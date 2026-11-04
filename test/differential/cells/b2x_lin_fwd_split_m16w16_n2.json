@@ -1,6 +1,6 @@
 {
-  "name": "b2x_lin_fwd_abort_m16w8_n512",
-  "description": "B2 headroom probe: per-tensor m16 x m8, N=512 > bfpSegmentLimit(16,8)=511 -> the documented guard must fail fast (Leg A predicts ABORT).",
+  "name": "b2x_lin_fwd_split_m16w16_n2",
+  "description": "B2 headroom probe: per-tensor m16 x m16, N=2 > segment limit 1. The backward kernel fails fast here; the integer forward splits the run (every product its own segment, g = 1) and must stay EXACT.",
   "family": "bfp_gemm",
   "op": "linear",
   "direction": "forward",
@@ -14,9 +14,9 @@
   },
   "fixture": {
     "type": "bfp_gemm",
-    "seed": 3109,
+    "seed": 3110,
     "batch": 1,
-    "inF": 512,
+    "inF": 2,
     "outF": 2,
     "input": {
       "m": 16,
@@ -26,7 +26,7 @@
       "expSpread": 0
     },
     "weight": {
-      "m": 8,
+      "m": 16,
       "e": 8,
       "groupSize": 0,
       "absmax": 0.25,
@@ -35,6 +35,9 @@
     "bias": null
   },
   "expect": {
-    "abort": true
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
   }
 }

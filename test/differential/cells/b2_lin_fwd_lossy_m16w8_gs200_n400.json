@@ -43,8 +43,7 @@
   },
   "expect": {
     "legA": [
-      "EXACT",
-      "TIE_ONLY"
+      "EXACT"
     ],
     "legB": "BOUNDED"
   }

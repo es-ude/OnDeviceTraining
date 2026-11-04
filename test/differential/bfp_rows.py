@@ -759,12 +759,12 @@ def evaluate_gemm_output(fx: GemmFixture, direction: str, drv, out_name: str, k:
 
 def _is_int_fold(cell: dict) -> bool:
     """The ops whose forward emits the integer BFP_RAW (arithmetic-bfp
-    section 13): Conv1d so far; Linear / ConvT1d forwards still fold in float."""
-    return cell["op"] == "conv1d" and cell["direction"] == "forward" and cell["arith"]["type"] == "BFP"
+    section 13): Conv1d and Linear; the ConvT1d forward still folds in float."""
+    return cell["op"] in ("conv1d", "linear") and cell["direction"] == "forward" and cell["arith"]["type"] == "BFP"
 
 
 def evaluate_int_fold_output(fx: GemmFixture, drv, tier: str, raw_group_size: int, out_spec: dict | None) -> dict:
-    """The Conv1d forward under the integer fold (section 13): Leg A is the
+    """The Conv1d / Linear forward under the integer fold (section 13): Leg A is the
     documented fold evaluated exactly -- kernel tier: the BFP_RAW mantissas
     and per-group exponents bit for bit; layer tier onto FLOAT32: the
     section-13 dequant of the predicted raw bit for bit; onto a BFP wire:
@@ -780,10 +780,14 @@ def evaluate_int_fold_output(fx: GemmFixture, drv, tier: str, raw_group_size: in
     n_out = int(exact.size)
     if n_out and raw_group_size >= n_out:
         raw_group_size = 0
-    fold = bfp_ref.conv1d_int_fold(a.codes, a.stored, a.bits, b.codes, b.stored, b.bits, bias, int(x[0]), int(x[1]), int(x[2]), c_out, fx.geom, raw_group_size)
+    if fx.op == "linear":
+        fold = bfp_ref.linear_int_fold(a.codes, a.stored, a.bits, b.codes, b.stored, b.bits, bias, int(x[0]), int(x[1]), c_out, raw_group_size)
+        n_red = int(x[1])
+    else:
+        fold = bfp_ref.conv1d_int_fold(a.codes, a.stored, a.bits, b.codes, b.stored, b.bits, bias, int(x[0]), int(x[1]), int(x[2]), c_out, fx.geom, raw_group_size)
+        n_red = int(x[1]) // fx.geom.groups * fx.geom.kernel_size
     if not np.allclose(fold.exact.reshape(exact.shape), exact, rtol=1e-12, atol=1e-30):
         raise RuntimeError("harness: the integer fold's exact sum disagrees with the float64 reference")
-    n_red = int(x[1]) // fx.geom.groups * fx.geom.kernel_size
     row: dict = {
         "output": "output",
         "n_elements": n_out,

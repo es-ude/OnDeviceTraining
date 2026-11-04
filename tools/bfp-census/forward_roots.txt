@@ -2,17 +2,17 @@
 # The census follows direct calls from each root (same object first, then any
 # unique definition in another object). Static helpers split by the compiler
 # (.constprop/.isra/.part) are matched by base name.
-Matmul.c        matmulBfpTensors
+Matmul.c        matmulBfpRawTensors
 Conv1dKernel.c  conv1dKernelBfpRaw
 ConvTranspose1dKernel.c  convTranspose1dKernelBfpGather
 Conv1d.c        forwardKernelBfpRaw
 Conv1dTransposed.c  forwardKernelBfp
-Linear.c        linearForwardKernelBfp
-Linear.c        linearForwardBfp
+Linear.c        linearForwardKernelBfpRaw
+Linear.c        linearForwardBfpRaw
 MaxPool1d.c     maxPool1dForwardKernelBfpRaw
 AvgPool1d.c     avgPool1dForwardKernelBfpRaw
 Softmax.c       softmaxForwardKernelBfp
-Softmax.c       softmaxValuesBfp
+Softmax.c       softmaxForwardBfpRaw
 Relu.c          reluForwardBfp
 LayerNorm.c     layerNormForwardKernelBfp
 Reduce.c        meanOverTrailingAxesBfp

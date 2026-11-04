@@ -65,7 +65,9 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
                                         tensor_t *outputTensor,
                                         const symGroupedWeight_t *groupedWeight, rngStream_t *rs);
 
-/*! BFP epic PR2 (Task 3): block-floating-point GEMM forward. Operands are in
+/*! BFP epic PR2 (Task 3): block-floating-point GEMM with the FLOAT32 raw --
+ *  since the integer-only forward (matmulBfpRawTensors below) it serves the
+ *  Linear BACKWARD kernels (dx, weightGrad). Operands are in
  *  the executeOp funnel's UNPACKED-BFP scratch form: ->data holds int32
  *  sign-extended mantissa codes, ->quantization is BFP with a live
  *  bfpQConfig_t (the form exists only between funnel prologue and kernel).
@@ -92,6 +94,22 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
  *  bfpSegmentLimit(ma, mb) == INT32_MAX >> (ma+mb-2) (#227 headroom, no
  *  int64 anywhere). */
 void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias, tensor_t *outputTensor);
+
+/*! Integer-only BFP GEMM forward (docs/conventions/arithmetic-bfp.md §13, the
+ *  Linear forward; matmulBfpTensors above stays the backward's float fold).
+ *  Same operands, walk and group tracking as matmulBfpTensors; the output is
+ *  BFP_RAW (int32 mantissas + one unbiased exponent per raw target group,
+ *  geometry from the output's own bfpRawQConfig_t, every exponent written)
+ *  and the fold is integer: ONE int32 accumulator per output in units of
+ *  2^E_acc, E_acc = (max over the group's outputs of max(rowTop(a) +
+ *  colTop(b), E_bias)) + g, g from bfpFoldGuardBits; every segment enters
+ *  through bfpAlignPartial (exact left shift / HALF_AWAY right shift, never
+ *  SR) and the bias is one more segment. Over-long same-exponent runs SPLIT
+ *  at bfpSegmentLimit (no fail-fast). rowTop / colTop are per-line maxima when
+ *  the reduction axis is physically innermost (Linear's input and transposed
+ *  weight), else the operand-wide max (coarser, still sound). */
+void matmulBfpRawTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
+                         tensor_t *outputTensor);
 
 size_t getMatmulInstructionCounter();
 

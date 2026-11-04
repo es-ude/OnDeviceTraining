@@ -262,26 +262,29 @@ directly (Conv1d); `linear_grid` / `full_scale` (Linear, above); `convert`
   while the reference clamped at `-qMax`; the reference was wrong against the
   aligned doc, the C was not.
 - `b2_lin_fwd_*`, `b2_conv_fwd_*`, `b2_convt_fwd_*` -- B2, the GEMM-family
-  forward under `ARITH_BFP`, kernel tier (`linearForwardBfp`,
+  forward under `ARITH_BFP`, kernel tier (`linearForwardBfpRaw`,
   `conv1dKernelBfpRaw`, `convTranspose1dKernelBfpGather` on the funnel's
   unpacked scratch form) and layer tier (packed BFP operands borrowed by the
   funnel, FLOAT32 `outputQ` = the raw, or its dequant for the integer-raw
-  ops). **Conv1d forward is the integer fold** (arithmetic-bfp section 13,
-  `bfp_ref.conv1d_int_fold`): the kernel tier emits the `BFP_RAW` (int32
+  ops). **Conv1d and Linear forwards are the integer fold** (arithmetic-bfp
+  section 13, `bfp_ref.conv1d_int_fold` / `bfp_ref.linear_int_fold`): the
+  kernel tier emits the `BFP_RAW` (int32
   mantissas + one unbiased exponent per raw target group, `raw.groupSize`
   in the cell, 0 = per-tensor) and Leg A compares mantissas AND exponents
   bit for bit; the layer tier's FLOAT32 wire is the section-13 dequant of
   the predicted raw, bit for bit; a B3 wire is the section-13 re-block of
-  the predicted raw, codes and stored exponents exactly. Every conv forward
-  row therefore expects `EXACT` (no fold-order gap: the integer fold is
+  the predicted raw, codes and stored exponents exactly. Every conv and
+  linear forward row therefore expects `EXACT` (no fold-order gap: the integer fold is
   deterministic along the documented walk, and no headroom abort is
   predicted -- over-long runs split). `b2_conv_fwd_spread_m8w6` spreads the
   input groups' exponents by +-14 binades so the fold's HALF_AWAY right
   shifts are exercised (the other conv cells only left-shift exactly: their
   spreads stay inside the negative fold guard); `b2_conv_fwd_g2_same_m8w6`
   and the spread cell use kernel-tier raw groups (8 / 16) that straddle
-  output rows. The Linear / ConvT1d forwards keep the float fold below until
-  their integer kernels land. Per-tensor fixtures (one segment per
+  output rows; `b2_lin_fwd_spread_m8w6_raw3` is the Linear twin (input
+  exponents +-14 binades against g = -12, raw groups of 3 straddling the
+  output rows of 5). The ConvT1d forward keeps the float fold below until
+  its integer kernel lands. Per-tensor fixtures (one segment per
   output: the fold is predicted to the bit, `expect EXACT`), grouped on both
   operands with group sizes that do and do not divide the row length, mixed
   widths (m12 x m8, m12 x m6, m12 x m4, m8 x m6), e = 4 and 8, conv groups,
@@ -289,9 +292,11 @@ directly (Conv1d); `linear_grid` / `full_scale` (Linear, above); `convert`
   positions stay at the bias seed), and the lossy regime of section 7: m16 x
   m8 with a 400-term segment (int32 partial ~1.7e9 > 2^24: the `(float)
   partial` cast rounds), two 200-term segments, and m16 x m16 with groupSize
-  1 (every product its own segment, 128 casts above 2^24). `b2x_*_abort_*`
-  sit one past `bfpSegmentLimit` (16 x 8 at N = 512; 16 x 16 at N = 2) and
-  must fail fast. `b2s_lin_fwd_f32in_*` gives the layer tier a grid-exact
+  1 (every product its own segment, 128 casts above 2^24). `b2x_lin_fwd_split_*`
+  sit one past `bfpSegmentLimit` (16 x 8 at N = 512; 16 x 16 at N = 2): the
+  backward kernels fail fast there, the integer forward splits the run and
+  must stay `EXACT` (they were `b2x_*_abort_*` under the float forward).
+  `b2s_lin_fwd_f32in_*` gives the layer tier a grid-exact
   FLOAT32 input: Decision 1 stages it per-tensor at the weight's widths, so
   its codes must equal the ones the kernel tier receives.
 - `b3_*_wire_*` -- B3, the same forwards (and a Linear dx) onto a BFP wire
@@ -299,8 +304,9 @@ directly (Conv1d); `linear_grid` / `full_scale` (Linear, above); `convert`
   of the raw. Leg A packs the PREDICTED raw (bit-exact for the
   single-segment fixtures; for the one multi-segment fixture the fold bound,
   in code units, is the tie window); Leg B = fold bound + half a code. The
-  Conv1d wire cell is the integer re-block of the integer raw instead
-  (section 13; `bfp_ref.reblock_raw`, exact codes and exponents).
+  Conv1d and Linear forward wire cells are the integer re-block of the
+  integer raw instead (section 13; `bfp_ref.reblock_raw`, exact codes and
+  exponents).
 - `b4_*` -- B4, native backward: Linear dx / weightGrad / biasGrad on both
   tiers (`linearCalcPropLossBfp`, `linearCalcWeightGradsBfp`,
   `linearCalcBiasGradsBfp` raw; the layer's ONE backward into a FLOAT32 dx
@@ -318,12 +324,15 @@ directly (Conv1d); `linear_grid` / `full_scale` (Linear, above); `convert`
   float64 within the float32 kernel's (2N+1) roundings. Softmax fq is not
   covered: only the GEMM family has twins.
 
-Observed in step 3 (all 121 rows PASS, none TIE_ONLY): every raw float32 output of every BFP GEMM-family op, forward
+Observed in step 3 (all 123 rows PASS, none TIE_ONLY): every raw float32 output of every BFP GEMM-family op, forward
 and backward, kernel and layer tier, is BIT-EXACT against the documented fold
-evaluated along the assumed walk (the Conv1d forward rows against the
-section-13 integer fold: raw mantissas and exponents, the FLOAT32 dequant and
-the B3 re-block all exact; the spread cell's float64 ratio against the fold
-bound is 0.44) -- including the section-7 lossy rows, where
+evaluated along the assumed walk (the Conv1d and Linear forward rows against
+the section-13 integer fold: raw mantissas and exponents, the FLOAT32
+dequant and the B3 re-block all exact; the spread cells' float64 ratios
+against the fold bound are 0.44 (conv) and 0.20 / 0.18 (linear kernel /
+layer: the layer tier's FLOAT32 target has ONE E_acc over the whole output,
+so 65 folds round there against 32 under the kernel tier's raw groups of 3)
+-- including the section-7 lossy rows, where
 the `(float)partial` cast is reproduced by the int64 -> float32 cast. The
 assumed walk orders of `bfp_ref.DOC_GAPS[2]` (Linear: reduction index
 ascending; Conv1d forward: input channel outer, tap inner; gather: tap outer,
@@ -524,6 +533,11 @@ reported alongside (`ratio_rigorous`) and never needed.
     (`bfpValidateSumHeadroom`) has no abort cell (the Linear weightGrad's
     product guard fires before the bias sum could); its regex is exercised
     only by the fitting control `b4x_lin_dw_abort_sum_m16_b2`.
+    Since the integer Linear forward the two `b2x_*_abort_*` cells are the
+    `b2x_lin_fwd_split_*` cells (the forward splits instead of failing fast),
+    so the two `bfpValidateBlockHeadroom` mutants above have no differential
+    cell any more; the guard lives on in the backward kernels and is pinned by
+    `testMatmulBfpHeadroomGuardDies` (UnitTestMatmul).
     B1 grid: the pack's lower clamp `qMin` replaced by `-qMax` in
     `packFloatBufferAsBfp` -> exactly the 12 grouped cells that carry
     saturating negative values (`b1_pack_m{2,4,6,8,12,16}_e{2,4}_g8`)

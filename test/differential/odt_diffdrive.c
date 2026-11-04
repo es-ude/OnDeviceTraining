@@ -35,10 +35,12 @@
  *                                    = the BFP target: widths, groupSize)
  *
  * BFP (step 3, spec.arith.type "BFP" or "FLOAT32" over BFP storage):
- *   linear  kernel/forward,dx,weightGrad  linearForwardBfp / linearCalcPropLossBfp
- *                            / linearCalcWeightGradsBfp (+ linearCalcBiasGradsBfp)
- *                            on the funnel's UNPACKED-BFP scratch form (int32
- *                            codes under a live bfpQConfig_t); raw FLOAT32 out
+ *   linear  kernel/dx,weightGrad  linearCalcPropLossBfp / linearCalcWeightGradsBfp
+ *                            (+ linearCalcBiasGradsBfp) on the funnel's
+ *                            UNPACKED-BFP scratch form (int32 codes under a
+ *                            live bfpQConfig_t); raw FLOAT32 out
+ *   linear  kernel/forward   linearForwardBfpRaw, same operand form; integer
+ *                            BFP_RAW out, as conv1d below
  *   conv1d  kernel/forward   conv1dKernelBfpRaw, same operand form; the output
  *                            is the integer BFP_RAW (spec.output.groupSize =
  *                            the raw target geometry), written as mantissas
@@ -1119,7 +1121,7 @@ static tensor_t *makeRawWire(size_t ndim, const size_t *dims, roundingMode_t rm)
 }
 
 /* A raw FLOAT32 wire: what the ARITH_BFP kernels without an integer raw
- * emit (D7; Linear / ConvT1d forward, every backward kernel). */
+ * emit (D7; ConvT1d forward, every backward kernel). */
 static tensor_t *makeFloatWire(size_t ndim, const size_t *dims) {
     return makeTensor(ndim, dims, quantizationInitFloat());
 }
@@ -1524,12 +1526,13 @@ static void freeLinearOperands(linearOperands_t *ops) {
     }
 }
 
-/* linear / kernel / forward: linearForwardSymInt32 / linearForwardBfp -- the
+/* linear / kernel / forward: linearForwardSymInt32 / linearForwardBfpRaw -- the
  * entries the funnel's kernel adapters call (transpose dance around the
  * matmul). Calling them rather than matmul directly keeps the weight
  * orientation under test: Leg A's y = x W^T is the documented contract, not
  * the driver's. SYM: raw accumulator-range int32 at s_in * s_w, the bias
- * refolded per column. BFP: raw FLOAT32, the bias dequant-seeded (D7). */
+ * refolded per column. BFP: the integer BFP_RAW (arithmetic-bfp section 13)
+ * onto the raw geometry spec.output names, the bias one more segment. */
 static void runLinearKernelForward(const runCtx_t *ctx) {
     arithmetic_t arith = parseArithmetic(ctx->spec);
     requireKernelArith(arith, "linear/kernel/forward");
@@ -1537,8 +1540,8 @@ static void runLinearKernelForward(const runCtx_t *ctx) {
     size_t outDims[2] = {ops.input->shape->dimensions[0], ops.weight->shape->dimensions[0]};
     tensor_t *out;
     if (arith.type == ARITH_BFP) {
-        out = makeFloatWire(2, outDims);
-        linearForwardBfp(ops.weight, ops.bias, ops.input, out);
+        out = makeBfpRawWire(2, outDims, ctx->spec);
+        linearForwardBfpRaw(ops.weight, ops.bias, ops.input, out);
     } else {
         out = makeRawWire(2, outDims, arith.roundingMode);
         linearForwardSymInt32(ops.weight, ops.bias, ops.input, out, NULL);

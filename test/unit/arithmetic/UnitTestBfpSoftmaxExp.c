@@ -6,6 +6,7 @@
 #include "BfpSoftmaxExp.h"
 #include "DeathTest.h"
 #include "RNG.h"
+#include "RngPinnedDraw.h"
 #include "expected_bfp_softmax_core.h"
 #include "unity.h"
 
@@ -145,6 +146,42 @@ void testShiftSrWithoutAStreamExits() {
                              shiftSrWithoutAStream());
 }
 
+/* The SR draw is integer (no float on the forward path): with u the draw's
+ * top k bits, v / 2^k lifts iff u < rem. Pinned draws: at k = 28 the old
+ * 24-bit float form saw u = (draw >> 8) << 4, so draws 0x4F and 0x50 both
+ * lifted rem 5; the integer form lifts only the first (u = 4 < 5, u = 5 not). */
+void testShiftSrLiftsIffTheDrawsTopKBitsAreBelowTheRemainder() {
+    rngStream_t lift = rngStreamWithNextDraw(0x4Fu);
+    TEST_ASSERT_EQUAL_INT32(1, bfpShiftRightRounded(5, 28u, BFP_SHIFT_SR, &lift));
+    rngStream_t stay = rngStreamWithNextDraw(0x50u);
+    TEST_ASSERT_EQUAL_INT32(0, bfpShiftRightRounded(5, 28u, BFP_SHIFT_SR, &stay));
+    /* Negative v is floor-domain too: -5 = -1 * 2^28 + (2^28 - 5). */
+    rngStream_t neg = rngStreamWithNextDraw(0xFFFFFFFFu);
+    TEST_ASSERT_EQUAL_INT32(-1, bfpShiftRightRounded(-5, 28u, BFP_SHIFT_SR, &neg));
+}
+
+/* For k <= 24 the integer draw takes the SAME decision the float form
+ * (int)(u24 / 2^24 * 2^k) < rem took from the same 32-bit word. */
+void testShiftSrIntegerDrawMatchesTheFloatFormUpToK24() {
+    static const uint32_t draws[] = {2u,          1u,          0xFFu,       0x100u,     0x7FFFFFFFu,
+                                     0x80000000u, 0xDEADBEEFu, 0xFFFFFFFFu, 0x12345678u};
+    static const int32_t vs[] = {1, 3, 1000, -7, 123456789, -987654321};
+    for (uint32_t k = 1; k <= 24; k++) {
+        for (size_t d = 0; d < sizeof(draws) / sizeof(draws[0]); d++) {
+            for (size_t j = 0; j < sizeof(vs) / sizeof(vs[0]); j++) {
+                int32_t v = vs[j];
+                int32_t floorQ = v >> k;
+                int32_t rem = v - (int32_t)((uint32_t)floorQ << k);
+                float u = (float)(draws[d] >> 8) / 0x1p24f;
+                int32_t floatDraw = (int32_t)(u * (float)(1u << k));
+                int32_t expected = floorQ + (floatDraw < rem ? 1 : 0);
+                rngStream_t rs = rngStreamWithNextDraw(draws[d]);
+                TEST_ASSERT_EQUAL_INT32(expected, bfpShiftRightRounded(v, k, BFP_SHIFT_SR, &rs));
+            }
+        }
+    }
+}
+
 void testIExpVectorsTrunc() {
     char msg[64];
     for (int i = 0; i < IEXP_NUM_QW; i++) {
@@ -230,5 +267,7 @@ int main(void) {
     RUN_TEST(testIExpUnderflowFloorIsExactZero);
     RUN_TEST(testIExpAccuracyEnvelope);
     RUN_TEST(testShiftByZeroNeedsNoStreamInAnyMode);
+    RUN_TEST(testShiftSrLiftsIffTheDrawsTopKBitsAreBelowTheRemainder);
+    RUN_TEST(testShiftSrIntegerDrawMatchesTheFloatFormUpToK24);
     return UNITY_END();
 }

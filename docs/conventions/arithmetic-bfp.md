@@ -304,8 +304,9 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
   kernel output back into a BFP target). Nothing inside a kernel's reduction
   loop rounds. Exception, forward only (§13 "The integer fold"): an
   integer-raw kernel aligns each finished segment to the accumulation
-  exponent with a HALF_AWAY right shift (never SR, never the op's mode) —
-  the re-block still owns the op's rounding mode.
+  exponent with a HALF_AWAY right shift (never SR, never the op's mode), and
+  the integer Softmax forward rounds its normalisation HALF_AWAY (§5.9 step
+  5) — the re-block still owns the op's rounding mode.
 - **Headroom, exact form.** A same-exponent `int32` partial is sound only up
   to `bfpSegmentLimit(ma, mb) = INT32_MAX >> (ma+mb−2)`
   (`src/arithmetic/include/BfpKernelSupport.h`; `shift >= 31` clamps to `1` —
@@ -1168,8 +1169,10 @@ mirroring `docs/conventions/arithmetic-sym.md` §"Grouped backward").**
 Native `ARITH_BFP` ships on BOTH sides. The forward runs an INTEGER pipeline —
 I-BERT's Algorithm 3 (`bfpIExpQ`, `src/arithmetic/BfpSoftmaxExp.c`) on a fixed
 dyadic work grid `2^-14`, fed by a block-alignment step that has no I-BERT
-analog (`softmaxValuesBfp`, `src/layer/Softmax.c`) — and the backward is ONE
-`executeOp` op that recomputes the forward through the same helper. Both are
+analog (`softmaxExpCodesBfp`, `src/layer/Softmax.c`) and closed by an
+integer normalisation into the `BFP_RAW` raw (`softmaxForwardBfpRaw`, §13)
+— and the backward is ONE `executeOp` op that recomputes steps 1-4 through
+the same helper and normalises in float32 (`softmaxValuesBfp`). Both are
 funnel-routed, so **the §5.7 packed-walk reviewer inventory does NOT grow**:
 the kernels consume the funnel's unpacked-BFP scratch (borrowed or staged,
 §5.3) and produce through the OUT_WRITE epilogue; a raw `->data` walk over
@@ -1202,8 +1205,11 @@ that one template. Pinned by `unitTestSoftmaxForwardBfpStagedWidths` /
 with `E_i` the element's unbiased block exponent and `EMax` the exponent of
 the block holding the SIGNED max:
 
-1. *Max* — one pass of `ldexpf((float)m_i, E_i)` compares, strict `>` keeps
-   the FIRST max (exact dequants, no rounding).
+1. *Max* — one pass of the exact `(code, E)` compare `bfpValueGreater`
+   (§13 "The pool forwards" item 1; needs `m <= 16`, checked), strict `>`
+   keeps the FIRST max, ties across blocks included. Until 2026-11-04 this
+   was an `ldexpf` compare, equal on every input where the dequant stays a
+   finite normal float32 (it overflowed to `inf` above `2^128` at e = 8).
 2. *Align* onto the work-grid-or-coarser common grid: `sigma = EMax + 14`,
    `down = max(0, -sigma)`, net shift `s_i = (EMax - E_i) + down`. `s_i >= 0`
    is a **rounded right shift** (`bfpShiftRightRounded`, exact at `s_i == 0`)
@@ -1219,8 +1225,28 @@ the block holding the SIGNED max:
    stays inside int32; `sigma < 0` ⇒ `qT` already IS on the work grid).
 4. *i-exp* `bfpIExpQ(qW_i, mode)` — its `>> z` renormalization is the THIRD
    lossy site.
-5. *Float boundary* `e_i = ldexpf((float)qe_i * 0.3585f, -28)`, float32 sum in
-   index order, divide (R-S3).
+5. *Normalise.* FORWARD (integer, 2026-11-04, `softmaxNormalizeRaw`):
+   the common scale `0.3585 · 2^-28` cancels, so `s_i = qe_i / Σ qe`
+   directly. `Σ qe` reaches `n · QE_MAX` (`QE_MAX = QB² + QC = 748 954 122`,
+   the i-exp's largest output) and leaves int32 for `n >= 3`, so the sum
+   is kept as `T = hi · 2^p + lo` (`lo < 2^p`, one carry per term) with `p`
+   the smallest `p >= 0` such that `n · QE_MAX <= INT32_MAX · 2^p` (a
+   compile-time table; HAR's `n = 6`: `p = 2`) — `hi` fits by that choice —
+   and the divisor is `S = round_half_up(T / 2^p)`. Then
+   `mant_i = round_half_up(qe_i · 2^(30-p) / S)` by a 32-step restoring
+   division (no hardware divide; `30 = BFP_SOFTMAX_RAW_FRAC_BITS`), at raw
+   exponent `-30` in EVERY raw group (the output geometry does not matter:
+   all elements share one scale). The division starts at
+   `r = qe_i >> (p+1)`, which must be `< S` for the quotient to fit 32
+   bits; `S >= T/2^p - 1/2` and `T > 2^p` (the argmax's `qe` is `≈ QE_MAX`)
+   give it, and it is CHECKED once per call (fail-fast). `|mant| <= 2^30 (1
+   + 2^(p-1)/T) + 1 < 2^31`. Rounding is HALF_AWAY (all values `>= 0`, so
+   half up), never SR and never the knob's: it is a fourth rounding site,
+   outside the knob, and the re-block owns the op's mode. Error per output
+   `<= 2^-31` from the division plus a common relative `<= 2^(p-1) / T <=
+   2^(p-30)` from `S`; `|Σ mant − 2^30| <= n/2 + 2^p + 1`.
+   BACKWARD recompute (R-S4, float32 as before): `e_i = ldexpf((float)qe_i *
+   0.3585f, -28)`, float32 sum in index order, divide (R-S3).
 
 The `min(qT, 0)` clamp is load-bearing under SR only: the deterministic modes
 are monotone, but an SR draw can jitter to `+1`, which would enter `bfpIExpQ`
@@ -1231,10 +1257,10 @@ sentinel (part 4 bounds its true weight), and a ZERO mantissa with `up >= 31`
 returns its exact `0` through an explicit clause, because `0 << 32` is
 shift-count UB (C11 6.5.7p3), not merely a value question.
 
-**No int32 accumulator exists on any softmax path**, so neither
-`bfpValidateBlockHeadroom` nor `bfpValidateSumHeadroom` has a role here —
-unlike every other BFP kernel family. The ONLY int32 headroom argument is the
-polynomial's, and it is what fixes `F = 14`: `q_p ∈ (-QLN2, 0]` gives
+**The only int32 accumulator is the forward's step-5 sum**, whose headroom
+is the static `p` of step 5 (no `bfpValidate*Headroom` has a role here —
+unlike every other BFP kernel family). The other int32 headroom argument is
+the polynomial's, and it is what fixes `F = 14`: `q_p ∈ (-QLN2, 0]` gives
 `|q_p + q_b| <= q_b = 22167`, so `qL <= 22167² + QC = 748 954 122 < 2^31`; at
 `F = 15` the square alone is ≈ 1.97e9 and overflows. The constants
 (`QLN2 = 11356`, `QB = 22167`, `QC = 257 578 233`, `QFLOOR = -363 392`) are
@@ -1242,7 +1268,10 @@ COMPILE-TIME floors of their real values, re-derived by the goldgen and pinned
 in C against a double-precision recomputation (`testShiftConstantsMatchDerivation`).
 
 **The knob (`bfpExpShiftRounding`).** `BFP_SHIFT_TRUNC` (default,
-I-BERT-faithful `>>`), `BFP_SHIFT_HALF_AWAY`, `BFP_SHIFT_SR` — set through
+I-BERT-faithful `>>`), `BFP_SHIFT_HALF_AWAY`, `BFP_SHIFT_SR` (the integer
+draw since 2026-11-04: lift iff the draw's top `k` bits `<` the `k` dropped
+bits, one `rngNextU32` per shift — for `k <= 24` the decision the 24-bit
+float draw took from the same word, for `25 <= k <= 31` the exact one) — set through
 `softmaxSetBfpExpShiftRounding` (`SoftmaxApi.h`). It governs the three
 INTEGER shift sites above and NOTHING else: it is ORTHOGONAL to every
 `roundingMode_t` in the config, never derives from one, and staging plus the
@@ -1255,13 +1284,15 @@ at whatever its factory set (`BFP_SHIFT_TRUNC`); a sweep that varies the knob
 must re-apply the setter after loading.
 
 **R-S3 — the float32 boundary (what "native" means here).** Exact:
-the dequants for the max compare, the alignment/promotion arithmetic, the
-`dLds` dequant in the backward. Float32: the exp weights `e_i` after
+the max compare, the alignment/promotion arithmetic, the `dLds` dequant in
+the backward. The FORWARD has no float32 left (2026-11-04): step 5 is the
+integer normalisation and the raw is `BFP_RAW` (§13), re-blocked in
+integers. Float32 on the BACKWARD only: the exp weights `e_i` after
 `(float)qe_i`, the cross-element sum, the normalize divide, and the whole
-backward elementwise/dot arithmetic. The block structure re-enters at exactly
-ONE point per op — the produced wire's OUT_WRITE pack, i.e. §10's
-"native OPERAND handling plus a natively derived produced grid" boundary in
-softmax's shape (§11 records it). The raw is FLOAT32 (D7).
+elementwise/dot arithmetic; its raw stays FLOAT32 (D7). The block structure
+re-enters at exactly ONE point per op — the produced wire's OUT_WRITE pack,
+i.e. §10's "native OPERAND handling plus a natively derived produced grid"
+boundary in softmax's shape (§11 records it).
 
 **R-S4 — backward = ONE funnel op that recomputes from the LOGITS.** The
 `ARITH_BFP` arm issues a single `executeOp` (`OUT_WRITE` into `propLoss`,
@@ -1270,7 +1301,10 @@ the logits via `softmaxValuesBfp` with the layer's OWN knob, dequantizes
 `dLds` exactly, accumulates `dot = Σ s·dLds` in float32 index order and emits
 `s·(dLds - dot)`. The recompute means the backward differentiates the
 UNPACKED forward values — the packed forward wire differs from them by one
-pack rounding — which is the norms' R-N4 cost note verbatim, and it is what
+pack rounding — which is the norms' R-N4 cost note verbatim (since the
+integer forward, the backward's `s` is the float32 normalisation of the
+SAME `qe` codes, so it differs from the forward's raw by at most
+`2^-31 + 2^-22 · s` — the goldgen asserts it per fixture), and it is what
 makes the layer stateless between passes. Two gates: the operand grid
 (`validateBfpQConfigShape`) and the loss ELEMENT COUNT (the #436 OOB class —
 both walks run `x`'s flat `n`, and a shorter per-tensor `{1,0}` loss passes
@@ -1383,12 +1417,14 @@ backward check sits after the `propLoss == NULL` return, R-S4's ordering).
    PROBABILITY, i.e. §5.8 part 2 verbatim, the same mantissa-width sweep axis.
    `SR_HALF_AWAY` rounds to one of the two neighbouring grid points. This is the ONE BFP-specific
    rounding of the whole path (backward: of `dx`).
-6. *Float32 dust.* `(float)qe_i` rounds above `2^24` (`qe` reaches
-   ≈`7.49e8`) — §7's documented `int32→float` conversion class at a different
-   site, relative `2^-24`, absorbed by the `2.5e-3` bound. The `N`-term sum in
-   index order carries the usual `<= (N-1)·2^-24` relative worst case, the
-   divide one rounding, and the backward's `dot` the same shape. All of it is
-   orders of magnitude below parts 4 and 5 at any practical width.
+6. *Normalisation dust.* Forward: the integer step 5's `<= 2^-31` per
+   output plus the common `<= 2^(p-30)` relative of `S` (step 5). Backward:
+   `(float)qe_i` rounds above `2^24` (`qe` reaches ≈`7.49e8`) — §7's
+   documented `int32→float` conversion class at a different site, relative
+   `2^-24`, absorbed by the `2.5e-3` bound; the `N`-term sum in index order
+   carries the usual `<= (N-1)·2^-24` relative worst case, the divide one
+   rounding, and the backward's `dot` the same shape. All of it is orders of
+   magnitude below parts 4 and 5 at any practical width.
 7. *Dominant term.* Worked at `m = 8` on both wires with logits of order 1
    (argmax block absmax `a = 2` ⇒ `EMax = -5`): the alignment band is
    `u = 2^-5 ≈ 3.1e-2` on the ARGUMENT, i.e. up to ≈3% of a rounded element's
@@ -1743,8 +1779,8 @@ in the repository are listed.
 | P6-1 | Softmax backward recomputes the softmax from the logits it actually receives (the layer input, per the training-loop contract) in every arm; the old code treated its input as the softmax output. | §11 Correction 1; `Softmax.c` |
 | P6-2 | Pure-integer alignment onto the max element's block grid, with a shift-rounding knob (`BFP_SHIFT_TRUNC` default, `HALF_AWAY`, `SR`) as a `softmaxConfig_t` field; `layerQuant_t` does not grow. | §5.9 R-S2; `softmaxSetBfpExpShiftRounding` |
 | P6-3 | Fixed dyadic work grid `2^-14`, so the i-exp constants are compile-time integers. | §5.9; `BfpSoftmaxExp.c` |
-| P6-4 | The max search is an exact float compare of dequantized values (first max wins); no rounding introduced. | §5.9 |
-| P6-5 | The cross-element sum and the normalizing divide run in float32 (D7); the only BFP rounding is the OUT_WRITE pack. | §5.9 R-S3 |
+| P6-4 | The max search is an exact float compare of dequantized values (first max wins); no rounding introduced. Amended 2026-11-04: the exact integer `(code, E)` compare `bfpValueGreater`, same tie rule. | §5.9 |
+| P6-5 | The cross-element sum and the normalizing divide run in float32 (D7); the only BFP rounding is the OUT_WRITE pack. Amended 2026-11-04 (integer-only forward): the FORWARD normalises in integers (HALF_AWAY, raw `BFP_RAW` at `2^-30`); the backward recompute keeps this row. | §5.9 R-S2 step 5, R-S3 |
 | P6-6 | Backward is one funnel OUT_WRITE op anchored on `propLossQ`, recomputing the softmax in-kernel from the logits; `propLoss == NULL` is an early no-op. | §5.9 R-S4 |
 | P6-7 | SYM_INT32 softmax stays fake-quant (float kernel); only `ARITH_BFP` gets native semantics. | `Softmax.c` dispatch |
 | P6-8 | Silent behavioural flip, documented: a uniform-BFP profile now runs the native forward and backward; pin the math slots to `ARITH_FLOAT32` to opt out. | §5.9 R-S6 |
@@ -1952,11 +1988,53 @@ emit `BFP_RAW` on the target's geometry.
    division sites of both roots are `bfpGroupAt`'s per-group-change
    recomputes.
 
+**The Linear forward** (`matmulBfpRawTensors`, `Matmul.c`, behind
+`linearForwardBfpRaw`'s transpose dance). `matmulBfpTensors`' walk verbatim —
+row, column, reduction loops, `calcElementIndexByIndices` per MAC,
+`bfpGroupAt` on both operands — with the Conv1d fold:
+
+1. `E_top` of output `(r, c)` = max group exponent over the reduction LINE
+   of input row `r` + over weight row `c` (the line output column `c`
+   reduces over), max'ed with column `c`'s bias exponent; `E_acc` of a raw
+   target group = max `E_top` over its outputs (walked in output order,
+   O(outputs)) `+ g`, `g = bfpFoldGuardBits(inFeatures, ...)` (HAR m8,
+   N = 64, bias m8: `g = −10`). A line is one contiguous storage run when
+   the reduction axis is the physically innermost dimension — the Linear
+   layer's identity-ordered input and its transposed weight view — and one
+   forward cursor walks all lines without a division. Any other view (a
+   permuted operand handed to the kernel directly) gets the operand-wide
+   max over all groups: coarser, still an upper bound.
+2. Items 3-7 above unchanged; the bias segment is aligned per OUTPUT (the
+   column changes every output, so there is no per-channel hoist).
+3. The backward kernels (dx, weightGrad: `matmulBfpTensors`) keep the
+   FLOAT32 raw and `bfpValidateBlockHeadroom`'s fail-fast; the forward
+   splits instead.
+4. Cost: the index math stays per MAC (the same-algorithm rule), and
+   `calcElementIndexByIndices` divides once per dimension per call, i.e.
+   per MAC on the M0+ in BOTH arms (allow-listed in the census); every
+   other division in the root is a `bfpGroupAt` recompute.
+
+**The Softmax forward** (`softmaxForwardBfpRaw`, `Softmax.c`): §5.9 R-S2
+steps 1-4 (`softmaxExpCodesBfp`, shared with the backward's recompute) and
+the integer step 5 into a `BFP_RAW` at exponent `−30` in every raw group.
+The one division left in the root besides `bfpGroupAt` is the i-exp's
+`z = −qW / QLN2`, per ELEMENT (steps 2-4 unchanged; allow-listed).
+
+**FLOAT32 targets of the two ops.** On the HAR proof path both head wires
+(6 elements) are per-tensor BFP (`resolveWireShape` falls back to `{1,0}`
+under `BFP_WIRE_BLOCK=16`), so no raw of these ops goes to a FLOAT32 target
+there; the loss reads the packed Softmax wire. Under `BFP_WIRE_BLOCK=float`
+(arm A) the Linear raw is `{1,0}` and the item-7 precision class above
+applies (the differential spread cell rounds 65 folds per-tensor against 32
+under raw groups of 3, float64 error `1.1e-2` vs `6e-6`, both inside the
+bound). The Softmax raw loses nothing there: every element shares the
+scale `2^-30` by construction, and `qe`'s own grid is already coarser.
+
 **Status.** The Conv1d forward emits `BFP_RAW` (`conv1dKernelBfpRaw`, the
 fold above); `conv1dKernelBfp` (FLOAT32 raw) remains for the ConvT1d dx
-adjoint. The MaxPool and AvgPool forwards emit `BFP_RAW` too (their
-backwards keep the FLOAT32 raw; MaxPool's argmax meaning is unchanged).
-Every other op keeps the FLOAT32 raw; the Linear and Softmax forwards land
-next and set the flag in their forward arms. Numbers of native
-BFP configs changed with the Conv1d fold by design; fake-quant and FLOAT32
-paths are untouched.
+adjoint. The MaxPool, AvgPool, Linear and Softmax forwards emit `BFP_RAW`
+too; their backwards keep the FLOAT32 raw (MaxPool's argmax meaning is
+unchanged, Linear's dx / weightGrad stay on `matmulBfpTensors`, Softmax's
+backward recomputes with the float32 step 5). Every other op keeps the
+FLOAT32 raw. Numbers of native BFP configs changed with these forwards by
+design; fake-quant and FLOAT32 paths are untouched.

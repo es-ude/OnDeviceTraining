@@ -1,0 +1,52 @@
+{
+  "name": "b2_lin_fwd_spread_m8w6_raw3",
+  "description": "B2 Linear forward B=3 inF=24 outF=5, grouped operands (input gs 8 straddling rows, weight gs 6) m8 x m6 + grouped bias, input group exponents spread +-14 binades against g = -12, so the integer fold's HALF_AWAY right shifts are exercised next to the exact left shifts. Kernel tier: raw target groups of 3 over the 15 outputs (groups straddle the output rows of 5).",
+  "family": "bfp_gemm",
+  "op": "linear",
+  "direction": "forward",
+  "tiers": [
+    "kernel",
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3121,
+    "batch": 3,
+    "inF": 24,
+    "outF": 5,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 8,
+      "absmax": 2.0,
+      "expSpread": 14
+    },
+    "weight": {
+      "m": 6,
+      "e": 8,
+      "groupSize": 6,
+      "absmax": 0.25,
+      "expSpread": 6
+    },
+    "bias": {
+      "m": 6,
+      "e": 8,
+      "groupSize": 1,
+      "absmax": 0.1,
+      "expSpread": 4
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  },
+  "raw": {
+    "groupSize": 3
+  }
+}

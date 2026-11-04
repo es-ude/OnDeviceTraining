@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "ArithmeticType.h"
+#include "BfpRawFixture.h"
 #include "DeathTest.h"
 #include "KeyedDrawCheck.h"
 #include "LayerExec.h"
@@ -1759,9 +1760,9 @@ static size_t smBfpPackRun(void *ctx, uint64_t seed, bool stochastic,
     return n + 1;
 }
 
-/* The BFP forward packs its float softmax into the BFP output in the OUT_WRITE
- * epilogue of its forward op (OP 0 under FORWARD): 16 codes, each rounded SR
- * by its own draw. */
+/* The BFP forward re-blocks its integer raw softmax into the BFP output in the
+ * OUT_WRITE epilogue of its forward op (OP 0 under FORWARD, the [BFP_RAW][BFP]
+ * cell): 16 codes, each rounded SR by its own draw. */
 void testSoftmaxBfpSrPackIsAPureFunctionOfItsForwardOpKey(void) {
     tensor_t *input = buildSmKeyedInput();
     quantization_t *wireQ = quantizationInitBfp(8, 8, HALF_AWAY);
@@ -1770,7 +1771,7 @@ void testSoftmaxBfpSrPackIsAPureFunctionOfItsForwardOpKey(void) {
     smKeyedFixture_t f = {.layer = softmaxLayerInit(&lq), .input = input};
     uint8_t bytes[KEYED_DRAW_MAX_BYTES];
 
-    keyedCellInstall(FLOAT32, BFP);
+    keyedCellInstall(BFP_RAW, BFP);
     smBfpPackRun(&f, SM_KEYED_PACK_SEED, true, bytes);
     keyedCellRestore();
     assertKeyedCellSawOneStream(keyedOpOutState(SM_KEYED_PACK_SEED, RNG_TAG_FORWARD, 0u),
@@ -1782,9 +1783,12 @@ void testSoftmaxBfpSrPackIsAPureFunctionOfItsForwardOpKey(void) {
     freeTensor(input);
 }
 
-/* softmaxValuesBfp of the fixture (one block, sigma < 0) rebuilt from the
+/* The forward softmax of the fixture (one block, sigma < 0) rebuilt from the
  * public shift primitives on `shift`: the argmax's shift, then per element its
- * alignment shift and the exp core's shift, in that order. */
+ * alignment shift and the exp core's shift, in that order; then the integer
+ * normalisation by its definition (smRawRefNormalise) and the loss-facing
+ * dequant of the -30 raw. */
+static void smRawRefNormalise(const int64_t *qe, size_t n, int32_t *mant);
 static void smReferenceUnderSrShifts(rngStream_t *shift, float s[SM_KEYED_N]) {
     const int32_t sigma = SM_KEYED_EMAX + BFP_SOFTMAX_EXP_FRAC_BITS;
     TEST_ASSERT_TRUE(sigma < 0);
@@ -1796,23 +1800,24 @@ static void smReferenceUnderSrShifts(rngStream_t *shift, float s[SM_KEYED_N]) {
         }
     }
     const int32_t mMaxW = bfpShiftRightRounded(mMax, down, BFP_SHIFT_SR, shift);
-    float sum = 0.f;
+    int64_t qe[SM_KEYED_N];
     for (size_t i = 0; i < SM_KEYED_N; i++) {
         int32_t qT = bfpShiftRightRounded(kSmKeyedCodes[i], down, BFP_SHIFT_SR, shift) - mMaxW;
         if (qT > 0) {
             qT = 0;
         }
-        const int32_t qe = bfpIExpQ(qT, BFP_SHIFT_SR, shift);
-        s[i] = ldexpf((float)qe * BFP_SOFTMAX_A, -28);
-        sum += s[i];
+        qe[i] = bfpIExpQ(qT, BFP_SHIFT_SR, shift);
     }
+    int32_t mant[SM_KEYED_N];
+    smRawRefNormalise(qe, SM_KEYED_N, mant);
     for (size_t i = 0; i < SM_KEYED_N; i++) {
-        s[i] /= sum;
+        s[i] = ldexpf((float)mant[i], -30);
     }
 }
 
-/* A keyedRun_t: one BFP forward into a FLOAT32 output (the raw softmax) with
- * SR shifts (stochastic) or truncating ones; out = the 16 floats. */
+/* A keyedRun_t: one BFP forward into a FLOAT32 output (the dequantized raw
+ * softmax) with SR shifts (stochastic) or truncating ones; out = the 16
+ * floats. */
 static size_t smBfpShiftRun(void *ctx, uint64_t seed, bool stochastic,
                             uint8_t out[KEYED_DRAW_MAX_BYTES]) {
     smKeyedFixture_t *f = ctx;
@@ -1916,6 +1921,219 @@ void testSoftmaxInitConfigClearsOwnsQuantizations(void) {
     TEST_ASSERT_EQUAL_UINT8(0, *(const unsigned char *)&cfg.ownsQuantizations);
 }
 
+/* ---- Integer-only forward (arithmetic-bfp.md §5.9 step 5, §13) ---------------
+ *
+ * softmaxForwardBfpRaw normalises in integers: with qe_i the i-exp codes
+ * (steps 1-4), p the smallest p >= 0 with n * QE_MAX <= INT32_MAX * 2^p,
+ * S = round(sum qe / 2^p) and mant_i = round(qe_i * 2^(30-p) / S) at raw
+ * exponent -30 in EVERY raw group. The references below compute that in
+ * int64 from the definition, for inputs whose qe are known without the i-exp
+ * (equal logits -> every qe = QE_MAX; a gap past the underflow floor -> 0). */
+
+#define SM_RAW_QE_MAX ((int64_t)BFP_SOFTMAX_QB * BFP_SOFTMAX_QB + BFP_SOFTMAX_QC)
+
+static int smRawPreShift(size_t n) {
+    int p = 0;
+    while ((int64_t)n * SM_RAW_QE_MAX > (int64_t)INT32_MAX * ((int64_t)1 << p)) {
+        p++;
+    }
+    return p;
+}
+
+/* round-half-up(qe 2^(30-p) / S) and S = round-half-up(T / 2^p), qe >= 0. */
+static void smRawRefNormalise(const int64_t *qe, size_t n, int32_t *mant) {
+    int p = smRawPreShift(n);
+    int64_t t = 0;
+    for (size_t i = 0; i < n; i++) {
+        t += qe[i];
+    }
+    int64_t s = p == 0 ? t : (t + ((int64_t)1 << (p - 1))) >> p;
+    for (size_t i = 0; i < n; i++) {
+        int64_t num = qe[i] * ((int64_t)1 << (31 - p)) + s;
+        mant[i] = (int32_t)(num / (2 * s));
+    }
+}
+
+static void smRawRun(const int32_t *codes, size_t n, const uint8_t *exps, size_t numGroups,
+                     size_t groupSize, size_t rawGroups, size_t rawGs, bfpShiftRounding_t mode,
+                     bfpRawFixture_t *out) {
+    bfpScratchFixture_t in;
+    size_t dims[] = {n};
+    bfpScratchInit(&in, 1, dims, codes, exps, numGroups, groupSize, 8, 8);
+    bfpRawInit(out, 1, dims, rawGroups, rawGs);
+    softmaxForwardBfpRaw(&in.tensor, mode, NULL, &out->tensor);
+}
+
+/* Equal logits: every qe is QE_MAX, so s_i = 1/n; n = 1 is exactly 2^30, and
+ * n spans the pre-shift p = 0 .. 5. Raw groups of 2 get -30 each. */
+void testSoftmaxBfpRawUniformLogitsNormaliseByTheDefinition(void) {
+    static const size_t ns[] = {1, 2, 3, 6, 12, 23, 64};
+    int32_t codes[64];
+    int64_t qe[64];
+    int32_t expected[64];
+    int16_t exps[16];
+    uint8_t inExp[] = {127 - 3};
+    for (size_t i = 0; i < 64; i++) {
+        codes[i] = 37;
+        qe[i] = SM_RAW_QE_MAX;
+    }
+    for (size_t k = 0; k < sizeof(ns) / sizeof(ns[0]); k++) {
+        size_t n = ns[k];
+        bfpRawFixture_t out;
+        smRawRun(codes, n, inExp, 1, 0, 1, 0, BFP_SHIFT_TRUNC, &out);
+        smRawRefNormalise(qe, n, expected);
+        exps[0] = -30;
+        assertRawEquals(&out, expected, n, exps, 1);
+    }
+    TEST_ASSERT_EQUAL_INT(5, smRawPreShift(64));
+    bfpRawFixture_t one;
+    smRawRun(codes, 1, inExp, 1, 0, 1, 0, BFP_SHIFT_TRUNC, &one);
+    TEST_ASSERT_EQUAL_INT32(1 << 30, one.mant[0]);
+
+    bfpRawFixture_t grouped;
+    smRawRun(codes, 6, inExp, 1, 0, 3, 2, BFP_SHIFT_TRUNC, &grouped);
+    smRawRefNormalise(qe, 6, expected);
+    for (size_t g = 0; g < 3; g++) {
+        exps[g] = -30;
+    }
+    assertRawEquals(&grouped, expected, 6, exps, 3);
+}
+
+/* A logit gap of 255 at E = 0 is far past the exp underflow floor: only the
+ * argmax keeps mass (qe = QE_MAX, the rest exactly 0), at n = 64 (p = 5). */
+void testSoftmaxBfpRawOnlyTheArgmaxSurvivesALargeGap(void) {
+    int32_t codes[64];
+    int64_t qe[64];
+    int32_t expected[64];
+    for (size_t i = 0; i < 64; i++) {
+        codes[i] = -128;
+        qe[i] = 0;
+    }
+    codes[5] = 127;
+    qe[5] = SM_RAW_QE_MAX;
+    uint8_t inExp[] = {127};
+    bfpRawFixture_t out;
+    smRawRun(codes, 64, inExp, 1, 0, 1, 0, BFP_SHIFT_HALF_AWAY, &out);
+    smRawRefNormalise(qe, 64, expected);
+    int16_t exps[] = {-30};
+    assertRawEquals(&out, expected, 64, exps, 1);
+    TEST_ASSERT_INT32_WITHIN(64, 1 << 30, out.mant[5]);
+}
+
+/* Step 1 is the exact (code, E) compare with first-strict-greater: 4 * 2^1
+ * and 8 * 2^0 tie across blocks. First the E=1 block: E_max = 1, so the E=0
+ * element's code 1 truncates to 0 on the coarser grid and the output equals
+ * the one with code 0 there. Blocks swapped: E_max = 0, the code-1 element is
+ * exact and the two outputs differ. A last-wins compare flips both. */
+void testSoftmaxBfpRawTiesAcrossBlocksKeepTheFirst(void) {
+    static const int32_t coarseFirst[] = {4, -3, 8, 1};
+    static const int32_t coarseFirstZero[] = {4, -3, 8, 0};
+    static const uint8_t coarseFirstExps[] = {128, 127};
+    static const int32_t fineFirst[] = {8, 1, 4, -3};
+    static const int32_t fineFirstZero[] = {8, 0, 4, -3};
+    static const uint8_t fineFirstExps[] = {127, 128};
+    bfpRawFixture_t a, b;
+    smRawRun(coarseFirst, 4, coarseFirstExps, 2, 2, 1, 0, BFP_SHIFT_TRUNC, &a);
+    smRawRun(coarseFirstZero, 4, coarseFirstExps, 2, 2, 1, 0, BFP_SHIFT_TRUNC, &b);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(a.mant, b.mant, 4);
+
+    smRawRun(fineFirst, 4, fineFirstExps, 2, 2, 1, 0, BFP_SHIFT_TRUNC, &a);
+    smRawRun(fineFirstZero, 4, fineFirstExps, 2, 2, 1, 0, BFP_SHIFT_TRUNC, &b);
+    TEST_ASSERT_FALSE(memcmp(a.mant, b.mant, 4 * sizeof(int32_t)) == 0);
+    TEST_ASSERT_EQUAL_INT32(a.mant[0], a.mant[2]); /* the tied maxima share their mass */
+}
+
+/* The outputs sum to 1 within the normalisation bound: each mant rounds by
+ * <= 1/2 and S by <= 1/2 of 2^p against a sum >= QE_MAX / 2, so
+ * |sum mant - 2^30| <= n/2 + 2^p + 1. Mixed codes over several blocks. */
+void testSoftmaxBfpRawSumsToOneWithinTheNormalisationBound(void) {
+    static const size_t ns[] = {3, 6, 23, 64};
+    int32_t codes[64];
+    uint8_t exps[16];
+    uint32_t lcg = 12345u;
+    for (size_t i = 0; i < 64; i++) {
+        lcg = lcg * 1664525u + 1013904223u;
+        codes[i] = (int32_t)(lcg >> 24) - 128;
+    }
+    for (size_t g = 0; g < 16; g++) {
+        exps[g] = (uint8_t)(120 + (g * 5) % 9);
+    }
+    for (size_t k = 0; k < sizeof(ns) / sizeof(ns[0]); k++) {
+        size_t n = ns[k];
+        size_t gs = (n % 4 == 0) ? 4 : 0;
+        bfpRawFixture_t out;
+        smRawRun(codes, n, exps, gs == 0 ? 1 : n / gs, gs, 1, 0, BFP_SHIFT_HALF_AWAY, &out);
+        int64_t sum = 0;
+        for (size_t i = 0; i < n; i++) {
+            TEST_ASSERT_TRUE(out.mant[i] >= 0);
+            sum += out.mant[i];
+        }
+        int64_t slack = (int64_t)n / 2 + ((int64_t)1 << smRawPreShift(n)) + 1;
+        TEST_ASSERT_TRUE_MESSAGE(llabs(sum - ((int64_t)1 << 30)) <= slack,
+                                 "softmax raw does not sum to 1 within the bound");
+        TEST_ASSERT_EQUAL_INT16(-30, out.exps[0]);
+    }
+}
+
+/* The raw of the native fixtures against the goldgen, whose step 5 is the
+ * definition in exact rationals (not the C restoring division), on the
+ * produced wire's grouped {2, 4} geometry: every group at -30. */
+void testSoftmaxBfpRawMatchesTheGoldOnTheNativeFixtures(void) {
+    static const int16_t exps[] = {-30, -30};
+    bfpRawFixture_t out;
+    smRawRun(kSmBfpXCodes, 8, kSmBfpXExponents, (size_t)kSmBfpXNumGroups, (size_t)kSmBfpXGroupSize,
+             2, 4, BFP_SHIFT_TRUNC, &out);
+    assertRawEquals(&out, kSmBfpRawMantTrunc, 8, exps, 2);
+    smRawRun(kSmBfpXCodes, 8, kSmBfpXExponents, (size_t)kSmBfpXNumGroups, (size_t)kSmBfpXGroupSize,
+             2, 4, BFP_SHIFT_HALF_AWAY, &out);
+    assertRawEquals(&out, kSmBfpRawMantHalfAway, 8, exps, 2);
+    smRawRun(kSmBfpCnXCodes, 8, kSmBfpCnXExponents, (size_t)kSmBfpXNumGroups,
+             (size_t)kSmBfpXGroupSize, 2, 4, BFP_SHIFT_TRUNC, &out);
+    assertRawEquals(&out, kSmBfpCnRawMantTrunc, 8, exps, 2);
+    smRawRun(kSmBfpCsXCodes, 8, kSmBfpCsXExponents, (size_t)kSmBfpCsXNumGroups,
+             (size_t)kSmBfpCsXGroupSize, 2, 4, BFP_SHIFT_TRUNC, &out);
+    assertRawEquals(&out, kSmBfpCsRawMantTrunc, 8, exps, 2);
+}
+
+static void smRawNonRawOutputBody(void) {
+    static const int32_t codes[] = {1, 2};
+    static const uint8_t unit[] = {127};
+    bfpScratchFixture_t in;
+    size_t dims[] = {2};
+    bfpScratchInit(&in, 1, dims, codes, unit, 1, 0, 8, 8);
+    float outData[2];
+    tensor_t outT;
+    shape_t outShape;
+    size_t outOrder[] = {0};
+    setShape(&outShape, dims, 1, outOrder);
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    setTensorValues(&outT, (uint8_t *)outData, &outShape, &outQ, NULL);
+    softmaxForwardBfpRaw(&in.tensor, BFP_SHIFT_TRUNC, NULL, &outT);
+}
+static void smRawBadGeometryBody(void) {
+    static const int32_t codes[] = {1, 2};
+    static const uint8_t unit[] = {127};
+    bfpRawFixture_t out;
+    smRawRun(codes, 2, unit, 1, 0, 3, 1, BFP_SHIFT_TRUNC, &out);
+}
+static void smRawWideCodesBody(void) {
+    static const int32_t codes[] = {1, 2};
+    static const uint8_t unit[] = {127};
+    bfpScratchFixture_t in;
+    size_t dims[] = {2};
+    bfpScratchInit(&in, 1, dims, codes, unit, 1, 0, 17, 8);
+    bfpRawFixture_t out;
+    bfpRawInit(&out, 1, dims, 1, 0);
+    softmaxForwardBfpRaw(&in.tensor, BFP_SHIFT_TRUNC, NULL, &out.tensor);
+}
+
+void testSoftmaxBfpRawRejectsANonRawOutputBadGeometryAndWideCodes(void) {
+    ASSERT_EXITS_WITH_FAILURE(smRawNonRawOutputBody());
+    ASSERT_EXITS_WITH_FAILURE(smRawBadGeometryBody());
+    ASSERT_EXITS_WITH_FAILURE(smRawWideCodesBody());
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(unitTestSoftmaxForwardFloat);
@@ -1979,5 +2197,11 @@ int main() {
     RUN_TEST(testSoftmaxBfpSrShiftsDrawFromTheForwardShiftStream);
     RUN_TEST(testSoftmaxSymBackwardConvertsWithItsBackwardConvertStream);
     RUN_TEST(testSoftmaxInitConfigClearsOwnsQuantizations);
+    RUN_TEST(testSoftmaxBfpRawUniformLogitsNormaliseByTheDefinition);
+    RUN_TEST(testSoftmaxBfpRawOnlyTheArgmaxSurvivesALargeGap);
+    RUN_TEST(testSoftmaxBfpRawTiesAcrossBlocksKeepTheFirst);
+    RUN_TEST(testSoftmaxBfpRawSumsToOneWithinTheNormalisationBound);
+    RUN_TEST(testSoftmaxBfpRawMatchesTheGoldOnTheNativeFixtures);
+    RUN_TEST(testSoftmaxBfpRawRejectsANonRawOutputBadGeometryAndWideCodes);
     return UNITY_END();
 }

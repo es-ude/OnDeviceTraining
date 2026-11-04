@@ -604,7 +604,7 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
 /* BFP epic PR2 (Task 3): matmulIntCoreGrouped's BFP twin (see Matmul.h for
  * the full contract). Differences from the SYM grouped core: BOTH operands
  * are group-tracked (not just the weight), the boundary combine is a
- * rounding-free ldexpf fold into a float accumulator (never
+ * rounding-free power-of-two fold into a float accumulator (never
  * rescaleIntoAccumulatorScale), and the output is raw FLOAT32. */
 void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
                       tensor_t *outputTensor) {
@@ -713,7 +713,7 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
                      * int32 partial enters the float accumulator via a pure
                      * exponent shift -- rounding-free by kernel contract. */
                     acc +=
-                        ldexpf((float)partial, (int)aQC->exponents[currentAGroup] - aExpBias +
+                        bfpLdexpInt32(partial, (int)aQC->exponents[currentAGroup] - aExpBias +
                                                    (int)bQC->exponents[currentBGroup] - bExpBias);
                     partial = 0;
                     currentAGroup = aGroup;
@@ -727,7 +727,7 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
              * so this is its only fold (and the ONLY fold when neither
              * operand changes groups over the walk). */
             if (aColumns > 0) {
-                acc += ldexpf((float)partial, (int)aQC->exponents[currentAGroup] - aExpBias +
+                acc += bfpLdexpInt32(partial, (int)aQC->exponents[currentAGroup] - aExpBias +
                                                   (int)bQC->exponents[currentBGroup] - bExpBias);
             }
             writeFloatToByteArray(acc, &outputTensor->data[resultCounter * sizeof(float)]);

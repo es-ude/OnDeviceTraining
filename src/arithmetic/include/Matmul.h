@@ -82,7 +82,7 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
  *  to group ids (bfpGroupAt -- gap-robust on strided walks like
  *  matmulIntCoreGrouped's per-element division, but the division runs only
  *  when an index leaves the cached current group); when EITHER id changes, the
- *  finished segment folds via acc += ldexpf((float)partial, Ea + Eb - biasA
+ *  finished segment folds via acc += bfpLdexpInt32(partial, Ea + Eb - biasA
  *  - biasB) and the partial resets; tail-fold after the loop. The kernel
  *  never rounds (rounding lives at staging and the OUT_WRITE epilogue).
  *  Every operand's group shape is fail-fast-checked against its element

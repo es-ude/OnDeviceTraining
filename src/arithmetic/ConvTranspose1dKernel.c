@@ -689,9 +689,9 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
                                  * the finished same-exponent segment's raw int32
                                  * partial enters the float accumulator via a pure
                                  * exponent shift -- rounding-free by contract. */
-                                acc += ldexpf((float)partial,
-                                              (int)inQC->exponents[currentInGroup] - inExpBias +
-                                                  (int)wQC->exponents[currentWGroup] - wExpBias);
+                                acc += bfpLdexpInt32(
+                                    partial, (int)inQC->exponents[currentInGroup] - inExpBias +
+                                                 (int)wQC->exponents[currentWGroup] - wExpBias);
                                 partial = 0;
                                 currentInGroup = inGroup;
                                 currentWGroup = wGroup;
@@ -704,9 +704,9 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
                      * boundary, so this is its only fold; tap-free positions
                      * never seed a segment at all. */
                     if (currentWGroup != SIZE_MAX) {
-                        acc += ldexpf((float)partial,
-                                      (int)inQC->exponents[currentInGroup] - inExpBias +
-                                          (int)wQC->exponents[currentWGroup] - wExpBias);
+                        acc += bfpLdexpInt32(partial,
+                                             (int)inQC->exponents[currentInGroup] - inExpBias +
+                                                 (int)wQC->exponents[currentWGroup] - wExpBias);
                     }
 
                     yArr[(b * outChannels + oc) * outputLength + outPos] = acc;

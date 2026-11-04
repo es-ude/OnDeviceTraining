@@ -527,7 +527,7 @@ static void avgPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
                 size_t outIdx = (b * channels + c) * outputLength + outPos;
                 size_t g = bfpGroupAt(&qRange, qC, outIdx);
                 float contribution =
-                    ldexpf((float)gyArr[outIdx], (int)qC->exponents[g] - expBias) / divisor;
+                    bfpLdexpInt32(gyArr[outIdx], (int)qC->exponents[g] - expBias) / divisor;
 
                 for (size_t i = 0; i < slice.validCount; i++) {
                     size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;

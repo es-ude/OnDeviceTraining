@@ -2,9 +2,11 @@
 #define BFP_KERNEL_SUPPORT_H
 
 #include <limits.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "Common.h"
 #include "Quantization.h"
@@ -66,6 +68,29 @@ static inline size_t bfpTapsBelow(size_t idx, size_t end, size_t stride, size_t 
         span -= stride;
     }
     return n;
+}
+
+/*! ldexpf((float)m, e), bit for bit, for every int32 m and every int e: the
+ * fold of an int32 segment partial (or a single code) into a float
+ * accumulator. Use it instead of ldexpf in per-fold / per-element BFP loops;
+ * the libm call is the hot cost there.
+ * Fast path e in [-126, 96]: 2^e is a normal float built from its exponent
+ * field, and (float)m is 0 or 1 <= |m| <= 2^31, so m * 2^e lies in
+ * [2^-126, 2^127] or is +0 -- representable, hence EXACT. An exact product
+ * equals ldexpf's single rounding, and stays exact when the compiler fuses
+ * it with the accumulator add (-ffp-contract=fast). Every other e (subnormal
+ * results, overflow to inf, 2^e itself not normal) takes the ldexpf call.
+ * Reach: an operand exponent with 2..8 exponent bits is stored - bias in
+ * [-127, 128], so a product fold's e is in [-254, 256] -- trained tensors
+ * stay well inside the fast path, the rest is correct, only slower. */
+static inline float bfpLdexpInt32(int32_t m, int e) {
+    if (e >= -126 && e <= 96) {
+        uint32_t bits = (uint32_t)(e + 127) << 23;
+        float pow2;
+        memcpy(&pow2, &bits, sizeof(pow2));
+        return (float)m * pow2;
+    }
+    return ldexpf((float)m, e);
 }
 
 /*! Max products one int32 block partial may accumulate: INT32_MAX >> (ma+mb-2).

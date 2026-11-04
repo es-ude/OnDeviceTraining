@@ -568,6 +568,8 @@ void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t con
 
     int32_t inExpBias = bfpExponentBias(inQC);
     int32_t wExpBias = bfpExponentBias(wQC);
+    bfpGroupRange_t inRange = {0};
+    bfpGroupRange_t wRange = {0};
 
     /* Per-output-channel bias seed, dequantized to float BEFORE the reduction
      * (value-seed, headroom-exempt -- it never touches the int32 partial).
@@ -607,13 +609,15 @@ void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t con
                             size_t kernelIdx = slice.firstValidKernelOffset + i;
                             size_t wIdx = wBase + icOffset * kernelSize + kernelIdx;
                             size_t inIdx = (b * inChannels + ic) * inputLength + inputIdx;
-                            /* Per-element division on BOTH operands (see the SYM
-                             * grouped kernel's gap rationale): clipped windows skip
-                             * taps, so consecutive visited indices can have gaps on
-                             * the weight AND -- across icOffset transitions -- jump
-                             * by inputLength on the input. */
-                            size_t inGroup = bfpGroupOf(inQC, inIdx);
-                            size_t wGroup = bfpGroupOf(wQC, wIdx);
+                            /* Per-element group lookup on BOTH operands (see the
+                             * SYM grouped kernel's gap rationale): clipped windows
+                             * skip taps, so consecutive visited indices can have
+                             * gaps on the weight AND -- across icOffset transitions
+                             * -- jump by inputLength on the input. bfpGroupAt
+                             * divides only when an index leaves the current
+                             * group's range. */
+                            size_t inGroup = bfpGroupAt(&inRange, inQC, inIdx);
+                            size_t wGroup = bfpGroupAt(&wRange, wQC, wIdx);
 
                             if (currentWGroup == SIZE_MAX) {
                                 currentInGroup = inGroup;

@@ -19,6 +19,33 @@ static inline size_t bfpGroupOf(const bfpQConfig_t *qC, size_t storageIdx) {
     return qC->groupSize == 0 ? 0 : storageIdx / qC->groupSize;
 }
 
+/*! Current-group cache for the per-element lookups inside MAC loops: the
+ * storage range [start, end) of `group`. Zero-initialise ({0}) for the empty
+ * range, so the first lookup recomputes. One cache per operand config. */
+typedef struct {
+    size_t group;
+    size_t start;
+    size_t end;
+} bfpGroupRange_t;
+
+/*! Group id of `physIdx`, same result as bfpGroupOf, but the division runs
+ * only when `physIdx` leaves the cached range (a group change in either
+ * direction) -- an M0+ has no hardware divide, and the MAC loops walk long
+ * same-group runs. The per-tensor sentinel installs [0, SIZE_MAX) once. */
+static inline size_t bfpGroupAt(bfpGroupRange_t *r, const bfpQConfig_t *qC, size_t physIdx) {
+    if (physIdx < r->start || physIdx >= r->end) {
+        r->group = bfpGroupOf(qC, physIdx);
+        if (qC->groupSize == 0) {
+            r->start = 0;
+            r->end = SIZE_MAX;
+        } else {
+            r->start = r->group * qC->groupSize;
+            r->end = r->start + qC->groupSize;
+        }
+    }
+    return r->group;
+}
+
 /*! Max products one int32 block partial may accumulate: INT32_MAX >> (ma+mb-2).
  * Mantissas are in [-2^(m-1), 2^(m-1)-1], so |product| <= 2^(ma+mb-2) and
  * INT32_MAX >> (ma+mb-2) products fit int32 -- the kernels' no-int64 rule

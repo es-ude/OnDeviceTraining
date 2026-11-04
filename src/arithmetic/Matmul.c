@@ -670,6 +670,8 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
 
     int32_t aExpBias = bfpExponentBias(aQC);
     int32_t bExpBias = bfpExponentBias(bQC);
+    bfpGroupRange_t aRange = {0};
+    bfpGroupRange_t bRange = {0};
 
     size_t resultCounter = 0;
     for (size_t rowIndex = 0; rowIndex < aRows; rowIndex++) {
@@ -701,8 +703,8 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
                     bValueIndex = calcElementIndexByIndices(bNumberOfDims, bDims, bIndices,
                                                             bTensor->shape->orderOfDimensions);
                 }
-                size_t aGroup = bfpGroupOf(aQC, aValueIndex);
-                size_t bGroup = bfpGroupOf(bQC, bValueIndex);
+                size_t aGroup = bfpGroupAt(&aRange, aQC, aValueIndex);
+                size_t bGroup = bfpGroupAt(&bRange, bQC, bValueIndex);
                 if (i == 0) {
                     currentAGroup = aGroup;
                     currentBGroup = bGroup;

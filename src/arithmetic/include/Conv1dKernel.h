@@ -97,8 +97,9 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
  *  live bfpQConfig_t), output is raw FLOAT32, the kernel never rounds.
  *  Unlike the SYM grouped kernel (which tracks only the weight's groups),
  *  BOTH operands' storage indices map to group ids per visited tap
- *  (bfpGroupOf -- per-element division, because padding clips taps and
- *  leaves GAPS in the visited weight/input index sequences); when EITHER id
+ *  (bfpGroupAt -- per-element lookup, because padding clips taps and
+ *  leaves GAPS in the visited weight/input index sequences; it divides only
+ *  when an index leaves the cached current group); when EITHER id
  *  changes, the finished segment's int32 partial folds into the float
  *  accumulator via ldexpf, plus a tail fold per output element. `bias` is a
  *  value-seed dequantized to float BEFORE the reduction (headroom-exempt).

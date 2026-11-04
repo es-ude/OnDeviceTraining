@@ -630,6 +630,8 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
 
     int32_t xExpBias = bfpExponentBias(xQC);
     int32_t gyExpBias = bfpExponentBias(gyQC);
+    bfpGroupRange_t xRange = {0};
+    bfpGroupRange_t gyRange = {0};
 
     for (size_t g = 0; g < groups; g++) {
         size_t inLo = g * inChPerGroup;
@@ -656,12 +658,14 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
                                 outPos * geom.stride + k * geom.dilation - geom.padLeft;
                             size_t xIdx = (b * inChannels + ic) * inputLength + inputIdx;
                             size_t gyIdx = (b * outChannels + oc) * outputLength + outPos;
-                            /* Per-element division on BOTH operands (the SYM
+                            /* Per-element group lookup on BOTH operands (the SYM
                              * grouped kernels' gap rationale): consecutive
                              * contributors hop by stride on the input and by
-                             * outputLength across batches. */
-                            size_t xGroup = bfpGroupOf(xQC, xIdx);
-                            size_t gyGroup = bfpGroupOf(gyQC, gyIdx);
+                             * outputLength across batches. bfpGroupAt divides
+                             * only when an index leaves the current group's
+                             * range. */
+                            size_t xGroup = bfpGroupAt(&xRange, xQC, xIdx);
+                            size_t gyGroup = bfpGroupAt(&gyRange, gyQC, gyIdx);
 
                             if (currentGyGroup == SIZE_MAX) {
                                 currentXGroup = xGroup;
@@ -858,6 +862,7 @@ static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
     bfpValidateSumHeadroom(gyQC, batch * outputLength, "conv1dCalcBiasGradsBfp");
 
     int32_t expBias = bfpExponentBias(gyQC);
+    bfpGroupRange_t gyRange = {0};
     int32_t const *gyArr = (int32_t const *)lossGrad->data;
     float *out = (float *)rawOut->data;
 
@@ -868,7 +873,7 @@ static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
         for (size_t b = 0; b < batch; b++) {
             for (size_t outPos = 0; outPos < outputLength; outPos++) {
                 size_t idx = (b * outChannels + oc) * outputLength + outPos;
-                size_t g = bfpGroupOf(gyQC, idx);
+                size_t g = bfpGroupAt(&gyRange, gyQC, idx);
                 if (b == 0 && outPos == 0) {
                     currentGroup = g;
                 } else if (g != currentGroup) {

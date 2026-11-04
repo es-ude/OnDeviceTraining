@@ -189,6 +189,7 @@ static void avgPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut
     validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(input));
     bfpValidateSumHeadroom(qC, cfg->kernel->size, "AvgPool1d forward BFP");
     const int32_t expBias = bfpExponentBias(qC);
+    bfpGroupRange_t qRange = {0};
 
     int32_t const *xArr = (int32_t const *)input->data;
     float *yArr = (float *)rawOut->data;
@@ -205,7 +206,7 @@ static void avgPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut
                 for (size_t i = 0; i < slice.validCount; i++) {
                     size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
                     size_t storageIdx = (b * channels + c) * inputLength + inputIdx;
-                    size_t g = bfpGroupOf(qC, storageIdx);
+                    size_t g = bfpGroupAt(&qRange, qC, storageIdx);
                     if (i == 0) {
                         currentGroup = g;
                     } else if (g != currentGroup) {
@@ -445,6 +446,7 @@ static void avgPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
     const bfpQConfig_t *qC = lossGrad->quantization->qConfig;
     validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(lossGrad));
     const int32_t expBias = bfpExponentBias(qC);
+    bfpGroupRange_t qRange = {0};
 
     int32_t const *gyArr = (int32_t const *)lossGrad->data;
     float *gxArr = (float *)rawOut->data;
@@ -457,7 +459,7 @@ static void avgPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
             for (size_t outPos = 0; outPos < outputLength; outPos++) {
                 windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
                 size_t outIdx = (b * channels + c) * outputLength + outPos;
-                size_t g = bfpGroupOf(qC, outIdx);
+                size_t g = bfpGroupAt(&qRange, qC, outIdx);
                 float contribution =
                     ldexpf((float)gyArr[outIdx], (int)qC->exponents[g] - expBias) / divisor;
 

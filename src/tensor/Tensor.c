@@ -60,6 +60,8 @@ size_t calcBytesPerElement(quantization_t *quantization) {
         bfpQConfig_t *bfpQC = quantization->qConfig;
         return (size_t)ceilf((float)bfpQC->mantissaBits / 8.0f);
     }
+    case BFP_RAW:
+        return sizeof(int32_t);
     default:
         PRINT_ERROR("Unknown QType!");
         exit(1);
@@ -88,6 +90,8 @@ size_t calcBitsPerElement(quantization_t *quantization) {
         bfpQConfig_t *bfpQC = quantization->qConfig;
         return bfpQC->mantissaBits;
     }
+    case BFP_RAW:
+        return sizeof(int32_t) * 8;
     default:
         PRINT_ERROR("Unknown QType!");
         exit(1);
@@ -116,6 +120,8 @@ static const char *qtypeName(qtype_t type) {
         return "BOOL";
     case BFP:
         return "BFP";
+    case BFP_RAW:
+        return "BFP_RAW";
     default:
         return "UNKNOWN";
     }
@@ -159,6 +165,7 @@ size_t calcNumberOfBytesForData(quantization_t *q, size_t numberOfElements) {
         return wordBytes(q, numberOfElements, sizeof(float));
     case INT32:
     case SYM_INT32:
+    case BFP_RAW:
         return wordBytes(q, numberOfElements, sizeof(int32_t));
     case SYM:
     case ASYM:
@@ -258,6 +265,26 @@ void byteConversion(uint8_t *dataIn, size_t dataInBits, uint8_t *dataOut, size_t
                     size_t numValues) {
     if (numValues == 0) {
         /* Skip the memset: N=0 tensor data may be NULL (#160). */
+        return;
+    }
+    if (dataInBits == 32 && (dataOutBits == 8 || dataOutBits == 16)) {
+        /* Byte/halfword codes from int32 words (every SYM/BFP pack at m = 8
+         * or 16): the bit engine emits each code's low dataOutBits bits
+         * LSB-first, which for whole bytes is the word's first one or two
+         * bytes in memory order -- the same bytes without the bit walk, and
+         * no memset since these widths leave no pad bits. Byte stores only:
+         * dataOut may sit on an odd address and Cortex-M0+ faults on an
+         * unaligned halfword store. */
+        if (dataOutBits == 8) {
+            for (size_t i = 0; i < numValues; i++) {
+                dataOut[i] = dataIn[4 * i];
+            }
+        } else {
+            for (size_t i = 0; i < numValues; i++) {
+                dataOut[2 * i] = dataIn[4 * i];
+                dataOut[2 * i + 1] = dataIn[4 * i + 1];
+            }
+        }
         return;
     }
     /* Ceiling idiom (bits+7)/8 as in calcNumberOfBytesForData: identical to
@@ -657,6 +684,10 @@ void copyQuantization(quantization_t *dest, quantization_t *src) {
     case BFP:
         copyBfpQConfigInto(dest, src);
         break;
+    case BFP_RAW:
+        PRINT_ERROR("copyQuantization: BFP_RAW is the funnel's transient raw intermediate, "
+                    "never copied or cloned");
+        exit(1);
     default:
         PRINT_ERROR("Unknown QType!");
         exit(1);

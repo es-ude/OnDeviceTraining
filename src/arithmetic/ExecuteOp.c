@@ -525,6 +525,43 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             }
         }
     }
+    /* Integer raw (opSpec_t.bfpRawOut): geometry copied from the target --
+     * the raw exponent is per TARGET group by contract -- and exponent
+     * backing on the funnel's stack, like stageExponents. Validated before
+     * the VLAs so a misuse dies with a message, not a bad size. */
+    bfpRawQConfig_t rawBfpQC = {.exponents = NULL, .numGroups = 0, .groupSize = 0};
+    if (spec->bfpRawOut) {
+        if (arithmetic.type != ARITH_BFP) {
+            PRINT_ERROR("executeOp: bfpRawOut is an ARITH_BFP forward contract (arithmetic "
+                        "dtype %d) -- a fake-quant pin must not set it",
+                        (int)arithmetic.type);
+            exit(1);
+        }
+        if (spec->mode != OUT_WRITE) {
+            PRINT_ERROR("executeOp: bfpRawOut needs the OUT_WRITE epilogue (mode %d) -- "
+                        "accumulating ops (backward) keep the FLOAT32 raw",
+                        (int)spec->mode);
+            exit(1);
+        }
+        switch (target->quantization->type) {
+        case BFP: {
+            const bfpQConfig_t *targetQC = target->quantization->qConfig;
+            rawBfpQC.numGroups = targetQC->numGroups;
+            rawBfpQC.groupSize = targetQC->groupSize;
+            break;
+        }
+        case FLOAT32:
+            rawBfpQC.numGroups = 1;
+            rawBfpQC.groupSize = 0;
+            break;
+        default:
+            PRINT_ERROR("executeOp: bfpRawOut has no epilogue into target dtype %d (BFP re-block "
+                        "or FLOAT32 dequant only)",
+                        (int)target->quantization->type);
+            exit(1);
+        }
+    }
+    int16_t rawExponents[rawBfpQC.numGroups > 0 ? rawBfpQC.numGroups : 1];
     /* outElems == 0 with aliasing: raw.data may be NULL for N=0 tensors
      * (target->data straight from a calloc(1,0), #160) — safe because the
      * kernel below iterates 0 elements. */
@@ -545,7 +582,16 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
         initSymInt32Quantization(&rawQC, &rawQ);
         break;
     case ARITH_BFP:
-        /* BFP D7: BFP kernels fold same-exponent segments into a float
+        if (spec->bfpRawOut) {
+            for (size_t g = 0; g < rawBfpQC.numGroups; g++) {
+                rawExponents[g] = 0;
+            }
+            rawBfpQC.exponents = rawExponents;
+            initBfpRawQuantization(&rawBfpQC, &rawQ);
+            break;
+        }
+        /* BFP D7 as amended (docs/conventions/arithmetic-bfp.md §13): without
+         * the opt-in, BFP kernels fold same-exponent segments into a float
          * accumulator (ldexpf) and never round — the raw intermediate stays
          * FLOAT32; any width-restore/pack is the OUT_WRITE epilogue's job. */
         initFloat32Quantization(&rawQ);

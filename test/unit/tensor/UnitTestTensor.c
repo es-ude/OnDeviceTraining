@@ -1139,11 +1139,120 @@ void testPackedByteCountMatchesCeilTable() {
     }
 }
 
+/* ---- Integer-only BFP forward (Task 5) ---------------------------------- */
+
+/* BFP_RAW is the funnel's integer raw intermediate: int32 words, like
+ * INT32/SYM_INT32, never a packed payload. */
+void testBfpRawSizesAsInt32Words(void) {
+    int16_t exponents[1] = {0};
+    bfpRawQConfig_t qc = {.exponents = exponents, .numGroups = 1, .groupSize = 0};
+    quantization_t q;
+    initBfpRawQuantization(&qc, &q);
+    TEST_ASSERT_EQUAL_INT(BFP_RAW, q.type);
+    TEST_ASSERT_EQUAL_size_t(sizeof(int32_t), calcBytesPerElement(&q));
+    TEST_ASSERT_EQUAL_size_t(32, calcBitsPerElement(&q));
+    TEST_ASSERT_EQUAL_size_t(5 * sizeof(int32_t), calcNumberOfBytesForData(&q, 5));
+}
+
+/* 32 -> 8/16 pack fast path, pinned to memset + the frozen walker over
+ * counts on and off the byte/chunk grid; edge codes (INT32_MIN/MAX, -1, the
+ * sign-bit and byte-boundary patterns) lead an LCG stream, and a canary
+ * behind the payload must survive. */
+static void assertPack32ToNarrowMatchesReference(size_t bits, size_t n) {
+    static const int32_t edge[] = {0,
+                                   -1,
+                                   1,
+                                   127,
+                                   -128,
+                                   128,
+                                   -129,
+                                   255,
+                                   256,
+                                   32767,
+                                   -32768,
+                                   32768,
+                                   -32769,
+                                   65535,
+                                   65536,
+                                   INT32_MAX,
+                                   INT32_MIN,
+                                   0x12345678,
+                                   (int32_t)0x80000080u,
+                                   (int32_t)0xFFFF8000u};
+    const size_t edgeCount = sizeof edge / sizeof edge[0];
+    int32_t *codes = reserveMemory(n * sizeof(int32_t));
+    for (size_t i = 0; i < n; i++) {
+        uint32_t w = 0;
+        for (int b = 0; b < 4; b++) {
+            w = (w << 8) | byteConvNextByte();
+        }
+        codes[i] = i < edgeCount ? edge[i] : (int32_t)w;
+    }
+    size_t bytes = n * bits / 8;
+    uint8_t *got = reserveMemory(bytes + BYTE_CONV_CANARY);
+    uint8_t *ref = reserveMemory(bytes + BYTE_CONV_CANARY);
+    memset(got, BYTE_CONV_DST_CANARY, bytes + BYTE_CONV_CANARY);
+    memset(ref, BYTE_CONV_DST_CANARY, bytes + BYTE_CONV_CANARY);
+
+    byteConversion((uint8_t *)codes, 32, got, bits, n);
+    memset(ref, 0, bytes);
+    refByteConversionAppend((uint8_t *)codes, 32, ref, bits, n, 0, 0);
+
+    if (memcmp(got, ref, bytes + BYTE_CONV_CANARY) != 0) {
+        char msg[96];
+        snprintf(msg, sizeof msg, "32 -> %zu-bit pack differs from the walker (n=%zu)", bits, n);
+        TEST_FAIL_MESSAGE(msg);
+    }
+    freeReservedMemory(codes);
+    freeReservedMemory(got);
+    freeReservedMemory(ref);
+}
+
+void testByteConversion32To8And16MatchesWalker(void) {
+    static const size_t counts[] = {1, 7, 8, 20, 255, 256, 269, 1000};
+    byteConvLcgState = 0x3205u;
+    for (size_t c = 0; c < sizeof counts / sizeof counts[0]; c++) {
+        assertPack32ToNarrowMatchesReference(8, counts[c]);
+        assertPack32ToNarrowMatchesReference(16, counts[c]);
+    }
+}
+
+/* The stored layout spelled out: a code's low 8 (16) bits, low byte first,
+ * whatever the host endianness; packing is pure low-bit truncation. */
+void testByteConversion32To8And16StoresLowBitsLittleEndian(void) {
+    int32_t codes[6] = {127, -128, -1, 256, 32767, -32768};
+    uint8_t out8[6];
+    byteConversion((uint8_t *)codes, 32, out8, 8, 6);
+    uint8_t expected8[6] = {0x7F, 0x80, 0xFF, 0x00, 0xFF, 0x00};
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected8, out8, 6);
+
+    uint8_t out16[12];
+    byteConversion((uint8_t *)codes, 32, out16, 16, 6);
+    uint8_t expected16[12] = {0x7F, 0x00, 0x80, 0xFF, 0xFF, 0xFF,
+                              0x00, 0x01, 0xFF, 0x7F, 0x00, 0x80};
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected16, out16, 12);
+}
+
+/* n == 0 touches neither buffer on the fast path either (#160: NULL data). */
+void testByteConversion32To8And16ZeroCountTouchesNothing(void) {
+    byteConversion(NULL, 32, NULL, 8, 0);
+    byteConversion(NULL, 32, NULL, 16, 0);
+    uint8_t dst[2] = {1, 2};
+    byteConversion(NULL, 32, dst, 8, 0);
+    byteConversion(NULL, 32, dst, 16, 0);
+    TEST_ASSERT_EQUAL_UINT8(1, dst[0]);
+    TEST_ASSERT_EQUAL_UINT8(2, dst[1]);
+}
+
 void setUp() {}
 void tearDown() {}
 
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testBfpRawSizesAsInt32Words);
+    RUN_TEST(testByteConversion32To8And16MatchesWalker);
+    RUN_TEST(testByteConversion32To8And16StoresLowBitsLittleEndian);
+    RUN_TEST(testByteConversion32To8And16ZeroCountTouchesNothing);
     RUN_TEST(testByteFlattening);
     RUN_TEST(testByteFlattening2);
     RUN_TEST(testByteFlattening3);

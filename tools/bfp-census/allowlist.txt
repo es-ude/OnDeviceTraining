@@ -7,3 +7,4 @@ quantizeFloatBufferToBfpCodes
 packFloatBufferAsBfp
 # Loss-facing dequant: BFP logits leave the integer domain here.
 convertBfpTensorToFloat32Tensor
+convertBfpRawTensorToFloat32Tensor

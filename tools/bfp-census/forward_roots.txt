@@ -23,3 +23,4 @@ BfpSoftmaxExp.c bfpShiftRightRounded
 TensorConversion.c  requantBfpTensor
 TensorConversion.c  convertBfpTensorToSymInt32Tensor
 TensorConversion.c  convertSymInt32TensorToBfpTensor
+TensorConversion.c  reblockBfpRawTensor

@@ -145,6 +145,21 @@ typedef struct opSpec {
      * tensor. Borrowed configs carry the source's STORAGE roundingMode;
      * staged configs carry the OP's arithmetic.roundingMode. */
     const bfpQConfig_t *bfpStage[EXECUTE_OP_MAX_INPUTS];
+    /* Integer-only BFP forward, ARITH_BFP only: true = the kernel emits a
+     * BFP_RAW raw (int32 mantissas + one UNBIASED int16 exponent per TARGET
+     * group, bfpRawQConfig_t; the kernel MUST write every group's exponent)
+     * instead of BFP D7's FLOAT32 raw, and the OUT_WRITE epilogue is the
+     * integer re-block (conversionMatrix[BFP_RAW][BFP], under the #282 op-
+     * rounding swap) or, for a FLOAT32 target, the loss-facing dequant
+     * ([BFP_RAW][FLOAT32]). Zero-init (false) keeps the FLOAT32 raw: every
+     * backward op leaves it false, including the Linear/Softmax backward
+     * adapters that share forward kernel code -- the explicit forward raw
+     * contract, so the backward never switches raw format by accident.
+     * Raw geometry: a BFP target's {numGroups, groupSize}; a FLOAT32 target
+     * has no groups, so the raw is per-tensor ({1,0}, one exponent over the
+     * whole output). Any other target dtype, any other arithmetic type, or
+     * an ACC epilogue fails fast. */
+    bool bfpRawOut;
 } opSpec_t;
 
 void executeOp(const opSpec_t *spec, tensor_t *target);

@@ -82,22 +82,115 @@ in
 		ci = {
 			exec = ''
 				set -e
-				# git grep exits 1 on no matches; suspend abort-on-error for this block only
-				set +e
-				matches=$(git grep -nP '\b(malloc|calloc|realloc|free)\s*\(' \
-					-- 'src/' 'test/' \
-					':!src/userApi/' \
-					':!*.md' \
-					| grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*)')
-				set -e
-				if [ -n "$matches" ]; then
-					echo "Allocation-locality violation: malloc/calloc/realloc/free are only allowed in src/userApi/."
-					echo "All other code must route through reserveMemory/freeReservedMemory in src/userApi/StorageApi.{c,h}."
-					echo
-					echo "Offending lines:"
-					echo "$matches"
-					exit 1
+				# alloc-locality (#488): the run block of the alloc-locality job in
+				# .github/workflows/ci.yml, verbatim but for indentation. Outside a git work
+				# tree (a jj secondary workspace) git grep cannot scan: skip loudly here, never
+				# pass vacuously (the CI job fails closed instead).
+				if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+					echo "alloc-locality: SKIPPED, not a git work tree (jj secondary workspace?); this is NOT a pass"
+				else
+					set +e
+					PATTERN='(^|[^A-Za-z0-9_])(malloc|calloc|realloc|free)[[:space:]]*\('
+					alloc_git() {
+						root=$1
+						shift
+						git -C "$root" "$@" -- 'src/' 'test/' ':!src/userApi/' ':!*.md'
+					}
+					# Sets hits to the non-comment matches under the repo root $1; returns 2 when
+					# git grep itself fails (rc 1 only means no match).
+					scan() {
+						raw=$(alloc_git "$1" grep -nE -e "$PATTERN")
+						rc=$?
+						if [ "$rc" -gt 1 ]; then
+							echo "alloc-locality: git grep failed (rc=$rc) in $1"
+							return 2
+						fi
+						hits=
+						if [ -n "$raw" ]; then
+							hits=$(printf '%s\n' "$raw" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*([[:space:]]|/|$))')
+						fi
+						return 0
+					}
+					if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+						echo "alloc-locality: not a git work tree, so git grep cannot scan; failing closed."
+						exit 1
+					fi
+					if [ -z "$(git ls-files -- src/userApi/StorageApi.c)" ]; then
+						echo "alloc-locality: src/userApi/StorageApi.c is not tracked; the userApi exclusion no longer names the allocator."
+						exit 1
+					fi
+					gated=$(alloc_git . ls-files)
+					if [ $? -ne 0 ]; then
+						echo "alloc-locality: git ls-files failed; failing closed."
+						exit 1
+					fi
+					if ! printf '%s\n' "$gated" | grep -q '^src/'; then
+						echo "alloc-locality: no src/ file is in the scanned set; the scan would be vacuous."
+						exit 1
+					fi
+					scan . || exit 1
+					if [ -n "$hits" ]; then
+						echo "Allocation-locality violation: malloc/calloc/realloc/free are only allowed in src/userApi/."
+						echo "All other code must route through reserveMemory/freeReservedMemory in src/userApi/StorageApi.{c,h}."
+						echo
+						echo "Offending lines:"
+						echo "$hits"
+						exit 1
+					fi
+					# Self-test in a throwaway repo, never in the checkout: each primitive must fire
+					# in src/ and test/ and in a new file, and the exclusions, the comment filter and
+					# look-alike names must stay silent.
+					(
+						tmp=$(mktemp -d) || exit 1
+						trap 'rm -rf "$tmp"' EXIT
+						git -C "$tmp" init -q || exit 1
+						failed=0
+						scan "$tmp" || exit 1
+						if [ -n "$hits" ]; then
+							echo "alloc-locality self-test: the empty repo is not clean"
+							failed=1
+						fi
+						probe() {
+							mkdir -p "$tmp/$(dirname "$2")" || exit 1
+							printf '%s\n' "$3" > "$tmp/$2"
+							git -C "$tmp" add "$2" || exit 1
+							scan "$tmp" || exit 1
+							git -C "$tmp" rm -q --cached "$2" && rm "$tmp/$2" || exit 1
+							if [ "$1" = fire ] && [ -z "$hits" ]; then
+								echo "alloc-locality self-test: the pattern missed: $3 (in $2)"
+								failed=1
+							elif [ "$1" = silent ] && [ -n "$hits" ]; then
+								echo "alloc-locality self-test: a control line fired: $3 (in $2)"
+								failed=1
+							fi
+						}
+						for f in src/a.c test/a.c; do
+							probe fire "$f" 'free(p);'
+							probe fire "$f" 'free (p);'
+							probe fire "$f" 'x = (int *)malloc(4);'
+							probe fire "$f" 'q = calloc (1, 4);'
+							probe fire "$f" '(void)realloc(p, 8);'
+						done
+						probe fire src/planted/P.c 'free(p);'
+						probe fire src/a.c '*out = malloc(n);'
+						probe silent src/userApi/a.c 'free(p);'
+						probe silent src/a.md 'free(p);'
+						probe silent src/a.c '// free(p);'
+						probe silent src/a.c ' * free(p);'
+						probe silent src/a.c 'freeTensor(t);'
+						probe silent src/a.c 'freeReservedMemory(b);'
+						probe silent src/a.c 'myfree(p);'
+						probe silent src/a.c 'reserveMemory(4);'
+						exit "$failed"
+					)
+					if [ $? -ne 0 ]; then
+						echo "alloc-locality: the self-test failed; the gate no longer catches what it must."
+						exit 1
+					fi
+					echo "alloc-locality: clean; self-test passed (12 plants fire, 8 controls stay silent)."
+					set -e
 				fi
+				# end alloc-locality
 				# #432: examples must step through optimizerStep(), never the raw vtable
 				set +e
 				matches=$(git grep -nP '(\.|->)step([^A-Za-z0-9_]|$)' \

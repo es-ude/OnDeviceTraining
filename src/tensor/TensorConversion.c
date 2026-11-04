@@ -1616,17 +1616,6 @@ static unsigned bitLength(uint32_t v) {
     return n + (v != 0);
 }
 
-static void validateBfpRawQConfigShape(const bfpRawQConfig_t *qC, size_t n, const char *what) {
-    bool perTensor = qC->numGroups == 1 && qC->groupSize == 0;
-    bool grouped = qC->numGroups > 1 && qC->groupSize > 0 && qC->numGroups * qC->groupSize == n;
-    if (!perTensor && !grouped) {
-        PRINT_ERROR("%s: invalid BFP_RAW group shape numGroups=%zu groupSize=%zu for %zu elements "
-                    "(valid: {1,0} or {>1,>0} with numGroups*groupSize == n)",
-                    what, qC->numGroups, qC->groupSize, n);
-        exit(1);
-    }
-}
-
 /* deriveBfpStoredExponent's rule in integer form: the smallest E with
  * absMax <= qMax * 2^E for a uint32 absmax under the raw exponent rawE. With
  * b = bitLength(absMax), s = b - (m - 1) gives absMax < 2^(m-1) * 2^s; since

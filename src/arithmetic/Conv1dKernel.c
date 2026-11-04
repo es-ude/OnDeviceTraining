@@ -659,39 +659,6 @@ void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t con
 
 /* ---- Integer-only forward (arithmetic-bfp.md §13): conv1dKernelBfpRaw ---- */
 
-/* Cursor for the exponent pre-pass: the groups of `qC` that the flat run
- * [start, start + count) intersects, for runs visited in increasing `start`
- * order (groups are contiguous, so no division is needed). */
-typedef struct bfpRowCursor {
-    size_t group;
-    size_t groupEnd; /* flat end (exclusive) of `group` */
-} bfpRowCursor_t;
-
-/* Max unbiased exponent over the groups the run intersects. */
-static int bfpRowMaxExponent(bfpRowCursor_t *c, const bfpQConfig_t *qC, int32_t expBias,
-                             size_t start, size_t count) {
-    if (qC->groupSize == 0) {
-        return (int)qC->exponents[0] - expBias;
-    }
-    while (start >= c->groupEnd) {
-        c->group++;
-        c->groupEnd += qC->groupSize;
-    }
-    size_t g = c->group;
-    size_t gEnd = c->groupEnd;
-    int e = (int)qC->exponents[g] - expBias;
-    size_t stop = start + count;
-    while (stop > gEnd) {
-        g++;
-        gEnd += qC->groupSize;
-        int eg = (int)qC->exponents[g] - expBias;
-        if (eg > e) {
-            e = eg;
-        }
-    }
-    return e;
-}
-
 /* The row maxima of the pre-pass, read per output row (b, oc). */
 typedef struct bfpRowTops {
     const int16_t *inMaxByBatchGroup; /* [batch * groups]: input rows of a conv group */
@@ -767,21 +734,9 @@ void conv1dKernelBfpRaw(tensor_t const *input, tensor_t const *weight, tensor_t 
 
     size_t outElems = batch * outChannels * outputLength;
     bfpRawQConfig_t *rawQC = output->quantization->qConfig;
-    bool rawPerTensor = rawQC->numGroups == 1 && rawQC->groupSize == 0;
-    bool rawGrouped = rawQC->numGroups > 1 && rawQC->groupSize > 0 &&
-                      rawQC->numGroups * rawQC->groupSize == outElems;
-    if (!rawPerTensor && !rawGrouped) {
-        PRINT_ERROR("conv1dKernelBfpRaw: BFP_RAW geometry {numGroups=%zu, groupSize=%zu} is "
-                    "invalid for %zu output elements (valid: {1,0} or {>1,>0} with "
-                    "numGroups*groupSize == n)",
-                    rawQC->numGroups, rawQC->groupSize, outElems);
-        exit(1);
-    }
+    size_t gsz = bfpRawRequireOutput(rawQC, outElems, "conv1dKernelBfpRaw");
     int16_t *rawE = rawQC->exponents;
     if (outElems == 0) {
-        for (size_t t = 0; t < rawQC->numGroups; t++) {
-            rawE[t] = 0;
-        }
         return;
     }
 
@@ -854,7 +809,6 @@ void conv1dKernelBfpRaw(tensor_t const *input, tensor_t const *weight, tensor_t 
      * group covers (a group may straddle channels and batches), plus g. Rows
      * advance with cursors; the loop order below produces outputs in this
      * same flat order. */
-    size_t gsz = rawQC->groupSize == 0 ? outElems : rawQC->groupSize;
     {
         size_t rowB = 0, rowOc = 0;
         size_t rowEnd = outputLength;

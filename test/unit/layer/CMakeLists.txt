@@ -320,6 +320,7 @@ add_elastic_ai_unit_test(
         TensorConversion
         odt_test_death
         odt_test_keyed_draw
+        odt_test_bfp_raw_fixture
 )
 add_dependencies(UnitTestMaxPool1d generate_expected_max_pool_1d)
 target_include_directories(UnitTestMaxPool1d PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
@@ -337,6 +338,7 @@ add_elastic_ai_unit_test(
         TensorConversion
         odt_test_death
         odt_test_keyed_draw
+        odt_test_bfp_raw_fixture
 )
 add_dependencies(UnitTestAvgPool1d generate_expected_avg_pool_1d)
 target_include_directories(UnitTestAvgPool1d PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

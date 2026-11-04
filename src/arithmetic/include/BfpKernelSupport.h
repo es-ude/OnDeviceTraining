@@ -2,6 +2,7 @@
 #define BFP_KERNEL_SUPPORT_H
 
 #include <limits.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -179,6 +180,100 @@ static inline int bfpFoldGuardBits(size_t reductionLen, uint8_t ma, uint8_t mb, 
         }
     }
     return g;
+}
+
+/*! Cursor for the integer-fold exponent pre-pass (Conv1d, AvgPool): the groups of `qC` that the
+ * flat run [start, start + count) intersects, for runs visited in increasing `start` order (groups
+ * are contiguous, so no division is needed). */
+typedef struct bfpRowCursor {
+    size_t group;
+    size_t groupEnd; /* flat end (exclusive) of `group` */
+} bfpRowCursor_t;
+
+/*! Max unbiased exponent over the groups the run intersects. */
+static inline int bfpRowMaxExponent(bfpRowCursor_t *c, const bfpQConfig_t *qC, int32_t expBias,
+                                    size_t start, size_t count) {
+    if (qC->groupSize == 0) {
+        return (int)qC->exponents[0] - expBias;
+    }
+    while (start >= c->groupEnd) {
+        c->group++;
+        c->groupEnd += qC->groupSize;
+    }
+    size_t g = c->group;
+    size_t gEnd = c->groupEnd;
+    int e = (int)qC->exponents[g] - expBias;
+    size_t stop = start + count;
+    while (stop > gEnd) {
+        g++;
+        gEnd += qC->groupSize;
+        int eg = (int)qC->exponents[g] - expBias;
+        if (eg > e) {
+            e = eg;
+        }
+    }
+    return e;
+}
+
+/*! Entry check of an integer forward kernel's BFP_RAW output over
+ * `outElems` elements (validateBfpRawQConfigShape: the only guard between
+ * the kernel and an out-of-bounds exponents[]/mantissa write). An empty
+ * output still gets every group exponent written (0), as the BFP_RAW
+ * contract requires. Returns the element count per raw group (outElems for
+ * the per-tensor {1,0}). */
+static inline size_t bfpRawRequireOutput(bfpRawQConfig_t *rawQC, size_t outElems,
+                                         const char *what) {
+    validateBfpRawQConfigShape(rawQC, outElems, what);
+    if (outElems == 0) {
+        for (size_t t = 0; t < rawQC->numGroups; t++) {
+            rawQC->exponents[t] = 0;
+        }
+    }
+    return rawQC->groupSize == 0 ? outElems : rawQC->groupSize;
+}
+
+/*! The guard of a pure code SUM (AvgPool): the product proof with the second
+ * factor bounded by 1 (`mb = 1`: 2^(m+1-2) = 2^(m-1) = max |code|), i.e. the
+ * smallest g with K 2^(m-1) 2^-g + (K + 1) <= INT32_MAX. */
+static inline int bfpSumFoldGuardBits(size_t terms, uint8_t mantissaBits, const char *what) {
+    return bfpFoldGuardBits(terms, mantissaBits, 1, 0, what);
+}
+
+/*! Exact value compare ma * 2^ea > mb * 2^eb of two BFP codes (|code| <=
+ * 2^15, m <= 16), no float: the code under the larger exponent is shifted
+ * left by the gap d in uint32 (|code| 2^d <= 2^30 for d <= 15). For d >= 16
+ * the shifted side has magnitude >= 2^16 > |other| unless it is zero, so its
+ * sign decides -- and a zero there loses exactly to a negative other. Equal
+ * values are not greater (the caller's first-strict-greater tie rule). */
+static inline bool bfpValueGreater(int32_t ma, int ea, int32_t mb, int eb) {
+    if (ea == eb) {
+        return ma > mb;
+    }
+    if (ea > eb) {
+        int d = ea - eb;
+        if (d >= 16) {
+            return ma > 0 || (ma == 0 && mb < 0);
+        }
+        return (int32_t)((uint32_t)ma << (unsigned)d) > mb;
+    }
+    int d = eb - ea;
+    if (d >= 16) {
+        return mb < 0 || (mb == 0 && ma > 0);
+    }
+    return ma > (int32_t)((uint32_t)mb << (unsigned)d);
+}
+
+/*! sum / count rounded half away from zero, count > 0 -- roundByMode
+ * (HALF_AWAY) without leaving the integer domain, exact over the whole int32
+ * range (uint32 magnitude; the tie test 2 rem >= count is written as
+ * rem >= count - rem, so nothing overflows). One division per call. */
+static inline int32_t roundedDivHalfAwayInt32(int32_t sum, int32_t count) {
+    uint32_t mag = sum < 0 ? 0u - (uint32_t)sum : (uint32_t)sum;
+    uint32_t d = (uint32_t)count;
+    uint32_t q = mag / d;
+    uint32_t rem = mag - q * d;
+    q += rem >= d - rem;
+    return sum < 0 ? (int32_t)(0u - q) : (int32_t)q;
 }
 
 /*! Max codes one int32 SUM partial may accumulate (PR3, biasGrad-family

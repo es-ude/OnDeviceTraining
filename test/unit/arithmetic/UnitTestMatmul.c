@@ -1640,6 +1640,90 @@ void testBfpFoldGuardBitsRejectsAReductionNoShiftCanHold(void) {
     ASSERT_EXITS_WITH_FAILURE(bfpFoldGuardBitsOverlongReductionBody());
 }
 
+/* ---- Pool helpers of the integer-only forward (arithmetic-bfp.md §13) ---- */
+
+/* Exact reference for value(ma, ea) > value(mb, eb): both sides as int64 on
+ * the smaller exponent's grid. A gap beyond 47 binades decides exactly like
+ * a gap of 47 (|code| <= 2^15, so 2^47 already dwarfs the other side), which
+ * keeps the int64 product in range. */
+static bool exactValueGreater(int32_t ma, int ea, int32_t mb, int eb) {
+    int lo = ea < eb ? ea : eb;
+    int da = ea - lo > 47 ? 47 : ea - lo;
+    int db = eb - lo > 47 ? 47 : eb - lo;
+    return (int64_t)ma * ((int64_t)1 << da) > (int64_t)mb * ((int64_t)1 << db);
+}
+
+void testBfpValueGreaterIsTheExactCompare(void) {
+    static const int32_t codes[] = {-32768, -32767, -129, -128, -2, -1, 0, 1, 2, 127, 32767};
+    static const int gaps[] = {0, 1, 2, 7, 14, 15, 16, 17, 30, 40, 200};
+    const size_t nc = sizeof(codes) / sizeof(codes[0]);
+    const size_t ng = sizeof(gaps) / sizeof(gaps[0]);
+    for (size_t a = 0; a < nc; a++) {
+        for (size_t b = 0; b < nc; b++) {
+            for (size_t d = 0; d < ng; d++) {
+                int base = -60;
+                /* Both orders: a above b by the gap, and b above a. */
+                TEST_ASSERT_EQUAL(exactValueGreater(codes[a], base + gaps[d], codes[b], base),
+                                  bfpValueGreater(codes[a], base + gaps[d], codes[b], base));
+                TEST_ASSERT_EQUAL(exactValueGreater(codes[a], base, codes[b], base + gaps[d]),
+                                  bfpValueGreater(codes[a], base, codes[b], base + gaps[d]));
+            }
+        }
+    }
+    /* Equal values across groups are NOT greater (the tie keeps the first). */
+    TEST_ASSERT_FALSE(bfpValueGreater(8, 0, 4, 1));
+    TEST_ASSERT_FALSE(bfpValueGreater(4, 1, 8, 0));
+    TEST_ASSERT_FALSE(bfpValueGreater(0, 20, 0, 0));
+    TEST_ASSERT_FALSE(bfpValueGreater(-32768, 16, -32768, 16));
+}
+
+/* Reference: round half away from zero of a / b in exact int64. */
+static int32_t exactDivHalfAway(int64_t a, int64_t b) {
+    int64_t mag = a < 0 ? -a : a;
+    int64_t q = mag / b;
+    if (2 * (mag - q * b) >= b) {
+        q++;
+    }
+    return (int32_t)(a < 0 ? -q : q);
+}
+
+void testRoundedDivHalfAwayInt32IsExactOverTheInt32Range(void) {
+    static const int32_t sums[] = {
+        INT32_MIN, INT32_MIN + 1, -1000001,      -7,       -5, -3, -2, -1, 0, 1, 2, 3, 5,
+        7,         1000001,       INT32_MAX - 1, INT32_MAX};
+    static const int32_t divs[] = {1, 2, 3, 4, 5, 6, 7, 10, 100, 65535, INT32_MAX};
+    for (size_t s = 0; s < sizeof(sums) / sizeof(sums[0]); s++) {
+        for (size_t d = 0; d < sizeof(divs) / sizeof(divs[0]); d++) {
+            TEST_ASSERT_EQUAL_INT32(exactDivHalfAway(sums[s], divs[d]),
+                                    roundedDivHalfAwayInt32(sums[s], divs[d]));
+        }
+    }
+    /* The ties, both signs: 5/2 -> 3, -5/2 -> -3, 3/6 -> 1, -3/6 -> -1. */
+    TEST_ASSERT_EQUAL_INT32(3, roundedDivHalfAwayInt32(5, 2));
+    TEST_ASSERT_EQUAL_INT32(-3, roundedDivHalfAwayInt32(-5, 2));
+    TEST_ASSERT_EQUAL_INT32(1, roundedDivHalfAwayInt32(3, 6));
+    TEST_ASSERT_EQUAL_INT32(-1, roundedDivHalfAwayInt32(-3, 6));
+}
+
+/* The SUM guard is the product proof with the second factor bounded by 1:
+ * K codes, each |code| <= 2^(m-1), so K 2^(m-1) 2^-g + (K + 1) <= INT32_MAX,
+ * smallest g -- checked on the inequality itself, in 64-bit arithmetic. */
+void testBfpSumFoldGuardBitsIsTheSmallestGThatHolds(void) {
+    static const uint8_t widths[] = {2, 4, 6, 8, 12, 16};
+    static const size_t lengths[] = {1, 2, 3, 4, 7, 32, 100, 511, 65536, 1000000};
+    for (size_t w = 0; w < sizeof(widths) / sizeof(widths[0]); w++) {
+        for (size_t l = 0; l < sizeof(lengths) / sizeof(lengths[0]); l++) {
+            size_t n = lengths[l];
+            uint64_t total = (uint64_t)n << (widths[w] - 1u);
+            uint64_t room = (uint64_t)INT32_MAX - (n + 1u);
+            int g = bfpSumFoldGuardBits(n, widths[w], "sweep");
+            TEST_ASSERT_TRUE(foldGuardHolds(total, room, g));
+            TEST_ASSERT_TRUE(g == -30 || !foldGuardHolds(total, room, g - 1));
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(-18, bfpSumFoldGuardBits(32, 8, "t")); /* HAR AvgPool K = 32 */
+}
+
 /* Group-shape fail-fast: bfpGroupOf divides by groupSize
  * with no relation to numGroups, so a mismatched config ({numGroups=2,
  * groupSize=4} on 12 elements: 2*4 == 8 != 12) would silently read
@@ -2420,6 +2504,9 @@ int main(void) {
     RUN_TEST(testBfpFoldGuardBitsFromTheProductBound);
     RUN_TEST(testBfpFoldGuardBitsIsTheSmallestGThatHolds);
     RUN_TEST(testBfpFoldGuardBitsRejectsAReductionNoShiftCanHold);
+    RUN_TEST(testBfpValueGreaterIsTheExactCompare);
+    RUN_TEST(testRoundedDivHalfAwayInt32IsExactOverTheInt32Range);
+    RUN_TEST(testBfpSumFoldGuardBitsIsTheSmallestGThatHolds);
     RUN_TEST(testMatmulBfpRejectsMismatchedGroupShape);
     RUN_TEST(testMatmulBfpDxStridedWeightWalkMatchesGold);
     RUN_TEST(testMatmulBfpWeightGradTransposedLossViewMatchesGold);

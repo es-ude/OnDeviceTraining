@@ -9,8 +9,8 @@ Conv1d.c        forwardKernelBfpRaw
 Conv1dTransposed.c  forwardKernelBfp
 Linear.c        linearForwardKernelBfp
 Linear.c        linearForwardBfp
-MaxPool1d.c     maxPool1dForwardKernelBfp
-AvgPool1d.c     avgPool1dForwardKernelBfp
+MaxPool1d.c     maxPool1dForwardKernelBfpRaw
+AvgPool1d.c     avgPool1dForwardKernelBfpRaw
 Softmax.c       softmaxForwardKernelBfp
 Softmax.c       softmaxValuesBfp
 Relu.c          reluForwardBfp

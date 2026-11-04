@@ -197,20 +197,25 @@ static void maxPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
         ((symInt32QConfig_t *)input->quantization->qConfig)->scale;
 }
 
-/* BFP epic PR4 (R-P4), ARITH_BFP arm: unlike the SYM arm's free ride (scale > 0
- * preserves order, so mantissa select IS value select), raw BFP mantissas are
- * NOT comparable across groups — a smaller code under a larger group exponent
- * can be the true maximum. Every candidate is therefore DEQUANTIZED with
- * ldexpf((float)mant, E_g - bias), which is exact (a float32 multiply by a
- * power of two), and the comparison runs on values. The winner's dequant goes
- * straight into the FLOAT32 raw (BFP D7) — no scale copy, because the raw has no
- * scale. Tie-break matches the FLOAT32 arm: strict >, seeded at -INFINITY,
- * first occurrence wins. argmax semantics (auxOut, INT32, never
- * funnel-converted; -1 empty-window sentinel) are unchanged. No headroom
- * guard: nothing is summed. */
-static void maxPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                      const void *ctx, rngStream_t *rs) {
+/* Integer-only forward (arithmetic-bfp.md section 13), ARITH_BFP arm. Raw BFP
+ * mantissas are NOT comparable across groups -- a smaller code under a larger
+ * group exponent can be the true maximum -- so candidates are compared as
+ * exact (code, E) values (bfpValueGreater: no float, no rounding). The walk
+ * is the FLOAT32 arm's: same windows, same order, first strict greater wins
+ * (ties across groups included), so argmax (auxOut, INT32, never
+ * funnel-converted; -1 empty-window sentinel) is exactly the float arm's on
+ * the dequantized input. The winners then go to the BFP_RAW output aligned
+ * to ONE exponent per raw target group, E_acc = (max E over the group's
+ * NONZERO winners) - 15: a code shifted left by <= 15 stays below 2^31, and
+ * a winner more than 15 binades below the group's top is rounded HALF_AWAY
+ * (a zero aligns losslessly at any E, so it never sets E_acc). Pass 1
+ * collects the per-group max in the raw exponent array; pass 2 re-reads each
+ * winner's exponent through its argmax. No headroom guard: nothing is
+ * summed. */
+void maxPool1dForwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                  const void *ctx, struct rngStream *rs) {
     (void)n;
+    (void)rs;
     const maxPool1dConfig_t *cfg = ctx;
     tensor_t *input = ops[0];
 
@@ -218,6 +223,12 @@ static void maxPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut
         PRINT_ERROR("MaxPool1d forward BFP: input must be rank-3 [batch, channels, length], got "
                     "rank %zu",
                     input->shape->numberOfDimensions);
+        exit(1);
+    }
+    if (input->quantization->type != BFP || rawOut->quantization->type != BFP_RAW) {
+        PRINT_ERROR("MaxPool1d forward BFP: needs a BFP (unpacked scratch) input and a BFP_RAW "
+                    "output (opSpec_t.bfpRawOut), got dtypes %d -> %d",
+                    (int)input->quantization->type, (int)rawOut->quantization->type);
         exit(1);
     }
     size_t batch = input->shape->dimensions[0];
@@ -236,43 +247,97 @@ static void maxPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut
 
     const bfpQConfig_t *qC = input->quantization->qConfig;
     validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(input));
+    if (qC->mantissaBits > 16) {
+        PRINT_ERROR("MaxPool1d forward BFP: mantissaBits %u > 16 breaks the exact compare",
+                    (unsigned)qC->mantissaBits);
+        exit(1);
+    }
     const int32_t expBias = bfpExponentBias(qC);
-    bfpGroupRange_t qRange = {0};
+
+    size_t outElems = batch * channels * outputLength;
+    bfpRawQConfig_t *rawQC = rawOut->quantization->qConfig;
+    size_t gsz = bfpRawRequireOutput(rawQC, outElems, "MaxPool1d forward BFP");
+    int16_t *rawE = rawQC->exponents;
+    if (outElems == 0) {
+        return;
+    }
+    for (size_t t = 0; t < rawQC->numGroups; t++) {
+        rawE[t] = INT16_MIN; /* pass 1: max STORED exponent of a nonzero winner */
+    }
 
     int32_t const *xArr = (int32_t const *)input->data;
-    float *yArr = (float *)rawOut->data;
+    int32_t *mant = (int32_t *)rawOut->data;
     int32_t *argmaxArr = (int32_t *)auxOut->data;
+    bfpGroupRange_t qRange = {0};
+    size_t targetGroup = 0;
+    size_t targetEnd = gsz;
 
     for (size_t b = 0; b < batch; b++) {
         for (size_t c = 0; c < channels; c++) {
             for (size_t outPos = 0; outPos < outputLength; outPos++) {
                 windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
 
-                float bestVal = -INFINITY;
+                int32_t bestCode = 0;
+                int bestE = 0;
                 int32_t bestInputIdx = -1;
                 for (size_t i = 0; i < slice.validCount; i++) {
                     size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
                     size_t storageIdx = (b * channels + c) * inputLength + inputIdx;
                     size_t g = bfpGroupAt(&qRange, qC, storageIdx);
-                    float v = ldexpf((float)xArr[storageIdx], (int)qC->exponents[g] - expBias);
-                    if (v > bestVal) {
-                        bestVal = v;
+                    int32_t v = xArr[storageIdx];
+                    int e = (int)qC->exponents[g];
+                    if (bestInputIdx < 0 || bfpValueGreater(v, e, bestCode, bestE)) {
+                        bestCode = v;
+                        bestE = e;
                         bestInputIdx = (int32_t)inputIdx;
                     }
                 }
 
                 size_t outIdx = (b * channels + c) * outputLength + outPos;
+                if (outIdx >= targetEnd) {
+                    targetGroup++;
+                    targetEnd += gsz;
+                }
                 if (slice.validCount > 0) {
-                    yArr[outIdx] = bestVal;
+                    mant[outIdx] = bestCode;
                     argmaxArr[outIdx] = bestInputIdx;
+                    if (bestCode != 0 && bestE > rawE[targetGroup]) {
+                        rawE[targetGroup] = (int16_t)bestE;
+                    }
                 } else {
                     // An empty window is theoretically possible but in
                     // practice unreachable; log + sentinel-encode rather than exit
-                    yArr[outIdx] = 0.0f;
+                    mant[outIdx] = 0;
                     argmaxArr[outIdx] = -1;
                     PRINT_ERROR("MaxPool1d: empty window at outPos=%zu — likely user misconfig",
                                 outPos);
                 }
+            }
+        }
+    }
+
+    /* E_acc per raw group, unbiased (0 for a group without a nonzero
+     * winner: every mantissa there is 0). */
+    for (size_t t = 0; t < rawQC->numGroups; t++) {
+        rawE[t] = rawE[t] == INT16_MIN ? 0 : (int16_t)(rawE[t] - expBias - 15);
+    }
+
+    /* Pass 2: align each nonzero winner, k = E_acc - E_winner >= -15. */
+    bfpGroupRange_t wRange = {0};
+    targetGroup = 0;
+    targetEnd = gsz;
+    size_t outIdx = 0;
+    for (size_t row = 0; row < batch * channels; row++) {
+        for (size_t outPos = 0; outPos < outputLength; outPos++, outIdx++) {
+            if (outIdx >= targetEnd) {
+                targetGroup++;
+                targetEnd += gsz;
+            }
+            int32_t a = argmaxArr[outIdx];
+            if (a >= 0 && mant[outIdx] != 0) {
+                size_t g = bfpGroupAt(&wRange, qC, row * inputLength + (size_t)a);
+                int eWin = (int)qC->exponents[g] - expBias;
+                mant[outIdx] = bfpAlignPartial(mant[outIdx], rawE[targetGroup] - eWin);
             }
         }
     }
@@ -363,7 +428,7 @@ void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
                               .exponentBits = anchor->exponentBits};
         executeOp(
             &(opSpec_t){
-                .kernel = maxPool1dForwardKernelBfp,
+                .kernel = maxPool1dForwardKernelBfpRaw,
                 .ctx = cfg,
                 .inputs = (tensor_t *[]){input},
                 .nInputs = 1,
@@ -372,6 +437,7 @@ void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
                 .mode = OUT_WRITE,
                 .auxOut = cfg->argmaxIndices,
                 .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL, NULL, NULL},
+                .bfpRawOut = true, /* the integer forward raw; the backward keeps FLOAT32 */
             },
             output);
         return;

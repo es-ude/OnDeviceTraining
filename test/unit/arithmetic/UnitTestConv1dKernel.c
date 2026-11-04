@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "BfpRawFixture.h"
 #include "Conv1dKernel.h"
 #include "DeathTest.h"
 #include "Matmul.h"
@@ -829,78 +830,8 @@ void testConv1dKernelBfpConvGroups2MatchesGold(void) {
  * the funnel re-blocks or dequantizes. Gold: generate_expected_bfp_conv1d.py
  * (conv1d_bfp_raw_ref), pinned bit for bit on mantissas AND exponents, plus
  * the float64 exact values within the documented fold bound
- * 1/2 (S+1) 2^E_acc. */
-
-/* Unpacked-BFP scratch operand on the stack; `codes` is borrowed, the
- * exponents are copied so a kernel bug cannot corrupt a gold table. */
-typedef struct bfpScratchFixture {
-    tensor_t tensor;
-    shape_t shape;
-    size_t dims[3];
-    size_t order[3];
-    uint8_t exps[64];
-    bfpQConfig_t qc;
-    quantization_t q;
-} bfpScratchFixture_t;
-
-static void bfpScratchInit(bfpScratchFixture_t *f, size_t ndim, const size_t *dims,
-                           const int32_t *codes, const uint8_t *exps, size_t numGroups,
-                           size_t groupSize, uint8_t m, uint8_t e) {
-    TEST_ASSERT_TRUE(numGroups <= sizeof(f->exps));
-    for (size_t i = 0; i < ndim; i++) {
-        f->dims[i] = dims[i];
-        f->order[i] = i;
-    }
-    setShape(&f->shape, f->dims, ndim, f->order);
-    memcpy(f->exps, exps, numGroups);
-    f->qc = (bfpQConfig_t){.exponents = f->exps,
-                           .numGroups = numGroups,
-                           .groupSize = groupSize,
-                           .roundingMode = HALF_AWAY,
-                           .mantissaBits = m,
-                           .exponentBits = e};
-    initBfpQuantization(&f->qc, &f->q);
-    setTensorValues(&f->tensor, (uint8_t *)codes, &f->shape, &f->q, NULL);
-}
-
-#define BFP_RAW_FIXTURE_MAX_OUT 64
-#define BFP_RAW_FIXTURE_MAX_GROUPS 16
-#define BFP_RAW_SENTINEL_MANT (INT32_MIN + 7)
-#define BFP_RAW_SENTINEL_EXP ((int16_t)0x7ABC)
-
-/* BFP_RAW output on the stack, sentinel-prefilled: every mantissa and every
- * group exponent must be kernel-written. */
-typedef struct bfpRawFixture {
-    tensor_t tensor;
-    shape_t shape;
-    size_t dims[3];
-    size_t order[3];
-    int32_t mant[BFP_RAW_FIXTURE_MAX_OUT];
-    int16_t exps[BFP_RAW_FIXTURE_MAX_GROUPS];
-    bfpRawQConfig_t qc;
-    quantization_t q;
-} bfpRawFixture_t;
-
-static void bfpRawInit(bfpRawFixture_t *f, size_t ndim, const size_t *dims, size_t numGroups,
-                       size_t groupSize) {
-    size_t n = 1;
-    for (size_t i = 0; i < ndim; i++) {
-        f->dims[i] = dims[i];
-        f->order[i] = i;
-        n *= dims[i];
-    }
-    TEST_ASSERT_TRUE(n <= BFP_RAW_FIXTURE_MAX_OUT && numGroups <= BFP_RAW_FIXTURE_MAX_GROUPS);
-    setShape(&f->shape, f->dims, ndim, f->order);
-    for (size_t i = 0; i < BFP_RAW_FIXTURE_MAX_OUT; i++) {
-        f->mant[i] = BFP_RAW_SENTINEL_MANT;
-    }
-    for (size_t g = 0; g < BFP_RAW_FIXTURE_MAX_GROUPS; g++) {
-        f->exps[g] = BFP_RAW_SENTINEL_EXP;
-    }
-    f->qc = (bfpRawQConfig_t){.exponents = f->exps, .numGroups = numGroups, .groupSize = groupSize};
-    initBfpRawQuantization(&f->qc, &f->q);
-    setTensorValues(&f->tensor, (uint8_t *)f->mant, &f->shape, &f->q, NULL);
-}
+ * 1/2 (S+1) 2^E_acc. The scratch-operand and BFP_RAW stack fixtures are the
+ * shared BfpRawFixture.h (the pool tests use them too). */
 
 /* The raw's value per element, exactly: mant * 2^E in double (|mant| < 2^31,
  * |E| small: no rounding), against the float64 exact sum within the bound. */
@@ -912,14 +843,6 @@ static void assertRawWithinBound(const bfpRawFixture_t *f, size_t n, const doubl
         TEST_ASSERT_TRUE_MESSAGE(fabs(v - exact[i]) <= bound[i],
                                  "raw value outside the fold bound");
     }
-}
-
-static void assertRawEquals(const bfpRawFixture_t *f, const int32_t *mant, size_t n,
-                            const int16_t *exps, size_t numGroups) {
-    TEST_ASSERT_EQUAL_INT32_ARRAY(mant, f->mant, n);
-    TEST_ASSERT_EQUAL_INT16_ARRAY(exps, f->exps, numGroups);
-    TEST_ASSERT_EQUAL_INT32(BFP_RAW_SENTINEL_MANT, f->mant[n]); /* nothing past the output */
-    TEST_ASSERT_EQUAL_INT16(BFP_RAW_SENTINEL_EXP, f->exps[numGroups]);
 }
 
 /* The main fixture's operands (grouped input m6, grouped weight m4, clipped

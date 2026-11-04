@@ -93,17 +93,6 @@ static void poolValidateSymValueSum(const tensor_t *operand, size_t maxTerms, co
     }
 }
 
-/* Rounded integer division, half away from zero — roundByMode(HALF_AWAY)
- * semantics without leaving the integer domain: (|s| + k/2) / k truncates to
- * the correctly rounded magnitude (exact for odd k where no .5 tie exists,
- * tie-away for even k). Window sums are bounded by count * qMax, far from
- * int32 overflow for realistic lengths. */
-static inline int32_t roundedDivHalfAwayInt32(int32_t sum, int32_t count) {
-    int32_t mag = sum >= 0 ? sum : -sum;
-    int32_t q = (mag + count / 2) / count;
-    return sum >= 0 ? q : -q;
-}
-
 /* SYM_INT32 arm (#205): per-window element count varies, so the division
  * cannot fold into ONE scale (AvgPool1d's trick) — decided mechanics: rounded
  * integer division of the mantissa sum (half-away, roundByMode-consistent),

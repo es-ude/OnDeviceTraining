@@ -8,6 +8,7 @@
 #include "Common.h"
 #include "DTypes.h"
 #include "MinMax.h"
+#include "RNG.h"
 #include "SymGridBounds.h"
 #include "Tensor.h"
 #include "TensorConversion.h"
@@ -995,6 +996,8 @@ char *quantTypeToString(qtype_t t) {
         return "BOOL";
     case BFP:
         return "BFP";
+    case BFP_RAW:
+        return "BFP_RAW";
     default:
         return "UNKNOWN";
     }
@@ -1582,6 +1585,244 @@ void requantBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     packDequantStreamAsBfp(inputTensor, n, outputTensor->quantization->qConfig, outputTensor->data,
                            "requantBfpTensor", rs);
+}
+
+/* ---- Integer-only BFP forward: BFP_RAW -> BFP re-block, BFP_RAW -> FLOAT32 ---- */
+
+/* bitLength(0) = 0, bitLength(2^31) = 32. A binary search instead of
+ * __builtin_clz: a core without CLZ (Cortex-M0+) would call libgcc for it. */
+static unsigned bitLength(uint32_t v) {
+    unsigned n = 0;
+    if (v >> 16) {
+        v >>= 16;
+        n += 16;
+    }
+    if (v >> 8) {
+        v >>= 8;
+        n += 8;
+    }
+    if (v >> 4) {
+        v >>= 4;
+        n += 4;
+    }
+    if (v >> 2) {
+        v >>= 2;
+        n += 2;
+    }
+    if (v >> 1) {
+        v >>= 1;
+        n += 1;
+    }
+    return n + (v != 0);
+}
+
+static void validateBfpRawQConfigShape(const bfpRawQConfig_t *qC, size_t n, const char *what) {
+    bool perTensor = qC->numGroups == 1 && qC->groupSize == 0;
+    bool grouped = qC->numGroups > 1 && qC->groupSize > 0 && qC->numGroups * qC->groupSize == n;
+    if (!perTensor && !grouped) {
+        PRINT_ERROR("%s: invalid BFP_RAW group shape numGroups=%zu groupSize=%zu for %zu elements "
+                    "(valid: {1,0} or {>1,>0} with numGroups*groupSize == n)",
+                    what, qC->numGroups, qC->groupSize, n);
+        exit(1);
+    }
+}
+
+/* deriveBfpStoredExponent's rule in integer form: the smallest E with
+ * absMax <= qMax * 2^E for a uint32 absmax under the raw exponent rawE. With
+ * b = bitLength(absMax), s = b - (m - 1) gives absMax < 2^(m-1) * 2^s; since
+ * qMax = 2^(m-1) - 1 is one below a power of two, the top of each octave
+ * (absMax > qMax << s, s >= 1) needs one more; for s <= 0 that never
+ * happens. Then the BFP D6 clamp to [0, cap]. *shiftOut = stored - bias -
+ * rawE is the right shift (negative: left) from raw mantissa to stored code
+ * The emit shift stored - bias - rawE differs from s exactly when a clamp
+ * fired. */
+static uint8_t deriveBfpRawStoredExponent(uint32_t absMax, int16_t rawE, uint8_t mantissaBits,
+                                          int32_t bias, int cap) {
+    if (absMax == 0) {
+        return (uint8_t)bias; /* zero state, as the float authority */
+    }
+    const uint32_t qMax = (1u << (mantissaBits - 1)) - 1u;
+    int s = (int)bitLength(absMax) - (int)(mantissaBits - 1);
+    if (s > 0 && absMax > (qMax << s)) {
+        s++;
+    }
+    int stored = (int)rawE + s + (int)bias;
+    if (stored < 0) {
+        stored = 0; /* flush-toward-zero regime */
+    }
+    if (stored > cap) {
+        stored = cap; /* mantissa-saturation regime */
+    }
+    return (uint8_t)stored;
+}
+
+/* One element of the cold path: k <= 0 (exact, a left shift saturating at
+ * cap) or k >= 32 (flush to 0). cap is the sign's code bound. */
+static inline uint32_t shiftRawMagnitudeCold(uint32_t mag, int k, uint32_t cap) {
+    if (k >= 32 || mag == 0) {
+        return 0;
+    }
+    if (k == 0) {
+        return mag;
+    }
+    unsigned s = (unsigned)(-k);
+    if (s >= 31u || mag > (cap >> s)) {
+        return cap;
+    }
+    return mag << s;
+}
+
+/* The integer re-block engine (contract: TensorConversion.h,
+ * reblockBfpRawTensor). Pass 1 per group: absmax, stored exponent. Pass 2
+ * chunked, per run inside a chunk (groups are contiguous, so a run cursor
+ * replaces every division): one shift k per run; k in [1, 31] is the hot
+ * path with the rounding mode hoisted out of the element loop. Codes are
+ * clamped to the sign's bound ([-2^(m-1), qMax]), which only binds in the D6
+ * cap regime. Under SR every element consumes exactly one draw, on every
+ * path, so the stream position matches the float re-pack's. */
+static void reblockBfpRawBuffer(const int32_t *mant, const int16_t *rawE, size_t n,
+                                bfpQConfig_t *outQC, uint8_t *dst, const char *what,
+                                rngStream_t *rs) {
+    validateBfpQConfigShape(outQC, n);
+    const int32_t bias = bfpExponentBias(outQC);
+    int cap = (int)((1u << outQC->exponentBits) - 1u);
+    if (cap > (int)bias + 127) {
+        cap = (int)bias + 127; /* largest stored exponent with a finite float scale */
+    }
+    if (n == 0) {
+        for (size_t g = 0; g < outQC->numGroups; g++) {
+            outQC->exponents[g] = (uint8_t)bias;
+        }
+        return;
+    }
+    const roundingMode_t rm = outQC->roundingMode;
+    if (rm == SR_HALF_AWAY && rs == NULL) {
+        PRINT_ERROR("%s: SR rounding without a stream", what);
+        exit(1);
+    }
+    const uint32_t posCap = (1u << (outQC->mantissaBits - 1)) - 1u;
+    const uint32_t negCap = 1u << (outQC->mantissaBits - 1);
+    const size_t gsz = outQC->groupSize == 0 ? n : outQC->groupSize;
+
+    for (size_t g = 0; g < outQC->numGroups; g++) {
+        size_t start = g * gsz;
+        size_t end = start + gsz;
+        uint32_t absMax = 0;
+        for (size_t i = start; i < end; i++) {
+            int32_t v = mant[i];
+            uint32_t mag = v < 0 ? 0u - (uint32_t)v : (uint32_t)v;
+            if (mag > absMax) {
+                absMax = mag;
+            }
+        }
+        outQC->exponents[g] =
+            deriveBfpRawStoredExponent(absMax, rawE[g], outQC->mantissaBits, bias, cap);
+    }
+
+    int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
+    size_t g = 0;
+    size_t groupEnd = gsz;
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        size_t chunkEnd = off + count;
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            while (idx >= groupEnd) {
+                g++;
+                groupEnd += gsz;
+            }
+            size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            const int32_t *in = mant + idx;
+            int32_t *out = codes + (idx - off);
+            size_t runLen = runEnd - idx;
+            const int k = (int)outQC->exponents[g] - (int)bias - (int)rawE[g];
+            if (k >= 1 && k <= 31) {
+                const unsigned uk = (unsigned)k;
+                const uint32_t mask = (1u << uk) - 1u;
+                if (rm == SR_HALF_AWAY) {
+                    for (size_t i = 0; i < runLen; i++) {
+                        int32_t v = in[i];
+                        bool neg = v < 0;
+                        uint32_t mag = neg ? 0u - (uint32_t)v : (uint32_t)v;
+                        uint32_t t = mag >> uk;
+                        uint32_t rem = mag & mask;
+                        t += (rngNextU32(rs) >> (32u - uk)) < rem;
+                        uint32_t cap = neg ? negCap : posCap;
+                        if (t > cap) {
+                            t = cap;
+                        }
+                        out[i] = neg ? -(int32_t)t : (int32_t)t;
+                    }
+                } else {
+                    const uint32_t half = 1u << (uk - 1u);
+                    for (size_t i = 0; i < runLen; i++) {
+                        int32_t v = in[i];
+                        bool neg = v < 0;
+                        uint32_t mag = neg ? 0u - (uint32_t)v : (uint32_t)v;
+                        uint32_t t = (mag >> uk) + ((mag & mask) >= half);
+                        uint32_t cap = neg ? negCap : posCap;
+                        if (t > cap) {
+                            t = cap;
+                        }
+                        out[i] = neg ? -(int32_t)t : (int32_t)t;
+                    }
+                }
+            } else {
+                for (size_t i = 0; i < runLen; i++) {
+                    int32_t v = in[i];
+                    bool neg = v < 0;
+                    uint32_t mag = neg ? 0u - (uint32_t)v : (uint32_t)v;
+                    uint32_t cap = neg ? negCap : posCap;
+                    if (rm == SR_HALF_AWAY) {
+                        (void)rngNextU32(rs); /* exact or flushed: the draw is still consumed */
+                    }
+                    uint32_t t = shiftRawMagnitudeCold(mag, k, cap);
+                    if (t > cap) {
+                        t = cap;
+                    }
+                    out[i] = neg ? -(int32_t)t : (int32_t)t;
+                }
+            }
+            idx = runEnd;
+        }
+        packChunkGuarded(codes, count, dst, outQC->mantissaBits, off, what);
+    }
+}
+
+void reblockBfpRawTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs) {
+    size_t n = calcNumberOfElementsByTensor(inputTensor);
+    bfpRawQConfig_t *rawQC = inputTensor->quantization->qConfig;
+    bfpQConfig_t *outQC = outputTensor->quantization->qConfig;
+    if (rawQC->numGroups != outQC->numGroups || rawQC->groupSize != outQC->groupSize) {
+        /* The raw exponent is per TARGET group by contract (the funnel copies
+         * the target's geometry); a mismatch would need an alignment pass. */
+        PRINT_ERROR("reblockBfpRawTensor: raw geometry {numGroups=%zu, groupSize=%zu} must equal "
+                    "the target's {%zu, %zu}",
+                    rawQC->numGroups, rawQC->groupSize, outQC->numGroups, outQC->groupSize);
+        exit(1);
+    }
+    reblockBfpRawBuffer((const int32_t *)inputTensor->data, rawQC->exponents, n, outQC,
+                        outputTensor->data, "reblockBfpRawTensor", rs);
+}
+
+void convertBfpRawTensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outputTensor,
+                                        rngStream_t *rs) {
+    size_t n = calcNumberOfElementsByTensor(inputTensor);
+    bfpRawQConfig_t *rawQC = inputTensor->quantization->qConfig;
+    validateBfpRawQConfigShape(rawQC, n, "convertBfpRawTensorToFloat32Tensor");
+    const int32_t *mant = (const int32_t *)inputTensor->data;
+    float *out = (float *)outputTensor->data;
+    const size_t gsz = rawQC->groupSize == 0 ? n : rawQC->groupSize;
+    /* ldexpf per element, not a hoisted 2^E multiply: a raw exponent is an
+     * uncapped int16, and 0 * ldexpf(1, 200) would be NaN where 0 belongs. */
+    for (size_t g = 0; g < rawQC->numGroups; g++) {
+        const int e = rawQC->exponents[g];
+        size_t start = g * gsz;
+        size_t end = start + gsz;
+        for (size_t i = start; i < end; i++) {
+            out[i] = ldexpf((float)mant[i], e);
+        }
+    }
 }
 
 /* BFP -> ASYM derives the affine grid via the canonical
@@ -2508,61 +2749,85 @@ void accumulateTensorIntoFloat32Inplace(tensor_t *target, const tensor_t *increm
     }
 }
 
-_Static_assert(BFP + 1 == 7, "extend conversionMatrix when adding qtype_t entries");
+_Static_assert(BFP_RAW + 1 == 8, "extend conversionMatrix when adding qtype_t entries");
 
-conversionFunction_t conversionMatrix[7][7] = {
+/* BFP_RAW (the funnel's transient forward raw) has exactly two cells out --
+ * the integer re-block and the loss-facing dequant -- and none in. */
+conversionFunction_t conversionMatrix[8][8] = {
     [INT32] = {[INT32] = NULL,
                [FLOAT32] = convertInt32TensorToFloatTensor,
                [SYM_INT32] = convertInt32TensorToSymInt32Tensor,
                [SYM] = convertInt32TensorToSymTensor,
                [ASYM] = convertInt32TensorToAsymTensor,
                [BOOL] = unsupportedConversionTypes,
-               [BFP] = convertInt32TensorToBfpTensor},
+               [BFP] = convertInt32TensorToBfpTensor,
+               [BFP_RAW] = unsupportedConversionTypes},
     [FLOAT32] = {[INT32] = convertFloatTensorToInt32Tensor,
                  [FLOAT32] = NULL,
                  [SYM_INT32] = convertFloatTensorToSymInt32Tensor,
                  [SYM] = convertFloatTensorToSymTensor,
                  [ASYM] = convertFloatTensorToAsymTensor,
                  [BOOL] = unsupportedConversionTypes,
-                 [BFP] = convertFloatTensorToBfpTensor},
+                 [BFP] = convertFloatTensorToBfpTensor,
+                 [BFP_RAW] = unsupportedConversionTypes},
     [SYM_INT32] = {[INT32] = extractInt32TensorFromSymInt32Tensor,
                    [FLOAT32] = convertSymInt32TensorToFloat32Tensor,
                    [SYM_INT32] = requantSymInt32Tensor,
                    [SYM] = convertSymInt32TensorToSymTensor,
                    [ASYM] = convertSymInt32TensorToAsymTensor,
                    [BOOL] = unsupportedConversionTypes,
-                   [BFP] = convertSymInt32TensorToBfpTensor},
+                   [BFP] = convertSymInt32TensorToBfpTensor,
+                   [BFP_RAW] = unsupportedConversionTypes},
     [SYM] = {[INT32] = convertSymTensorToInt32Tensor,
              [FLOAT32] = convertSymTensorToFloat32Tensor,
              [SYM_INT32] = convertSymTensorToSymInt32Tensor,
              [SYM] = NULL,
              [ASYM] = convertSymTensorToAsymTensor,
              [BOOL] = unsupportedConversionTypes,
-             [BFP] = convertSymTensorToBfpTensor},
+             [BFP] = convertSymTensorToBfpTensor,
+             [BFP_RAW] = unsupportedConversionTypes},
     [ASYM] = {[INT32] = convertAsymTensorToInt32Tensor,
               [FLOAT32] = convertAsymTensorToFloatTensor,
               [SYM_INT32] = convertAsymTensorToSymInt32Tensor,
               [SYM] = convertAsymTensorToSymTensor,
               [ASYM] = NULL,
               [BOOL] = unsupportedConversionTypes,
-              [BFP] = convertAsymTensorToBfpTensor},
+              [BFP] = convertAsymTensorToBfpTensor,
+              [BFP_RAW] = unsupportedConversionTypes},
     [BOOL] = {[INT32] = unsupportedConversionTypes,
               [FLOAT32] = unsupportedConversionTypes,
               [SYM_INT32] = unsupportedConversionTypes,
               [SYM] = unsupportedConversionTypes,
               [ASYM] = unsupportedConversionTypes,
               [BOOL] = NULL,
-              [BFP] = unsupportedConversionTypes},
+              [BFP] = unsupportedConversionTypes,
+              [BFP_RAW] = unsupportedConversionTypes},
     [BFP] = {[INT32] = convertBfpTensorToInt32Tensor,
              [FLOAT32] = convertBfpTensorToFloat32Tensor,
              [SYM_INT32] = convertBfpTensorToSymInt32Tensor,
              [SYM] = convertBfpTensorToSymTensor,
              [ASYM] = convertBfpTensorToAsymTensor,
              [BOOL] = unsupportedConversionTypes,
-             [BFP] = requantBfpTensor}};
+             [BFP] = requantBfpTensor,
+             [BFP_RAW] = unsupportedConversionTypes},
+    [BFP_RAW] = {[INT32] = unsupportedConversionTypes,
+                 [FLOAT32] = convertBfpRawTensorToFloat32Tensor,
+                 [SYM_INT32] = unsupportedConversionTypes,
+                 [SYM] = unsupportedConversionTypes,
+                 [ASYM] = unsupportedConversionTypes,
+                 [BOOL] = unsupportedConversionTypes,
+                 [BFP] = reblockBfpRawTensor,
+                 [BFP_RAW] = NULL}};
 
 static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTensor,
                                        qtype_t qType) {
+    if (qType == BFP_RAW) {
+        /* A verbatim copy would carry the mantissas and drop the exponents;
+         * the raw is a transient funnel intermediate with no copy semantics. */
+        PRINT_ERROR("convertTensor: BFP_RAW -> BFP_RAW has no copy semantics -- the raw "
+                    "intermediate only re-blocks to BFP or dequantizes to FLOAT32");
+        exit(1);
+    }
     size_t inputBits = calcBitsPerElement(inputTensor->quantization);
     size_t outputBits = calcBitsPerElement(outputTensor->quantization);
     if (inputBits != outputBits) {

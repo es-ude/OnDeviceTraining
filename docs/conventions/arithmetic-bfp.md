@@ -293,6 +293,9 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
   `acc += ldexpf((float)partial, Ea + Eb − biasA − biasB)`. The power-of-two
   multiply is exact (D7) — the only rounding this step introduces is
   ordinary float32 addition across blocks, plus the two exceptions in §§7–8.
+  Amended for the forward by §13: an op that opts into the integer raw
+  (`opSpec_t.bfpRawOut`) emits `BFP_RAW` and the epilogue re-blocks in
+  integers; without the opt-in (every backward op) this bullet stands.
 - **Kernels are rounding-free** (Decision 7). Every `roundByMode` call in
   the BFP path (`HALF_AWAY` and `SR_HALF_AWAY` are defined once, in
   [arithmetic-sym.md](arithmetic-sym.md) "Rounding modes, the SYM_INT32 grid,
@@ -1710,7 +1713,7 @@ in the repository are listed.
 | D4 | Native `ARITH_BFP` everywhere, Softmax and norms included — except by decision: Dropout is non-native (float bridge), Flatten is a passthrough, losses are fake-quant (native CE/MSE an optional stretch). | §5.7–§5.9; `Dropout.c`, `MSE.c`, `CrossEntropy.c` |
 | D5 | Wires are fully blocked; the wire-block size is independent of the weight-block size; per-tensor (`numGroups = 1`) is the degenerate sweep point. | §5.5, wire allocators |
 | D6 | Exponent saturation, not abort: the shared exponent clamps to its representable range; at the top mantissas saturate to the grid `[-2^(m-1), qMax]`, at the bottom they flush toward zero. Deliberate deviation from the `#227` abort discipline — saturation is what the `exponentBits` sweep axis measures. Doc aligned to the shipped clamp 2026-10-31 (positive cap `qMax`, negative floor `-2^(m-1)`; clamp code unchanged). | §1, §2; `deriveBfpStoredExponent`, BFP cells of `TensorConversion.c` |
-| D7 | The raw intermediate under `ARITH_BFP` is FLOAT32: kernels MAC mantissa products in `int32` within a block, fold each block partial with an exact `·2^(Ea+Eb)` float multiply, and accumulate in float32 across blocks. No `int64`. | §5.3; every BFP kernel, `ExecuteOp.c`'s BFP arms |
+| D7 | The raw intermediate under `ARITH_BFP` is FLOAT32: kernels MAC mantissa products in `int32` within a block, fold each block partial with an exact `·2^(Ea+Eb)` float multiply, and accumulate in float32 across blocks. No `int64`. **Amended 2026-11-04 (integer-only forward, §13):** a forward op that sets `opSpec_t.bfpRawOut` emits `BFP_RAW` instead (int32 mantissas + one unbiased int16 exponent per TARGET group) and the OUT_WRITE epilogue re-blocks in integers; ops without the flag — every backward op — keep the FLOAT32 raw. | §5.3, §13; every BFP kernel, `ExecuteOp.c`'s BFP arms, `reblockBfpRawTensor` |
 | D8 | Op-local blocking: compute blocking belongs to the op, storage blocking to the tensor. Amended 2026-09-02 (PR3): an already BFP-stored operand is never re-blocked — op-local blocking realizes as the exact fold-segmentation contract (fold whenever either operand's group changes); fresh blocking happens only on the FLOAT32-staging path. | §5.3, §9; GEMM kernels, pools, Relu/Dropout |
 | D9 | Every ConvT1d op under `ARITH_BFP` is gather-formulated (output-centric: each output is a dot product over its contributors), restoring the int32 block-partial contract; the SYM scatter core stays SYM-only. | §6; `convTranspose1dKernelBfpGather`, `convTranspose1dTapsAt` |
 | D12 | Sequencing: the epic starts after group-quant PR3; group-quant PR4 (ASYM groups) runs in parallel with a single coordinated ODTS version bump (v5); the group-quant HAR sweep is the vehicle the BFP sweep extends. | `Serialize.c` (v5) |
@@ -1725,7 +1728,7 @@ in the repository are listed.
 | Decision 2 | Bias is staged uniformly like any other operand (FLOAT32 bias → per-tensor BFP scratch; BFP bias → unpacked and borrowed); no funnel special case. | §5.4 |
 | Decision 3 | v1 operand-dtype scope: under `ARITH_BFP` only FLOAT32-stored (staged) and BFP-stored operands are legal; SYM/ASYM/INT32/BOOL-stored operands fail fast ("insert a Quantization layer"). | §5.4 |
 | Decision 5 | Wire geometry: a per-tensor template gives a per-tensor wire; a grouped template gives `{N/groupSize, groupSize}` from the template's `groupSize`, ignoring its `numGroups`; `N % groupSize != 0` fails fast; exponents start zero-state. | §5.5; `initLayerOutputs`, `CalculateGradsSequential.c`, `InferenceApi.c`, norm-factory BFP params |
-| Decision 7 | `ARITH_BFP` kernels are rounding-free: all rounding happens at staging (quantize) and at the OUT_WRITE epilogue (pack). | §5.3 |
+| Decision 7 | `ARITH_BFP` kernels are rounding-free: all rounding happens at staging (quantize) and at the OUT_WRITE epilogue (pack). Amended 2026-11-04 (§13): for an op with `bfpRawOut` the OUT_WRITE rounding is the integer re-block (shift + HALF_AWAY magnitude form or integer SR), one draw per element as before. | §5.3, §13 |
 | Decision 8 | The `ARITH_BFP` derivation flip lands last: after it, `layerQuantInitUniform(bfp)` derives `ARITH_BFP` in all four math slots (backward slots had to be pinned to FLOAT32 until epic PR3). | §5.1, `ArithmeticType.c` |
 | Decision 9 | The PR2 native end-to-end model keeps its final (loss-facing) wire FLOAT32, because losses had no BFP arms before PR4. | `UnitTestMultiLayerTraining.c` |
 | Decision 11 | A BFP-stored operand under `ARITH_SYM_INT32` is denied (guided fail-fast in the funnel's SYM prologue): converting it would silently collapse its group structure to one scalar grid. Legal: BFP storage under `ARITH_FLOAT32` (fake-quant) or `ARITH_BFP` (native). | §5.4; `ExecuteOp.c`, `Softmax.c` |
@@ -1742,3 +1745,88 @@ in the repository are listed.
 | P6-6 | Backward is one funnel OUT_WRITE op anchored on `propLossQ`, recomputing the softmax in-kernel from the logits; `propLoss == NULL` is an early no-op. | §5.9 R-S4 |
 | P6-7 | SYM_INT32 softmax stays fake-quant (float kernel); only `ARITH_BFP` gets native semantics. | `Softmax.c` dispatch |
 | P6-8 | Silent behavioural flip, documented: a uniform-BFP profile now runs the native forward and backward; pin the math slots to `ARITH_FLOAT32` to opt out. | §5.9 R-S6 |
+
+## 13. Integer raw intermediate (`BFP_RAW`) and the integer re-block rule (integer-only forward)
+
+D7 made every BFP kernel emit a FLOAT32 raw that the OUT_WRITE epilogue
+re-packed with float (per element `fdiv` + `roundf` / float SR, per group
+`frexpf`) — on a core without an FPU that pack alone costs more than the
+integer MACs it follows. This section records the integer replacement for the
+FORWARD path (2026-11-04). The backward keeps D7's FLOAT32 raw unchanged.
+
+**The raw.** `qtype_t BFP_RAW` with `bfpRawQConfig_t {int16_t *exponents;
+numGroups; groupSize}` (`Quantization.h`): int32 mantissas in the tensor data
+plus ONE **unbiased** int16 exponent per TARGET group, `value = mant · 2^E`
+(unbiased because an accumulation exponent is the sum of two unbiased operand
+exponents plus a fold guard, which exceeds int8). It is transient by design:
+it exists on the funnel's stack for one op, is never storage, never
+serialized, copied or cloned, and every other dtype switch rejects it; the
+enum value is appended last so stored tags stay stable. An op opts in per
+call with `opSpec_t.bfpRawOut` (`ExecuteOp.h`): `ARITH_BFP` and `OUT_WRITE`
+only, raw geometry copied from the target (a BFP target's
+`{numGroups, groupSize}`; a FLOAT32 target has no groups, so `{1,0}` — one
+exponent over the whole output); any other target dtype, arithmetic type or
+epilogue fails fast. The explicit flag is the "forward raw contract": the
+Linear/Softmax backward adapters that share forward kernel code never switch
+raw format by accident, because they never set it. A kernel that sets it
+MUST write every group's exponent.
+
+**The re-block** (`conversionMatrix[BFP_RAW][BFP]`, `reblockBfpRawTensor`,
+`TensorConversion.c`), per target group:
+
+1. `absmax` of the int32 mantissas in `uint32` (`|INT32_MIN| = 2^31` is a
+   legal magnitude).
+2. Stored exponent by §3's rule in integer form — the smallest `E` with
+   `absmax <= qMax · 2^E`: `s = bitlen(absmax) − (m − 1)`, plus one when
+   `s >= 1` and `absmax > qMax << s` (`qMax = 2^(m−1) − 1` is one below a
+   power of two, so the top of each octave needs one more; for `s <= 0` the
+   correction never fires). `stored = rawE + s + bias`, then the D6 clamp to
+   `[0, min(2^e − 1, bias + 127)]` — the same cap as `deriveBfpStoredExponent`,
+   since a stored exponent is still decoded by `bfpGroupScale` on the float
+   side. `absmax == 0` is the zero state (`stored = bias`); `n == 0` writes
+   the zero state for every group and no payload (R7 parity).
+3. ONE shift per group, `k = stored − bias − rawE` (right; negative = left).
+   `k` in `[1, 31]`: HALF_AWAY in magnitude form (`t = mag >> k;
+   t += (mag & (2^k − 1)) >= 2^(k−1)`) or integer SR (`t += (draw >> (32 − k))
+   < rem`, `rem` = the `k` dropped bits) — the shipped law "lift iff u < frac"
+   with `u` = the draw's top `k` bits on a `k`-bit grid; for `k <= 24` this is
+   the SAME decision the float path takes from the same draw (`u` on the 24-bit
+   grid), which the float-authority tests pin. `k >= 32` flushes to 0.
+   `k <= 0` is an exact left shift that saturates at the sign's bound. Codes
+   clamp to `[−2^(m−1), qMax]`, which binds only in the D6 cap regime. The
+   sign is applied after the magnitude rounding, so SR stays odd per draw
+   (`SR(−x) = −SR(x)`) as the law requires.
+4. Under SR exactly ONE draw per element in element order, on every path
+   (exact, flushed, zero group included) — the same stream position as the
+   float re-pack it replaces (`roundByMode` draws for integer-valued quotients
+   too), so pinned-draw tests and the Python mirrors keep their positions.
+5. Packed through `packChunkGuarded`; the 32 → 8/16 byte/halfword fast path in
+   `byteConversion` (`Tensor.c`) serves every `m = 8/16` pack site (SYM and
+   BFP; Relu/Dropout/Comparison too). It is bit-identical to the bit walker by
+   construction: the walker emits a code's low 8/16 bits LSB-first, which is
+   the int32 word's first one or two bytes in memory order.
+
+**Relation to the float authority.** On data where the float path is exact
+(`|mant| < 2^24`, a power-of-two scale, `k <= 24`) the integer rule
+reproduces `deriveBfpStoredExponent`'s stored exponents and the float
+re-pack's codes bit for bit, under HALF_AWAY and under SR from the same key.
+Above `2^24` the two legitimately diverge: `(float)mant` rounds the magnitude
+(§7); the integer form is the exact one. Non-finite values cannot arise in
+the integer domain, so R9's fail-fast has no integer twin.
+
+**Loss-facing dequant** (`conversionMatrix[BFP_RAW][FLOAT32]`,
+`convertBfpRawTensorToFloat32Tensor`): `ldexpf((float)mant, E)` per element,
+not a hoisted `2^E` multiply — `E` is an uncapped int16, and `0 · 2^200` must
+stay `0`, not `NaN`. One of the two permitted float boundaries of the
+integer-only forward (allow-listed in the census).
+
+**Cost shape.** No division anywhere: group runs use an incrementing cursor
+(groups are contiguous), `bitlen` is a five-step binary search (no libgcc
+`__clzsi2` on a core without CLZ). The census reports zero float / libm /
+division helpers for the re-block; its one `mem` hit is `byteConversion`'s
+`memset` on the non-8/16 width branch.
+
+**Status.** Shipped with no producer: no kernel emits `BFP_RAW` yet, every
+op keeps the FLOAT32 raw and the identity oracle stays bit-identical. The
+integer kernels (Conv1d fold, pools, Linear, Softmax) land next and set the
+flag in their forward arms.

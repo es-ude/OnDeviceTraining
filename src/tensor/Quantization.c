@@ -284,3 +284,8 @@ void initBfpQuantization(bfpQConfig_t *bfpQConfig, quantization_t *quantization)
     quantization->type = BFP;
     quantization->qConfig = bfpQConfig;
 }
+
+void initBfpRawQuantization(bfpRawQConfig_t *bfpRawQConfig, quantization_t *quantization) {
+    quantization->type = BFP_RAW;
+    quantization->qConfig = bfpRawQConfig;
+}

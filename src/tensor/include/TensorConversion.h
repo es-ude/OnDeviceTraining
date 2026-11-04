@@ -221,6 +221,37 @@ void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment,
  * SYM/ASYM scale arms, there is nothing here to propagate it into. */
 void scaleBfpTensorInPlace(tensor_t *t, float factor, rngStream_t *rs);
 
-extern conversionFunction_t conversionMatrix[7][7];
+/*! @brief BFP_RAW -> BFP: the integer re-block of the funnel's forward raw
+ * (int32 mantissas + one UNBIASED int16 exponent per TARGET group) onto the
+ * target's grid -- shifts and integer rounding only, no float.
+ *
+ * Per target group: uint32 absmax of the mantissas; stored exponent by the
+ * SAME rule as deriveBfpStoredExponent in integer form (smallest E with
+ * absmax <= qMax * 2^E, from one bit length plus one correcting compare,
+ * then the BFP D6 clamp to [0, min(2^e - 1, bias + 127)]; an all-zero group
+ * is the zero state, stored = bias); then ONE two-sided shift per group,
+ * k = stored - bias - rawE: k in [1, 31] rounds by the target config's
+ * roundingMode -- HALF_AWAY on the magnitude, or SR in integer form (lift
+ * iff u < rem, u = the draw's top k bits, rem = the k dropped bits: the
+ * shipped "lift iff u < frac" law on a k-bit grid); k >= 32 flushes to 0;
+ * k <= 0 is an exact left shift that saturates. Codes clamp to
+ * [-2^(m-1), qMax] (D6 cap regime). Under SR exactly ONE draw is consumed
+ * per element in element order whatever k is, like roundByMode -- the same
+ * stream and order as the float re-pack it replaces, so pinned draws and
+ * Python mirrors keep their positions. Raw and target geometry must be
+ * identical (fail-fast); n == 0 writes zero-state exponents and no payload.
+ * Packed through packChunkGuarded (byte/halfword fast path at m = 8/16).
+ * Wired into conversionMatrix[BFP_RAW][BFP]; the OUT_WRITE epilogue reaches
+ * it through convertTensor with the #282 rounding swap in place. */
+void reblockBfpRawTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs);
+/*! @brief BFP_RAW -> FLOAT32: the loss-facing dequant, value = ldexpf((float)
+ * mantissa, rawE[g]) per element (exact where representable; a zero mantissa
+ * under an out-of-range exponent stays 0). One of the two permitted float
+ * boundaries of the integer-only forward. Wired into
+ * conversionMatrix[BFP_RAW][FLOAT32]. */
+void convertBfpRawTensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outputTensor,
+                                        rngStream_t *rs);
+
+extern conversionFunction_t conversionMatrix[8][8];
 
 #endif // TENSOR_CONVERSION_H

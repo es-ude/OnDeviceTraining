@@ -2625,7 +2625,7 @@ typedef struct {
 
 static funnelRecord_t funnelRecords[FUNNEL_MAX_RECORDS];
 static size_t funnelRecordCount;
-static conversionFunction_t funnelSavedCells[7][7];
+static conversionFunction_t funnelSavedCells[8][8];
 
 static void funnelRecord(const rngStream_t *rs) {
     if (funnelRecordCount < FUNNEL_MAX_RECORDS) {
@@ -2881,6 +2881,287 @@ void testExecuteConvertHandsTheStreamToTheCellOnEveryRoute(void) {
     }
 }
 
+/* ---- Integer-only BFP forward (Task 5): the per-op bfpRawOut flag ------- */
+
+static int g_rawCapQType;
+static size_t g_rawCapNumGroups;
+static size_t g_rawCapGroupSize;
+static const int32_t *g_rawProbeMant;
+static const int16_t *g_rawProbeE;
+
+/* Probe: records the raw's dtype and geometry, then writes the test's known
+ * mantissas and UNBIASED raw exponents into it (a kernel's forward contract). */
+static void writeKnownRawKernel(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
+                                tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
+    (void)operands;
+    (void)nOperands;
+    (void)auxOut;
+    (void)ctx;
+    (void)rs;
+    g_rawCapQType = (int)rawOut->quantization->type;
+    if (rawOut->quantization->type != BFP_RAW) {
+        return; /* the assert after the call reports it */
+    }
+    bfpRawQConfig_t *qc = rawOut->quantization->qConfig;
+    g_rawCapNumGroups = qc->numGroups;
+    g_rawCapGroupSize = qc->groupSize;
+    size_t n = calcNumberOfElementsByTensor(rawOut);
+    for (size_t i = 0; i < n; i++) {
+        ((int32_t *)rawOut->data)[i] = g_rawProbeMant[i];
+    }
+    for (size_t g = 0; g < qc->numGroups; g++) {
+        qc->exponents[g] = g_rawProbeE[g];
+    }
+}
+
+/* bfpRawOut under ARITH_BFP: the raw is BFP_RAW on the TARGET's geometry
+ * ({2,4} here) and the OUT_WRITE epilogue is the integer re-block -- group 0
+ * (absmax 60 at m=4 -> /16, stored 131) rounds, group 1 (absmax 3 -> *2,
+ * stored 126) shifts left exactly. The flag unset keeps the FLOAT32 raw
+ * (testExecuteOpBfpRawIsFloat32AndPacksTarget). */
+void testExecuteOpBfpRawOutReblocksOnTargetGeometry(void) {
+    size_t n = 8;
+    size_t dims[] = {8};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    uint8_t srcExponents[1] = {127};
+    bfpQConfig_t srcQC = {.exponents = srcExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t srcQ;
+    uint8_t srcData[4];
+    tensor_t src;
+    buildBfpTarget(&src, srcData, &shape, &srcQ, &srcQC, (int32_t[]){1, 1, 1, 1, 1, 1, 1, 1}, n);
+
+    uint8_t outExponents[2] = {9, 9};
+    bfpQConfig_t outQC = {.exponents = outExponents,
+                          .numGroups = 2,
+                          .groupSize = 4,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t outQ;
+    initBfpQuantization(&outQC, &outQ);
+    uint8_t outData[4];
+    tensor_t dst;
+    setTensorValues(&dst, outData, &shape, &outQ, NULL);
+
+    g_rawProbeMant = (int32_t[]){60, 24, -24, 8, 3, -1, 2, 0};
+    g_rawProbeE = (int16_t[]){0, 0};
+    g_rawCapQType = -1;
+    executeOp(
+        &(opSpec_t){
+            .kernel = writeKnownRawKernel,
+            .inputs = (tensor_t *[]){&src},
+            .nInputs = 1,
+            .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
+            .mode = OUT_WRITE,
+            .bfpRawOut = true,
+        },
+        &dst);
+
+    TEST_ASSERT_EQUAL_INT(BFP_RAW, g_rawCapQType);
+    TEST_ASSERT_EQUAL_size_t(2, g_rawCapNumGroups);
+    TEST_ASSERT_EQUAL_size_t(4, g_rawCapGroupSize);
+    TEST_ASSERT_EQUAL_UINT8(131, outExponents[0]);
+    TEST_ASSERT_EQUAL_UINT8(126, outExponents[1]);
+    int32_t mant[8];
+    unpackSignExtend(dst.data, 4, 0, mant, 8);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){4, 2, -2, 1, 6, -2, 4, 0}), mant, 8);
+}
+
+/* A FLOAT32 target has no groups: the raw is per-tensor ({1,0}, one
+ * exponent) and the epilogue is the exact loss-facing dequant. */
+void testExecuteOpBfpRawOutFloat32TargetDequantsPerTensorRaw(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    uint8_t srcExponents[1] = {127};
+    bfpQConfig_t srcQC = {.exponents = srcExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t srcQ;
+    uint8_t srcData[2];
+    tensor_t src;
+    buildBfpTarget(&src, srcData, &shape, &srcQ, &srcQC, (int32_t[]){1, 1, 1, 1}, n);
+
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    float out[4] = {9.f, 9.f, 9.f, 9.f};
+    tensor_t dst;
+    setTensorValues(&dst, (uint8_t *)out, &shape, &floatQ, NULL);
+
+    g_rawProbeMant = (int32_t[]){5, -7, 0, 3};
+    g_rawProbeE = (int16_t[]){-3};
+    g_rawCapQType = -1;
+    g_rawCapNumGroups = 99;
+    g_rawCapGroupSize = 99;
+    executeOp(
+        &(opSpec_t){
+            .kernel = writeKnownRawKernel,
+            .inputs = (tensor_t *[]){&src},
+            .nInputs = 1,
+            .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
+            .mode = OUT_WRITE,
+            .bfpRawOut = true,
+        },
+        &dst);
+
+    TEST_ASSERT_EQUAL_INT(BFP_RAW, g_rawCapQType);
+    TEST_ASSERT_EQUAL_size_t(1, g_rawCapNumGroups);
+    TEST_ASSERT_EQUAL_size_t(0, g_rawCapGroupSize);
+    float expected[4] = {0.625f, -0.875f, 0.f, 0.375f};
+    TEST_ASSERT_EQUAL_MEMORY(expected, out, sizeof expected);
+}
+
+/* #282 reaches the integer re-block: the target's storage mode is SR but the
+ * op rounds HALF_AWAY with no key (NULL streams) -- an SR re-block would die
+ * without a stream; the swapped slot gives the deterministic HALF_AWAY codes
+ * and is restored afterwards. */
+void testExecuteOpBfpRawOutRoundsByTheOpAndRestoresTheSlot(void) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    uint8_t srcExponents[1] = {127};
+    bfpQConfig_t srcQC = {.exponents = srcExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t srcQ;
+    uint8_t srcData[2];
+    tensor_t src;
+    buildBfpTarget(&src, srcData, &shape, &srcQ, &srcQC, (int32_t[]){1, 1, 1, 1}, n);
+
+    uint8_t outExponents[1] = {9};
+    bfpQConfig_t outQC = {.exponents = outExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = SR_HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t outQ;
+    initBfpQuantization(&outQC, &outQ);
+    uint8_t outData[2];
+    tensor_t dst;
+    setTensorValues(&dst, outData, &shape, &outQ, NULL);
+
+    g_rawProbeMant = (int32_t[]){60, 24, -24, 8};
+    g_rawProbeE = (int16_t[]){0};
+    executeOp(
+        &(opSpec_t){
+            .kernel = writeKnownRawKernel,
+            .inputs = (tensor_t *[]){&src},
+            .nInputs = 1,
+            .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
+            .mode = OUT_WRITE,
+            .bfpRawOut = true,
+        },
+        &dst);
+
+    TEST_ASSERT_EQUAL_UINT8(131, outExponents[0]);
+    int32_t mant[4];
+    unpackSignExtend(dst.data, 4, 0, mant, 4);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){4, 2, -2, 1}), mant, 4);
+    TEST_ASSERT_EQUAL_INT(SR_HALF_AWAY, outQC.roundingMode);
+}
+
+/* The flag is a forward BFP contract: under any other arithmetic, with an
+ * ACC epilogue (backward keeps its FLOAT32 raw), or into a target without a
+ * BFP_RAW cell it fails fast. */
+void testExecuteOpBfpRawOutUnderFloatArithmeticDies(void) {
+    ASSERT_EXITS_WITH_FAILURE({
+        tensor_t *in = buildFloat(2, (float[]){1.f, 2.f});
+        tensor_t *out = buildFloat(2, (float[]){0.f, 0.f});
+        executeOp(
+            &(opSpec_t){
+                .kernel = executeOpIdentityKernel,
+                .inputs = (tensor_t *[]){in},
+                .nInputs = 1,
+                .arithmetic = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
+                .mode = OUT_WRITE,
+                .bfpRawOut = true,
+            },
+            out);
+    });
+}
+
+static void bfpRawOutIntoTargetBody(outputMode_t mode, quantization_t *targetQ,
+                                    uint8_t *targetData) {
+    size_t n = 4;
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t srcExponents[1] = {127};
+    bfpQConfig_t srcQC = {.exponents = srcExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t srcQ;
+    uint8_t srcData[2];
+    tensor_t src;
+    buildBfpTarget(&src, srcData, &shape, &srcQ, &srcQC, (int32_t[]){1, 1, 1, 1}, n);
+    tensor_t dst;
+    setTensorValues(&dst, targetData, &shape, targetQ, NULL);
+    g_rawProbeMant = (int32_t[]){60, 24, -24, 8};
+    g_rawProbeE = (int16_t[]){0};
+    executeOp(
+        &(opSpec_t){
+            .kernel = writeKnownRawKernel,
+            .inputs = (tensor_t *[]){&src},
+            .nInputs = 1,
+            .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
+            .mode = mode,
+            .bfpRawOut = true,
+        },
+        &dst);
+}
+
+static void bfpRawOutAccModeBody(void) {
+    uint8_t outExponents[1] = {127};
+    bfpQConfig_t outQC = {.exponents = outExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t outQ;
+    initBfpQuantization(&outQC, &outQ);
+    uint8_t outData[2] = {0, 0};
+    bfpRawOutIntoTargetBody(OUT_ACC_DYNAMIC_RESCALE, &outQ, outData);
+}
+
+void testExecuteOpBfpRawOutWithAccModeDies(void) {
+    ASSERT_EXITS_WITH_FAILURE(bfpRawOutAccModeBody());
+}
+
+static void bfpRawOutSymInt32TargetBody(void) {
+    symInt32QConfig_t outQC;
+    initSymInt32QConfig(HALF_AWAY, &outQC);
+    quantization_t outQ;
+    initSymInt32Quantization(&outQC, &outQ);
+    int32_t outData[4] = {0, 0, 0, 0};
+    bfpRawOutIntoTargetBody(OUT_WRITE, &outQ, (uint8_t *)outData);
+}
+
+void testExecuteOpBfpRawOutIntoSymInt32TargetDies(void) {
+    ASSERT_EXITS_WITH_FAILURE(bfpRawOutSymInt32TargetBody());
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testProloguePassesMatchingOperandThroughUntouched);
@@ -2939,6 +3220,12 @@ int main(void) {
     RUN_TEST(testExecuteOpStagesGroupedAndPerTensorOperandsDistinctSlices);
     RUN_TEST(testExecuteOpBfpStagingSrDrawsFromTheStageStream);
     RUN_TEST(testExecuteOpBfpRawIsFloat32AndPacksTarget);
+    RUN_TEST(testExecuteOpBfpRawOutReblocksOnTargetGeometry);
+    RUN_TEST(testExecuteOpBfpRawOutFloat32TargetDequantsPerTensorRaw);
+    RUN_TEST(testExecuteOpBfpRawOutRoundsByTheOpAndRestoresTheSlot);
+    RUN_TEST(testExecuteOpBfpRawOutUnderFloatArithmeticDies);
+    RUN_TEST(testExecuteOpBfpRawOutWithAccModeDies);
+    RUN_TEST(testExecuteOpBfpRawOutIntoSymInt32TargetDies);
     RUN_TEST(testExecuteConvertHandsTheStreamToTheCellOnEveryRoute);
     RUN_TEST(testExecuteOpOpensTheStageAndKernelStreamsFromTheOpKey);
     RUN_TEST(testExecuteOpOpensTheOutStreamFromTheOpKey);

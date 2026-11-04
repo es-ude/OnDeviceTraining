@@ -8569,6 +8569,476 @@ void testAllZeroInputToWidth1SymInt32DoesNotExit(void) {
     TEST_ASSERT_EQUAL_INT32(0, data[1]);
 }
 
+/* ---- Integer-only BFP forward (Task 5): BFP_RAW -> BFP integer re-block
+ * and BFP_RAW -> FLOAT32 dequant ------------------------------------------ */
+
+/* Runs conversionMatrix[BFP_RAW][BFP] on n raw mantissas (int32, one UNBIASED
+ * int16 exponent per group) into a target of the same geometry at
+ * (m, e, rm); unpacks the codes, leaves the stored exponents in storedOut. */
+static void reblockRaw(const int32_t *mant, const int16_t *rawE, size_t n, size_t numGroups,
+                       size_t groupSize, uint8_t m, uint8_t e, roundingMode_t rm, rngStream_t *rs,
+                       uint8_t *storedOut, int32_t *codesOut) {
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    bfpRawQConfig_t rawQC = {
+        .exponents = (int16_t *)rawE, .numGroups = numGroups, .groupSize = groupSize};
+    quantization_t rawQ;
+    initBfpRawQuantization(&rawQC, &rawQ);
+    tensor_t raw;
+    setTensorValues(&raw, (uint8_t *)mant, &shape, &rawQ, NULL);
+    bfpQConfig_t outQC = {.exponents = storedOut,
+                          .numGroups = numGroups,
+                          .groupSize = groupSize,
+                          .roundingMode = rm,
+                          .mantissaBits = m,
+                          .exponentBits = e};
+    quantization_t outQ;
+    initBfpQuantization(&outQC, &outQ);
+    size_t outBytes = calcNumberOfBytesForData(&outQ, n);
+    uint8_t outData[outBytes > 0 ? outBytes : 1];
+    tensor_t dst;
+    setTensorValues(&dst, outData, &shape, &outQ, NULL);
+    conversionMatrix[BFP_RAW][BFP](&raw, &dst, rs);
+    unpackSignExtend(dst.data, m, 0, codesOut, n);
+}
+
+/* absmax 64 at m=8 already fits (64 <= 127): the stored exponent is the raw
+ * one plus the bias and every code is its mantissa, no shift at all. */
+void testBfpRawToBfpExactWhenMantissasFit(void) {
+    int32_t mant[4] = {64, -32, 16, 0};
+    int16_t rawE[1] = {3};
+    uint8_t stored[1] = {9};
+    int32_t codes[4];
+    reblockRaw(mant, rawE, 4, 1, 0, 8, 8, HALF_AWAY, NULL, stored, codes);
+    TEST_ASSERT_EQUAL_UINT8(130, stored[0]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(mant, codes, 4);
+}
+
+/* Small mantissas: the smallest E with absmax/2^E <= qMax is NEGATIVE here
+ * (3 <= 127 * 2^-5, not 127 * 2^-6), so the re-block shifts LEFT by 5 --
+ * exact, no rounding. */
+void testBfpRawToBfpNegativeShiftIsExactLeftShift(void) {
+    int32_t mant[4] = {3, -1, 2, 0};
+    int16_t rawE[1] = {0};
+    uint8_t stored[1] = {9};
+    int32_t codes[4];
+    reblockRaw(mant, rawE, 4, 1, 0, 8, 8, HALF_AWAY, NULL, stored, codes);
+    TEST_ASSERT_EQUAL_UINT8(122, stored[0]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){96, -32, 64, 0}), codes, 4);
+}
+
+/* qMax = 2^(m-1)-1 is not a power of two, so a bit length alone is one off
+ * at the top of each octave: absmax 56 at m=4 fits /8 (56 == 7 * 8) while 60
+ * needs /16. HALF_AWAY ties go away from zero in both signs. */
+void testBfpRawToBfpExponentCorrectionAndHalfAwayTies(void) {
+    int32_t mant60[8] = {60, 24, -24, 8, -8, 40, 56, -60};
+    int16_t rawE[1] = {0};
+    uint8_t stored[1] = {9};
+    int32_t codes[8];
+    reblockRaw(mant60, rawE, 8, 1, 0, 4, 8, HALF_AWAY, NULL, stored, codes);
+    TEST_ASSERT_EQUAL_UINT8(131, stored[0]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){4, 2, -2, 1, -1, 3, 4, -4}), codes, 8);
+
+    int32_t mant56[4] = {56, 28, -4, 12};
+    reblockRaw(mant56, rawE, 4, 1, 0, 4, 8, HALF_AWAY, NULL, stored, codes);
+    TEST_ASSERT_EQUAL_UINT8(130, stored[0]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){7, 4, -1, 2}), codes, 4);
+}
+
+/* Integer SR law: lift iff u < rem, u = the draw's top k bits, rem = the k
+ * dropped bits. 25 at m=4 is /4 (rem 1 of 4): only u == 0 (draw < 2^30)
+ * lifts; the same draw lowers -25 (odd in the sign). 3 at m=2 is /4 (rem 3):
+ * u = 2 lifts, u = 3 does not -- the strict compare at the boundary. */
+void testBfpRawToBfpSrPinnedDrawLiftsIffUBelowFrac(void) {
+    int16_t rawE[1] = {0};
+    uint8_t stored[1];
+    int32_t code[1];
+    int32_t pos[1] = {25};
+    int32_t neg[1] = {-25};
+
+    rngStream_t rs = rngStreamWithNextDraw(1u); /* u = 0 */
+    reblockRaw(pos, rawE, 1, 1, 0, 4, 8, SR_HALF_AWAY, &rs, stored, code);
+    TEST_ASSERT_EQUAL_UINT8(129, stored[0]);
+    TEST_ASSERT_EQUAL_INT32(7, code[0]);
+    rs = rngStreamWithNextDraw(1u);
+    reblockRaw(neg, rawE, 1, 1, 0, 4, 8, SR_HALF_AWAY, &rs, stored, code);
+    TEST_ASSERT_EQUAL_INT32(-7, code[0]);
+
+    rs = rngStreamWithNextDraw(0x40000000u); /* u = 1 */
+    reblockRaw(pos, rawE, 1, 1, 0, 4, 8, SR_HALF_AWAY, &rs, stored, code);
+    TEST_ASSERT_EQUAL_INT32(6, code[0]);
+    rs = rngStreamWithNextDraw(0xFFFFFFFFu); /* u = 3 */
+    reblockRaw(neg, rawE, 1, 1, 0, 4, 8, SR_HALF_AWAY, &rs, stored, code);
+    TEST_ASSERT_EQUAL_INT32(-6, code[0]);
+
+    int32_t three[1] = {3};
+    rs = rngStreamWithNextDraw(0x80000000u); /* u = 2 < rem 3 */
+    reblockRaw(three, rawE, 1, 1, 0, 2, 8, SR_HALF_AWAY, &rs, stored, code);
+    TEST_ASSERT_EQUAL_UINT8(129, stored[0]);
+    TEST_ASSERT_EQUAL_INT32(1, code[0]);
+    rs = rngStreamWithNextDraw(0xC0000000u); /* u = 3 */
+    reblockRaw(three, rawE, 1, 1, 0, 2, 8, SR_HALF_AWAY, &rs, stored, code);
+    TEST_ASSERT_EQUAL_INT32(0, code[0]);
+}
+
+/* An all-zero group is the zero state (stored = bias) whatever its raw
+ * exponent says, and its neighbour derives independently. n == 0 writes the
+ * zero state for every group and no payload (#421 R7 parity). */
+void testBfpRawToBfpZeroGroupIsZeroStateIndependently(void) {
+    int32_t mant[8] = {0, 0, 0, 0, 8, -8, 4, 2};
+    int16_t rawE[2] = {50, 0};
+    uint8_t stored[2] = {9, 9};
+    int32_t codes[8];
+    reblockRaw(mant, rawE, 8, 2, 4, 4, 8, HALF_AWAY, NULL, stored, codes);
+    TEST_ASSERT_EQUAL_UINT8(127, stored[0]);
+    TEST_ASSERT_EQUAL_UINT8(128, stored[1]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){0, 0, 0, 0, 4, -4, 2, 1}), codes, 8);
+
+    int16_t rawE0[1] = {33};
+    uint8_t stored0[1] = {9};
+    reblockRaw(NULL, rawE0, 0, 1, 0, 4, 8, HALF_AWAY, NULL, stored0, codes);
+    TEST_ASSERT_EQUAL_UINT8(127, stored0[0]);
+}
+
+/* D6 at both ends, integer form. High: raw E = 200 at e=8 would store 326;
+ * the cap is bias + 127 = 254, so the group is LEFT-shifted 73 beyond its
+ * natural grid and saturates to [-2^(m-1), qMax] (sign-dependent caps). At
+ * e=4 the cap is the stored range top (15). Low: raw E = -130 stores 0 (not
+ * -3), so the group is right-shifted 3 more than natural and flushes toward
+ * zero; raw E = -200 (k = 73 >= 32) flushes everything to 0 -- under SR too,
+ * which still consumes exactly one draw per element. */
+void testBfpRawToBfpClampsExponentAtBothEnds(void) {
+    int32_t high[2] = {3, -1};
+    int16_t highE[1] = {200};
+    uint8_t stored[1] = {9};
+    int32_t codes[4];
+    reblockRaw(high, highE, 2, 1, 0, 4, 8, HALF_AWAY, NULL, stored, codes);
+    TEST_ASSERT_EQUAL_UINT8(254, stored[0]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){7, -8}), codes, 2);
+
+    int32_t cap4[1] = {100};
+    int16_t cap4E[1] = {10};
+    reblockRaw(cap4, cap4E, 1, 1, 0, 4, 4, HALF_AWAY, NULL, stored, codes);
+    TEST_ASSERT_EQUAL_UINT8(15, stored[0]);
+    TEST_ASSERT_EQUAL_INT32(7, codes[0]);
+
+    /* cap regime with a left shift of 12 on a 21-bit magnitude: 2^20 << 12
+     * wraps to 0 in uint32, so the saturation must be decided BEFORE the
+     * shift (a post-shift clamp alone would emit 0 here, not the cap) */
+    int32_t wrap[2] = {1 << 20, -(1 << 20)};
+    int16_t wrapE[1] = {20};
+    reblockRaw(wrap, wrapE, 2, 1, 0, 4, 4, HALF_AWAY, NULL, stored, codes);
+    TEST_ASSERT_EQUAL_UINT8(15, stored[0]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){7, -8}), codes, 2);
+
+    int32_t low[3] = {100, -3, 7};
+    int16_t lowE[1] = {-130};
+    reblockRaw(low, lowE, 3, 1, 0, 8, 8, HALF_AWAY, NULL, stored, codes);
+    TEST_ASSERT_EQUAL_UINT8(0, stored[0]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){13, 0, 1}), codes, 3);
+
+    int16_t flushE[1] = {-200};
+    reblockRaw(low, flushE, 3, 1, 0, 8, 8, HALF_AWAY, NULL, stored, codes);
+    TEST_ASSERT_EQUAL_UINT8(0, stored[0]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){0, 0, 0}), codes, 3);
+
+    rngStream_t rs = rngOpen(rngKeyFromSeed(7u));
+    rngStream_t probe = rs;
+    reblockRaw(low, flushE, 3, 1, 0, 8, 8, SR_HALF_AWAY, &rs, stored, codes);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){0, 0, 0}), codes, 3);
+    for (int i = 0; i < 3; i++) {
+        (void)rngNextU32(&probe);
+    }
+    TEST_ASSERT_EQUAL_UINT32(probe.state, rs.state);
+}
+
+/* INT32_MIN's magnitude (2^31) and INT32_MAX at m=16: absmax and the shift
+ * arithmetic run in uint32 (bit length 32 -> k = 17); 2^31-1 rounds up to
+ * 16384. m=2 with 2^31: k = 31 is a legal right shift, not a flush. Under SR
+ * the second element's outcome hangs on the SECOND draw (pinned through the
+ * xorshift inverse), so the draws are consumed one per element in order. */
+void testBfpRawToBfpInt32ExtremesAreSafe(void) {
+    int32_t mant[4] = {INT32_MIN, INT32_MAX, 1, -1};
+    int16_t rawE[1] = {0};
+    uint8_t stored[1] = {9};
+    int32_t codes[4];
+    reblockRaw(mant, rawE, 4, 1, 0, 16, 8, HALF_AWAY, NULL, stored, codes);
+    TEST_ASSERT_EQUAL_UINT8(144, stored[0]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){-16384, 16384, 0, 0}), codes, 4);
+
+    int32_t minOnly[1] = {INT32_MIN};
+    reblockRaw(minOnly, rawE, 1, 1, 0, 2, 8, HALF_AWAY, NULL, stored, codes);
+    TEST_ASSERT_EQUAL_UINT8(158, stored[0]);
+    TEST_ASSERT_EQUAL_INT32(-1, codes[0]);
+
+    int32_t pair[2] = {1 << 30, 1}; /* 2^30 >> 16 is exact; 1 >> 16 lifts iff u == 0 */
+    rngStream_t rs = rngStreamWithNextDraw(rngStateWhoseNextDrawIs(1u));
+    reblockRaw(pair, rawE, 2, 1, 0, 16, 8, SR_HALF_AWAY, &rs, stored, codes);
+    TEST_ASSERT_EQUAL_UINT8(143, stored[0]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){16384, 1}), codes, 2);
+    rs = rngStreamWithNextDraw(rngStateWhoseNextDrawIs(0x10000u));
+    reblockRaw(pair, rawE, 2, 1, 0, 16, 8, SR_HALF_AWAY, &rs, stored, codes);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){16384, 0}), codes, 2);
+}
+
+static uint32_t rawLcg;
+
+static int32_t rawNextMant(unsigned magBits) {
+    rawLcg = rawLcg * 1664525u + 1013904223u;
+    int32_t v = (int32_t)(rawLcg >> (32u - magBits));
+    return ((rawLcg >> 8) & 1u) ? -v : v;
+}
+
+/* The integer re-block against the float authority (conversionMatrix
+ * [FLOAT32][BFP] on ldexpf((float)mant, rawE)) on data where the float path
+ * is exact: |mant| < 2^24 keeps (float)mant exact and the absmax/qMax
+ * division from crossing a power of two, a power-of-two scale keeps the
+ * quotient exact, and k <= 24 keeps the SR fraction on the float path's
+ * 24-bit grid -- so stored exponents AND codes must agree bit for bit, under
+ * HALF_AWAY and under SR from the same key (one draw per element in element
+ * order, zero groups included). Group 1 is all zero. Above 2^24 the two
+ * legitimately diverge ((float) rounds the magnitude; the integer rule is
+ * the exact one). */
+static void assertRawReblockMatchesFloatAuthority(size_t n, size_t numGroups, size_t groupSize,
+                                                  uint8_t m, int16_t rawE, roundingMode_t rm,
+                                                  uint32_t seed) {
+    int32_t mant[n];
+    float vals[n];
+    size_t zeroStart = groupSize, zeroEnd = 2 * groupSize;
+    for (size_t i = 0; i < n; i++) {
+        mant[i] = (i >= zeroStart && i < zeroEnd) ? 0 : rawNextMant(23);
+        vals[i] = ldexpf((float)mant[i], rawE);
+    }
+    int16_t rawEs[numGroups];
+    for (size_t g = 0; g < numGroups; g++) {
+        rawEs[g] = rawE;
+    }
+    uint8_t storedInt[numGroups];
+    int32_t codesInt[n];
+    rngStream_t rsInt = rngOpen(rngKeyFromSeed(seed));
+    reblockRaw(mant, rawEs, n, numGroups, groupSize, m, 8, rm, rm == SR_HALF_AWAY ? &rsInt : NULL,
+               storedInt, codesInt);
+
+    size_t dims[] = {n};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    tensor_t src;
+    setTensorValues(&src, (uint8_t *)vals, &shape, &floatQ, NULL);
+    uint8_t storedFloat[numGroups];
+    bfpQConfig_t outQC = {.exponents = storedFloat,
+                          .numGroups = numGroups,
+                          .groupSize = groupSize,
+                          .roundingMode = rm,
+                          .mantissaBits = m,
+                          .exponentBits = 8};
+    quantization_t outQ;
+    initBfpQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t dst;
+    setTensorValues(&dst, outData, &shape, &outQ, NULL);
+    rngStream_t rsFloat = rngOpen(rngKeyFromSeed(seed));
+    convertTensor(&src, &dst, rm == SR_HALF_AWAY ? &rsFloat : NULL);
+    int32_t codesFloat[n];
+    unpackSignExtend(dst.data, m, 0, codesFloat, n);
+
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(storedFloat, storedInt, numGroups);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(codesFloat, codesInt, n);
+}
+
+void testBfpRawToBfpMatchesFloatAuthorityWhereFloatIsExact(void) {
+    static const uint8_t ms[] = {2, 4, 8, 16};
+    static const int16_t es[] = {-9, 0, 5};
+    rawLcg = 0x5150u;
+    for (size_t mi = 0; mi < sizeof(ms) / sizeof(ms[0]); mi++) {
+        for (size_t ei = 0; ei < sizeof(es) / sizeof(es[0]); ei++) {
+            assertRawReblockMatchesFloatAuthority(64, 4, 16, ms[mi], es[ei], HALF_AWAY, 0u);
+            assertRawReblockMatchesFloatAuthority(64, 4, 16, ms[mi], es[ei], SR_HALF_AWAY,
+                                                  42u + ms[mi]);
+        }
+    }
+}
+
+/* Groups straddling the 256-element conversion chunk: n = 600, groupSize 50
+ * (12 groups; the chunk boundaries at 256 and 512 fall mid-group), and a
+ * per-tensor n = 600. Same float authority, HALF_AWAY and SR. */
+void testBfpRawToBfpMultiChunkGroupsStraddleChunkBoundaries(void) {
+    rawLcg = 0x600u;
+    assertRawReblockMatchesFloatAuthority(600, 12, 50, 8, -2, HALF_AWAY, 0u);
+    assertRawReblockMatchesFloatAuthority(600, 12, 50, 8, -2, SR_HALF_AWAY, 9u);
+    assertRawReblockMatchesFloatAuthority(600, 1, 0, 6, 3, HALF_AWAY, 0u);
+    assertRawReblockMatchesFloatAuthority(600, 1, 0, 6, 3, SR_HALF_AWAY, 10u);
+}
+
+/* Stack BFP_RAW view over mant[n] at one geometry (death-test bodies; the
+ * bodies are functions because brace initializers split the death macro's
+ * one argument). */
+static void buildBfpRawView(tensor_t *raw, int32_t *mant, int16_t *rawE, size_t numGroups,
+                            size_t groupSize, shape_t *shape, quantization_t *rawQ,
+                            bfpRawQConfig_t *rawQC) {
+    rawQC->exponents = rawE;
+    rawQC->numGroups = numGroups;
+    rawQC->groupSize = groupSize;
+    initBfpRawQuantization(rawQC, rawQ);
+    setTensorValues(raw, (uint8_t *)mant, shape, rawQ, NULL);
+}
+
+static void bfpRawGeometryMismatchBody(void) {
+    size_t n = 8;
+    size_t dims[] = {8};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    int32_t mant[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    int16_t rawE[2] = {0, 0};
+    bfpRawQConfig_t rawQC;
+    quantization_t rawQ;
+    tensor_t raw;
+    buildBfpRawView(&raw, mant, rawE, 2, 4, &shape, &rawQ, &rawQC);
+    uint8_t stored[1] = {0};
+    bfpQConfig_t outQC = {.exponents = stored,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 8,
+                          .exponentBits = 8};
+    quantization_t outQ;
+    initBfpQuantization(&outQC, &outQ);
+    uint8_t outData[calcNumberOfBytesForData(&outQ, n)];
+    tensor_t dst;
+    setTensorValues(&dst, outData, &shape, &outQ, NULL);
+    conversionMatrix[BFP_RAW][BFP](&raw, &dst, NULL);
+}
+
+static void bfpRawShapeNotCoveringBody(void) {
+    int32_t mant[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    int16_t rawE[2] = {0, 0};
+    uint8_t stored[2];
+    int32_t codes[8];
+    reblockRaw(mant, rawE, 8, 2, 3, 8, 8, HALF_AWAY, NULL, stored, codes);
+}
+
+static void bfpRawSrWithoutStreamBody(void) {
+    int32_t mant[2] = {25, 3};
+    int16_t rawE[1] = {0};
+    uint8_t stored[1];
+    int32_t codes[2];
+    reblockRaw(mant, rawE, 2, 1, 0, 4, 8, SR_HALF_AWAY, NULL, stored, codes);
+}
+
+/* The public cell checks what the funnel guarantees: raw and target geometry
+ * must be identical (the raw exponent is per TARGET group by contract), the
+ * shape must cover n, and SR needs a stream. */
+void testBfpRawToBfpRejectsGeometryMismatchWithTarget(void) {
+    ASSERT_EXITS_WITH_FAILURE(bfpRawGeometryMismatchBody());
+}
+
+void testBfpRawToBfpRejectsShapeNotCoveringElements(void) {
+    ASSERT_EXITS_WITH_FAILURE(bfpRawShapeNotCoveringBody());
+}
+
+void testBfpRawToBfpSrWithoutStreamDies(void) {
+    ASSERT_EXITS_WITH_FAILURE(bfpRawSrWithoutStreamBody());
+}
+
+/* BFP_RAW -> FLOAT32 is the loss-facing dequant: value = mant * 2^E per
+ * group, exact for representable results (compared bit for bit). Reachable
+ * through convertTensor (types differ -> matrix), which is how the funnel's
+ * FLOAT32-target epilogue dispatches it. */
+void testBfpRawToFloat32IsExactPerGroup(void) {
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    int32_t mant[4] = {5, -7, 0, 3};
+    int16_t rawE[2] = {-3, 4};
+    bfpRawQConfig_t rawQC = {.exponents = rawE, .numGroups = 2, .groupSize = 2};
+    quantization_t rawQ;
+    initBfpRawQuantization(&rawQC, &rawQ);
+    tensor_t raw;
+    setTensorValues(&raw, (uint8_t *)mant, &shape, &rawQ, NULL);
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    float out[4] = {9.f, 9.f, 9.f, 9.f};
+    tensor_t dst;
+    setTensorValues(&dst, (uint8_t *)out, &shape, &floatQ, NULL);
+
+    convertTensor(&raw, &dst, NULL);
+    float expected[4] = {0.625f, -0.875f, 0.f, 48.f};
+    TEST_ASSERT_EQUAL_MEMORY(expected, out, sizeof expected);
+
+    int16_t rawE1[1] = {-3};
+    rawQC = (bfpRawQConfig_t){.exponents = rawE1, .numGroups = 1, .groupSize = 0};
+    conversionMatrix[BFP_RAW][FLOAT32](&raw, &dst, NULL);
+    float expected1[4] = {0.625f, -0.875f, 0.f, 0.375f};
+    TEST_ASSERT_EQUAL_MEMORY(expected1, out, sizeof expected1);
+}
+
+static void bfpRawSameTypeCopyBody(void) {
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    int32_t mant[2] = {1, 2};
+    int16_t rawE[1] = {0};
+    bfpRawQConfig_t rawQC;
+    quantization_t rawQ;
+    tensor_t raw;
+    buildBfpRawView(&raw, mant, rawE, 1, 0, &shape, &rawQ, &rawQC);
+    int32_t mant2[2];
+    int16_t rawE2[1] = {0};
+    bfpRawQConfig_t rawQC2;
+    quantization_t rawQ2;
+    tensor_t raw2;
+    buildBfpRawView(&raw2, mant2, rawE2, 1, 0, &shape, &rawQ2, &rawQC2);
+    convertTensor(&raw, &raw2, NULL);
+}
+
+static void bfpRawToSymInt32Body(void) {
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    int32_t mant[2] = {1, 2};
+    int16_t rawE[1] = {0};
+    bfpRawQConfig_t rawQC;
+    quantization_t rawQ;
+    tensor_t raw;
+    buildBfpRawView(&raw, mant, rawE, 1, 0, &shape, &rawQ, &rawQC);
+    symInt32QConfig_t symQC;
+    initSymInt32QConfig(HALF_AWAY, &symQC);
+    quantization_t symQ;
+    initSymInt32Quantization(&symQC, &symQ);
+    int32_t symData[2];
+    tensor_t sym;
+    setTensorValues(&sym, (uint8_t *)symData, &shape, &symQ, NULL);
+    convertTensor(&raw, &sym, NULL);
+}
+
+static void floatToBfpRawBody(void) {
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    float vals[2] = {1.f, 2.f};
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    tensor_t src;
+    setTensorValues(&src, (uint8_t *)vals, &shape, &floatQ, NULL);
+    int32_t mant[2];
+    int16_t rawE[1] = {0};
+    bfpRawQConfig_t rawQC;
+    quantization_t rawQ;
+    tensor_t raw;
+    buildBfpRawView(&raw, mant, rawE, 1, 0, &shape, &rawQ, &rawQC);
+    convertTensor(&src, &raw, NULL);
+}
+
+/* A raw intermediate is transient: no same-type copy and no other cell. */
+void testBfpRawHasNoOtherConversionCells(void) {
+    TEST_ASSERT_EQUAL_STRING("BFP_RAW", quantTypeToString(BFP_RAW));
+    ASSERT_EXITS_WITH_FAILURE(bfpRawSameTypeCopyBody());
+    ASSERT_EXITS_WITH_FAILURE(bfpRawToSymInt32Body());
+    ASSERT_EXITS_WITH_FAILURE(floatToBfpRawBody());
+}
+
 int main(void) {
     UNITY_BEGIN();
 
@@ -8806,6 +9276,21 @@ int main(void) {
     RUN_TEST(testAccumulateSymInt32RescaleIntoWidth1Exits);
     RUN_TEST(testFixedScaleRequantToWidth1StillWorks);
     RUN_TEST(testAllZeroInputToWidth1SymInt32DoesNotExit);
+
+    RUN_TEST(testBfpRawToBfpExactWhenMantissasFit);
+    RUN_TEST(testBfpRawToBfpNegativeShiftIsExactLeftShift);
+    RUN_TEST(testBfpRawToBfpExponentCorrectionAndHalfAwayTies);
+    RUN_TEST(testBfpRawToBfpSrPinnedDrawLiftsIffUBelowFrac);
+    RUN_TEST(testBfpRawToBfpZeroGroupIsZeroStateIndependently);
+    RUN_TEST(testBfpRawToBfpClampsExponentAtBothEnds);
+    RUN_TEST(testBfpRawToBfpInt32ExtremesAreSafe);
+    RUN_TEST(testBfpRawToBfpMatchesFloatAuthorityWhereFloatIsExact);
+    RUN_TEST(testBfpRawToBfpMultiChunkGroupsStraddleChunkBoundaries);
+    RUN_TEST(testBfpRawToBfpRejectsGeometryMismatchWithTarget);
+    RUN_TEST(testBfpRawToBfpRejectsShapeNotCoveringElements);
+    RUN_TEST(testBfpRawToBfpSrWithoutStreamDies);
+    RUN_TEST(testBfpRawToFloat32IsExactPerGroup);
+    RUN_TEST(testBfpRawHasNoOtherConversionCells);
 
     return UNITY_END();
 }

@@ -13,6 +13,8 @@
  *     weight widths, arithmetic-bfp.md §5.4); tensor|N builds ONE BFP template PER WIRE,
  *     forward and dx resolved independently by resolveWireShape (6-element
  *     head wires always fall back to per-tensor -- recorded in wires_resolved).
+ *     Under BFP wires + native math an input Quantization layer writes the
+ *     input.out wire first, so the integer forward never sees a float.
  *   - math: native = ARITH_BFP on the four GEMM slots; fq = those slots and
  *     Softmax's forward pinned ARITH_FLOAT32 (the GEMM fake-quant reference,
  *     NOT a whole-model twin: Relu/pools keep their BFP arms).
@@ -57,6 +59,7 @@
 #include "NPYLoaderApi.h"
 #include "Optimizer.h"
 #include "Pool1dApi.h"
+#include "QuantLayerApi.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
 #include "RNG.h"
@@ -91,9 +94,17 @@
 #define C3_OUT 64
 #define C3_K 3
 
-/* 3 x (Conv1d + ReLU + Pool) + Flatten + Linear + Softmax = 12 layers */
+/* 3 x (Conv1d + ReLU + Pool) + Flatten + Linear + Softmax = 12 body layers,
+ * behind an optional input Quantization layer (FLOAT32 -> BFP wire), the one
+ * float boundary of the integer forward. It exists iff the wires are BFP and
+ * the math is native (g_inLayer): under BFP_WIRE_BLOCK=float there is no BFP
+ * wire to quantize into, and fq stays the unchanged GEMM fake-quant
+ * reference. Every per-layer table below is indexed by BODY layer (0 =
+ * conv1); model[] = {input layer?, body...}. */
 #define MODEL_SIZE 12
+#define MODEL_SIZE_MAX (MODEL_SIZE + 1)
 _Static_assert(MODEL_SIZE == HAR_NUM_LAYERS, "HAR topology");
+#define IN_ELEMS (IN_CHANNELS * LEN_INPUT)
 
 static dataset_t g_trainDataset;
 static dataset_t g_valDataset;
@@ -119,6 +130,12 @@ static quantization_t *g_outQ[MODEL_SIZE];
 static quantization_t *g_dxQ[MODEL_SIZE];
 static groupShape_t g_outShape[MODEL_SIZE];
 static groupShape_t g_dxShape[MODEL_SIZE];
+/* The input layer's output wire; it has no dx (below conv1, the deepest
+ * trainable layer). */
+static size_t g_inLayer = 0; /* 1 iff model[0] is the input Quantization layer */
+static size_t g_modelSize = MODEL_SIZE;
+static quantization_t *g_inQ = NULL;
+static groupShape_t g_inShape;
 
 static const char *const kLayerNames[MODEL_SIZE] = {"conv1", "relu1",   "pool1",  "conv2",
                                                     "relu2", "pool2",   "conv3",  "relu3",
@@ -151,6 +168,12 @@ static quantization_t *makeWireTemplate(groupShape_t gs) {
 
 static void buildWireTemplates(void) {
     g_floatQ = quantizationInitFloat();
+    g_inLayer = (g_cfg.wireMode != WIRE_BLOCK_FLOAT && g_cfg.math == BFP_MATH_NATIVE) ? 1 : 0;
+    g_modelSize = MODEL_SIZE + g_inLayer;
+    if (g_inLayer) {
+        g_inShape = resolveWireShape(IN_ELEMS, g_cfg.wireMode, g_cfg.wireSize);
+        g_inQ = makeWireTemplate(g_inShape);
+    }
     for (size_t i = 0; i < MODEL_SIZE; i++) {
         g_outShape[i] = resolveWireShape(kOutElems[i], g_cfg.wireMode, g_cfg.wireSize);
         g_outQ[i] = makeWireTemplate(g_outShape[i]);
@@ -179,6 +202,9 @@ static void freeWireTemplates(void) {
     }
     if (g_gradQ != NULL) {
         freeQuantization(g_gradQ);
+    }
+    if (g_inQ != NULL) {
+        freeQuantization(g_inQ);
     }
     freeQuantization(g_floatQ);
 }
@@ -301,7 +327,15 @@ static size_t getTestSize(void) {
     return g_testDataset.items->size;
 }
 
-static void buildModel(layer_t **model, const trainingRng_t *rng) {
+/* Init keys stay at the BODY index (0/3/6/10), not the model position, so
+ * the native (13-layer) and fq/float-wire (12-layer) arms start from the same
+ * weights. The input layer converts by its template's HALF_AWAY: no draws. */
+static void buildModel(layer_t **fullModel, const trainingRng_t *rng) {
+    if (g_inLayer) {
+        layerQuant_t inLq = {.outputQ = g_inQ, .propLossQ = g_inQ}; /* no dx below conv1 */
+        fullModel[0] = quantLayerInit(&inLq);
+    }
+    layer_t **model = fullModel + g_inLayer;
     layerQuant_t lq[MODEL_SIZE];
     for (size_t i = 0; i < MODEL_SIZE; i++) {
         lq[i] = layerQuantFor(i);
@@ -524,6 +558,9 @@ static groupLogInfo_t computeGroupLogInfo(layer_t **model) {
 
 static void emitWiresResolved(FILE *f) {
     fputs("{", f);
+    if (g_inLayer) {
+        fprintf(f, "\"input.out\": [%zu, %zu], ", g_inShape.numGroups, g_inShape.groupSize);
+    }
     for (size_t i = 0; i < MODEL_SIZE; i++) {
         fprintf(f, "%s\"%s.out\": [%zu, %zu]", i == 0 ? "" : ", ", kLayerNames[i],
                 g_outShape[i].numGroups, g_outShape[i].groupSize);
@@ -696,9 +733,10 @@ static void headroomPreflight(void) {
                       runOf(resolveGroupShape(6144, 64, g_cfg.weightMode, g_cfg.weightSize)),
                       runOf(resolveGroupShape(384, 6, g_cfg.weightMode, g_cfg.weightSize))};
     bool bfpWires = (g_cfg.wireMode != WIRE_BLOCK_FLOAT);
-    /* input-wire run per GEMM: dataset input (always staged), pool1.out, pool2.out, flatten.out */
-    size_t inRun[4] = {0, bfpWires ? runOf(g_outShape[2]) : 0, bfpWires ? runOf(g_outShape[5]) : 0,
-                       bfpWires ? runOf(g_outShape[9]) : 0};
+    /* input-wire run per GEMM: input.out (staged per-tensor without the input
+     * layer), pool1.out, pool2.out, flatten.out */
+    size_t inRun[4] = {g_inLayer ? runOf(g_inShape) : 0, bfpWires ? runOf(g_outShape[2]) : 0,
+                       bfpWires ? runOf(g_outShape[5]) : 0, bfpWires ? runOf(g_outShape[9]) : 0};
     /* dY entering each GEMM's backward = dx produced by the layer above:
      * relu1.dx, relu2.dx, relu3.dx, and the loss grad (clones softmax.out). */
     size_t dyRun[4] = {bfpWires ? runOf(g_dxShape[1]) : 0, bfpWires ? runOf(g_dxShape[4]) : 0,
@@ -739,9 +777,14 @@ static void headroomPreflight(void) {
 }
 
 /* ---- First-real-step wire gate ------------------------------------------ */
-#define WIRE_EVENTS (MODEL_SIZE + 1 + (MODEL_SIZE - 1))
+/* Slots by BODY index b: [0,12) fwd@b, [12] lossgrad, [13,24) agrad@b (the
+ * backward runs linear down to conv1, the deepest trainable layer), [24] fwd
+ * of the input layer. agrad never fires for the input layer: no dx below conv1. */
+#define WIRE_EVENTS_BODY (MODEL_SIZE + 1 + (MODEL_SIZE - 1))
+#define WIRE_SLOT_INPUT WIRE_EVENTS_BODY
+#define WIRE_EVENTS_MAX (WIRE_EVENTS_BODY + 1)
 typedef struct wireGateCtx {
-    bool seen[WIRE_EVENTS]; /* [0,12) fwd@i, [12] lossgrad, [13,24) agrad@i */
+    bool seen[WIRE_EVENTS_MAX];
     int fails;
 } wireGateCtx_t;
 static wireGateCtx_t g_wireGate;
@@ -773,25 +816,35 @@ static void checkWire(wireGateCtx_t *g, const char *what, tensor_t *t, size_t el
  * calculateGradsImpl with calculateGradsSequential). */
 static void wireGateSink(void *ctx, size_t layerIdx, layerType_t layerType, const char *phase,
                          tensor_t *tensor) {
-    (void)layerType;
     wireGateCtx_t *g = ctx;
     char what[48];
     size_t slot;
-    if (strcmp(phase, "fwd") == 0 && layerIdx < MODEL_SIZE) {
-        slot = layerIdx;
-        snprintf(what, sizeof(what), "fwd %s.out", kLayerNames[layerIdx]);
-        checkWire(g, what, tensor, kOutElems[layerIdx], g_outShape[layerIdx]);
-    } else if (strcmp(phase, "lossgrad") == 0 && layerIdx == MODEL_SIZE) {
+    bool isInputLayer = g_inLayer && layerIdx == 0;
+    size_t b = layerIdx - g_inLayer; /* body index; unused for the input layer */
+    if (strcmp(phase, "fwd") == 0 && isInputLayer) {
+        slot = WIRE_SLOT_INPUT;
+        if (layerType != QUANTIZATION) {
+            fprintf(stderr,
+                    "WIRE GATE FAIL: model[0] is layer type %d, not the input "
+                    "Quantization layer\n",
+                    (int)layerType);
+            g->fails++;
+        }
+        checkWire(g, "fwd input.out", tensor, IN_ELEMS, g_inShape);
+    } else if (strcmp(phase, "fwd") == 0 && layerIdx < g_modelSize) {
+        slot = b;
+        snprintf(what, sizeof(what), "fwd %s.out", kLayerNames[b]);
+        checkWire(g, what, tensor, kOutElems[b], g_outShape[b]);
+    } else if (strcmp(phase, "lossgrad") == 0 && layerIdx == g_modelSize) {
         slot = MODEL_SIZE;
         checkWire(g, "lossgrad (clones softmax.out)", tensor, kOutElems[11], g_outShape[11]);
-    } else if (strcmp(phase, "agrad") == 0 && layerIdx < MODEL_SIZE - 1) {
-        slot = MODEL_SIZE + 1 + layerIdx;
-        if (layerIdx == MODEL_SIZE - 2) { /* agrad@linear == the loss grad tensor */
+    } else if (strcmp(phase, "agrad") == 0 && !isInputLayer && layerIdx < g_modelSize - 1) {
+        slot = MODEL_SIZE + 1 + b;
+        if (b == MODEL_SIZE - 2) { /* agrad@linear == the loss grad tensor */
             checkWire(g, "agrad linear (loss grad)", tensor, kOutElems[11], g_outShape[11]);
         } else {
-            snprintf(what, sizeof(what), "agrad %s (= %s.dx)", kLayerNames[layerIdx],
-                     kLayerNames[layerIdx + 1]);
-            checkWire(g, what, tensor, kDxElems[layerIdx + 1], g_dxShape[layerIdx + 1]);
+            snprintf(what, sizeof(what), "agrad %s (= %s.dx)", kLayerNames[b], kLayerNames[b + 1]);
+            checkWire(g, what, tensor, kDxElems[b + 1], g_dxShape[b + 1]);
         }
     } else {
         fprintf(stderr, "WIRE GATE FAIL: unexpected event %s@%zu\n", phase, layerIdx);
@@ -819,8 +872,9 @@ static trainingStats_t *firstStepGatedGrads(layer_t **model, size_t modelSize,
     g_wireGateDone = true;
     trainingStats_t *stats = tracedGrads(model, modelSize, lossConfig, forwardReduction, input,
                                          label, wireGateSink, &g_wireGate, call);
+    size_t expected = WIRE_EVENTS_BODY + g_inLayer;
     int missing = 0;
-    for (size_t s = 0; s < WIRE_EVENTS; s++) {
+    for (size_t s = 0; s < expected; s++) {
         if (!g_wireGate.seen[s]) {
             fprintf(stderr, "WIRE GATE FAIL: missing event slot %zu\n", s);
             missing++;
@@ -828,10 +882,10 @@ static trainingStats_t *firstStepGatedGrads(layer_t **model, size_t modelSize,
     }
     if (g_wireGate.fails != 0 || missing != 0) {
         fprintf(stderr, "WIRE GATE FAILED (fails=%d missing=%d of %d events)\n", g_wireGate.fails,
-                missing, (int)WIRE_EVENTS);
+                missing, (int)expected);
         exit(2);
     }
-    fprintf(stdout, "WIRE GATE PASS: %d traced wires match wires_resolved\n", (int)WIRE_EVENTS);
+    fprintf(stdout, "WIRE GATE PASS: %d traced wires match wires_resolved\n", (int)expected);
     fflush(stdout);
     return stats;
 }
@@ -910,23 +964,23 @@ int main(void) {
     size_t markDataset = memProfileMark(); /* dataset_b */
 #endif
 
-    layer_t *model[MODEL_SIZE];
+    layer_t *model[MODEL_SIZE_MAX];
     trainingRng_t rng;
     trainingRngInit(&rng, g_seed);
 #ifdef ODT_MEM_PROFILE
     size_t markBeforeModel = memProfileMark();
 #endif
     buildModel(model, &rng);
-    requantizeParamsToBfp(model);
+    requantizeParamsToBfp(model + g_inLayer);
 #ifdef ODT_MEM_PROFILE
     size_t markAfterModel = memProfileMark(); /* params_grads_b = delta */
 #endif
 
     /* ---- Gate: param + grad storage dtypes -------------------------------- */
     paramGateCtx_t wCtx = {.isGrad = false, .count = 0, .fails = 0};
-    traceModelWeights(model, MODEL_SIZE, "gate", paramGateSink, &wCtx);
+    traceModelWeights(model, g_modelSize, "gate", paramGateSink, &wCtx);
     paramGateCtx_t gCtx = {.isGrad = true, .count = 0, .fails = 0};
-    traceModelGrads(model, MODEL_SIZE, "gate", paramGateSink, &gCtx);
+    traceModelGrads(model, g_modelSize, "gate", paramGateSink, &gCtx);
     /* 4 trainable layers x (weight + bias) = 8 each. */
     if (wCtx.fails != 0 || gCtx.fails != 0 || wCtx.count != 8 || gCtx.count != 8) {
         fprintf(stderr, "GATES FAILED (weight ok=%d fails=%d; grad ok=%d fails=%d)\n", wCtx.count,
@@ -945,8 +999,8 @@ int main(void) {
                                               /*shuffle*/ false, /*dropLast*/ true);
 
     /* ---- Gate: sane initial loss (~ln(6)=1.7918 for 6-class near-uniform) -- */
-    epochStats_t initStats = evaluationEpochWithMetrics(model, MODEL_SIZE, CROSS_ENTROPY, valLoader,
-                                                        inferenceWithLoss, REDUCTION_MEAN, 0);
+    epochStats_t initStats = evaluationEpochWithMetrics(
+        model, g_modelSize, CROSS_ENTROPY, valLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
     fprintf(stdout, "initial_val_loss=%.6f initial_val_acc=%.6f (expected ~%.4f)\n",
             (double)initStats.loss, (double)initStats.accuracy, log(6.0));
     fflush(stdout);
@@ -970,7 +1024,7 @@ int main(void) {
             ? quantizationInitBfp(g_cfg.mantissaBits, g_cfg.exponentBits, trainingSideRounding())
             : quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(g_lr, g_momentum, /*weightDecay*/ 0.0f, model, MODEL_SIZE, momentumQ,
+        sgdMCreateOptim(g_lr, g_momentum, /*weightDecay*/ 0.0f, model, g_modelSize, momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     /* ONE call covers the param write-back AND the momentum-state write-back
      * (Sgd.c runs both update ops with writeBackRounding as the op rounding). */
@@ -996,7 +1050,7 @@ int main(void) {
         sched = &cosineSched;
     }
 
-    groupLogInfo_t groupInfo = computeGroupLogInfo(model);
+    groupLogInfo_t groupInfo = computeGroupLogInfo(model + g_inLayer);
 
     if (logPath != NULL && logPath[0] != '\0') {
         g_log_file = fopen(logPath, "w");
@@ -1031,7 +1085,7 @@ int main(void) {
     clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
 
     trainingRunResult_t result = trainingRun(
-        model, MODEL_SIZE,
+        model, g_modelSize,
         (lossConfig_t){
             .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
         trainLoader, valLoader, sgd, g_epochs, firstStepGatedGrads, inferenceWithLoss,
@@ -1039,7 +1093,7 @@ int main(void) {
     (void)result;
 
     epochStats_t testStats = evaluationEpochWithMetrics(
-        model, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
+        model, g_modelSize, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
 
     fprintf(stdout, "FINAL test_loss=%.4f test_acc=%.4f\n", (double)testStats.loss,
             (double)testStats.accuracy);
@@ -1059,12 +1113,17 @@ int main(void) {
     report.grads_b = memInstrumentGradBytes(sgd);
     report.optstate_analytic_b = memInstrumentOptStateBytes(sgd);
     report.io_b = memInstrumentHarIoBytes(MICRO_BATCH);
-    report.pool_backward_b = memInstrumentPoolBackwardBytes(model, MODEL_SIZE);
+    report.pool_backward_b = memInstrumentPoolBackwardBytes(model, g_modelSize);
     harWireProfile_t outProf[HAR_NUM_LAYERS], dxProf[HAR_NUM_LAYERS];
     fillWireProfiles(outProf, dxProf);
     report.activations_b = memInstrumentHarActivationBytes(MICRO_BATCH, outProf);
     report.dx_peak_b = memInstrumentHarDxPeakBytes(MICRO_BATCH, dxProf);
     report.wire_overhead_b = memInstrumentHarWireOverheadBytes(MICRO_BATCH, outProf, dxProf);
+    if (g_inLayer) {
+        harWireProfile_t inProf = profileFrom(g_inQ, IN_ELEMS);
+        report.activations_b += memInstrumentHarInputWireBytes(MICRO_BATCH, inProf);
+        report.wire_overhead_b += memInstrumentHarInputWireMetadataBytes(inProf);
+    }
     report.group_overhead_b = groupInfo.overheadBytes;
     report.grad_overhead_b = gradMetadataBytes(sgd);
     report.optstate_overhead_b = stateMetadataBytes(sgd);
@@ -1072,7 +1131,7 @@ int main(void) {
     sample_t *stepSample = getTrainSample(0);
     memStepCtx_t stepCtx = {
         .model = model,
-        .modelSize = MODEL_SIZE,
+        .modelSize = g_modelSize,
         .lossConfig = (lossConfig_t){.funcType = CROSS_ENTROPY,
                                      .backwardReduction = REDUCTION_MEAN,
                                      .classWeights = NULL},

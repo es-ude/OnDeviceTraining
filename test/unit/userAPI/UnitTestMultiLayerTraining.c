@@ -1312,7 +1312,13 @@ static void buildBfpNativeFixture(bfpNativeFixture_t *f, bool pinWeightGradMath,
     f->sgd = sgdMCreateOptim(0.002f, 0.f, 0.f, f->model, 2, f->momentumQ,
                              (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
+    /* BFP-stored input: layer 0's integer forward writes a BFP wire, so it
+     * must not see a FLOAT32 operand (what a model-start Quantization layer
+     * produces, done once here). 1, 2, 3 are exact at m = 8. */
     f->input = buildFloatTensor2D(1, 3, (float[]){1.0f, 2.0f, 3.0f});
+    quantization_t *inBfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    requantizeTensorInPlace(f->input, inBfpQ);
+    freeQuantization(inBfpQ);
     f->label = buildFloatTensor2D(1, 2, (float[]){0.2f, -0.3f});
 }
 
@@ -1702,6 +1708,20 @@ void testBfpGradStorageTrainingAccumulatesAndSteps(void) {
 static tensor_t *bfpMeanEpochItems[2];
 static tensor_t *bfpMeanEpochLabels[2];
 
+/* A BFP-stored sample: a native layer 0 writes a BFP wire, so its integer
+ * forward rejects a FLOAT32 operand. The dataset fixtures' values are exact at
+ * m = 8; the model tests' inputs (0.9, ramps) round onto the m = 8 grid. */
+static tensor_t *quantizeInputToBfp8(tensor_t *t) {
+    quantization_t *q = quantizationInitBfp(8, 8, HALF_AWAY);
+    requantizeTensorInPlace(t, q);
+    freeQuantization(q);
+    return t;
+}
+
+static tensor_t *buildBfpInputTensor1D(size_t n, const float *values) {
+    return quantizeInputToBfp8(buildFloatTensor1D(n, values));
+}
+
 static sample_t *getBfpMeanEpochSample(size_t id) {
     sample_t *s = reserveMemory(sizeof(sample_t));
     s->item = bfpMeanEpochItems[id];
@@ -1729,9 +1749,9 @@ void testBfpGradStorageTrainsUnderReductionMean(void) {
     buildBfpNativeFixture(&f, /*pinWeightGradMath=*/false, gradKnob, 1717u);
     freeQuantization(gradKnob);
 
-    bfpMeanEpochItems[0] = buildFloatTensor1D(3, (float[]){1.0f, 2.0f, 3.0f});
+    bfpMeanEpochItems[0] = buildBfpInputTensor1D(3, (float[]){1.0f, 2.0f, 3.0f});
     bfpMeanEpochLabels[0] = buildFloatTensor1D(2, (float[]){0.2f, -0.3f});
-    bfpMeanEpochItems[1] = buildFloatTensor1D(3, (float[]){0.5f, -1.0f, 2.0f});
+    bfpMeanEpochItems[1] = buildBfpInputTensor1D(3, (float[]){0.5f, -1.0f, 2.0f});
     bfpMeanEpochLabels[1] = buildFloatTensor1D(2, (float[]){-0.1f, 0.4f});
     dataLoader_t *dl = dataLoaderInit(getBfpMeanEpochSample, getBfpMeanEpochDatasetSize, 1, NULL,
                                       NULL, false, true);
@@ -1860,9 +1880,9 @@ static size_t trainTwoUpdates(bool throughTheEpochLoop, uint64_t seed, dataLoade
 /* A loop written from the training-state helpers trains exactly as
  * trainingEpochDefault: two calls per update (batch size 2), two updates. */
 void testADirectLoopFromTheHelpersTrainsAsTrainingEpochDefault(void) {
-    bfpMeanEpochItems[0] = buildFloatTensor1D(3, (float[]){1.0f, 2.0f, 3.0f});
+    bfpMeanEpochItems[0] = buildBfpInputTensor1D(3, (float[]){1.0f, 2.0f, 3.0f});
     bfpMeanEpochLabels[0] = buildFloatTensor1D(2, (float[]){0.2f, -0.3f});
-    bfpMeanEpochItems[1] = buildFloatTensor1D(3, (float[]){0.5f, -1.0f, 2.0f});
+    bfpMeanEpochItems[1] = buildBfpInputTensor1D(3, (float[]){0.5f, -1.0f, 2.0f});
     bfpMeanEpochLabels[1] = buildFloatTensor1D(2, (float[]){-0.1f, 0.4f});
     dataLoader_t *dl = dataLoaderInit(getBfpMeanEpochSample, getBfpMeanEpochDatasetSize, 2, NULL,
                                       NULL, false, true);
@@ -1979,11 +1999,11 @@ static size_t scaledGradsFromTheHelpers(uint64_t seed, bool underTheUpdateKey,
  * to its step are the helpers' grads mean-scaled under trainingRngUpdateKey,
  * and not those mean-scaled under another key. */
 void testTrainingEpochMeanScalesUnderTheUpdateKey(void) {
-    bfpScaleItems[0] = buildFloatTensor1D(3, (float[]){1.0f, 2.0f, 3.0f});
+    bfpScaleItems[0] = buildBfpInputTensor1D(3, (float[]){1.0f, 2.0f, 3.0f});
     bfpScaleLabels[0] = buildFloatTensor1D(2, (float[]){0.2f, -0.3f});
-    bfpScaleItems[1] = buildFloatTensor1D(3, (float[]){0.5f, -1.0f, 2.0f});
+    bfpScaleItems[1] = buildBfpInputTensor1D(3, (float[]){0.5f, -1.0f, 2.0f});
     bfpScaleLabels[1] = buildFloatTensor1D(2, (float[]){-0.1f, 0.4f});
-    bfpScaleItems[2] = buildFloatTensor1D(3, (float[]){-1.5f, 0.5f, 1.0f});
+    bfpScaleItems[2] = buildBfpInputTensor1D(3, (float[]){-1.5f, 0.5f, 1.0f});
     bfpScaleLabels[2] = buildFloatTensor1D(2, (float[]){0.3f, 0.1f});
     dataLoader_t *dl = dataLoaderInit(getBfpScaleSample, getBfpScaleDatasetSize, SCALE_SAMPLES,
                                       NULL, NULL, false, true);
@@ -2382,7 +2402,7 @@ void testBfpUniformPoolActivationModelTrains(void) {
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     float inputValues[8] = {0.9f, -0.4f, 1.3f, 0.2f, -1.1f, 0.7f, 0.3f, -0.6f};
-    tensor_t *input = buildFloatTensor3D(1, 1, 8, inputValues);
+    tensor_t *input = quantizeInputToBfp8(buildFloatTensor3D(1, 1, 8, inputValues));
     tensor_t *label = buildFloatTensor2D(1, 2, (float[]){1.0f, 0.0f});
 
     /* Snapshot the conv weight's packed payload: the SGD write-back must land
@@ -2717,8 +2737,9 @@ void testBfpUniformNormModelTrainsAndGridsMove(void) {
         itemB[0 * BFP_NORM_SEQ_LEN + t] = -1.6f - ramp;
         itemB[1 * BFP_NORM_SEQ_LEN + t] = 1.6f + ramp;
     }
-    tensor_t *inputs[2] = {buildFloatTensor3D(1, BFP_NORM_IN_CHANNELS, BFP_NORM_SEQ_LEN, itemA),
-                           buildFloatTensor3D(1, BFP_NORM_IN_CHANNELS, BFP_NORM_SEQ_LEN, itemB)};
+    tensor_t *inputs[2] = {
+        quantizeInputToBfp8(buildFloatTensor3D(1, BFP_NORM_IN_CHANNELS, BFP_NORM_SEQ_LEN, itemA)),
+        quantizeInputToBfp8(buildFloatTensor3D(1, BFP_NORM_IN_CHANNELS, BFP_NORM_SEQ_LEN, itemB))};
     tensor_t *labels[2] = {buildFloatTensor2D(1, BFP_NORM_NUM_CLASSES, (float[]){1.0f, 0.0f}),
                            buildFloatTensor2D(1, BFP_NORM_NUM_CLASSES, (float[]){0.0f, 1.0f})};
 
@@ -3247,7 +3268,7 @@ void unitTestUniformBfpSoftmaxMseTrains(void) {
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     float inputValues[4] = {0.9f, -0.4f, 1.3f, 0.2f};
-    tensor_t *input = buildFloatTensor2D(1, 4, inputValues);
+    tensor_t *input = quantizeInputToBfp8(buildFloatTensor2D(1, 4, inputValues));
     tensor_t *label = buildFloatTensor2D(1, 3, (float[]){1.0f, 0.0f, 0.0f});
 
     /* Snapshot the linear weight's packed payload: the SGD write-back must

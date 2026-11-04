@@ -3162,6 +3162,95 @@ void testExecuteOpBfpRawOutIntoSymInt32TargetDies(void) {
     ASSERT_EXITS_WITH_FAILURE(bfpRawOutSymInt32TargetBody());
 }
 
+/* ---- Integer-only BFP forward (Task 9): no float staging into a BFP wire -- */
+
+/* One FLOAT32-stored operand staged per-tensor at m=4 ({100,-50,25,0} ->
+ * exponent 131, codes {6,-3,2,0}) under ARITH_BFP, OUT_WRITE into `dst`.
+ * bfpRawOut selects the forward contract (BFP_RAW kernel) or the backward
+ * one (FLOAT32 raw). */
+static void floatStagedOpBody(bool bfpRawOut, tensor_t *dst) {
+    tensor_t *in = buildFloat(4, (float[]){100.f, -50.f, 25.f, 0.f});
+    bfpQConfig_t stage = {.exponents = NULL,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    g_rawProbeMant = (int32_t[]){5, -7, 0, 3};
+    g_rawProbeE = (int16_t[]){-3};
+    g_bfpCapCodes[0] = 0;
+    executeOp(
+        &(opSpec_t){
+            .kernel = bfpRawOut ? writeKnownRawKernel : captureBfpOperandKernel,
+            .inputs = (tensor_t *[]){in},
+            .nInputs = 1,
+            .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
+            .mode = OUT_WRITE,
+            .bfpStage = {&stage},
+            .bfpRawOut = bfpRawOut,
+        },
+        dst);
+    freeTensor(in);
+}
+
+static void bfpWireTarget(tensor_t *dst, shape_t *shape, quantization_t *q, bfpQConfig_t *qc,
+                          uint8_t *exponents, uint8_t *data) {
+    *qc = (bfpQConfig_t){.exponents = exponents,
+                         .numGroups = 1,
+                         .groupSize = 0,
+                         .roundingMode = HALF_AWAY,
+                         .mantissaBits = 4,
+                         .exponentBits = 8};
+    initBfpQuantization(qc, q);
+    setTensorValues(dst, data, shape, q, NULL);
+}
+
+static void forwardFloatStagingIntoBfpWireBody(void) {
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t exponents[1] = {9};
+    uint8_t data[2];
+    bfpQConfig_t qc;
+    quantization_t q;
+    tensor_t dst;
+    bfpWireTarget(&dst, &shape, &q, &qc, exponents, data);
+    floatStagedOpBody(true, &dst);
+}
+
+/* The integer forward (bfpRawOut) writing a BFP wire must find every operand
+ * already BFP-stored: a FLOAT32 operand there means float re-entered the
+ * forward after the input quantization layer. */
+void testExecuteOpForwardFloatStagingIntoBfpWireDies(void) {
+    ASSERT_EXITS_WITH_FAILURE(forwardFloatStagingIntoBfpWireBody());
+}
+
+/* FLOAT32 wires (the HAR arm A): the forward still stages its float operand. */
+void testExecuteOpForwardFloatStagingIntoFloat32WireStillStages(void) {
+    tensor_t *out = buildFloat(4, (float[]){9.f, 9.f, 9.f, 9.f});
+    floatStagedOpBody(true, out);
+    float got[4];
+    memcpy(got, out->data, sizeof got);
+    freeTensor(out);
+    float expected[4] = {0.625f, -0.875f, 0.f, 0.375f};
+    TEST_ASSERT_EQUAL_MEMORY(expected, got, sizeof expected);
+}
+
+/* The backward (no bfpRawOut) keeps staging FLOAT32 operands into BFP wires. */
+void testExecuteOpBackwardFloatStagingIntoBfpWireStillStages(void) {
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t exponents[1] = {9};
+    uint8_t data[2];
+    bfpQConfig_t qc;
+    quantization_t q;
+    tensor_t dst;
+    bfpWireTarget(&dst, &shape, &q, &qc, exponents, data);
+    floatStagedOpBody(false, &dst);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){6, -3, 2, 0}), g_bfpCapCodes, 4);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testProloguePassesMatchingOperandThroughUntouched);
@@ -3226,6 +3315,9 @@ int main(void) {
     RUN_TEST(testExecuteOpBfpRawOutUnderFloatArithmeticDies);
     RUN_TEST(testExecuteOpBfpRawOutWithAccModeDies);
     RUN_TEST(testExecuteOpBfpRawOutIntoSymInt32TargetDies);
+    RUN_TEST(testExecuteOpForwardFloatStagingIntoBfpWireDies);
+    RUN_TEST(testExecuteOpForwardFloatStagingIntoFloat32WireStillStages);
+    RUN_TEST(testExecuteOpBackwardFloatStagingIntoBfpWireStillStages);
     RUN_TEST(testExecuteConvertHandsTheStreamToTheCellOnEveryRoute);
     RUN_TEST(testExecuteOpOpensTheStageAndKernelStreamsFromTheOpKey);
     RUN_TEST(testExecuteOpOpensTheOutStreamFromTheOpKey);

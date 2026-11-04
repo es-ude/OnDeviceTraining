@@ -366,7 +366,10 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
   BFP instead (§5.5) and never reaches this path. **Explicitly marked
   revisable**: nothing in the funnel or the kernels assumes per-tensor
   staging specifically — a future PR could stage at a grouped template
-  without touching the kernel contract.
+  without touching the kernel contract. Since 2026-11-04 the FORWARD stages
+  only into FLOAT32 targets: an integer forward into a BFP wire rejects a
+  FLOAT32 operand, and the model input goes through a Quantization layer
+  (§13, "No float in the forward after the input layer").
 - **Decision 1 covers backward identically (epic PR3).** Every layer's
   backward dispatch builds the SAME per-tensor `{1,0}` staging template, at
   the weight operand's own `(mantissaBits, exponentBits)`, once before its
@@ -2038,3 +2041,26 @@ unchanged, Linear's dx / weightGrad stay on `matmulBfpTensors`, Softmax's
 backward recomputes with the float32 step 5). Every other op keeps the
 FLOAT32 raw. Numbers of native BFP configs changed with these forwards by
 design; fake-quant and FLOAT32 paths are untouched.
+
+**No float in the forward after the input layer (2026-11-04).** On BFP wires
+the integer forward starts at ONE input `Quantization` layer (FLOAT32 → the
+first BFP wire, rounded by the wire template's own mode); after it, every
+operand of an integer forward op is BFP-stored. The funnel enforces it: an
+op with `bfpRawOut` writing a BFP target fails fast on a FLOAT32-stored
+operand instead of staging it (`ExecuteOp.c`, the `ARITH_BFP` prologue).
+`bfpRawOut` is the forward marker (every backward op leaves it false), and the
+target dtype is the wire marker, so the rule leaves two cases staging as
+before: FLOAT32 wires (the HAR arm A, `BFP_WIRE_BLOCK=float`: forward targets
+are FLOAT32) and every backward op. Decision 1's per-tensor staging is
+therefore reachable in the forward only under FLOAT32 wires; under BFP wires
+the first layer's input arrives grouped at the wire's block size instead of
+per-tensor at the weight widths. Softmax's forward always writes its BFP
+anchor wire, so its R-N1 input staging is unreachable now. The HAR trainer
+(`train_c_bfp.c`) inserts the input layer iff the wires are BFP and the math
+is native; `BFP_MATH=fq` keeps the 12-layer model (its GEMMs run
+`ARITH_FLOAT32`, the rule does not reach them) so it stays the unchanged
+fake-quant reference. The static side is the M0+ census
+(`tools/bfp-census/`, `har_forward_roots.txt --strict`): zero float, double,
+libm and int64 calls in the HAR forward kernels, the re-block and the operand
+unpack, and only per-call, per-group-change, per-output and shared-index-math
+divisions, each allow-listed for its one root.

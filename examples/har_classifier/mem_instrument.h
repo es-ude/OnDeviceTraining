@@ -127,6 +127,14 @@ size_t memInstrumentHarIoBytes(size_t microBatch);
  *  - HarWireOverhead: the metadata (group exponents/scales) of the 12 forward
  *    wires plus that of the same peak dx pair HarDxPeak models; 0 for FLOAT32. */
 size_t memInstrumentPoolBackwardBytes(layer_t **model, size_t modelSize);
+
+/* The BFP trainer's input Quantization layer (FLOAT32 -> BFP, ahead of conv1)
+ * adds one forward wire of [9, 128] per sample that the 12-layer tables above
+ * do not hold: add its payload to activations_b and its metadata to
+ * wire_overhead_b. It produces no dx (conv1 is the deepest trainable layer).
+ * The other trainers have no such layer and never call these. */
+size_t memInstrumentHarInputWireBytes(size_t microBatch, harWireProfile_t in);
+size_t memInstrumentHarInputWireMetadataBytes(harWireProfile_t in);
 size_t memInstrumentHarDxPeakBytes(size_t microBatch, const harWireProfile_t dx[HAR_NUM_LAYERS]);
 size_t memInstrumentHarWireOverheadBytes(size_t microBatch,
                                          const harWireProfile_t out[HAR_NUM_LAYERS],

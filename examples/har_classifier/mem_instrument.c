@@ -129,6 +129,14 @@ size_t memInstrumentHarIoBytes(size_t microBatch) {
     return (size_t)(9 * 128 + 6) * microBatch * sizeof(float);
 }
 
+size_t memInstrumentHarInputWireBytes(size_t microBatch, harWireProfile_t in) {
+    return wirePayload(in, (size_t)9 * 128 * microBatch);
+}
+
+size_t memInstrumentHarInputWireMetadataBytes(harWireProfile_t in) {
+    return wireMetadata(in);
+}
+
 size_t memInstrumentPoolBackwardBytes(layer_t **model, size_t modelSize) {
     /* #321: each MaxPool layer pre-allocates an INT32 argmax-index tensor (shape ==
      * output shape) at build time; it lives the whole run and is required for the

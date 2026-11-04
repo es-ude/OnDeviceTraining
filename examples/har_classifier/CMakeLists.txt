@@ -399,6 +399,9 @@ target_link_libraries(train_c_har_classifier_bfp PRIVATE
         MaxPool1d
         AvgPool1d
 
+        QuantLayerApi
+        QuantizationLayer
+
         ArithmeticType
 
         QuantizationApi

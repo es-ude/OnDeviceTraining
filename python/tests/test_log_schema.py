@@ -159,6 +159,36 @@ def test_c_bfp_log_without_sym_bits_loads(tmp_path):
     assert "sym_bits" not in loaded["memory"]
 
 
+def test_c_bfp_log_with_the_input_layer_wire_loads(tmp_path):
+    """A native BFP-wire run quantizes its input in a 13th layer and logs that wire as
+    "input.out" next to the body wires; the fq / float-wire arms log no such key. The schema
+    types wires_resolved as an open dict, so this pins the round trip, not the key name."""
+    body = {f"{name}.out": [1, 0] for name in (
+        "conv1", "relu1", "pool1", "conv2", "relu2", "pool2", "conv3", "relu3", "pool3",
+        "flatten", "linear", "softmax")}
+    wires = {"input.out": [72, 16], **body}
+    log = {
+        "impl": "c-bfp", "example": "har_classifier",
+        "config": {
+            "epochs": 1, "batch": 64, "lr": 0.01, "momentum": 0.9, "seed": 1,
+            "weight_dtype": "bfp", "mantissa_bits": 8, "exponent_bits": 8,
+            "weight_block": "channel", "wire_block": "16", "bfp_math": "native",
+            "bfp_grads": 0, "bfp_state": 0, "bfp_rounding": "sr",
+            "groups_resolved": {"conv1": [16, 63]}, "wires_resolved": wires,
+            "group_overhead_b": 122,
+        },
+        "epochs": [{"epoch": 0, "step_losses": [], "train_loss": 1.7,
+                    "val_loss": 1.3, "val_acc": 0.39, "wall_s": 1.0}],
+        "final": {"test_loss": 1.39, "test_acc": 0.38, "test_auc": None},
+    }
+    path = tmp_path / "bfp_input.json"
+    dump_log(path, log)
+    loaded = load_log(path)
+    assert loaded == log
+    assert loaded["config"]["wires_resolved"]["input.out"] == [72, 16]
+    assert "wires_resolved" in TrainConfig.__optional_keys__
+
+
 def test_remat_keys_are_declared_optional():
     """A trainer that builds a remat scheduler (REMAT_STORAGE / REMAT_PLAN /
     DRY_PLAN) logs its choice in config and the plan's bytes in memory; every

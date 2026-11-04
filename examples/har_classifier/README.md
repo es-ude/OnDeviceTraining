@@ -398,6 +398,12 @@ floating point: packed `mantissaBits`-wide two's-complement mantissas sharing on
 scale for grouped SYM). The contract is
 `docs/conventions/arithmetic-bfp.md`.
 
+**Input layer.** With BFP wires and `BFP_MATH=native` a Quantization layer (FLOAT32 →
+the `input.out` BFP wire, HALF_AWAY) runs before conv1: 13 layers, and the forward is
+integer-only after it (a FLOAT32 operand in an integer forward into a BFP wire is a
+run-time error). `abf` and `xfq` keep the 12 layers. Weight-init keys stay per body
+layer (conv1 = 0), so every arm starts from the same weights.
+
 **Knobs** (env): `BFP_MANTISSA_BITS` (2..16, default 8), `BFP_EXPONENT_BITS` (2..8, 8),
 `BFP_WEIGHT_BLOCK=tensor|channel|N` (N falls back to per-channel where it does not divide
 a weight's element count — conv1 at 32/64, like the SYM g32/g64 arms), `BFP_WIRE_BLOCK=
@@ -428,6 +434,7 @@ FLOAT32 arms reject packed wires). `g1` / `g1s1` store grads / momentum as per-t
 
 | wires | ab16 | ab32 | t |
 |---|---|---|---|
+| 1152-element (input.out, native only) | {72,16} | {36,32} | {1,0} |
 | 2048-element (conv/relu out, most dx) | {128,16} | {64,32} | {1,0} |
 | 1024-element (pool1/pool2 out, conv2/conv3 dx) | {64,16} | {32,32} | {1,0} |
 | 64-element (pool3/flatten out, flatten/linear dx) | {4,16} | {2,32} | {1,0} |

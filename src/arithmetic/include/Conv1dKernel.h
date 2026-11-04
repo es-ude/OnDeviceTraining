@@ -118,4 +118,40 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
 void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
                      kernel_t const *kernel, size_t groups, tensor_t *output);
 
+/*! Integer-only BFP Conv1d forward (docs/conventions/arithmetic-bfp.md §13,
+ *  "The integer fold"): conv1dKernelBfp's walk -- same loop skeleton, loop
+ *  order, MAC count, windowSlice1dAt and index math, same per-tap group
+ *  tracking on BOTH operands -- with the float fold replaced by an int32
+ *  accumulator per output in units of 2^E_acc, and the output a BFP_RAW
+ *  tensor (int32 mantissas + one UNBIASED int16 exponent per raw target
+ *  group, bfpRawQConfig_t) that the funnel re-blocks or dequantizes. No
+ *  float, no division per MAC, no int64. conv1dKernelBfp (FLOAT32 raw)
+ *  stays for the backward (the ConvT1d dx adjoint uses it).
+ *
+ *  Pre-pass (O(groups)): per output row (b, oc) E_top = max over the conv
+ *  group's input rows of their group-max exponent + the weight row's
+ *  group-max exponent, max'ed with oc's bias exponent; every raw target
+ *  group's exponent is E_acc = max E_top over the rows it covers +
+ *  bfpFoldGuardBits(inChannels/groups * kernelSize, widths) -- the static
+ *  headroom proof (BfpKernelSupport.h). Per output: acc starts at the bias
+ *  code aligned to E_acc (bfpAlignPartial, hoisted per channel and group);
+ *  a same-exponent segment closes on EITHER operand's group change AND when
+ *  it holds bfpSegmentLimit products (over-long runs are SPLIT, not
+ *  rejected -- there is no headroom fail-fast here), its partial enters the
+ *  accumulator as bfpAlignPartial(partial, E_acc - (Ein + Ew)) -- exact left
+ *  shift or HALF_AWAY right shift; tail fold. SR never happens here: the
+ *  re-block owns it.
+ *
+ *  @param input  [batch, in_channels, input_length], BFP scratch
+ *  @param weight [out_channels, in_channels/groups, kernel_size], BFP scratch
+ *  @param bias   [out_channels] or NULL, BFP scratch
+ *  @param kernel kernel_t with size/stride/dilation/paddingType
+ *  @param groups must divide in_channels and out_channels
+ *  @param output [batch, out_channels, output_length], BFP_RAW with a valid
+ *                {numGroups, groupSize} for the element count; every group's
+ *                exponent is written
+ */
+void conv1dKernelBfpRaw(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
+                        kernel_t const *kernel, size_t groups, tensor_t *output);
+
 #endif // ODT_CONV1D_KERNEL_H

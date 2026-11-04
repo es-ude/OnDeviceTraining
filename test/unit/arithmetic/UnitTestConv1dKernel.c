@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdbool.h>
 #include <string.h>
 
@@ -821,6 +822,496 @@ void testConv1dKernelBfpConvGroups2MatchesGold(void) {
                              kBfpConvG2Expected_len * sizeof(float));
 }
 
+/* ---- Integer-only forward: conv1dKernelBfpRaw --------------------------
+ *
+ * Same operand form as conv1dKernelBfp; the output is a BFP_RAW tensor
+ * (int32 mantissas + one UNBIASED int16 exponent per raw target group) that
+ * the funnel re-blocks or dequantizes. Gold: generate_expected_bfp_conv1d.py
+ * (conv1d_bfp_raw_ref), pinned bit for bit on mantissas AND exponents, plus
+ * the float64 exact values within the documented fold bound
+ * 1/2 (S+1) 2^E_acc. */
+
+/* Unpacked-BFP scratch operand on the stack; `codes` is borrowed, the
+ * exponents are copied so a kernel bug cannot corrupt a gold table. */
+typedef struct bfpScratchFixture {
+    tensor_t tensor;
+    shape_t shape;
+    size_t dims[3];
+    size_t order[3];
+    uint8_t exps[64];
+    bfpQConfig_t qc;
+    quantization_t q;
+} bfpScratchFixture_t;
+
+static void bfpScratchInit(bfpScratchFixture_t *f, size_t ndim, const size_t *dims,
+                           const int32_t *codes, const uint8_t *exps, size_t numGroups,
+                           size_t groupSize, uint8_t m, uint8_t e) {
+    TEST_ASSERT_TRUE(numGroups <= sizeof(f->exps));
+    for (size_t i = 0; i < ndim; i++) {
+        f->dims[i] = dims[i];
+        f->order[i] = i;
+    }
+    setShape(&f->shape, f->dims, ndim, f->order);
+    memcpy(f->exps, exps, numGroups);
+    f->qc = (bfpQConfig_t){.exponents = f->exps,
+                           .numGroups = numGroups,
+                           .groupSize = groupSize,
+                           .roundingMode = HALF_AWAY,
+                           .mantissaBits = m,
+                           .exponentBits = e};
+    initBfpQuantization(&f->qc, &f->q);
+    setTensorValues(&f->tensor, (uint8_t *)codes, &f->shape, &f->q, NULL);
+}
+
+#define BFP_RAW_FIXTURE_MAX_OUT 64
+#define BFP_RAW_FIXTURE_MAX_GROUPS 16
+#define BFP_RAW_SENTINEL_MANT (INT32_MIN + 7)
+#define BFP_RAW_SENTINEL_EXP ((int16_t)0x7ABC)
+
+/* BFP_RAW output on the stack, sentinel-prefilled: every mantissa and every
+ * group exponent must be kernel-written. */
+typedef struct bfpRawFixture {
+    tensor_t tensor;
+    shape_t shape;
+    size_t dims[3];
+    size_t order[3];
+    int32_t mant[BFP_RAW_FIXTURE_MAX_OUT];
+    int16_t exps[BFP_RAW_FIXTURE_MAX_GROUPS];
+    bfpRawQConfig_t qc;
+    quantization_t q;
+} bfpRawFixture_t;
+
+static void bfpRawInit(bfpRawFixture_t *f, size_t ndim, const size_t *dims, size_t numGroups,
+                       size_t groupSize) {
+    size_t n = 1;
+    for (size_t i = 0; i < ndim; i++) {
+        f->dims[i] = dims[i];
+        f->order[i] = i;
+        n *= dims[i];
+    }
+    TEST_ASSERT_TRUE(n <= BFP_RAW_FIXTURE_MAX_OUT && numGroups <= BFP_RAW_FIXTURE_MAX_GROUPS);
+    setShape(&f->shape, f->dims, ndim, f->order);
+    for (size_t i = 0; i < BFP_RAW_FIXTURE_MAX_OUT; i++) {
+        f->mant[i] = BFP_RAW_SENTINEL_MANT;
+    }
+    for (size_t g = 0; g < BFP_RAW_FIXTURE_MAX_GROUPS; g++) {
+        f->exps[g] = BFP_RAW_SENTINEL_EXP;
+    }
+    f->qc = (bfpRawQConfig_t){.exponents = f->exps, .numGroups = numGroups, .groupSize = groupSize};
+    initBfpRawQuantization(&f->qc, &f->q);
+    setTensorValues(&f->tensor, (uint8_t *)f->mant, &f->shape, &f->q, NULL);
+}
+
+/* The raw's value per element, exactly: mant * 2^E in double (|mant| < 2^31,
+ * |E| small: no rounding), against the float64 exact sum within the bound. */
+static void assertRawWithinBound(const bfpRawFixture_t *f, size_t n, const double *exact,
+                                 const double *bound) {
+    size_t gsz = f->qc.groupSize == 0 ? n : f->qc.groupSize;
+    for (size_t i = 0; i < n; i++) {
+        double v = ldexp((double)f->mant[i], f->exps[i / gsz]);
+        TEST_ASSERT_TRUE_MESSAGE(fabs(v - exact[i]) <= bound[i],
+                                 "raw value outside the fold bound");
+    }
+}
+
+static void assertRawEquals(const bfpRawFixture_t *f, const int32_t *mant, size_t n,
+                            const int16_t *exps, size_t numGroups) {
+    TEST_ASSERT_EQUAL_INT32_ARRAY(mant, f->mant, n);
+    TEST_ASSERT_EQUAL_INT16_ARRAY(exps, f->exps, numGroups);
+    TEST_ASSERT_EQUAL_INT32(BFP_RAW_SENTINEL_MANT, f->mant[n]); /* nothing past the output */
+    TEST_ASSERT_EQUAL_INT16(BFP_RAW_SENTINEL_EXP, f->exps[numGroups]);
+}
+
+/* The main fixture's operands (grouped input m6, grouped weight m4, clipped
+ * stride-2 windows); `wExps` lets a test swap the weight's exponent table. */
+static void bfpRawMainOperands(bfpScratchFixture_t *in, bfpScratchFixture_t *w,
+                               const uint8_t *wExps) {
+    size_t inDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvInChannels,
+                       (size_t)kBfpConvInputLength};
+    bfpScratchInit(in, 3, inDims, kBfpConvInCodes, kBfpConvInExponents, (size_t)kBfpConvInNumGroups,
+                   (size_t)kBfpConvInGroupSize, (uint8_t)kBfpConvInMantissaBits,
+                   (uint8_t)kBfpConvInExponentBits);
+    size_t wDims[] = {(size_t)kBfpConvOutChannels, (size_t)kBfpConvInChannels,
+                      (size_t)kBfpConvKernelSize};
+    bfpScratchInit(w, 3, wDims, kBfpConvWCodes, wExps, (size_t)kBfpConvWNumGroups,
+                   (size_t)kBfpConvWGroupSize, (uint8_t)kBfpConvWMantissaBits,
+                   (uint8_t)kBfpConvWExponentBits);
+}
+
+static void bfpRawMainBias(bfpScratchFixture_t *bias) {
+    size_t biasDims[] = {(size_t)kBfpConvOutChannels};
+    bfpScratchInit(bias, 1, biasDims, kBfpConvBiasCodes, kBfpConvBiasExponents, 1, 0,
+                   (uint8_t)kBfpConvBiasMantissaBits, (uint8_t)kBfpConvBiasExponentBits);
+}
+
+static void bfpRawMainKernel(kernel_t *kernel, size_t dilation) {
+    initKernelExplicit(kernel, (size_t)kBfpConvKernelSize, (size_t)kBfpConvPadding, dilation,
+                       (size_t)kBfpConvStride);
+}
+
+void testConv1dKernelBfpRawMatchesGold(void) {
+    bfpScratchFixture_t in, w, bias;
+    bfpRawMainOperands(&in, &w, kBfpConvWExponents);
+    bfpRawMainBias(&bias);
+    size_t outDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvOutChannels, (size_t)kBfpConvOutLen};
+    bfpRawFixture_t out;
+    bfpRawInit(&out, 3, outDims, 1, 0);
+    kernel_t kernel;
+    bfpRawMainKernel(&kernel, 1);
+
+    conv1dKernelBfpRaw(&in.tensor, &w.tensor, &bias.tensor, &kernel, 1, &out.tensor);
+
+    assertRawEquals(&out, kBfpConvRawMant, kBfpConvRawMant_len, kBfpConvRawExps, 1);
+    assertRawWithinBound(&out, kBfpConvRawMant_len, kBfpConvRawExact, kBfpConvRawBound);
+}
+
+void testConv1dKernelBfpRawNoBiasMatchesGold(void) {
+    bfpScratchFixture_t in, w;
+    bfpRawMainOperands(&in, &w, kBfpConvWExponents);
+    size_t outDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvOutChannels, (size_t)kBfpConvOutLen};
+    bfpRawFixture_t out;
+    bfpRawInit(&out, 3, outDims, 1, 0);
+    kernel_t kernel;
+    bfpRawMainKernel(&kernel, 1);
+
+    conv1dKernelBfpRaw(&in.tensor, &w.tensor, NULL, &kernel, 1, &out.tensor);
+
+    assertRawEquals(&out, kBfpConvRawNoBiasMant, kBfpConvRawNoBiasMant_len, kBfpConvRawNoBiasExps,
+                    1);
+}
+
+/* Grouped bias {2, 1}: each channel's bias segment is aligned by ITS group's
+ * exponent (a group-0 collapse is off by a power of two on channel 1). */
+void testConv1dKernelBfpRawGroupedBiasBindsPerGroupExponent(void) {
+    bfpScratchFixture_t in, w, bias;
+    bfpRawMainOperands(&in, &w, kBfpConvWExponents);
+    size_t biasDims[] = {(size_t)kBfpConvOutChannels};
+    bfpScratchInit(&bias, 1, biasDims, kBfpConvBiasGroupedCodes, kBfpConvBiasGroupedExponents,
+                   (size_t)kBfpConvBiasGroupedNumGroups, 1, (uint8_t)kBfpConvBiasMantissaBits,
+                   (uint8_t)kBfpConvBiasExponentBits);
+    size_t outDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvOutChannels, (size_t)kBfpConvOutLen};
+    bfpRawFixture_t out;
+    bfpRawInit(&out, 3, outDims, 1, 0);
+    kernel_t kernel;
+    bfpRawMainKernel(&kernel, 1);
+
+    conv1dKernelBfpRaw(&in.tensor, &w.tensor, &bias.tensor, &kernel, 1, &out.tensor);
+
+    assertRawEquals(&out, kBfpConvRawBiasGroupedMant, kBfpConvRawBiasGroupedMant_len,
+                    kBfpConvRawBiasGroupedExps, 1);
+}
+
+/* Raw target groups of 2 over the [1, 2, 5] output: group 2 holds the last
+ * element of channel 0 and the first of channel 1, whose row maxima differ
+ * (channel 1's weight exponents are bumped by 3), so its exponent must be
+ * the LARGER row's and the straddled elements align to it. */
+void testConv1dKernelBfpRawStraddlingTargetGroupTakesTheLargerRow(void) {
+    bfpScratchFixture_t in, w, bias;
+    bfpRawMainOperands(&in, &w, kBfpConvRawGs2WExponents);
+    bfpRawMainBias(&bias);
+    size_t outDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvOutChannels, (size_t)kBfpConvOutLen};
+    bfpRawFixture_t out;
+    bfpRawInit(&out, 3, outDims, kBfpConvRawGs2Mant_len / (size_t)kBfpConvRawGs2GroupSize,
+               (size_t)kBfpConvRawGs2GroupSize);
+    kernel_t kernel;
+    bfpRawMainKernel(&kernel, 1);
+
+    conv1dKernelBfpRaw(&in.tensor, &w.tensor, &bias.tensor, &kernel, 1, &out.tensor);
+
+    assertRawEquals(&out, kBfpConvRawGs2Mant, kBfpConvRawGs2Mant_len, kBfpConvRawGs2Exps,
+                    kBfpConvRawGs2Exps_len);
+}
+
+void testConv1dKernelBfpRawDilation2MatchesGold(void) {
+    bfpScratchFixture_t in, w, bias;
+    bfpRawMainOperands(&in, &w, kBfpConvWExponents);
+    bfpRawMainBias(&bias);
+    size_t outDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvOutChannels,
+                        (size_t)kBfpConvDilOutLen};
+    bfpRawFixture_t out;
+    bfpRawInit(&out, 3, outDims, 1, 0);
+    kernel_t kernel;
+    bfpRawMainKernel(&kernel, (size_t)kBfpConvDilDilation);
+
+    conv1dKernelBfpRaw(&in.tensor, &w.tensor, &bias.tensor, &kernel, 1, &out.tensor);
+
+    assertRawEquals(&out, kBfpConvRawDilMant, kBfpConvRawDilMant_len, kBfpConvRawDilExps, 1);
+}
+
+void testConv1dKernelBfpRawConvGroups2MatchesGold(void) {
+    bfpScratchFixture_t in, w, bias;
+    size_t inDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvG2InChannels,
+                       (size_t)kBfpConvG2InputLength};
+    bfpScratchInit(&in, 3, inDims, kBfpConvG2InCodes, kBfpConvG2InExponents,
+                   (size_t)kBfpConvG2InNumGroups, (size_t)kBfpConvG2InGroupSize,
+                   (uint8_t)kBfpConvG2InMantissaBits, (uint8_t)kBfpConvG2InExponentBits);
+    size_t wDims[] = {(size_t)kBfpConvG2OutChannels,
+                      (size_t)kBfpConvG2InChannels / (size_t)kBfpConvG2ConvGroups,
+                      (size_t)kBfpConvKernelSize};
+    bfpScratchInit(&w, 3, wDims, kBfpConvG2WCodes, kBfpConvG2WExponents,
+                   (size_t)kBfpConvG2WNumGroups, (size_t)kBfpConvG2WGroupSize,
+                   (uint8_t)kBfpConvG2WMantissaBits, (uint8_t)kBfpConvG2WExponentBits);
+    size_t biasDims[] = {(size_t)kBfpConvG2OutChannels};
+    bfpScratchInit(&bias, 1, biasDims, kBfpConvG2BiasCodes, kBfpConvG2BiasExponents, 1, 0,
+                   (uint8_t)kBfpConvG2BiasMantissaBits, (uint8_t)kBfpConvG2BiasExponentBits);
+    size_t outDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvG2OutChannels,
+                        (size_t)kBfpConvG2OutLen};
+    bfpRawFixture_t out;
+    bfpRawInit(&out, 3, outDims, 1, 0);
+    kernel_t kernel;
+    bfpRawMainKernel(&kernel, 1);
+
+    conv1dKernelBfpRaw(&in.tensor, &w.tensor, &bias.tensor, &kernel, (size_t)kBfpConvG2ConvGroups,
+                       &out.tensor);
+
+    assertRawEquals(&out, kBfpConvG2RawMant, kBfpConvG2RawMant_len, kBfpConvG2RawExps, 1);
+}
+
+/* Both alignment arms inside ONE output: the input groups sit 24 binades
+ * apart and the fold guard is negative, so output 3's max-exponent segment
+ * is left-shifted exactly while its low-exponent segment is right-shifted
+ * onto a HALF_AWAY tie (3.5 -> 4). */
+void testConv1dKernelBfpRawAlignsTwoSided(void) {
+    bfpScratchFixture_t in, w;
+    size_t inDims[] = {1, 1, (size_t)kBfpConvSpreadInputLength};
+    bfpScratchInit(&in, 3, inDims, kBfpConvSpreadInCodes, kBfpConvSpreadInExponents,
+                   kBfpConvSpreadInExponents_len, (size_t)kBfpConvSpreadInGroupSize,
+                   (uint8_t)kBfpConvSpreadInMantissaBits, 8);
+    size_t wDims[] = {1, 1, 2};
+    bfpScratchInit(&w, 3, wDims, kBfpConvSpreadWCodes, kBfpConvSpreadWExponents, 1, 0,
+                   (uint8_t)kBfpConvSpreadWMantissaBits, 8);
+    size_t outDims[] = {1, 1, (size_t)kBfpConvSpreadOutLen};
+    bfpRawFixture_t out;
+    bfpRawInit(&out, 3, outDims, 1, 0);
+    kernel_t kernel;
+    initKernel(&kernel, 2, VALID, 1, 1);
+
+    conv1dKernelBfpRaw(&in.tensor, &w.tensor, NULL, &kernel, 1, &out.tensor);
+
+    TEST_ASSERT_TRUE(kBfpConvSpreadG < 0);
+    assertRawEquals(&out, kBfpConvSpreadRawMant, kBfpConvSpreadRawMant_len, kBfpConvSpreadRawExps,
+                    1);
+    assertRawWithinBound(&out, kBfpConvSpreadRawMant_len, kBfpConvSpreadRawExact,
+                         kBfpConvSpreadRawBound);
+    /* The rounding arm is observable: output 3 is not exact. */
+    TEST_ASSERT_TRUE(ldexp((double)out.mant[3], out.exps[0]) != kBfpConvSpreadRawExact[3]);
+}
+
+/* m16 x m16: bfpSegmentLimit == 1, so every product is its own segment --
+ * the same operands conv1dKernelBfp fails fast on (headroom guard) now RUN
+ * through run splitting, within the fold bound. */
+void testConv1dKernelBfpRawSplitsEveryProductAtM16(void) {
+    bfpScratchFixture_t in, w;
+    uint8_t unit[] = {127};
+    size_t inDims[] = {1, 1, 4};
+    bfpScratchInit(&in, 3, inDims, kBfpConvM16InCodes, unit, 1, 0, 16, 8);
+    size_t wDims[] = {1, 1, 2};
+    bfpScratchInit(&w, 3, wDims, kBfpConvM16WCodes, unit, 1, 0, 16, 8);
+    size_t outDims[] = {1, 1, 3};
+    bfpRawFixture_t out;
+    bfpRawInit(&out, 3, outDims, 1, 0);
+    kernel_t kernel;
+    initKernel(&kernel, 2, VALID, 1, 1);
+
+    conv1dKernelBfpRaw(&in.tensor, &w.tensor, NULL, &kernel, 1, &out.tensor);
+
+    assertRawEquals(&out, kBfpConvM16RawMant, kBfpConvM16RawMant_len, kBfpConvM16RawExps, 1);
+    assertRawWithinBound(&out, kBfpConvM16RawMant_len, kBfpConvM16RawExact, kBfpConvM16RawBound);
+}
+
+/* m16 x m8 at the code floors: every product is exactly 2^22 and a 600-tap
+ * reduction overflows int32 unless the run splits at bfpSegmentLimit (511);
+ * the two partials align exactly under g = 1. */
+void testConv1dKernelBfpRawSplitsLongRunAtTheSegmentLimit(void) {
+    static int32_t xCodes[600];
+    static int32_t wCodes[600];
+    for (size_t i = 0; i < (size_t)kBfpConvLongTaps; i++) {
+        xCodes[i] = -32768;
+        wCodes[i] = -128;
+    }
+    bfpScratchFixture_t in, w;
+    uint8_t unit[] = {127};
+    size_t inDims[] = {1, 1, (size_t)kBfpConvLongTaps};
+    bfpScratchInit(&in, 3, inDims, xCodes, unit, 1, 0, 16, 8);
+    size_t wDims[] = {1, 1, (size_t)kBfpConvLongTaps};
+    bfpScratchInit(&w, 3, wDims, wCodes, unit, 1, 0, 8, 8);
+    size_t outDims[] = {1, 1, 1};
+    bfpRawFixture_t out;
+    bfpRawInit(&out, 3, outDims, 1, 0);
+    kernel_t kernel;
+    initKernel(&kernel, (size_t)kBfpConvLongTaps, VALID, 1, 1);
+
+    conv1dKernelBfpRaw(&in.tensor, &w.tensor, NULL, &kernel, 1, &out.tensor);
+
+    int16_t expExp = (int16_t)kBfpConvLongRawExp;
+    assertRawEquals(&out, &kBfpConvLongRawMant, 1, &expExp, 1);
+}
+
+/* ---- Worst-case headroom: every code at a grid edge, at the proof's limits.
+ * The exact sum is formed in int64 HERE (the test's reference; the kernel
+ * never uses int64) and the raw must reproduce it exactly: mant * 2^E_acc ==
+ * sum, with the expected g. Under a guard search that returned 1 for every
+ * g >= 2 these accumulators overflowed. */
+
+#define WORST_MAX_TAPS 2400
+static int32_t gWorstX[WORST_MAX_TAPS];
+static int32_t gWorstW[WORST_MAX_TAPS];
+
+/* One output of a [1, 1, taps] x [1, 1, taps] reduction (K = taps, VALID),
+ * every x = xCode, every w = wCode, both per-tensor at stored exponent 127
+ * (unbiased 0); optional bias (code, stored exponent). */
+static void runWorstCase(size_t taps, int32_t xCode, uint8_t mx, int32_t wCode, uint8_t mw,
+                         const int32_t *biasCode, uint8_t mBias, uint8_t biasStored,
+                         bfpRawFixture_t *out) {
+    TEST_ASSERT_TRUE(taps <= WORST_MAX_TAPS);
+    for (size_t i = 0; i < taps; i++) {
+        gWorstX[i] = xCode;
+        gWorstW[i] = wCode;
+    }
+    bfpScratchFixture_t in, w, bias;
+    uint8_t unit[] = {127};
+    size_t inDims[] = {1, 1, taps};
+    bfpScratchInit(&in, 3, inDims, gWorstX, unit, 1, 0, mx, 8);
+    size_t wDims[] = {1, 1, taps};
+    bfpScratchInit(&w, 3, wDims, gWorstW, unit, 1, 0, mw, 8);
+    if (biasCode != NULL) {
+        uint8_t biasExp[] = {biasStored};
+        size_t biasDims[] = {1};
+        bfpScratchInit(&bias, 1, biasDims, biasCode, biasExp, 1, 0, mBias, 8);
+    }
+    size_t outDims[] = {1, 1, 1};
+    bfpRawInit(out, 3, outDims, 1, 0);
+    kernel_t kernel;
+    initKernel(&kernel, taps, VALID, 1, 1);
+    conv1dKernelBfpRaw(&in.tensor, &w.tensor, biasCode != NULL ? &bias.tensor : NULL, &kernel, 1,
+                       &out->tensor);
+}
+
+static void assertRawIsExactly(const bfpRawFixture_t *out, int64_t exactSum, int expectedE) {
+    TEST_ASSERT_EQUAL_INT16((int16_t)expectedE, out->exps[0]);
+    TEST_ASSERT_TRUE(expectedE >= 0);
+    int64_t value = (int64_t)out->mant[0] * ((int64_t)1 << (unsigned)expectedE);
+    TEST_ASSERT_EQUAL_INT64(exactSum, value);
+}
+
+/* m16 x m16, N = 80 (g = 6, every product its own segment): all codes at the
+ * floor -2^15 -> 80 products of exactly 2^30; then the floor against the
+ * ceiling +2^15-1. Both exact in the raw. */
+void testConv1dKernelBfpRawWorstCaseM16xM16AllCodesAtTheEdges(void) {
+    bfpRawFixture_t out;
+    runWorstCase(80, -32768, 16, -32768, 16, NULL, 0, 0, &out);
+    assertRawIsExactly(&out, (int64_t)80 * ((int64_t)1 << 30), 6);
+    TEST_ASSERT_EQUAL_INT32(80 << 24, out.mant[0]);
+
+    runWorstCase(80, -32768, 16, 32767, 16, NULL, 0, 0, &out);
+    assertRawIsExactly(&out, (int64_t)80 * (-32768LL * 32767LL), 6);
+}
+
+/* m16 x m8, N = 2400 (g = 3): the run splits at 511 products (four full
+ * segments + 356), every product exactly 2^22; exact in the raw. */
+void testConv1dKernelBfpRawWorstCaseM16xM8SplitRunsAtTheEdges(void) {
+    bfpRawFixture_t out;
+    runWorstCase(2400, -32768, 16, -128, 8, NULL, 0, 0, &out);
+    assertRawIsExactly(&out, (int64_t)2400 * ((int64_t)1 << 22), 3);
+
+    runWorstCase(2400, 32767, 16, -128, 8, NULL, 0, 0, &out);
+    assertRawIsExactly(&out, (int64_t)2400 * (32767LL * -128LL), 3);
+}
+
+/* m16 x m16, N = 4 with a m16 bias at its floor (g = 2): the bias segment
+ * is the extra term of the proof; exact. */
+void testConv1dKernelBfpRawWorstCaseWithBiasAtTheFloor(void) {
+    int32_t biasCode = -32768;
+    bfpRawFixture_t out;
+    runWorstCase(4, -32768, 16, -32768, 16, &biasCode, 16, 127, &out);
+    assertRawIsExactly(&out, (int64_t)4 * ((int64_t)1 << 30) - 32768, 2);
+}
+
+/* Bias exponent ABOVE every product's (stored 147 = +20 unbiased): E_top is
+ * the bias exponent, the products (m8 x m8, N = 80, one segment of 80 * 2^14)
+ * are right-shifted by 10 exactly, the bias is left-shifted by 10 (g = -10);
+ * the raw reproduces the int64 sum exactly. */
+void testConv1dKernelBfpRawBiasExponentDominatesTheProducts(void) {
+    int32_t biasCode = -128;
+    bfpRawFixture_t out;
+    runWorstCase(80, -128, 8, -128, 8, &biasCode, 8, 147, &out);
+    assertRawIsExactly(&out, (int64_t)80 * ((int64_t)1 << 14) + (int64_t)-128 * ((int64_t)1 << 20),
+                       10);
+    TEST_ASSERT_EQUAL_INT32(-129792, out.mant[0]);
+}
+
+/* Exact power-of-two grids: the raw's dequant (float)mant * 2^E must be
+ * bit-identical to the float kernel's rounding-free fold on the same codes. */
+void testConv1dKernelBfpRawPowerOfTwoDequantMatchesFloatKernel(void) {
+    uint8_t inExps[] = {126};
+    uint8_t wExps[] = {125, 125, 125, 125, 125, 125};
+    bfpScratchFixture_t in, w;
+    size_t inDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvInChannels,
+                       (size_t)kBfpConvInputLength};
+    bfpScratchInit(&in, 3, inDims, kBfpConvInCodes, inExps, 1, 0, 8, 8);
+    size_t wDims[] = {(size_t)kBfpConvOutChannels, (size_t)kBfpConvInChannels,
+                      (size_t)kBfpConvKernelSize};
+    bfpScratchInit(&w, 3, wDims, kBfpConvWCodes, wExps, 6, 2, 8, 8);
+    size_t outDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvOutChannels, (size_t)kBfpConvOutLen};
+    bfpRawFixture_t raw;
+    bfpRawInit(&raw, 3, outDims, 1, 0);
+    kernel_t kernel;
+    bfpRawMainKernel(&kernel, 1);
+
+    conv1dKernelBfpRaw(&in.tensor, &w.tensor, NULL, &kernel, 1, &raw.tensor);
+
+    tensor_t floatOut;
+    float floatData[10];
+    shape_t floatShape;
+    size_t floatOrder[] = {0, 1, 2};
+    setShape(&floatShape, outDims, 3, floatOrder);
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    setTensorValues(&floatOut, (uint8_t *)floatData, &floatShape, &floatQ, NULL);
+    conv1dKernelBfp(&in.tensor, &w.tensor, NULL, &kernel, 1, &floatOut);
+
+    for (size_t i = 0; i < 10; i++) {
+        float deq = ldexpf((float)raw.mant[i], raw.exps[0]);
+        TEST_ASSERT_EQUAL_MEMORY(&floatData[i], &deq, sizeof(float));
+    }
+}
+
+static void conv1dKernelBfpRawFloatOutputBody(void) {
+    bfpScratchFixture_t in, w;
+    bfpRawMainOperands(&in, &w, kBfpConvWExponents);
+    tensor_t out;
+    float outData[10];
+    size_t outDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvOutChannels, (size_t)kBfpConvOutLen};
+    size_t outOrder[] = {0, 1, 2};
+    shape_t outShape;
+    setShape(&outShape, outDims, 3, outOrder);
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    setTensorValues(&out, (uint8_t *)outData, &outShape, &outQ, NULL);
+    kernel_t kernel;
+    bfpRawMainKernel(&kernel, 1);
+    conv1dKernelBfpRaw(&in.tensor, &w.tensor, NULL, &kernel, 1, &out);
+}
+
+void testConv1dKernelBfpRawRejectsNonRawOutput(void) {
+    ASSERT_EXITS_WITH_FAILURE(conv1dKernelBfpRawFloatOutputBody());
+}
+
+static void conv1dKernelBfpRawBadGeometryBody(void) {
+    bfpScratchFixture_t in, w;
+    bfpRawMainOperands(&in, &w, kBfpConvWExponents);
+    size_t outDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvOutChannels, (size_t)kBfpConvOutLen};
+    bfpRawFixture_t out;
+    bfpRawInit(&out, 3, outDims, 3, 4); /* 3 * 4 != 10 */
+    kernel_t kernel;
+    bfpRawMainKernel(&kernel, 1);
+    conv1dKernelBfpRaw(&in.tensor, &w.tensor, NULL, &kernel, 1, &out.tensor);
+}
+
+void testConv1dKernelBfpRawRejectsMismatchedRawGeometry(void) {
+    ASSERT_EXITS_WITH_FAILURE(conv1dKernelBfpRawBadGeometryBody());
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -1246,5 +1737,21 @@ int main(void) {
     RUN_TEST(testConv1dKernelBfpHeadroomGuardDies);
     RUN_TEST(testConv1dKernelBfpRejectsMismatchedGroupShape);
     RUN_TEST(testConv1dKernelBfpConvGroups2MatchesGold);
+    RUN_TEST(testConv1dKernelBfpRawMatchesGold);
+    RUN_TEST(testConv1dKernelBfpRawNoBiasMatchesGold);
+    RUN_TEST(testConv1dKernelBfpRawGroupedBiasBindsPerGroupExponent);
+    RUN_TEST(testConv1dKernelBfpRawStraddlingTargetGroupTakesTheLargerRow);
+    RUN_TEST(testConv1dKernelBfpRawDilation2MatchesGold);
+    RUN_TEST(testConv1dKernelBfpRawConvGroups2MatchesGold);
+    RUN_TEST(testConv1dKernelBfpRawAlignsTwoSided);
+    RUN_TEST(testConv1dKernelBfpRawSplitsEveryProductAtM16);
+    RUN_TEST(testConv1dKernelBfpRawSplitsLongRunAtTheSegmentLimit);
+    RUN_TEST(testConv1dKernelBfpRawWorstCaseM16xM16AllCodesAtTheEdges);
+    RUN_TEST(testConv1dKernelBfpRawWorstCaseM16xM8SplitRunsAtTheEdges);
+    RUN_TEST(testConv1dKernelBfpRawWorstCaseWithBiasAtTheFloor);
+    RUN_TEST(testConv1dKernelBfpRawBiasExponentDominatesTheProducts);
+    RUN_TEST(testConv1dKernelBfpRawPowerOfTwoDequantMatchesFloatKernel);
+    RUN_TEST(testConv1dKernelBfpRawRejectsNonRawOutput);
+    RUN_TEST(testConv1dKernelBfpRawRejectsMismatchedRawGeometry);
     return UNITY_END();
 }

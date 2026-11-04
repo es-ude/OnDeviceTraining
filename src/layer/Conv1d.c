@@ -110,14 +110,18 @@ static void forwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_
  * scratch form; the BFP kernel reads all quant info from the operands
  * themselves, so only the kernel_t/groups geometry is taken from ctx —
  * ctx->groupedWeight stays NULL (BFP weights never take the SYM carrier
- * path, symGroupedWeightOrNull returns NULL for the BFP dtype). */
-static void forwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                             const void *ctx, rngStream_t *rs) {
+ * path, symGroupedWeightOrNull returns NULL for the BFP dtype).
+ * Integer-only forward (arithmetic-bfp.md §13): rawOut is the BFP_RAW the
+ * forward arm opts into (opSpec_t.bfpRawOut), folded in int32 by the
+ * kernel; the OUT_WRITE epilogue re-blocks or dequantizes it. */
+static void forwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                const void *ctx, rngStream_t *rs) {
     (void)auxOut;
+    (void)rs; /* SR belongs to the re-block, never to the fold */
     const conv1dForwardCtx_t *fctx = ctx;
     const conv1dConfig_t *cfg = fctx->cfg;
     tensor_t *bias = (n > 2) ? ops[2] : NULL;
-    conv1dKernelBfp(ops[0], ops[1], bias, cfg->kernel, cfg->groups, rawOut);
+    conv1dKernelBfpRaw(ops[0], ops[1], bias, cfg->kernel, cfg->groups, rawOut);
 }
 
 /* OP(k) of each funnel op of this layer, for layerExecOpKey. Part of the
@@ -216,7 +220,7 @@ void conv1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const laye
                               .exponentBits = wQC->exponentBits};
         executeOp(
             &(opSpec_t){
-                .kernel = forwardKernelBfp,
+                .kernel = forwardKernelBfpRaw,
                 .ctx = &fctx,
                 .inputs = biasTensor != NULL ? (tensor_t *[]){input, weightTensor, biasTensor}
                                              : (tensor_t *[]){input, weightTensor},
@@ -229,6 +233,7 @@ void conv1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const laye
                              (biasTensor != NULL && biasTensor->quantization->type == FLOAT32)
                                  ? &stage
                                  : NULL},
+                .bfpRawOut = true, /* the integer forward raw; backward arms keep FLOAT32 */
             },
             output);
         break;

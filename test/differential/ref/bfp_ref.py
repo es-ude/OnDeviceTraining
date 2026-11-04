@@ -547,6 +547,274 @@ def linear_walk(batch: int, in_f: int, out_f: int, direction: str, with_bias: bo
     raise ValueError(direction)
 
 
+# --------------------------------------------------------------------------- #
+# Integer fold (arithmetic-bfp section 13, "The integer fold"): the Conv1d    #
+# forward's BFP_RAW -- int32 mantissas + one unbiased exponent per target     #
+# group -- and the section-13 re-block / dequant of that raw                   #
+# --------------------------------------------------------------------------- #
+
+
+def fold_guard_bits(n_terms: int, ma: int, mb: int, m_bias: int) -> int:
+    """Section 13 item 3, from the definition: the smallest integer g in
+    [-30, 31] with (N 2^(ma+mb-2) + 2^(mBias-1)) 2^-g + (N + 1) <= INT32_MAX,
+    every candidate evaluated exactly (rational arithmetic, no shifts);
+    m_bias 0 = no bias segment."""
+    total = n_terms * 2 ** (ma + mb - 2) + (2 ** (m_bias - 1) if m_bias else 0)
+    for g in range(-30, 32):
+        if Fraction(total) * Fraction(2) ** (-g) + (n_terms + 1) <= INT32_MAX:
+            return g
+    raise ValueError("no int32 fold holds this reduction (section 13 fails fast)")
+
+
+def shr_half_away(v: int, k: int) -> int:
+    """Section 13 item 4, k >= 0: v 2^-k rounded half away from zero, as
+    integer division of the magnitude with a remainder test (the dropped
+    fraction is >= 1/2 iff 2 rem >= 2^k). Any k: a value below one half
+    rounds to zero, the exact half rounds away."""
+    if k == 0:
+        return v
+    q, rem = divmod(abs(v), 2 ** k)
+    if 2 * rem >= 2 ** k:
+        q += 1
+    return -q if v < 0 else q
+
+
+def align_partial(v: int, k: int) -> int:
+    """Section 13 item 4: k < 0 is an exact left shift, k >= 0 shr_half_away."""
+    if k < 0:
+        r = v << (-k)
+        if not INT32_MIN <= r <= INT32_MAX:
+            raise ValueError("left shift leaves int32 -- the section-13 proof is violated")
+        return r
+    return shr_half_away(v, k)
+
+
+def _row_group_max(stored: np.ndarray, bias: int, group_size: int, start: int, count: int) -> int:
+    """Max unbiased exponent over the groups a flat run [start, start+count)
+    intersects (group_size 0: the per-tensor group)."""
+    if group_size == 0:
+        return int(stored[0]) - bias
+    g_lo, g_hi = start // group_size, (start + count - 1) // group_size
+    return int(stored[g_lo:g_hi + 1].max()) - bias
+
+
+@dataclass
+class IntFold:
+    mant: np.ndarray  # int64 flat, the raw mantissas
+    exps: np.ndarray  # int64 [numTargetGroups], UNBIASED E_acc
+    exact: np.ndarray  # float64 flat: the exact sum (+ bias)
+    bound: np.ndarray  # float64 flat: 1/2 (S + 1) 2^E_acc per element (section 13 item 7)
+    g: int
+    raw_group_size: int
+    n_segments_max: int
+    n_splits: int  # segments closed by the segment limit (item 5)
+    n_left: int  # folds with k < 0 (exact left shift)
+    n_rounded: int  # folds with k > 0 whose dropped remainder was nonzero
+
+    def stats(self) -> dict:
+        return {
+            "g": self.g,
+            "E_acc_range": [int(self.exps.min()), int(self.exps.max())],
+            "n_segments_max": self.n_segments_max,
+            "n_splits": self.n_splits,
+            "n_left_shifts": self.n_left,
+            "n_rounded_folds": self.n_rounded,
+            "mant_abs_max": int(np.abs(self.mant).max()) if self.mant.size else 0,
+        }
+
+
+def conv1d_int_fold(
+    a_codes: np.ndarray,
+    a_stored: np.ndarray,
+    a_bits: tuple[int, int, int],
+    b_codes: np.ndarray,
+    b_stored: np.ndarray,
+    b_bits: tuple[int, int, int],
+    bias: tuple[np.ndarray, np.ndarray, tuple[int, int, int]] | None,
+    batch: int,
+    c_in: int,
+    length: int,
+    c_out: int,
+    geom: "ConvGeom",
+    raw_group_size: int,
+) -> IntFold:
+    """Section 13 "The integer fold" for the Conv1d forward along the
+    conv1d_walk order (input channel outer, tap inner -- the walk the float
+    fold was observed to use, DOC_GAPS[2]). Items 1-7 of the section:
+    E_top per output row (b, oc) from the row maxima of the conv group's
+    input rows and the weight row, max'ed with the channel's bias exponent;
+    E_acc per raw target group = max E_top over the rows it covers + g;
+    per output: bias aligned first, one int partial per same-exponent
+    segment closed on either operand's group change or at segment_limit
+    products, aligned by align_partial(partial, E_acc - (E_a + E_b)); tail
+    fold. HALF_AWAY only. ``*_bits`` = (mantissaBits, exponentBits,
+    groupSize); ``raw_group_size`` 0 = the per-tensor raw."""
+    a = np.asarray(a_codes, dtype=np.int64).ravel()
+    b = np.asarray(b_codes, dtype=np.int64).ravel()
+    a_st, b_st = np.asarray(a_stored, dtype=np.int64), np.asarray(b_stored, dtype=np.int64)
+    ga_all, gb_all = group_ids(a.size, a_bits[2]), group_ids(b.size, b_bits[2])
+    bias_a, bias_b = exponent_bias(a_bits[1]), exponent_bias(b_bits[1])
+    cin_g, cout_g = c_in // geom.groups, c_out // geom.groups
+    k_sz = geom.kernel_size
+    n_terms = cin_g * k_sz
+    l_out = geom.conv_out_len(length)
+    limit = segment_limit(a_bits[0], b_bits[0])
+    if bias is not None:
+        bias_codes = np.asarray(bias[0], dtype=np.int64).ravel()
+        bias_st = np.asarray(bias[1], dtype=np.int64)
+        bias_e = bias_st[group_ids(c_out, bias[2][2])] - exponent_bias(bias[2][1])
+        m_bias = bias[2][0]
+    else:
+        bias_codes, bias_e, m_bias = None, None, 0
+    g = fold_guard_bits(n_terms, a_bits[0], b_bits[0], m_bias)
+
+    in_row_max = np.array(
+        [[_row_group_max(a_st, bias_a, a_bits[2], (bb * c_in + ic) * length, length) for ic in range(c_in)] for bb in range(batch)],
+        dtype=np.int64,
+    ).reshape(batch, c_in)
+    w_row_max = np.array([_row_group_max(b_st, bias_b, b_bits[2], oc * n_terms, n_terms) for oc in range(c_out)], dtype=np.int64)
+
+    def row_top(row: int) -> int:
+        bb, oc = divmod(row, c_out)
+        cg = oc // cout_g
+        e = int(in_row_max[bb, cg * cin_g:(cg + 1) * cin_g].max()) + int(w_row_max[oc])
+        if bias_e is not None and int(bias_e[oc]) > e:
+            e = int(bias_e[oc])
+        return e
+
+    n_out = batch * c_out * l_out
+    gsz = n_out if raw_group_size == 0 else raw_group_size
+    if n_out == 0:
+        z = np.zeros(0, dtype=np.int64)
+        return IntFold(z, np.zeros(1, dtype=np.int64), z.astype(np.float64), z.astype(np.float64), g, raw_group_size, 0, 0, 0, 0)
+    if n_out % gsz:
+        raise ValueError(f"raw groupSize {gsz} does not divide the output ({n_out})")
+    n_groups = n_out // gsz
+    exps = np.array([max(row_top(r) for r in range((t * gsz) // l_out, ((t + 1) * gsz - 1) // l_out + 1)) + g for t in range(n_groups)], dtype=np.int64)
+
+    walk = conv1d_walk(batch, c_in, length, c_out, geom, "forward", bias is not None)
+    mant = np.zeros(n_out, dtype=np.int64)
+    exact = np.zeros(n_out, dtype=np.float64)
+    bound = np.zeros(n_out, dtype=np.float64)
+    seg_max = n_splits = n_left = n_rounded = 0
+    for o in range(n_out):
+        e_acc = int(exps[o // gsz])
+        acc = 0
+        ex = 0.0
+        segments = 0
+        if bias_codes is not None:
+            oc = int(walk.bias_index[o])
+            k = e_acc - int(bias_e[oc])
+            acc = align_partial(int(bias_codes[oc]), k)
+            ex = float(bias_codes[oc]) * 2.0 ** int(bias_e[oc])
+            segments = 1
+        idx_a, idx_b = np.asarray(walk.ia[o], dtype=np.int64), np.asarray(walk.ib[o], dtype=np.int64)
+        partial = 0
+        seg_count = 0
+        cur = None
+        for ia_i, ib_i in zip(idx_a, idx_b):
+            key = (int(ga_all[ia_i]), int(gb_all[ib_i]))
+            if cur is None:
+                cur = key
+            elif key != cur or seg_count == limit:
+                if key == cur:
+                    n_splits += 1
+                e_seg = (int(a_st[cur[0]]) - bias_a) + (int(b_st[cur[1]]) - bias_b)
+                k = e_acc - e_seg
+                if k < 0:
+                    n_left += 1
+                elif k > 0 and shr_half_away(partial, k) * (1 << k) != partial:
+                    n_rounded += 1
+                acc += align_partial(partial, k)
+                segments += 1
+                partial, seg_count, cur = 0, 0, key
+            prod = int(a[ia_i]) * int(b[ib_i])
+            partial += prod
+            seg_count += 1
+            ex += prod * 2.0 ** ((int(a_st[key[0]]) - bias_a) + (int(b_st[key[1]]) - bias_b))
+        if cur is not None:
+            e_seg = (int(a_st[cur[0]]) - bias_a) + (int(b_st[cur[1]]) - bias_b)
+            k = e_acc - e_seg
+            if k < 0:
+                n_left += 1
+            elif k > 0 and shr_half_away(partial, k) * (1 << k) != partial:
+                n_rounded += 1
+            acc += align_partial(partial, k)
+            segments += 1
+        if not INT32_MIN <= acc <= INT32_MAX:
+            raise ValueError("accumulator leaves int32 -- the section-13 proof is violated")
+        mant[o] = acc
+        exact[o] = ex
+        bound[o] = 0.5 * (segments + 1) * 2.0 ** e_acc
+        seg_max = max(seg_max, segments)
+    return IntFold(mant, exps, exact, bound, g, raw_group_size, seg_max, n_splits, n_left, n_rounded)
+
+
+def _bitlen(v: int) -> int:
+    return int(v).bit_length()
+
+
+def reblock_raw(
+    mant: np.ndarray, exps: np.ndarray, raw_group_size: int, mantissa_bits: int, exponent_bits: int, out_group_size: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Section 13 "The re-block", HALF_AWAY: per target group absmax of the
+    mantissas, the smallest E with absmax <= qMax 2^E in integer form (s =
+    bitlen(absmax) - (m-1), +1 when s >= 1 and absmax > qMax << s), stored =
+    rawE + s + bias clamped to [0, min(2^e - 1, bias + 127)], zero group ->
+    bias; one shift k = stored - bias - rawE per group (k >= 1 HALF_AWAY in
+    magnitude form, k <= 0 an exact left shift), codes clamped to
+    [-2^(m-1), qMax]. The raw and the target must share the group geometry."""
+    v = np.asarray(mant, dtype=np.int64).ravel()
+    n = v.size
+    gsz = n if out_group_size == 0 else out_group_size
+    if (n if raw_group_size == 0 else raw_group_size) != gsz:
+        raise ValueError("section 13: the raw geometry must equal the target's")
+    raw_e = np.asarray(exps, dtype=np.int64)
+    bias = exponent_bias(exponent_bits)
+    cap = stored_exponent_cap(exponent_bits)
+    q = qmax(mantissa_bits)
+    floor = code_floor_twos_complement(mantissa_bits)
+    n_g = n // gsz if n else 1
+    codes = np.zeros(n, dtype=np.int64)
+    stored = np.zeros(n_g, dtype=np.int64)
+    for g in range(n_g):
+        grp = v[g * gsz:(g + 1) * gsz]
+        absmax = int(np.abs(grp).max()) if grp.size else 0
+        if absmax == 0:
+            stored[g] = bias
+        else:
+            s = _bitlen(absmax) - (mantissa_bits - 1)
+            if s >= 1 and absmax > (q << s):
+                s += 1
+            stored[g] = min(max(int(raw_e[g]) + s + bias, 0), cap)
+        k = int(stored[g]) - bias - int(raw_e[g])
+        out = []
+        for x in grp:
+            x = int(x)
+            neg = x < 0
+            mag = -x if neg else x
+            if k >= 32:
+                t = 0
+            elif k >= 1:
+                t = (mag >> k) + (1 if (mag & ((1 << k) - 1)) >= (1 << (k - 1)) else 0)
+            else:
+                t = mag << (-k)
+            c = -t if neg else t
+            out.append(min(max(c, floor), q))
+        codes[g * gsz:(g + 1) * gsz] = out
+    return codes, stored
+
+
+def dequant_raw_f32(mant: np.ndarray, exps: np.ndarray, raw_group_size: int) -> np.ndarray:
+    """Section 13 "Loss-facing dequant": ldexpf((float)mant, E) -- (float)mant
+    rounds to nearest even above 2^24 (DOC_GAPS[3]'s assumption), the
+    power-of-two scaling is exact. float32 results as float64."""
+    v = np.asarray(mant, dtype=np.int64).ravel()
+    gsz = v.size if raw_group_size == 0 else raw_group_size
+    e = np.asarray(exps, dtype=np.int64)[group_ids(v.size, gsz)]
+    return np.ldexp(v.astype(np.float32), e.astype(np.int32)).astype(np.float32).astype(np.float64)
+
+
 @dataclass(frozen=True)
 class ConvGeom:
     """Conv1d / ConvT1d geometry (PyTorch semantics, data-shape 'Weight layouts, orientation and padding'):

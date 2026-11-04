@@ -2,7 +2,7 @@
   "version": 6,
   "cmakeMinimumRequired": {
     "major": 3,
-    "minor": 20,
+    "minor": 25,
     "patch": 0
   },
   "configurePresets": [
@@ -110,7 +110,7 @@
       "cacheVariables": {
         "HOST": "OFF",
         "ODT_BUILD_TESTS": "OFF",
-        "CMAKE_C_FLAGS": "-Werror"
+        "CMAKE_C_FLAGS": "-mcpu=cortex-m4 -mthumb -Werror"
       }
     },
     {

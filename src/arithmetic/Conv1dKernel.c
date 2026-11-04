@@ -880,7 +880,8 @@ void conv1dKernelBfpRaw(tensor_t const *input, tensor_t const *weight, tensor_t 
 
                     for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
                         size_t ic = inLo + icOffset;
-                        for (size_t i = 0; i < slice.validCount; i++) {
+                        size_t i = 0;
+                        while (i < slice.validCount) {
                             size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
                             size_t kernelIdx = slice.firstValidKernelOffset + i;
                             size_t wIdx = wBase + icOffset * kernelSize + kernelIdx;
@@ -906,8 +907,23 @@ void conv1dKernelBfpRaw(tensor_t const *input, tensor_t const *weight, tensor_t 
                                 currentWGroup = wGroup;
                             }
 
-                            partial += mulInt32s(xArr[inIdx], wArr[wIdx]);
-                            segCount++;
+                            /* The taps from i that stay in both cached groups
+                             * and under the segment limit need no lookup and
+                             * no segment check: the same segments close at
+                             * the same taps as a per-tap check would. */
+                            size_t run = bfpTapsBelow(wIdx, wRange.end, 1, slice.validCount - i);
+                            run = bfpTapsBelow(inIdx, inRange.end, geom.dilation, run);
+                            if (run > segmentLimit - segCount) {
+                                run = segmentLimit - segCount;
+                            }
+                            segCount += run;
+                            for (size_t runEnd = i + run; i < runEnd; i++) {
+                                inputIdx = slice.firstValidInputIdx + i * geom.dilation;
+                                kernelIdx = slice.firstValidKernelOffset + i;
+                                wIdx = wBase + icOffset * kernelSize + kernelIdx;
+                                inIdx = (b * inChannels + ic) * inputLength + inputIdx;
+                                partial += mulInt32s(xArr[inIdx], wArr[wIdx]);
+                            }
                         }
                     }
                     if (currentWGroup != SIZE_MAX) {

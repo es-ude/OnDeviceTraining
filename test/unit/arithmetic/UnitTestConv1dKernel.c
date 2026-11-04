@@ -1042,6 +1042,30 @@ void testConv1dKernelBfpRawSplitsEveryProductAtM16(void) {
     assertRawWithinBound(&out, kBfpConvM16RawMant_len, kBfpConvM16RawExact, kBfpConvM16RawBound);
 }
 
+/* Dilation 2 over input groups of 3: output 1 taps inputs 1, 3, 5, so a
+ * dilated step crosses an input-group boundary that a unit-step run count
+ * would miss (tap 3 folded at group 0's exponent). */
+void testConv1dKernelBfpRawDilatedRunStopsAtTheInputGroupEnd(void) {
+    bfpScratchFixture_t in, w;
+    size_t inDims[] = {1, 1, 9};
+    bfpScratchInit(&in, 3, inDims, kBfpConvDilGrpInCodes, kBfpConvDilGrpInExponents, 3, 3, 4, 8);
+    uint8_t unit[] = {127};
+    size_t wDims[] = {1, 1, 3};
+    bfpScratchInit(&w, 3, wDims, kBfpConvDilGrpWCodes, unit, 1, 0, 4, 8);
+    size_t outDims[] = {1, 1, 5};
+    bfpRawFixture_t out;
+    bfpRawInit(&out, 3, outDims, 1, 0);
+    kernel_t kernel;
+    initKernel(&kernel, 3, VALID, 2, 1);
+
+    conv1dKernelBfpRaw(&in.tensor, &w.tensor, NULL, &kernel, 1, &out.tensor);
+
+    assertRawEquals(&out, kBfpConvDilGrpRawMant, kBfpConvDilGrpRawMant_len, kBfpConvDilGrpRawExps,
+                    1);
+    assertRawWithinBound(&out, kBfpConvDilGrpRawMant_len, kBfpConvDilGrpRawExact,
+                         kBfpConvDilGrpRawBound);
+}
+
 /* m16 x m8 at the code floors: every product is exactly 2^22 and a 600-tap
  * reduction overflows int32 unless the run splits at bfpSegmentLimit (511);
  * the two partials align exactly under g = 1. */
@@ -1669,6 +1693,7 @@ int main(void) {
     RUN_TEST(testConv1dKernelBfpRawAlignsTwoSided);
     RUN_TEST(testConv1dKernelBfpRawSplitsEveryProductAtM16);
     RUN_TEST(testConv1dKernelBfpRawSplitsLongRunAtTheSegmentLimit);
+    RUN_TEST(testConv1dKernelBfpRawDilatedRunStopsAtTheInputGroupEnd);
     RUN_TEST(testConv1dKernelBfpRawWorstCaseM16xM16AllCodesAtTheEdges);
     RUN_TEST(testConv1dKernelBfpRawWorstCaseM16xM8SplitRunsAtTheEdges);
     RUN_TEST(testConv1dKernelBfpRawWorstCaseWithBiasAtTheFloor);

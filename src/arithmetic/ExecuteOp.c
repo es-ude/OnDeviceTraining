@@ -300,6 +300,19 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
              * operand is unpacked/staged into int32 scratch (Task 3-5 kernels
              * consume the unpacked-BFP scratch form only). */
             matches = false;
+            /* The integer forward into a BFP wire is float-free after the
+             * model's input quantization layer: a FLOAT32 operand here is a
+             * wiring bug, not a staging request. Arm A (FLOAT32 wires) and
+             * the backward (no bfpRawOut) keep staging. */
+            if (inputs[i]->quantization->type == FLOAT32 && spec->bfpRawOut &&
+                target->quantization->type == BFP) {
+                PRINT_ERROR("executeOp: FLOAT32-stored operand %zu in an integer BFP forward "
+                            "into a BFP wire -- the forward must see BFP operands only; "
+                            "quantize the model input with a Quantization layer "
+                            "(docs/conventions/arithmetic-bfp.md)",
+                            i);
+                exit(1);
+            }
             if (inputs[i]->quantization->type == FLOAT32 && spec->bfpStage[i] != NULL) {
                 const bfpQConfig_t *stage = spec->bfpStage[i];
                 size_t n = calcNumberOfElementsByTensor(inputs[i]);

@@ -1,29 +1,64 @@
-# Permitted float boundaries.
-#   <function>            traversal stops at this function (whole subtree allowed)
-#   <function> <symbol>   this one symbol is allowed inside this function
-# Input quantization layer: float samples enter the BFP domain here.
-convertFloatTensorToBfpTensor
-quantizeFloatBufferToBfpCodes
-packFloatBufferAsBfp
-# Loss-facing dequant: BFP logits leave the integer domain here.
-convertBfpTensorToFloat32Tensor
-convertBfpRawTensorToFloat32Tensor
-# Same-algorithm rule: the window geometry (per call) and the window slice
-# (one division per OUTPUT element, never per MAC) are shared with the FLOAT32
-# conv kernels and stay as they are.
-windowGeometry1dCalc
-windowSlice1dAt
-# AvgPool mean for a NON-power-of-two K: one roundedDivHalfAwayInt32 per
-# OUTPUT element, never per MAC (a power-of-two K -- HAR's 32 -- folds into
-# the raw exponent and skips it). Both sign branches call the helper.
-avgPool1dForwardKernelBfpRaw __aeabi_uidivmod
-# Same-algorithm rule: Linear (matmul) keeps the FLOAT32 arm's per-MAC index
-# math; calcElementIndexByIndices divides once per dimension per call, i.e.
-# per MAC on both arms. Kept as it is (the shared skeleton), counted here.
-# The entry covers every root that reaches the index math (LayerNorm and
-# Reduce too), not only Linear.
-calcElementIndexByIndices __aeabi_uidiv
-# Softmax steps 2-4 are unchanged: the i-exp core's z = -qW / ln2 is one
-# division per ELEMENT (never per MAC); the integer normalisation (step 5)
+# Permitted calls, each SCOPED to one root (<source.c>:<function> as the roots
+# file names it), so an entry never hides another root's hits.
+#   <root> <function>                  traversal stops at <function> under <root>
+#   <root> <function> <symbol> <count> exactly <count> call sites of <symbol> in
+#                                      <function> are allowed under <root>; more
+#                                      are hits, fewer make the entry stale
+#                                      (--strict fails on both)
+# Policy (integer-only BFP forward): no float/double/libm/int64 outside the two
+# float boundaries; no BFP-specific division per MAC. Allowed divisions run per
+# call, per group change, per output element, or are the index math the FLOAT32
+# arm shares (same-algorithm rule).
+
+# ---- Float boundaries --------------------------------------------------------
+# Input quantization layer: float samples enter the BFP domain. The layer's
+# dispatch derives its op key per call (rngFold) and copies through convertTensor;
+# the cell itself is the boundary.
+QuantizationLayer.c:quantizationForward rngFold __aeabi_uidivmod 2
+TensorConversion.c:convertFloatTensorToBfpTensor convertFloatTensorToBfpTensor
+# Loss-facing dequant: the softmax wire leaves the integer domain for the loss.
+TensorConversion.c:convertBfpTensorToFloat32Tensor convertBfpTensorToFloat32Tensor
+
+# ---- Conv1d ------------------------------------------------------------------
+# Two uidivmod at entry (inChannels % groups, outChannels % groups; per call,
+# the FLOAT32 kernel has them too); three uidiv = the inlined bfpGroupAt
+# recomputes (input, weight, bias), one only when an index leaves its group.
+Conv1d.c:forwardKernelBfpRaw conv1dKernelBfpRaw __aeabi_uidivmod 2
+Conv1d.c:forwardKernelBfpRaw conv1dKernelBfpRaw __aeabi_uidiv 3
+# Shared window geometry (per call) and window slice (per OUTPUT element).
+Conv1d.c:forwardKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
+Conv1d.c:forwardKernelBfpRaw windowSlice1dAt __aeabi_ldivmod 2
+
+# ---- MaxPool1d ---------------------------------------------------------------
+# Two bfpGroupAt recomputes (per group change); shared window math as above.
+MaxPool1d.c:maxPool1dForwardKernelBfpRaw maxPool1dForwardKernelBfpRaw __aeabi_uidiv 2
+MaxPool1d.c:maxPool1dForwardKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
+MaxPool1d.c:maxPool1dForwardKernelBfpRaw windowSlice1dAt __aeabi_ldivmod 2
+
+# ---- AvgPool1d ---------------------------------------------------------------
+# One bfpGroupAt recompute; the mean for a NON-power-of-two K is one
+# roundedDivHalfAwayInt32 per OUTPUT (both sign branches = 2 sites; HAR's K = 32
+# folds into the raw exponent and skips it); shared window math as above.
+AvgPool1d.c:avgPool1dForwardKernelBfpRaw avgPool1dForwardKernelBfpRaw __aeabi_uidiv 1
+AvgPool1d.c:avgPool1dForwardKernelBfpRaw avgPool1dForwardKernelBfpRaw __aeabi_uidivmod 2
+AvgPool1d.c:avgPool1dForwardKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
+AvgPool1d.c:avgPool1dForwardKernelBfpRaw windowSlice1dAt __aeabi_ldivmod 2
+
+# ---- Linear ------------------------------------------------------------------
+# Three bfpGroupAt recomputes (a, b, bias pre-pass). calcElementIndexByIndices
+# divides once per dimension per call, i.e. per MAC -- on the FLOAT32 arm too:
+# the shared index math the same-algorithm rule keeps.
+Linear.c:linearForwardKernelBfpRaw matmulBfpRawTensors __aeabi_uidiv 3
+Linear.c:linearForwardKernelBfpRaw calcElementIndexByIndices __aeabi_uidiv 1
+
+# ---- Softmax -----------------------------------------------------------------
+# Two bfpGroupAt recomputes (steps 1 and 2). Steps 2-4: the i-exp core's
+# z = -qW / ln2 is one division per ELEMENT; the integer normalisation (step 5)
 # divides by restoring shifts and calls no helper.
-bfpIExpQ __aeabi_idiv
+Softmax.c:softmaxForwardKernelBfp softmaxExpCodesBfp __aeabi_uidiv 2
+Softmax.c:softmaxForwardKernelBfp bfpIExpQ __aeabi_idiv 1
+
+# ---- Funnel (self root: executeOp's own body) --------------------------------
+# idx / groupSize in the ARITH_SYM_INT32 arm's grouped-ASYM zero-point hoist,
+# once per group, never on the BFP path.
+ExecuteOp.c:executeOp executeOp __aeabi_uidiv 1

@@ -11,10 +11,11 @@ double / libm / division / int64 / memcpy / clz helpers that the root can
 reach. On a core without FPU or divider each such call is real cost, so the
 goal is "no hits outside the allow-listed boundaries".
 
-  uv run tools/bfp-census/census.py [BUILD_DIR] [--strict] [-v]
+  uv run tools/bfp-census/census.py [BUILD_DIR] [--roots FILE] [--strict] [-v]
 
 Calls through function pointers (vtables, kernel callbacks) are not followed;
-list such targets as roots instead.
+list such targets as roots instead. Every allow-list entry is scoped to ONE
+root, so an entry for one root never hides another root's hits.
 """
 import argparse
 import os
@@ -42,6 +43,8 @@ CATEGORIES = [
     ("mem", re.compile(r"^(memcpy|memmove|memset|__aeabi_mem(cpy|move|set)\d*)$")),
     ("clz", re.compile(r"^__(clz|ctz|popcount)(si|di)2$")),
 ]
+# --strict gates these; mem and clz are reported only (per-call copies/zeroing).
+GATE_CATS = {"float", "double", "libm", "div", "int64"}
 CALL_RELOC = re.compile(r"R_ARM_THM_(CALL|JUMP24|JUMP11|JUMP19)\s+(\S+)")
 FUNC_HDR = re.compile(r"^[0-9a-f]+ <(.+)>:$")
 DIRECT_BRANCH = re.compile(r"\t(?:bl|b|b\.w|b\.n|bl\.w)\w*\s+[0-9a-f]+ <([^>+]+)(?:\+0x[0-9a-f]+)?>")
@@ -66,8 +69,31 @@ def self_test():
     bad = {k: (category(k), v) for k, v in expect.items() if category(k) != v}
     for k, (got, want) in bad.items():
         print(f"self-test FAIL {k}: got {got}, want {want}", file=sys.stderr)
-    print("self-test " + ("FAILED" if bad else "ok"))
-    return 1 if bad else 0
+    # Scoped allow-list: an entry for root A must not touch root B's sites, an
+    # excess site over the count stays a hit, and a missing site is stale.
+    allow = {"A.c:a": {"sym": {("f", "__aeabi_uidiv"): 2}, "stop": set()}}
+    sites = {("x.c", "f"): {("div", "__aeabi_uidiv"): 3}}
+    hits_a, stale_a = apply_allow(sites, allow.get("A.c:a"), set())
+    hits_b, _ = apply_allow(sites, allow.get("B.c:b"), set())
+    _, stale_c = apply_allow({}, allow.get("A.c:a"), set())
+    scoped_ok = (hits_a == {("x.c", "f"): {("div", "__aeabi_uidiv"): 1}} and not stale_a
+                 and hits_b == sites and stale_c == ["f __aeabi_uidiv: allowed 2, found 0"])
+    if not scoped_ok:
+        print(f"self-test FAIL scoped allow-list: {hits_a} {stale_a} {hits_b} {stale_c}",
+              file=sys.stderr)
+    # Self-only root: its own float call is a hit, its callees' are not.
+    graph = {("d.c", "disp"): ["__aeabi_fmul", "armF"], ("d.c", "armF"): ["__aeabi_fadd"]}
+    res = lambda src, sym: (src, sym) if (src, sym) in graph else None
+    own, _, _ = walk_root(graph, [("d.c", "disp")], set(), True, res)
+    full, _, _ = walk_root(graph, [("d.c", "disp")], set(), False, res)
+    own_hits, _ = apply_allow(own, None, set())
+    self_ok = (own_hits == {("d.c", "disp"): {("float", "__aeabi_fmul"): 1}}
+               and ("d.c", "armF") in full)
+    if not self_ok:
+        print(f"self-test FAIL self-only root: {own_hits} {dict(full)}", file=sys.stderr)
+    failed = bool(bad) or not scoped_ok or not self_ok
+    print("self-test " + ("FAILED" if failed else "ok"))
+    return 1 if failed else 0
 
 
 def find_objdump():
@@ -125,13 +151,97 @@ def base_name(sym):
     return re.sub(r"(\.(constprop|isra|part|cold|lto_priv)\.?\d*)+$", "", sym)
 
 
+def read_allow(path):
+    """{root: {"stop": {function}, "sym": {(function, symbol): count}}}.
+
+    Line forms (root = <source.c>:<function>, as the roots file names it):
+      <root> <function>                  traversal stops at <function> under <root>
+      <root> <function> <symbol> <count> <count> call sites of <symbol> inside
+                                         <function> are allowed under <root>
+    """
+    allow = defaultdict(lambda: {"stop": set(), "sym": {}})
+    for parts in read_pairs(path):
+        if ":" not in parts[0] or len(parts) not in (2, 4):
+            sys.exit(f"census: bad allow-list line (want '<src.c>:<root> <function> "
+                     f"[<symbol> <count>]'): {' '.join(parts)}")
+        if len(parts) == 2:
+            allow[parts[0]]["stop"].add(parts[1])
+        else:
+            allow[parts[0]]["sym"][(parts[1], parts[2])] = int(parts[3])
+    return allow
+
+
+def walk_root(local, seeds, stops, self_only, resolve):
+    """Collect the call sites a root reaches: {node: {(cat, sym): n}}, plus the
+    nodes entered and the base names reached (stops included).
+
+    self_only: count the seeds' own call sites and follow nothing -- for the
+    dtype dispatchers, whose callees span every dtype's arm.
+    """
+    seen, reached, stack = set(), set(), list(seeds)
+    sites = defaultdict(lambda: defaultdict(int))
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        if base_name(node[1]) in stops:
+            reached.add(base_name(node[1]))
+            continue
+        seen.add(node)
+        reached.add(base_name(node[1]))
+        for callee in local[node]:
+            cat = category(callee)
+            if cat:
+                sites[node][(cat, callee)] += 1
+                continue
+            if self_only:
+                continue
+            nxt = resolve(node[0], callee)
+            if nxt:
+                stack.append(nxt)
+    return sites, seen, reached
+
+
+def apply_allow(sites, entry, reached):
+    """Split one root's call sites into hits and stale entries.
+
+    sites: {node: {(cat, sym): n}}; entry: that root's allow-list (or None);
+    reached: base names of the functions the walk entered or stopped at.
+    """
+    entry = entry or {"stop": set(), "sym": {}}
+    per_key = defaultdict(int)
+    for node, fnhits in sites.items():
+        for (_, sym), n in fnhits.items():
+            per_key[(base_name(node[1]), sym)] += n
+    stale = []
+    for (fn, sym), allowed in sorted(entry["sym"].items()):
+        if per_key.get((fn, sym), 0) < allowed:
+            stale.append(f"{fn} {sym}: allowed {allowed}, found {per_key.get((fn, sym), 0)}")
+    for fn in sorted(entry["stop"] - reached):
+        stale.append(f"{fn}: stop entry never reached")
+    budget = dict(entry["sym"])
+    hits = defaultdict(lambda: defaultdict(int))
+    for node in sorted(sites):
+        for (cat, sym), n in sorted(sites[node].items()):
+            key = (base_name(node[1]), sym)
+            take = min(n, budget.get(key, 0))
+            if key in budget:
+                budget[key] -= take
+            if n - take:
+                hits[node][(cat, sym)] += n - take
+    return {k: dict(v) for k, v in hits.items()}, stale
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("build_dir", nargs="?", default="build/arm_cross_m0plus")
-    ap.add_argument("--strict", action="store_true", help="exit 1 on any non-allow-listed hit")
+    ap.add_argument("--strict", action="store_true",
+                    help="exit 1 on a gated hit, a missing root or a stale allow-list entry")
     ap.add_argument("-v", "--verbose", action="store_true", help="list every hit function per root")
     ap.add_argument("--self-test", action="store_true", help="check the symbol classifier and exit")
-    ap.add_argument("--roots", default=str(HERE / "forward_roots.txt"))
+    ap.add_argument("--roots", default=str(HERE / "har_forward_roots.txt"),
+                    help="roots file (default: the HAR forward gate set; "
+                         "forward_roots.txt = every BFP forward kernel)")
     ap.add_argument("--allow", default=str(HERE / "allowlist.txt"))
     args = ap.parse_args()
 
@@ -161,41 +271,30 @@ def main():
         unresolved.setdefault(sym, "ambiguous" if cands else "undefined")
         return None
 
-    allow_stop, allow_sym = set(), set()
-    for parts in read_pairs(Path(args.allow)):
-        if len(parts) == 1:
-            allow_stop.add(parts[0])
-        else:
-            allow_sym.add((parts[0], parts[1]))
+    allow = read_allow(Path(args.allow))
 
-    rows, strict_fail = [], False
+    rows, strict_fail, stale_all = [], False, []
     for parts in read_pairs(Path(args.roots)):
         src, name = parts[0], parts[1]
+        self_only = parts[2:] == ["self"]
+        if parts[2:] and not self_only:
+            sys.exit(f"census: bad root line (want '<src.c> <function> [self]'): {' '.join(parts)}")
+        label = f"{src}:{name}" + (" (self)" if self_only else "")
+        entry = allow.get(f"{src}:{name}")
+        stops = entry["stop"] if entry else set()
         seeds = [k for k in local if k[0] == src and base_name(k[1]) == name]
         if not seeds:
-            print(f"census: root {src}:{name} not found in {args.build_dir}", file=sys.stderr)
+            print(f"census: root {label} not found in {args.build_dir}", file=sys.stderr)
             strict_fail = True
             continue
-        seen, stack, hits = set(), list(seeds), defaultdict(lambda: defaultdict(int))
-        while stack:
-            node = stack.pop()
-            if node in seen or base_name(node[1]) in allow_stop:
-                continue
-            seen.add(node)
-            for callee in local[node]:
-                cat = category(callee)
-                if cat:
-                    if (base_name(node[1]), callee) not in allow_sym:
-                        hits[node][(cat, callee)] += 1
-                    continue
-                nxt = resolve(node[0], callee)
-                if nxt:
-                    stack.append(nxt)
+        sites, seen, reached = walk_root(local, seeds, stops, self_only, resolve)
+        hits, stale = apply_allow(sites, entry, reached)
+        stale_all += [f"{label}: {s}" for s in stale]
         totals = defaultdict(int)
         for fnhits in hits.values():
             for (cat, _), n in fnhits.items():
                 totals[cat] += n
-        rows.append((f"{src}:{name}", len(seen), totals, hits))
+        rows.append((label, len(seen), totals, hits))
 
     cats = [c for c, _ in CATEGORIES]
     w = max([len(r[0]) for r in rows] + [10])
@@ -224,9 +323,13 @@ def main():
     for sym, why in sorted(unresolved.items()):
         print(f"census: warning: callee {sym} is {why}; not followed", file=sys.stderr)
     n_hit = sum(sum(h.values()) for h in unique.values())
-    print(f"\ntotal non-allow-listed hit call sites (unique): {n_hit}")
+    n_gate = sum(n for h in unique.values() for (c, _), n in h.items() if c in GATE_CATS)
+    print(f"\ntotal non-allow-listed hit call sites (unique): {n_hit} "
+          f"(gated {'/'.join(c for c, _ in CATEGORIES if c in GATE_CATS)}: {n_gate})")
+    for line in stale_all:
+        print(f"census: stale allow-list entry: {line}", file=sys.stderr)
 
-    if args.strict and (n_hit or strict_fail):
+    if args.strict and (n_gate or strict_fail or stale_all):
         return 1
     return 0
 

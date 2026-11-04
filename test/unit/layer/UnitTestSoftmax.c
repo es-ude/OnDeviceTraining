@@ -1266,35 +1266,22 @@ void unitTestSoftmaxForwardBfpCoarseSaturation(void) {
     TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpCsOutExponentsTrunc, gotExps, 2);
 }
 
-/* R-N1 staging: a FLOAT32-stored input is staged per-tensor at the ANCHOR
- * widths -- the layer's own produced-wire config (outputQ, m = 6 here), not
- * the operand's width and not a hardcoded 8. The generator asserts an m=8
- * staging changes these codes, so this test pins BOTH the .bfpStage wiring
- * AND the anchor widths. */
-void unitTestSoftmaxForwardBfpStagedWidths(void) {
+/* The integer forward's anchor is a BFP produced wire, so a FLOAT32-stored
+ * input never reaches R-N1's staging any more: the funnel rejects float in a
+ * forward into a BFP wire (the model input goes through a Quantization
+ * layer). */
+static void softmaxForwardBfpFloat32InputBody(void) {
     tensor_t *in = buildSoftmaxWire1D(8, quantizationInitFloat());
     tensorFillFromFloatBuffer(in, (float *)kSmBfpBXValues, kSmBfpBXValues_len);
     tensor_t *out = buildSmBfpOutputWire((uint8_t)kSmBfpBOutMantissaBits);
-
     layerQuant_t lq;
     layerQuantInitUniform(&lq, out->quantization);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
-    TEST_ASSERT_EQUAL_INT(ARITH_BFP, softmaxLayer->config->softmax->forwardMath.type);
-
     layerFunctions[SOFTMAX].forward(softmaxLayer, in, out, NULL);
+}
 
-    int32_t got[8];
-    uint8_t gotExps[2];
-    bfpQConfig_t *outQC = out->quantization->qConfig;
-    unpackSignExtend(out->data, outQC->mantissaBits, 0, got, 8);
-    memcpy(gotExps, outQC->exponents, outQC->numGroups);
-
-    freeSoftmaxLayer(softmaxLayer);
-    freeTensor(out);
-    freeTensor(in);
-
-    TEST_ASSERT_EQUAL_INT32_ARRAY(kSmBfpBOutCodes, got, 8);
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpBOutExponents, gotExps, 2);
+void unitTestSoftmaxForwardBfpRejectsAFloat32Input(void) {
+    ASSERT_EXITS_WITH_FAILURE(softmaxForwardBfpFloat32InputBody());
 }
 
 /* The forward's staging width anchor is the produced-wire config: a pinned
@@ -2175,7 +2162,7 @@ int main() {
     RUN_TEST(testSoftmaxBfpBackwardRecomputesTheForwardsSoftmaxUnderSrShifts);
     RUN_TEST(unitTestSoftmaxForwardBfpCoarseNegativeBlock);
     RUN_TEST(unitTestSoftmaxForwardBfpCoarseSaturation);
-    RUN_TEST(unitTestSoftmaxForwardBfpStagedWidths);
+    RUN_TEST(unitTestSoftmaxForwardBfpRejectsAFloat32Input);
     RUN_TEST(testSoftmaxForwardBfpRequiresBfpOutputQ);
 
     RUN_TEST(unitTestSoftmaxBackwardBfpNative);

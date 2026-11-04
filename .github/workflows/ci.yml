@@ -856,6 +856,15 @@ jobs:
             exit 1
           fi
 
+      - name: Assert cmake >= 3.25 (CMakePresets.json schema 6)
+        run: |
+          cmake --version | head -1
+          v=$(cmake --version | head -1 | awk '{print $3}')
+          if [ "$(printf '%s\n' 3.25 "$v" | sort -V | head -1)" != "3.25" ]; then
+            echo "::error::cmake on PATH is ${v}, need >= 3.25: CMakePresets.json uses schema version 6, which older cmake rejects before configuring."
+            exit 1
+          fi
+
       - name: Configure (arm_cross preset)
         run: |
           export PATH="$HOME/arm-gnu-toolchain/bin:$PATH"
@@ -896,6 +905,17 @@ jobs:
           major=$(arm-none-eabi-gcc -dumpversion | cut -d. -f1)
           if [ "$major" != "10" ]; then
             echo "::error::apt arm-none-eabi-gcc major is ${major}, expected 10 (the pre-C23 portability floor this job exists to guard). If the runner image bumped the package, re-pin the floor deliberately -- do not just widen this check."
+            exit 1
+          fi
+
+      # Ubuntu 22.04's apt cmake is 3.22, so this job needs a newer runner
+      # cmake winning PATH; fail fast with a clear message if it does not.
+      - name: Assert cmake >= 3.25 (CMakePresets.json schema 6)
+        run: |
+          cmake --version | head -1
+          v=$(cmake --version | head -1 | awk '{print $3}')
+          if [ "$(printf '%s\n' 3.25 "$v" | sort -V | head -1)" != "3.25" ]; then
+            echo "::error::cmake on PATH is ${v}, need >= 3.25: CMakePresets.json uses schema version 6, which older cmake rejects before configuring."
             exit 1
           fi
 

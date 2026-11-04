@@ -1532,6 +1532,50 @@ void testBfpGroupAtMatchesBfpGroupOfOnStridedWalk(void) {
     }
 }
 
+/* bfpTapsBelow: how many taps idx, idx + stride, ... (at most cap) stay below
+ * a group range's exclusive end -- the run a MAC loop may take without a
+ * group lookup. end is exclusive; idx is always inside the range. */
+void testBfpTapsBelowUnitStride(void) {
+    TEST_ASSERT_EQUAL_size_t(5, bfpTapsBelow(3, 8, 1, 100));
+    TEST_ASSERT_EQUAL_size_t(2, bfpTapsBelow(3, 8, 1, 2));
+    TEST_ASSERT_EQUAL_size_t(1, bfpTapsBelow(7, 8, 1, 100));
+    TEST_ASSERT_EQUAL_size_t(0, bfpTapsBelow(3, 8, 1, 0));
+}
+
+void testBfpTapsBelowDilatedStride(void) {
+    /* taps 0, 2, 4 < 5 */
+    TEST_ASSERT_EQUAL_size_t(3, bfpTapsBelow(0, 5, 2, 100));
+    /* taps 0, 2 < 4; tap 4 is the next group's first element */
+    TEST_ASSERT_EQUAL_size_t(2, bfpTapsBelow(0, 4, 2, 100));
+    TEST_ASSERT_EQUAL_size_t(1, bfpTapsBelow(0, 4, 2, 1));
+    TEST_ASSERT_EQUAL_size_t(1, bfpTapsBelow(9, 10, 3, 100));
+    TEST_ASSERT_EQUAL_size_t(0, bfpTapsBelow(0, 4, 2, 0));
+}
+
+/* The per-tensor sentinel range ends at SIZE_MAX: the count is the cap,
+ * with no overflow on any stride. */
+void testBfpTapsBelowPerTensorSentinelReturnsCap(void) {
+    TEST_ASSERT_EQUAL_size_t(7, bfpTapsBelow(5, SIZE_MAX, 1, 7));
+    TEST_ASSERT_EQUAL_size_t(7, bfpTapsBelow(5, SIZE_MAX, 3, 7));
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX - 5, bfpTapsBelow(5, SIZE_MAX, 1, SIZE_MAX));
+}
+
+void testBfpTapsBelowMatchesTapByTapCount(void) {
+    for (size_t stride = 1; stride <= 5; stride++) {
+        for (size_t idx = 0; idx < 12; idx++) {
+            for (size_t end = idx + 1; end <= 24; end++) {
+                for (size_t cap = 0; cap <= 10; cap++) {
+                    size_t n = 0;
+                    while (n < cap && idx + n * stride < end) {
+                        n++;
+                    }
+                    TEST_ASSERT_EQUAL_size_t(n, bfpTapsBelow(idx, end, stride, cap));
+                }
+            }
+        }
+    }
+}
+
 /* Integer fold helpers (arithmetic-bfp §13 "The integer fold"): a partial
  * enters the int32 accumulator as partial * 2^-k. k > 0 rounds HALF_AWAY in
  * the overflow-safe magnitude form, k == 0 is the identity, k < 0 is an
@@ -2946,6 +2990,10 @@ int main(void) {
     RUN_TEST(testBfpGroupAtLastGroupEndsAtElementCount);
     RUN_TEST(testBfpGroupAtPerTensorNeverRecomputes);
     RUN_TEST(testBfpGroupAtMatchesBfpGroupOfOnStridedWalk);
+    RUN_TEST(testBfpTapsBelowUnitStride);
+    RUN_TEST(testBfpTapsBelowDilatedStride);
+    RUN_TEST(testBfpTapsBelowPerTensorSentinelReturnsCap);
+    RUN_TEST(testBfpTapsBelowMatchesTapByTapCount);
     RUN_TEST(testBfpShrHalfAwayRoundsHalfAwayFromZero);
     RUN_TEST(testBfpShrHalfAwayInt32Extremes);
     RUN_TEST(testBfpAlignPartialLeftShiftIsExactAndRightShiftRounds);

@@ -47,6 +47,27 @@ static inline size_t bfpGroupAt(bfpGroupRange_t *r, const bfpQConfig_t *qC, size
     return r->group;
 }
 
+/*! Taps idx, idx + stride, ... (at most `cap`) that stay below `end`, the
+ * exclusive end of the group range holding idx: the run a MAC loop may take
+ * with one bfpGroupAt per operand instead of one per tap. No division (an M0+
+ * has none in hardware): unit stride is one subtraction, a dilated stride
+ * walks the run. Safe on the per-tensor sentinel end SIZE_MAX. */
+static inline size_t bfpTapsBelow(size_t idx, size_t end, size_t stride, size_t cap) {
+    size_t span = end - idx;
+    if (stride == 1) {
+        return span < cap ? span : cap;
+    }
+    size_t n = 0;
+    while (n < cap) {
+        n++;
+        if (span <= stride) {
+            break;
+        }
+        span -= stride;
+    }
+    return n;
+}
+
 /*! Max products one int32 block partial may accumulate: INT32_MAX >> (ma+mb-2).
  * Mantissas are in [-2^(m-1), 2^(m-1)-1], so |product| <= 2^(ma+mb-2) and
  * INT32_MAX >> (ma+mb-2) products fit int32 -- the kernels' no-int64 rule

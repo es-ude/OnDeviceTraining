@@ -1,0 +1,9 @@
+# Permitted float boundaries.
+#   <function>            traversal stops at this function (whole subtree allowed)
+#   <function> <symbol>   this one symbol is allowed inside this function
+# Input quantization layer: float samples enter the BFP domain here.
+convertFloatTensorToBfpTensor
+quantizeFloatBufferToBfpCodes
+packFloatBufferAsBfp
+# Loss-facing dequant: BFP logits leave the integer domain here.
+convertBfpTensorToFloat32Tensor

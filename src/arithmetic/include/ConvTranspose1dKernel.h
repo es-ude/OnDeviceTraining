@@ -117,9 +117,10 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
  *  sign-extended mantissa codes, ->quantization a live bfpQConfig_t), output
  *  is raw FLOAT32, the kernel never rounds. The reduction walks taps OUTER /
  *  icOffset INNER; BOTH operands' storage indices map to group ids per step
- *  (bfpGroupAt -- per-element lookup, tap hops make both index sequences
- *  non-contiguous; it divides only when an index leaves the cached current
- *  group); when EITHER id changes, the finished segment's int32
+ *  (a bfpGroupCursor_t per operand, anchored per tap through bfpGroupAt and
+ *  stepped by the fixed channel stride with no division -- the channel walk
+ *  usually changes group on every MAC); when EITHER id changes, the finished
+ *  segment's int32
  *  partial folds into the float accumulator via bfpLdexpInt32, plus a tail fold per
  *  output element. `bias` is seeded per output element (value-seed
  *  dequantized to float BEFORE the reduction -- no separate bias pass,

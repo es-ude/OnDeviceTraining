@@ -1578,6 +1578,43 @@ void testBfpTapsBelowMatchesTapByTapCount(void) {
     }
 }
 
+/* bfpGroupCursorStep walks idx, idx + stride, ... and must report bfpGroupOf
+ * of every visited index without a division: strides below, equal to, above
+ * and at multiples of the group size, group size 1, a carry on the very first
+ * step, and the per-tensor sentinel. */
+void testBfpGroupCursorStepMatchesBfpGroupOf(void) {
+    for (size_t gs = 0; gs <= 7; gs++) {
+        bfpQConfig_t qc = groupAtQc;
+        qc.groupSize = gs;
+        qc.numGroups = gs == 0 ? 1 : 1000;
+        for (size_t stride = 0; stride <= 23; stride++) {
+            bfpGroupStep_t step = bfpGroupStepOf(&qc, stride);
+            for (size_t start = 0; start < 20; start++) {
+                bfpGroupRange_t r = {0};
+                bfpGroupCursor_t c = bfpGroupCursorAt(&r, &qc, start);
+                for (size_t k = 0; k < 30; k++) {
+                    TEST_ASSERT_EQUAL_size_t(bfpGroupOf(&qc, start + k * stride), c.group);
+                    bfpGroupCursorStep(&c, &step);
+                }
+            }
+        }
+    }
+}
+
+/* The cursor anchor reuses the range cache: an anchor inside the cached
+ * group trusts it (a poisoned group id proves no recompute), and the offset
+ * is measured from the cached group's start. */
+void testBfpGroupCursorAtReusesTheRangeCache(void) {
+    bfpGroupRange_t r = {0};
+    bfpGroupCursor_t c = bfpGroupCursorAt(&r, &groupAtQc, 5);
+    TEST_ASSERT_EQUAL_size_t(1, c.group);
+    TEST_ASSERT_EQUAL_size_t(1, c.offset);
+    r.group = 9;
+    c = bfpGroupCursorAt(&r, &groupAtQc, 7);
+    TEST_ASSERT_EQUAL_size_t(9, c.group);
+    TEST_ASSERT_EQUAL_size_t(3, c.offset);
+}
+
 /* bfpLdexpInt32 replaces ldexpf((float)m, e) in the BFP float-accumulator
  * folds, so it must equal it BIT FOR BIT for every int32 m and every int e --
  * the multiply fast path, the subnormal / underflow / overflow fallback and
@@ -3070,6 +3107,8 @@ int main(void) {
     RUN_TEST(testBfpTapsBelowDilatedStride);
     RUN_TEST(testBfpTapsBelowPerTensorSentinelReturnsCap);
     RUN_TEST(testBfpTapsBelowMatchesTapByTapCount);
+    RUN_TEST(testBfpGroupCursorStepMatchesBfpGroupOf);
+    RUN_TEST(testBfpGroupCursorAtReusesTheRangeCache);
     RUN_TEST(testBfpLdexpInt32MatchesLdexpfBitForBit);
     RUN_TEST(testBfpLdexpInt32Boundaries);
     RUN_TEST(testBfpShrHalfAwayRoundsHalfAwayFromZero);

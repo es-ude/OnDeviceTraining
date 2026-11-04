@@ -49,6 +49,57 @@ static inline size_t bfpGroupAt(bfpGroupRange_t *r, const bfpQConfig_t *qC, size
     return r->group;
 }
 
+/*! A fixed index stride split into whole groups plus a remainder, so a walk
+ * idx, idx + stride, ... can track its group without dividing per element
+ * (bfpGroupCursorStep). Use it when the stride exceeds or hops across groups,
+ * e.g. a channel-inner gather, where bfpGroupAt would divide on every element.
+ * `span` is the group size, SIZE_MAX for the per-tensor sentinel (the carry
+ * then never fires and the group stays 0). */
+typedef struct {
+    size_t groups;
+    size_t offset;
+    size_t span;
+} bfpGroupStep_t;
+
+/*! Group id of the current walk index plus its offset in that group,
+ * offset < span. */
+typedef struct {
+    size_t group;
+    size_t offset;
+} bfpGroupCursor_t;
+
+/*! Split `stride` once per call (one division, outside the MAC loops). */
+static inline bfpGroupStep_t bfpGroupStepOf(const bfpQConfig_t *qC, size_t stride) {
+    bfpGroupStep_t s = {0, 0, SIZE_MAX};
+    if (qC->groupSize != 0) {
+        s.groups = stride / qC->groupSize;
+        s.offset = stride % qC->groupSize;
+        s.span = qC->groupSize;
+    }
+    return s;
+}
+
+/*! Anchor a walk at `idx` through the range cache `r`: walk starts that move
+ * by less than a group keep hitting it, so anchoring rarely divides. */
+static inline bfpGroupCursor_t bfpGroupCursorAt(bfpGroupRange_t *r, const bfpQConfig_t *qC,
+                                                size_t idx) {
+    bfpGroupCursor_t c;
+    c.group = bfpGroupAt(r, qC, idx);
+    c.offset = idx - r->start;
+    return c;
+}
+
+/*! Advance the cursor by the stride of `s`. Both offsets are below span, so
+ * their sum is below 2 * span and one conditional carry is exact. */
+static inline void bfpGroupCursorStep(bfpGroupCursor_t *c, const bfpGroupStep_t *s) {
+    c->group += s->groups;
+    c->offset += s->offset;
+    if (c->offset >= s->span) {
+        c->offset -= s->span;
+        c->group++;
+    }
+}
+
 /*! Taps idx, idx + stride, ... (at most `cap`) that stay below `end`, the
  * exclusive end of the group range holding idx: the run a MAC loop may take
  * with one bfpGroupAt per operand instead of one per tap. No division (an M0+

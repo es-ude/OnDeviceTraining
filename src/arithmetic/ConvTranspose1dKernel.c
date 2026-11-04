@@ -622,8 +622,13 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
 
     int32_t inExpBias = bfpExponentBias(inQC);
     int32_t wExpBias = bfpExponentBias(wQC);
+    /* The range caches only anchor each tap's channel walk: anchors move by a
+     * few positions per tap, so they rarely leave the cached group. */
     bfpGroupRange_t inRange = {0};
     bfpGroupRange_t wRange = {0};
+    /* Per-MAC index strides of the channel walk, split once per call. */
+    bfpGroupStep_t inStep = bfpGroupStepOf(inQC, inputLength);
+    bfpGroupStep_t wStep = bfpGroupStepOf(wQC, outChPerGroup * kernelSize);
 
     /* Per-output-channel bias seed, dequantized to float BEFORE the reduction
      * (value-seed, headroom-exempt -- it never touches the int32 partial).
@@ -666,20 +671,27 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
                     size_t currentWGroup = SIZE_MAX;
 
                     /* Taps OUTER, icOffset INNER (the BFP D9 normative reduction
-                     * order the gold emulation mirrors). Per-element group
-                     * lookup on BOTH operands: tap hops make both index
-                     * sequences non-contiguous, so no run length could be
-                     * precomputed (the SYM grouped kernels' gap rationale);
-                     * bfpGroupAt divides only when an index leaves the current
-                     * group's range. */
+                     * order the gold emulation mirrors). Per-element group on
+                     * BOTH operands: the channel walk hops by a fixed stride
+                     * per operand, typically past a whole wire block, so the
+                     * group changes on nearly every MAC. A cursor per operand
+                     * steps the group by that stride with no division; it is
+                     * anchored once per tap. */
                     for (size_t t = 0; t < tapCount; t++) {
+                        bfpGroupCursor_t inCur = bfpGroupCursorAt(
+                            &inRange, inQC, (b * inChannels + inLo) * inputLength + taps[t].inPos);
+                        bfpGroupCursor_t wCur = bfpGroupCursorAt(
+                            &wRange, wQC,
+                            (inLo * outChPerGroup + ocOffset) * kernelSize + taps[t].kernelIdx);
                         for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
                             size_t ic = inLo + icOffset;
                             size_t inIdx = (b * inChannels + ic) * inputLength + taps[t].inPos;
                             size_t wIdx =
                                 (ic * outChPerGroup + ocOffset) * kernelSize + taps[t].kernelIdx;
-                            size_t inGroup = bfpGroupAt(&inRange, inQC, inIdx);
-                            size_t wGroup = bfpGroupAt(&wRange, wQC, wIdx);
+                            size_t inGroup = inCur.group;
+                            size_t wGroup = wCur.group;
+                            bfpGroupCursorStep(&inCur, &inStep);
+                            bfpGroupCursorStep(&wCur, &wStep);
 
                             if (currentWGroup == SIZE_MAX) {
                                 currentInGroup = inGroup;

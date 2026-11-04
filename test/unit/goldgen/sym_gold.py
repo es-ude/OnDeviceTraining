@@ -1437,6 +1437,84 @@ def bfp_raw_dequant_f32(mant, exps, raw_group_size):
     return [float(np.ldexp(np.float32(v), np.int32(exps[i // gsz]))) for i, v in enumerate(mant)]
 
 
+def linear_bfp_raw_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc, bias_codes, bias_exp,
+                       bias_qc, batch, out_features, in_features, raw_group_size=0):
+    """matmulBfpRawTensors' emulation for the Linear forward y = x W^T + b
+    (x row-major [batch, in_features], W STORED [out_features, in_features]).
+    Same return dict as conv1d_bfp_raw_ref.
+
+    Rule (section 13, Linear): E_top(b, o) = group-max exponent of input row b
+    + group-max exponent of weight row o, max'ed with the bias exponent of o;
+    E_acc(target group) = max E_top over the outputs it covers + g (N =
+    in_features). Per output (row-major): acc = align(bias, E_acc - E_bias);
+    one int partial per same-exponent segment along i, folded on EITHER
+    operand's group change AND at bfp_segment_limit products; tail fold.
+    HALF_AWAY at every right shift, never SR."""
+    x_bias = 2 ** (x_qc["exponent_bits"] - 1) - 1
+    w_bias = 2 ** (w_qc["exponent_bits"] - 1) - 1
+    limit = bfp_segment_limit(x_qc["mantissa_bits"], w_qc["mantissa_bits"])
+    g = bfp_fold_guard_bits(in_features, x_qc["mantissa_bits"], w_qc["mantissa_bits"],
+                            bias_qc["mantissa_bits"] if bias_codes is not None else 0)
+    x_row_max = [_bfp_row_group_max(x_exp, x_bias, x_qc["group_size"], b * in_features,
+                                    in_features) for b in range(batch)]
+    w_row_max = [_bfp_row_group_max(w_exp, w_bias, w_qc["group_size"], o * in_features,
+                                    in_features) for o in range(out_features)]
+    bias_e = None
+    if bias_codes is not None:
+        bb = 2 ** (bias_qc["exponent_bits"] - 1) - 1
+        bias_e = [bias_exp[_bfp_group_of(o, bias_qc["group_size"])] - bb
+                  for o in range(out_features)]
+
+    def top(b, o):
+        e = x_row_max[b] + w_row_max[o]
+        return max(e, bias_e[o]) if bias_e is not None else e
+
+    n_out = batch * out_features
+    gsz = n_out if raw_group_size == 0 else raw_group_size
+    if n_out == 0:
+        return dict(mant=[], exps=[0], exact=[], g=g, bound=[])
+    assert n_out % gsz == 0, "linear_bfp_raw_ref: raw_group_size must divide the output"
+    exps = [max(top(*divmod(o, out_features)) for o in range(t * gsz, (t + 1) * gsz)) + g
+            for t in range(n_out // gsz)]
+
+    mant, exact, bound = [], [], []
+    for b in range(batch):
+        for o in range(out_features):
+            e_acc = exps[(b * out_features + o) // gsz]
+            acc, ex, segments = 0, 0.0, 0
+            if bias_codes is not None:
+                acc = bfp_align_partial(bias_codes[o], e_acc - bias_e[o])
+                ex = bias_codes[o] * (2.0 ** bias_e[o])
+                segments = 1
+            partial, seg_count, cur = 0, 0, None
+            for i in range(in_features):
+                x_idx, w_idx = b * in_features + i, o * in_features + i
+                key = (_bfp_group_of(x_idx, x_qc["group_size"]),
+                       _bfp_group_of(w_idx, w_qc["group_size"]))
+                if cur is not None and (key != cur or seg_count == limit):
+                    e_seg = (x_exp[cur[0]] - x_bias) + (w_exp[cur[1]] - w_bias)
+                    acc += bfp_align_partial(partial, e_acc - e_seg)
+                    segments += 1
+                    partial, seg_count = 0, 0
+                cur = key
+                prod = x_codes[x_idx] * w_codes[w_idx]
+                partial += prod
+                seg_count += 1
+                assert abs(partial) <= _INT32_MAX, "linear_bfp_raw_ref: partial left int32"
+                ex += prod * (2.0 ** ((x_exp[key[0]] - x_bias) + (w_exp[key[1]] - w_bias)))
+            if cur is not None:
+                e_seg = (x_exp[cur[0]] - x_bias) + (w_exp[cur[1]] - w_bias)
+                acc += bfp_align_partial(partial, e_acc - e_seg)
+                segments += 1
+            assert _INT32_MIN <= acc <= _INT32_MAX, "linear_bfp_raw_ref: acc left int32"
+            mant.append(acc)
+            exact.append(ex)
+            bound.append(0.5 * (segments + 1) * (2.0 ** e_acc))
+    for v, e_acc, ex, bd in zip(mant, (exps[i // gsz] for i in range(n_out)), exact, bound):
+        assert abs(v * (2.0 ** e_acc) - ex) <= bd, "linear_bfp_raw_ref: fold error above its bound"
+    return dict(mant=mant, exps=exps, exact=exact, g=g, bound=bound)
+
+
 # ---- BFP epic PR2 Task 5: gather-formulated ConvT1d BFP reference (D9),
 # convTranspose1dKernelBfpGather's kernel emulation. Output-centric: every
 # output element is ONE dot product over its contributors (convT1d_taps_at),

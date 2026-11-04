@@ -189,6 +189,8 @@ add_elastic_ai_unit_test(
         RNG
         Common
         odt_test_death
+        odt_test_bfp_raw_fixture
+        m
 )
 add_dependencies(UnitTestMatmul generate_expected_group_matmul generate_expected_bfp_matmul)
 target_include_directories(UnitTestMatmul PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

@@ -1,8 +1,10 @@
+#include <math.h>
 #include <stdbool.h>
 #include <string.h>
 
 #include "Arithmetic.h"
 #include "BfpKernelSupport.h"
+#include "BfpRawFixture.h"
 #include "DeathTest.h"
 #include "Matmul.h"
 #include "RNG.h"
@@ -1979,6 +1981,452 @@ void testMatmulBfpDxPowerOfTwoBitIdenticalToGroupedSym(void) {
     }
 }
 
+/* ---- Integer-only forward (arithmetic-bfp.md §13): matmulBfpRawTensors ----
+ *
+ * The Linear forward's integer fold, operands in the funnel's unpacked-BFP
+ * scratch form, output BFP_RAW. Every reference below is computed HERE from
+ * the §13 definition in int64 (division + remainder for HALF_AWAY, the guard
+ * by its defining inequality), never from the kernel's bit forms. `a` is
+ * [rows, k] row-major, the weight is STORED [cols, k] and handed to the
+ * kernel as the transposed [k, cols] view (Linear.c's transpose dance). */
+
+#define LIN_RAW_MAX_K 2400
+#define LIN_RAW_MAX_OUT 16
+
+typedef struct linRawCase {
+    size_t rows, cols, k;
+    const int32_t *a;
+    const uint8_t *aExps;
+    size_t aGroups, aGs;
+    uint8_t ma;
+    const int32_t *w;
+    const uint8_t *wExps;
+    size_t wGroups, wGs;
+    uint8_t mw;
+    const int32_t *bias; /* NULL = no bias */
+    const uint8_t *biasExps;
+    size_t biasGroups, biasGs;
+    uint8_t mBias;
+    size_t rawGroups, rawGs;
+} linRawCase_t;
+
+typedef struct linRawRef {
+    int32_t mant[LIN_RAW_MAX_OUT];
+    int16_t exps[LIN_RAW_MAX_OUT];
+    double exact[LIN_RAW_MAX_OUT];
+    double bound[LIN_RAW_MAX_OUT]; /* 1/2 (S + 1) 2^E_acc, §13 item 7 */
+    int g;
+    size_t rounded; /* right-shift folds that dropped a nonzero remainder */
+    size_t splits;  /* segments closed by the segment limit */
+} linRawRef_t;
+
+static int linUnbiased(const uint8_t *exps, size_t gs, size_t idx) {
+    return (int)exps[gs == 0 ? 0 : idx / gs] - 127;
+}
+
+static int64_t refShrHalfAway(int64_t v, int k) {
+    if (k == 0) {
+        return v;
+    }
+    if (k > 40) {
+        return 0; /* |v| < 2^32 <= 2^(k-1): below one half */
+    }
+    int64_t d = (int64_t)1 << k;
+    int64_t mag = v < 0 ? -v : v;
+    int64_t q = mag / d;
+    if (2 * (mag % d) >= d) {
+        q++;
+    }
+    return v < 0 ? -q : q;
+}
+
+static int64_t refAlign(int64_t v, int k, size_t *rounded) {
+    if (k < 0) {
+        int64_t r = v * ((int64_t)1 << -k);
+        TEST_ASSERT_TRUE(r >= INT32_MIN && r <= INT32_MAX);
+        return r;
+    }
+    int64_t r = refShrHalfAway(v, k);
+    if (k > 0 && (k > 40 || r * ((int64_t)1 << k) != v)) {
+        (*rounded)++;
+    }
+    return r;
+}
+
+/* Smallest g in [-30, 31] with (N 2^(ma+mb-2) + 2^(mBias-1)) 2^-g + (N + 1) <=
+ * INT32_MAX, compared without shifting the total left (it is an integer, so
+ * total 2^-g <= R iff total <= floor(R 2^g)). */
+static int refGuard(size_t n, uint8_t ma, uint8_t mb, uint8_t mBias) {
+    int64_t total =
+        (int64_t)n * ((int64_t)1 << (ma + mb - 2)) + (mBias > 0 ? ((int64_t)1 << (mBias - 1)) : 0);
+    int64_t room = (int64_t)INT32_MAX - (int64_t)n - 1;
+    for (int g = -30; g <= 31; g++) {
+        int64_t lim = g <= 0 ? room >> -g : room * ((int64_t)1 << g);
+        if (total <= lim) {
+            return g;
+        }
+    }
+    TEST_FAIL_MESSAGE("no guard holds");
+    return 0;
+}
+
+static void refLinearRaw(const linRawCase_t *c, linRawRef_t *r) {
+    size_t nOut = c->rows * c->cols;
+    TEST_ASSERT_TRUE(nOut <= LIN_RAW_MAX_OUT);
+    unsigned shift = (unsigned)c->ma + c->mw - 2u;
+    size_t limit = shift >= 31u ? 1u : (size_t)(INT32_MAX >> shift);
+    r->g = refGuard(c->k, c->ma, c->mw, c->bias != NULL ? c->mBias : 0);
+    r->rounded = 0;
+    r->splits = 0;
+    size_t gsz = c->rawGs == 0 ? nOut : c->rawGs;
+    for (size_t t = 0; t * gsz < nOut; t++) {
+        int top = INT32_MIN;
+        for (size_t o = t * gsz; o < (t + 1) * gsz; o++) {
+            size_t row = o / c->cols, col = o % c->cols;
+            int aMax = INT32_MIN, wMax = INT32_MIN;
+            for (size_t i = 0; i < c->k; i++) {
+                int ea = linUnbiased(c->aExps, c->aGs, row * c->k + i);
+                int ew = linUnbiased(c->wExps, c->wGs, col * c->k + i);
+                aMax = ea > aMax ? ea : aMax;
+                wMax = ew > wMax ? ew : wMax;
+            }
+            int e = aMax + wMax;
+            if (c->bias != NULL) {
+                int eb = linUnbiased(c->biasExps, c->biasGs, col);
+                e = eb > e ? eb : e;
+            }
+            top = e > top ? e : top;
+        }
+        r->exps[t] = (int16_t)(top + r->g);
+    }
+    for (size_t o = 0; o < nOut; o++) {
+        size_t row = o / c->cols, col = o % c->cols;
+        int eAcc = r->exps[o / gsz];
+        int64_t acc = 0;
+        double exact = 0.0;
+        size_t segments = 0;
+        if (c->bias != NULL) {
+            int eb = linUnbiased(c->biasExps, c->biasGs, col);
+            acc = refAlign(c->bias[col], eAcc - eb, &r->rounded);
+            exact = ldexp((double)c->bias[col], eb);
+            segments = 1;
+        }
+        int64_t partial = 0;
+        size_t count = 0;
+        size_t curA = SIZE_MAX, curW = SIZE_MAX;
+        int curE = 0;
+        for (size_t i = 0; i < c->k; i++) {
+            size_t ia = row * c->k + i, iw = col * c->k + i;
+            size_t ga = c->aGs == 0 ? 0 : ia / c->aGs;
+            size_t gw = c->wGs == 0 ? 0 : iw / c->wGs;
+            if (curA != SIZE_MAX && (ga != curA || gw != curW || count == limit)) {
+                if (ga == curA && gw == curW) {
+                    r->splits++;
+                }
+                acc += refAlign(partial, eAcc - curE, &r->rounded);
+                TEST_ASSERT_TRUE(acc >= INT32_MIN && acc <= INT32_MAX);
+                segments++;
+                partial = 0;
+                count = 0;
+            }
+            curA = ga;
+            curW = gw;
+            curE = linUnbiased(c->aExps, c->aGs, ia) + linUnbiased(c->wExps, c->wGs, iw);
+            int64_t prod = (int64_t)c->a[ia] * c->w[iw];
+            partial += prod;
+            TEST_ASSERT_TRUE(partial >= INT32_MIN && partial <= INT32_MAX);
+            count++;
+            exact += ldexp((double)prod, curE);
+        }
+        if (curA != SIZE_MAX) {
+            acc += refAlign(partial, eAcc - curE, &r->rounded);
+            segments++;
+        }
+        TEST_ASSERT_TRUE(acc >= INT32_MIN && acc <= INT32_MAX);
+        r->mant[o] = (int32_t)acc;
+        r->exact[o] = exact;
+        r->bound[o] = 0.5 * (double)(segments + 1) * ldexp(1.0, eAcc);
+    }
+}
+
+/* The kernel's operands for one case: a [rows, k] identity order; the weight
+ * stored [cols, k] under the transposed view (order {1, 0}), exactly what
+ * linearForwardBfpRaw hands the kernel. */
+typedef struct linRawOperands {
+    bfpScratchFixture_t a, w, bias;
+    bfpRawFixture_t out;
+} linRawOperands_t;
+
+static void linRawBuild(const linRawCase_t *c, linRawOperands_t *ops) {
+    size_t aDims[] = {c->rows, c->k};
+    bfpScratchInit(&ops->a, 2, aDims, c->a, c->aExps, c->aGroups, c->aGs, c->ma, 8);
+    size_t wDims[] = {c->cols, c->k};
+    bfpScratchInit(&ops->w, 2, wDims, c->w, c->wExps, c->wGroups, c->wGs, c->mw, 8);
+    ops->w.order[0] = 1;
+    ops->w.order[1] = 0;
+    if (c->bias != NULL) {
+        size_t biasDims[] = {c->cols};
+        bfpScratchInit(&ops->bias, 1, biasDims, c->bias, c->biasExps, c->biasGroups, c->biasGs,
+                       c->mBias, 8);
+    }
+    size_t outDims[] = {c->rows, c->cols};
+    bfpRawInit(&ops->out, 2, outDims, c->rawGroups, c->rawGs);
+}
+
+static void runLinRawCase(const linRawCase_t *c, linRawRef_t *ref, linRawOperands_t *ops) {
+    refLinearRaw(c, ref);
+    linRawBuild(c, ops);
+    matmulBfpRawTensors(&ops->a.tensor, &ops->w.tensor, c->bias != NULL ? &ops->bias.tensor : NULL,
+                        &ops->out.tensor);
+    size_t nOut = c->rows * c->cols;
+    assertRawEquals(&ops->out, ref->mant, nOut, ref->exps, c->rawGroups);
+    size_t gsz = c->rawGs == 0 ? nOut : c->rawGs;
+    for (size_t o = 0; o < nOut; o++) {
+        double got = ldexp((double)ops->out.mant[o], ops->out.exps[o / gsz]);
+        TEST_ASSERT_TRUE_MESSAGE(fabs(got - ref->exact[o]) <= ref->bound[o],
+                                 "raw value outside the 1/2 (S+1) 2^E_acc fold bound");
+    }
+}
+
+/* Grouped operands whose groups straddle rows (a gs 4 over k = 6, the weight
+ * gs 9 over its [3, 6] storage), per-column bias groups with one exponent
+ * ABOVE every product (it sets E_top for column 0), and raw target groups of
+ * 2 that straddle the two output rows. The input exponents span 22 binades
+ * against g = -14, so some segments are left-shifted exactly and others
+ * rounded HALF_AWAY. */
+void testMatmulBfpRawMatchesTheFoldReferenceOnStraddlingGroups(void) {
+    static const int32_t a[] = {100, -128, 127, -3, 55, -77, 64, -1, 90, -100, 33, 7};
+    static const uint8_t aExps[] = {127 + 12, 127 - 10, 127 + 3};
+    static const int32_t w[] = {-90, 17, 127, -128, 5,    60,  31, -45, 99,
+                                -7,  88, -66, 12,   -128, 127, 1,  -2,  43};
+    static const uint8_t wExps[] = {127 - 4, 127 + 9};
+    static const int32_t bias[] = {-101, 77, 3};
+    static const uint8_t biasExps[] = {127 + 25, 127 - 30, 127};
+    linRawCase_t c = {.rows = 2,
+                      .cols = 3,
+                      .k = 6,
+                      .a = a,
+                      .aExps = aExps,
+                      .aGroups = 3,
+                      .aGs = 4,
+                      .ma = 8,
+                      .w = w,
+                      .wExps = wExps,
+                      .wGroups = 2,
+                      .wGs = 9,
+                      .mw = 8,
+                      .bias = bias,
+                      .biasExps = biasExps,
+                      .biasGroups = 3,
+                      .biasGs = 1,
+                      .mBias = 8,
+                      .rawGroups = 3,
+                      .rawGs = 2};
+    linRawRef_t ref;
+    linRawOperands_t ops;
+    runLinRawCase(&c, &ref, &ops);
+    TEST_ASSERT_EQUAL_INT(-14, ref.g);
+    TEST_ASSERT_TRUE_MESSAGE(ref.rounded > 0, "fixture too weak: no fold rounds");
+    /* column 0's bias exponent (+25) sets E_top of both groups holding a
+     * column-0 output; group 2 is row 1 x weight row 2 (3 + 9). */
+    TEST_ASSERT_EQUAL_INT16(25 - 14, ops.out.exps[0]);
+    TEST_ASSERT_EQUAL_INT16(25 - 14, ops.out.exps[1]);
+    TEST_ASSERT_EQUAL_INT16(12 - 14, ops.out.exps[2]);
+
+    /* Same operands without bias, onto the per-tensor raw. */
+    c.bias = NULL;
+    c.rawGroups = 1;
+    c.rawGs = 0;
+    runLinRawCase(&c, &ref, &ops);
+    TEST_ASSERT_EQUAL_INT(-14, ref.g);
+    TEST_ASSERT_TRUE_MESSAGE(ref.rounded > 0, "fixture too weak: no fold rounds");
+}
+
+/* Worst-case headroom: every code at a grid edge, at the proof's limits, one
+ * output of a [1, k] x [k, 1] reduction, every exponent unbiased 0. */
+static int32_t gLinWorstA[LIN_RAW_MAX_K];
+static int32_t gLinWorstW[LIN_RAW_MAX_K];
+
+static void runLinWorst(size_t k, int32_t aCode, uint8_t ma, int32_t wCode, uint8_t mw,
+                        const int32_t *biasCode, uint8_t mBias, uint8_t biasStored,
+                        linRawRef_t *ref) {
+    TEST_ASSERT_TRUE(k <= LIN_RAW_MAX_K);
+    for (size_t i = 0; i < k; i++) {
+        gLinWorstA[i] = aCode;
+        gLinWorstW[i] = wCode;
+    }
+    static const uint8_t unit[] = {127};
+    uint8_t biasExps[] = {biasStored};
+    linRawCase_t c = {.rows = 1,
+                      .cols = 1,
+                      .k = k,
+                      .a = gLinWorstA,
+                      .aExps = unit,
+                      .aGroups = 1,
+                      .aGs = 0,
+                      .ma = ma,
+                      .w = gLinWorstW,
+                      .wExps = unit,
+                      .wGroups = 1,
+                      .wGs = 0,
+                      .mw = mw,
+                      .bias = biasCode,
+                      .biasExps = biasExps,
+                      .biasGroups = 1,
+                      .biasGs = 0,
+                      .mBias = mBias,
+                      .rawGroups = 1,
+                      .rawGs = 0};
+    linRawOperands_t ops;
+    runLinRawCase(&c, ref, &ops);
+}
+
+/* m16 x m16, N = 80: g = 6 and the segment limit is 1 (two 2^30 products
+ * already overflow), so every product is its own segment; floor x floor and
+ * floor x ceiling. */
+void testMatmulBfpRawWorstCaseM16xM16AllCodesAtTheEdges(void) {
+    linRawRef_t ref;
+    runLinWorst(80, -32768, 16, -32768, 16, NULL, 0, 0, &ref);
+    TEST_ASSERT_EQUAL_INT(6, ref.g);
+    TEST_ASSERT_EQUAL_INT32(80 << 24, ref.mant[0]); /* 80 * 2^30 exactly */
+    TEST_ASSERT_EQUAL_size_t(79, ref.splits);
+    runLinWorst(80, -32768, 16, 32767, 16, NULL, 0, 0, &ref);
+    TEST_ASSERT_EQUAL_INT(6, ref.g);
+}
+
+/* m16 x m8, N = 2400 (g = 3): the run splits at 511 products (four full
+ * segments + 356) instead of failing fast as the backward kernel does. */
+void testMatmulBfpRawWorstCaseM16xM8SplitsAtTheSegmentLimit(void) {
+    linRawRef_t ref;
+    runLinWorst(2400, -32768, 16, -128, 8, NULL, 0, 0, &ref);
+    TEST_ASSERT_EQUAL_INT(3, ref.g);
+    TEST_ASSERT_EQUAL_size_t(4, ref.splits);
+    TEST_ASSERT_EQUAL_INT32(2400 << 19, ref.mant[0]); /* 2400 * 2^22 / 2^3 */
+    runLinWorst(2400, 32767, 16, -128, 8, NULL, 0, 0, &ref);
+}
+
+/* m16 x m16, N = 4, a m16 bias at its floor (g = 2); and a m8 bias whose
+ * exponent (+20) is ABOVE the products' (m8 x m8, N = 80, g = -10): E_top is
+ * the bias exponent and the products shift right by 10 exactly. */
+void testMatmulBfpRawWorstCaseBiasAtTheFloorAndAboveTheProducts(void) {
+    linRawRef_t ref;
+    int32_t biasFloor = -32768;
+    runLinWorst(4, -32768, 16, -32768, 16, &biasFloor, 16, 127, &ref);
+    TEST_ASSERT_EQUAL_INT(2, ref.g);
+    TEST_ASSERT_EQUAL_INT64((int64_t)4 * ((int64_t)1 << 30) - 32768,
+                            (int64_t)ref.mant[0] * ((int64_t)1 << 2));
+
+    int32_t biasHigh = -128;
+    runLinWorst(80, -128, 8, -128, 8, &biasHigh, 8, 127 + 20, &ref);
+    TEST_ASSERT_EQUAL_INT(-10, ref.g);
+    TEST_ASSERT_EQUAL_INT16(10, ref.exps[0]);
+    TEST_ASSERT_EQUAL_INT32(-129792, ref.mant[0]);
+}
+
+/* A weight view whose reduction axis is NOT the physically innermost one
+ * (identity-ordered [k, cols] storage): a weight column is no contiguous run,
+ * so E_top uses the weight's tensor-wide max exponent -- coarser, still
+ * sound. Every fold here is an exact left shift, so the raw equals the int64
+ * sum and E_acc = rowmax(a) + max(w) + g. */
+void testMatmulBfpRawStridedWeightViewUsesTheTensorWideMax(void) {
+    static const int32_t a[] = {3, -5, 7, 11};
+    static const uint8_t aExps[] = {127 - 2};
+    /* storage [k = 4, cols = 2], gs 2: storage row i is group i */
+    static const int32_t w[] = {1, -2, 4, 8, -16, 32, 64, -128};
+    static const uint8_t wExps[] = {127 + 1, 127 - 6, 127 + 5, 127};
+    bfpScratchFixture_t aF, wF;
+    size_t aDims[] = {1, 4};
+    bfpScratchInit(&aF, 2, aDims, a, aExps, 1, 0, 8, 8);
+    size_t wDims[] = {4, 2};
+    bfpScratchInit(&wF, 2, wDims, w, wExps, 4, 2, 8, 8);
+    bfpRawFixture_t out;
+    size_t outDims[] = {1, 2};
+    bfpRawInit(&out, 2, outDims, 2, 1);
+
+    matmulBfpRawTensors(&aF.tensor, &wF.tensor, NULL, &out.tensor);
+
+    /* one raw group per output: a column read as a contiguous run would cover
+     * storage groups {0, 1} (max +1) for column 0 instead of the +5 it visits */
+    int eAcc = -2 + 5 + refGuard(4, 8, 8, 0);
+    TEST_ASSERT_EQUAL_INT16((int16_t)eAcc, out.exps[0]);
+    TEST_ASSERT_EQUAL_INT16((int16_t)eAcc, out.exps[1]);
+    for (size_t col = 0; col < 2; col++) {
+        int64_t exactScaled = 0; /* in units of 2^eAcc; every shift is left */
+        for (size_t i = 0; i < 4; i++) {
+            int e = -2 + ((int)wExps[i] - 127);
+            exactScaled += (int64_t)a[i] * w[i * 2 + col] * ((int64_t)1 << (e - eAcc));
+        }
+        TEST_ASSERT_EQUAL_INT64(exactScaled, (int64_t)out.mant[col]);
+    }
+}
+
+/* Exact power-of-two data (the matmulBfpTensors gold fixture): the raw's
+ * dequant (float)mant * 2^E is bit-identical to the float kernel's
+ * rounding-free fold, bias included. */
+void testMatmulBfpRawPowerOfTwoDequantMatchesFloatKernel(void) {
+    bfpScratchFixture_t a, b, bias;
+    size_t aDims[] = {(size_t)kBfpOutRows, (size_t)kBfpReduceLen};
+    bfpScratchInit(&a, 2, aDims, kBfpACodes, kBfpAExponents, (size_t)kBfpANumGroups,
+                   (size_t)kBfpAGroupSize, (uint8_t)kBfpAMantissaBits, (uint8_t)kBfpAExponentBits);
+    size_t bDims[] = {(size_t)kBfpOutCols, (size_t)kBfpReduceLen};
+    bfpScratchInit(&b, 2, bDims, kBfpBCodes, kBfpBExponents, (size_t)kBfpBNumGroups,
+                   (size_t)kBfpBGroupSize, (uint8_t)kBfpBMantissaBits, (uint8_t)kBfpBExponentBits);
+    b.order[0] = 1;
+    b.order[1] = 0;
+    size_t biasDims[] = {(size_t)kBfpOutCols};
+    bfpScratchInit(&bias, 1, biasDims, kBfpBiasCodes, kBfpBiasExponents, 1, 0,
+                   (uint8_t)kBfpBiasMantissaBits, (uint8_t)kBfpBiasExponentBits);
+    bfpRawFixture_t out;
+    size_t outDims[] = {(size_t)kBfpOutRows, (size_t)kBfpOutCols};
+    bfpRawInit(&out, 2, outDims, 1, 0);
+
+    matmulBfpRawTensors(&a.tensor, &b.tensor, &bias.tensor, &out.tensor);
+
+    float deq[6];
+    TEST_ASSERT_TRUE(kBfpMatmulExpected_len <= 6);
+    for (size_t i = 0; i < kBfpMatmulExpected_len; i++) {
+        deq[i] = ldexpf((float)out.mant[i], out.exps[0]);
+    }
+    TEST_ASSERT_EQUAL_MEMORY(kBfpMatmulExpected, deq, kBfpMatmulExpected_len * sizeof(float));
+}
+
+static bfpScratchFixture_t gLinDieA, gLinDieW;
+static bfpRawFixture_t gLinDieRaw;
+static void linRawDieSetup(void) {
+    static const int32_t codes[] = {1, 2, 3, 4};
+    static const uint8_t unit[] = {127};
+    size_t aDims[] = {1, 2};
+    bfpScratchInit(&gLinDieA, 2, aDims, codes, unit, 1, 0, 8, 8);
+    size_t wDims[] = {2, 2};
+    bfpScratchInit(&gLinDieW, 2, wDims, codes, unit, 1, 0, 8, 8);
+    gLinDieW.order[0] = 1;
+    gLinDieW.order[1] = 0;
+}
+static void linRawIntoFloatBody(void) {
+    linRawDieSetup();
+    float outData[2];
+    tensor_t outT;
+    shape_t outShape;
+    size_t outDims[] = {1, 2};
+    size_t outOrder[] = {0, 1};
+    setShape(&outShape, outDims, 2, outOrder);
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    setTensorValues(&outT, (uint8_t *)outData, &outShape, &outQ, NULL);
+    matmulBfpRawTensors(&gLinDieA.tensor, &gLinDieW.tensor, NULL, &outT);
+}
+static void linRawBadGeometryBody(void) {
+    linRawDieSetup();
+    size_t outDims[] = {1, 2};
+    bfpRawInit(&gLinDieRaw, 2, outDims, 3, 1); /* 3 groups of 1 over 2 outputs */
+    matmulBfpRawTensors(&gLinDieA.tensor, &gLinDieW.tensor, NULL, &gLinDieRaw.tensor);
+}
+
+void testMatmulBfpRawRejectsANonRawOutputAndBadRawGeometry(void) {
+    ASSERT_EXITS_WITH_FAILURE(linRawIntoFloatBody());
+    ASSERT_EXITS_WITH_FAILURE(linRawBadGeometryBody());
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -2511,6 +2959,13 @@ int main(void) {
     RUN_TEST(testMatmulBfpDxStridedWeightWalkMatchesGold);
     RUN_TEST(testMatmulBfpWeightGradTransposedLossViewMatchesGold);
     RUN_TEST(testMatmulBfpDxPowerOfTwoBitIdenticalToGroupedSym);
+    RUN_TEST(testMatmulBfpRawMatchesTheFoldReferenceOnStraddlingGroups);
+    RUN_TEST(testMatmulBfpRawWorstCaseM16xM16AllCodesAtTheEdges);
+    RUN_TEST(testMatmulBfpRawWorstCaseM16xM8SplitsAtTheSegmentLimit);
+    RUN_TEST(testMatmulBfpRawWorstCaseBiasAtTheFloorAndAboveTheProducts);
+    RUN_TEST(testMatmulBfpRawStridedWeightViewUsesTheTensorWideMax);
+    RUN_TEST(testMatmulBfpRawPowerOfTwoDequantMatchesFloatKernel);
+    RUN_TEST(testMatmulBfpRawRejectsANonRawOutputAndBadRawGeometry);
 
     return UNITY_END();
 }

@@ -37,6 +37,15 @@ void softmaxInitLayer(layerConfig_t *softmaxConfig, layer_t *softmaxLayer);
  * [1, N] stored as [N, 1] + transpose fails fast; one storage row takes any
  * order. The ARITH_BFP arms take a single storage row only ([N] or [1, N]);
  * more rows fail fast. */
+/* The integer-only ARITH_BFP forward (arithmetic-bfp.md §5.9 R-S2, §13):
+ * steps 1-4 on the unpacked-BFP `input` (int32 codes under a live
+ * bfpQConfig_t, mantissaBits <= 16), step 5 an integer normalisation into
+ * the BFP_RAW `rawOut` (same element count; every raw group gets exponent
+ * -BFP_SOFTMAX_RAW_FRAC_BITS). `mode` is the layer's bfpExpShiftRounding knob,
+ * `shift` its SR stream (NULL unless mode is BFP_SHIFT_SR). The funnel's
+ * forward kernel adapter calls it; exported for kernel-level tests. */
+void softmaxForwardBfpRaw(const tensor_t *input, bfpShiftRounding_t mode, rngStream_t *shift,
+                          tensor_t *rawOut);
 void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output,
                     const layerExec_t *exec);
 

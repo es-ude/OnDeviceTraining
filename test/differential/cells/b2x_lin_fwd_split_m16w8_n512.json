@@ -1,6 +1,6 @@
 {
-  "name": "b2x_lin_fwd_abort_m16w16_n2",
-  "description": "B2 headroom probe: per-tensor m16 x m16, N=2 > limit 1 -> ABORT predicted.",
+  "name": "b2x_lin_fwd_split_m16w8_n512",
+  "description": "B2 headroom probe: per-tensor m16 x m8, N=512 one past the segment limit 511. The backward kernel fails fast here; the integer forward splits the run (511 + 1) and must stay EXACT.",
   "family": "bfp_gemm",
   "op": "linear",
   "direction": "forward",
@@ -14,9 +14,9 @@
   },
   "fixture": {
     "type": "bfp_gemm",
-    "seed": 3110,
+    "seed": 3109,
     "batch": 1,
-    "inF": 2,
+    "inF": 512,
     "outF": 2,
     "input": {
       "m": 16,
@@ -26,7 +26,7 @@
       "expSpread": 0
     },
     "weight": {
-      "m": 16,
+      "m": 8,
       "e": 8,
       "groupSize": 0,
       "absmax": 0.25,
@@ -35,6 +35,9 @@
     "bias": null
   },
   "expect": {
-    "abort": true
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
   }
 }

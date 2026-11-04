@@ -71,16 +71,17 @@ void linearForwardSymInt32Grouped(tensor_t *w, tensor_t *b, tensor_t *input, ten
     transposeTensor(w, 0, 1);
 }
 
-/* BFP epic PR2 (Task 7): all operands are the executeOp prologue's
- * unpacked-BFP scratch (int32 mantissa codes under a live bfpQConfig_t —
- * borrowed exponents for BFP-stored sources, funnel-staged for FLOAT32
- * ones). Same transpose dance as linearForwardSymInt32Grouped: BFP groups
- * bind to STORAGE order, which transposeTensor exposes zero-copy as the
- * physically-innermost axis for the reduction. matmulBfpTensors reads all
- * quant info from the operands themselves — no grouped-weight ctx. */
-void linearForwardBfp(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output) {
+/* All operands are the executeOp prologue's unpacked-BFP scratch (int32
+ * mantissa codes under a live bfpQConfig_t — borrowed exponents for
+ * BFP-stored sources, funnel-staged for FLOAT32 ones); `output` is the
+ * BFP_RAW raw (integer-only forward, arithmetic-bfp.md §13). Same transpose
+ * dance as linearForwardSymInt32Grouped: BFP groups bind to STORAGE order,
+ * which transposeTensor exposes zero-copy as the physically-innermost axis
+ * for the reduction (the row-top pre-pass of matmulBfpRawTensors relies on
+ * that to walk weight rows as contiguous runs). */
+void linearForwardBfpRaw(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output) {
     transposeTensor(w, 0, 1);
-    matmulBfpTensors(input, w, b, output);
+    matmulBfpRawTensors(input, w, b, output);
     transposeTensor(w, 0, 1);
 }
 
@@ -109,12 +110,12 @@ static void linearForwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, t
         linearForwardSymInt32(ops[1], bias, ops[0], rawOut, rs);
     }
 }
-static void linearForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                   const void *ctx, rngStream_t *rs) {
+static void linearForwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                      const void *ctx, rngStream_t *rs) {
     (void)auxOut;
     (void)ctx;
     tensor_t *bias = (n > 2) ? ops[2] : NULL;
-    linearForwardBfp(ops[1], bias, ops[0], rawOut);
+    linearForwardBfpRaw(ops[1], bias, ops[0], rawOut);
 }
 
 /* OP(k) of each funnel op of this layer, for layerExecOpKey. Part of the
@@ -172,7 +173,7 @@ void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output,
                               .exponentBits = wQC->exponentBits};
         executeOp(
             &(opSpec_t){
-                .kernel = linearForwardKernelBfp,
+                .kernel = linearForwardKernelBfpRaw,
                 .inputs = bias != NULL ? (tensor_t *[]){input, weights, bias}
                                        : (tensor_t *[]){input, weights},
                 .nInputs = bias != NULL ? 3 : 2,
@@ -182,6 +183,9 @@ void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output,
                 .groupedSymOperandPos = 0,
                 .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL, NULL,
                              (bias != NULL && bias->quantization->type == FLOAT32) ? &stage : NULL},
+                /* Forward raw contract: only this arm emits BFP_RAW; the
+                 * backward adapters (matmulBfpTensors) never set it. */
+                .bfpRawOut = true,
             },
             output);
         return;

@@ -51,7 +51,7 @@ static inline void bfpScratchInit(bfpScratchFixture_t *f, size_t ndim, const siz
     setTensorValues(&f->tensor, (uint8_t *)codes, &f->shape, &f->q, NULL);
 }
 
-#define BFP_RAW_FIXTURE_MAX_OUT 64
+#define BFP_RAW_FIXTURE_MAX_OUT 128
 #define BFP_RAW_FIXTURE_MAX_GROUPS 16
 #define BFP_RAW_SENTINEL_MANT (INT32_MIN + 7)
 #define BFP_RAW_SENTINEL_EXP ((int16_t)0x7ABC)
@@ -78,7 +78,8 @@ static inline void bfpRawInit(bfpRawFixture_t *f, size_t ndim, const size_t *dim
         f->order[i] = i;
         n *= dims[i];
     }
-    TEST_ASSERT_TRUE(n <= BFP_RAW_FIXTURE_MAX_OUT && numGroups <= BFP_RAW_FIXTURE_MAX_GROUPS);
+    /* strict: assertRawEquals reads one sentinel past the output and the groups */
+    TEST_ASSERT_TRUE(n < BFP_RAW_FIXTURE_MAX_OUT && numGroups < BFP_RAW_FIXTURE_MAX_GROUPS);
     setShape(&f->shape, f->dims, ndim, f->order);
     for (size_t i = 0; i < BFP_RAW_FIXTURE_MAX_OUT; i++) {
         f->mant[i] = BFP_RAW_SENTINEL_MANT;

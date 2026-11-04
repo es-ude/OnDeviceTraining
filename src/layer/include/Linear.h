@@ -48,12 +48,12 @@ void linearForwardSymInt32(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *
  * weight is grouped SYM or ASYM — not a direct public entry point. */
 void linearForwardSymInt32Grouped(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output,
                                   const symGroupedWeight_t *groupedWeight, rngStream_t *rs);
-/* BFP epic PR2 (Task 7): the BFP twin of linearForwardSymInt32Grouped's role.
- * All operands are the executeOp prologue's unpacked-BFP scratch (int32
- * mantissa codes under a live bfpQConfig_t; `b` NULL-able) — same transpose
- * dance around matmulBfpTensors. Routed to by the funnel adapter — not a
- * direct public entry point. */
-void linearForwardBfp(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output);
+/* The integer-only BFP forward (arithmetic-bfp.md §13). All operands are the
+ * executeOp prologue's unpacked-BFP scratch (int32 mantissa codes under a
+ * live bfpQConfig_t; `b` NULL-able), `output` the funnel's BFP_RAW raw —
+ * same transpose dance around matmulBfpRawTensors. Routed to by the funnel
+ * adapter — not a direct public entry point. */
+void linearForwardBfpRaw(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output);
 // IMPORTANT: Used for mismatched quantizations
 void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output,
                    const layerExec_t *exec);

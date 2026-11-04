@@ -26,16 +26,18 @@ int32_t bfpShiftRightRounded(int32_t v, uint32_t k, bfpShiftRounding_t mode, rng
     case BFP_SHIFT_SR: {
         /* floor-domain, sign-agnostic, unbiased: floor + Bernoulli(rem/2^k).
          * The unsigned re-shift reproduces f * 2^k in two's complement
-         * without the signed-left-shift UB; rem ∈ [0, 2^k). The cast draw
-         * is >= 0, so rem == 0 never increments. */
+         * without the signed-left-shift UB; rem ∈ [0, 2^k). The draw's top k
+         * bits are u on a k-bit grid (integer, no float on the forward
+         * path; for k <= 24 the same decision the 24-bit float draw took),
+         * and u >= 0, so rem == 0 never increments. */
         if (rs == NULL) {
             PRINT_ERROR("bfpShiftRightRounded: SR shift without a stream");
             exit(1);
         }
         const int32_t floorQ = v >> k;
-        const int32_t rem = v - (int32_t)((uint32_t)floorQ << k);
-        const int32_t draw = (int32_t)(rngNextUnitFloat(rs) * (float)(1u << k));
-        return floorQ + ((draw < rem) ? 1 : 0);
+        const uint32_t rem = (uint32_t)(v - (int32_t)((uint32_t)floorQ << k));
+        const uint32_t u = rngNextU32(rs) >> (32u - k);
+        return floorQ + ((u < rem) ? 1 : 0);
     }
     }
     return 0;

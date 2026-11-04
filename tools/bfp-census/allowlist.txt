@@ -17,3 +17,13 @@ windowSlice1dAt
 # OUTPUT element, never per MAC (a power-of-two K -- HAR's 32 -- folds into
 # the raw exponent and skips it). Both sign branches call the helper.
 avgPool1dForwardKernelBfpRaw __aeabi_uidivmod
+# Same-algorithm rule: Linear (matmul) keeps the FLOAT32 arm's per-MAC index
+# math; calcElementIndexByIndices divides once per dimension per call, i.e.
+# per MAC on both arms. Kept as it is (the shared skeleton), counted here.
+# The entry covers every root that reaches the index math (LayerNorm and
+# Reduce too), not only Linear.
+calcElementIndexByIndices __aeabi_uidiv
+# Softmax steps 2-4 are unchanged: the i-exp core's z = -qW / ln2 is one
+# division per ELEMENT (never per MAC); the integer normalisation (step 5)
+# divides by restoring shifts and calls no helper.
+bfpIExpQ __aeabi_idiv

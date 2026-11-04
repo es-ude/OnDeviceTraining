@@ -623,76 +623,30 @@ class IntFold:
         }
 
 
-def conv1d_int_fold(
-    a_codes: np.ndarray,
-    a_stored: np.ndarray,
+def _int_fold_walk(
+    walk: Walk,
+    a: np.ndarray,
+    a_st: np.ndarray,
     a_bits: tuple[int, int, int],
-    b_codes: np.ndarray,
-    b_stored: np.ndarray,
+    b: np.ndarray,
+    b_st: np.ndarray,
     b_bits: tuple[int, int, int],
-    bias: tuple[np.ndarray, np.ndarray, tuple[int, int, int]] | None,
-    batch: int,
-    c_in: int,
-    length: int,
-    c_out: int,
-    geom: "ConvGeom",
+    bias_codes: np.ndarray | None,
+    bias_e: np.ndarray | None,
+    exps: np.ndarray,
+    gsz: int,
+    g: int,
     raw_group_size: int,
 ) -> IntFold:
-    """Section 13 "The integer fold" for the Conv1d forward along the
-    conv1d_walk order (input channel outer, tap inner -- the walk the float
-    fold was observed to use, DOC_GAPS[2]). Items 1-7 of the section:
-    E_top per output row (b, oc) from the row maxima of the conv group's
-    input rows and the weight row, max'ed with the channel's bias exponent;
-    E_acc per raw target group = max E_top over the rows it covers + g;
-    per output: bias aligned first, one int partial per same-exponent
-    segment closed on either operand's group change or at segment_limit
-    products, aligned by align_partial(partial, E_acc - (E_a + E_b)); tail
-    fold. HALF_AWAY only. ``*_bits`` = (mantissaBits, exponentBits,
-    groupSize); ``raw_group_size`` 0 = the per-tensor raw."""
-    a = np.asarray(a_codes, dtype=np.int64).ravel()
-    b = np.asarray(b_codes, dtype=np.int64).ravel()
-    a_st, b_st = np.asarray(a_stored, dtype=np.int64), np.asarray(b_stored, dtype=np.int64)
+    """Section 13 items 4-7 along a forward walk, given E_acc per raw target
+    group: per output the bias aligned first, one int partial per
+    same-exponent segment (closed on either operand's group change or at
+    segment_limit products), aligned by align_partial(partial, E_acc - (E_a +
+    E_b)); tail fold. HALF_AWAY only."""
     ga_all, gb_all = group_ids(a.size, a_bits[2]), group_ids(b.size, b_bits[2])
     bias_a, bias_b = exponent_bias(a_bits[1]), exponent_bias(b_bits[1])
-    cin_g, cout_g = c_in // geom.groups, c_out // geom.groups
-    k_sz = geom.kernel_size
-    n_terms = cin_g * k_sz
-    l_out = geom.conv_out_len(length)
     limit = segment_limit(a_bits[0], b_bits[0])
-    if bias is not None:
-        bias_codes = np.asarray(bias[0], dtype=np.int64).ravel()
-        bias_st = np.asarray(bias[1], dtype=np.int64)
-        bias_e = bias_st[group_ids(c_out, bias[2][2])] - exponent_bias(bias[2][1])
-        m_bias = bias[2][0]
-    else:
-        bias_codes, bias_e, m_bias = None, None, 0
-    g = fold_guard_bits(n_terms, a_bits[0], b_bits[0], m_bias)
-
-    in_row_max = np.array(
-        [[_row_group_max(a_st, bias_a, a_bits[2], (bb * c_in + ic) * length, length) for ic in range(c_in)] for bb in range(batch)],
-        dtype=np.int64,
-    ).reshape(batch, c_in)
-    w_row_max = np.array([_row_group_max(b_st, bias_b, b_bits[2], oc * n_terms, n_terms) for oc in range(c_out)], dtype=np.int64)
-
-    def row_top(row: int) -> int:
-        bb, oc = divmod(row, c_out)
-        cg = oc // cout_g
-        e = int(in_row_max[bb, cg * cin_g:(cg + 1) * cin_g].max()) + int(w_row_max[oc])
-        if bias_e is not None and int(bias_e[oc]) > e:
-            e = int(bias_e[oc])
-        return e
-
-    n_out = batch * c_out * l_out
-    gsz = n_out if raw_group_size == 0 else raw_group_size
-    if n_out == 0:
-        z = np.zeros(0, dtype=np.int64)
-        return IntFold(z, np.zeros(1, dtype=np.int64), z.astype(np.float64), z.astype(np.float64), g, raw_group_size, 0, 0, 0, 0)
-    if n_out % gsz:
-        raise ValueError(f"raw groupSize {gsz} does not divide the output ({n_out})")
-    n_groups = n_out // gsz
-    exps = np.array([max(row_top(r) for r in range((t * gsz) // l_out, ((t + 1) * gsz - 1) // l_out + 1)) + g for t in range(n_groups)], dtype=np.int64)
-
-    walk = conv1d_walk(batch, c_in, length, c_out, geom, "forward", bias is not None)
+    n_out = int(np.prod(walk.out_shape))
     mant = np.zeros(n_out, dtype=np.int64)
     exact = np.zeros(n_out, dtype=np.float64)
     bound = np.zeros(n_out, dtype=np.float64)
@@ -748,6 +702,128 @@ def conv1d_int_fold(
         bound[o] = 0.5 * (segments + 1) * 2.0 ** e_acc
         seg_max = max(seg_max, segments)
     return IntFold(mant, exps, exact, bound, g, raw_group_size, seg_max, n_splits, n_left, n_rounded)
+
+
+def conv1d_int_fold(
+    a_codes: np.ndarray,
+    a_stored: np.ndarray,
+    a_bits: tuple[int, int, int],
+    b_codes: np.ndarray,
+    b_stored: np.ndarray,
+    b_bits: tuple[int, int, int],
+    bias: tuple[np.ndarray, np.ndarray, tuple[int, int, int]] | None,
+    batch: int,
+    c_in: int,
+    length: int,
+    c_out: int,
+    geom: "ConvGeom",
+    raw_group_size: int,
+) -> IntFold:
+    """Section 13 "The integer fold" for the Conv1d forward along the
+    conv1d_walk order (input channel outer, tap inner -- the walk the float
+    fold was observed to use, DOC_GAPS[2]). Items 1-7 of the section:
+    E_top per output row (b, oc) from the row maxima of the conv group's
+    input rows and the weight row, max'ed with the channel's bias exponent;
+    E_acc per raw target group = max E_top over the rows it covers + g;
+    per output: bias aligned first, one int partial per same-exponent
+    segment closed on either operand's group change or at segment_limit
+    products, aligned by align_partial(partial, E_acc - (E_a + E_b)); tail
+    fold. HALF_AWAY only. ``*_bits`` = (mantissaBits, exponentBits,
+    groupSize); ``raw_group_size`` 0 = the per-tensor raw."""
+    a = np.asarray(a_codes, dtype=np.int64).ravel()
+    b = np.asarray(b_codes, dtype=np.int64).ravel()
+    a_st, b_st = np.asarray(a_stored, dtype=np.int64), np.asarray(b_stored, dtype=np.int64)
+    bias_a, bias_b = exponent_bias(a_bits[1]), exponent_bias(b_bits[1])
+    cin_g, cout_g = c_in // geom.groups, c_out // geom.groups
+    k_sz = geom.kernel_size
+    n_terms = cin_g * k_sz
+    l_out = geom.conv_out_len(length)
+    if bias is not None:
+        bias_codes = np.asarray(bias[0], dtype=np.int64).ravel()
+        bias_st = np.asarray(bias[1], dtype=np.int64)
+        bias_e = bias_st[group_ids(c_out, bias[2][2])] - exponent_bias(bias[2][1])
+        m_bias = bias[2][0]
+    else:
+        bias_codes, bias_e, m_bias = None, None, 0
+    g = fold_guard_bits(n_terms, a_bits[0], b_bits[0], m_bias)
+
+    in_row_max = np.array(
+        [[_row_group_max(a_st, bias_a, a_bits[2], (bb * c_in + ic) * length, length) for ic in range(c_in)] for bb in range(batch)],
+        dtype=np.int64,
+    ).reshape(batch, c_in)
+    w_row_max = np.array([_row_group_max(b_st, bias_b, b_bits[2], oc * n_terms, n_terms) for oc in range(c_out)], dtype=np.int64)
+
+    def row_top(row: int) -> int:
+        bb, oc = divmod(row, c_out)
+        cg = oc // cout_g
+        e = int(in_row_max[bb, cg * cin_g:(cg + 1) * cin_g].max()) + int(w_row_max[oc])
+        if bias_e is not None and int(bias_e[oc]) > e:
+            e = int(bias_e[oc])
+        return e
+
+    n_out = batch * c_out * l_out
+    gsz = n_out if raw_group_size == 0 else raw_group_size
+    if n_out == 0:
+        z = np.zeros(0, dtype=np.int64)
+        return IntFold(z, np.zeros(1, dtype=np.int64), z.astype(np.float64), z.astype(np.float64), g, raw_group_size, 0, 0, 0, 0)
+    if n_out % gsz:
+        raise ValueError(f"raw groupSize {gsz} does not divide the output ({n_out})")
+    n_groups = n_out // gsz
+    exps = np.array([max(row_top(r) for r in range((t * gsz) // l_out, ((t + 1) * gsz - 1) // l_out + 1)) + g for t in range(n_groups)], dtype=np.int64)
+
+    walk = conv1d_walk(batch, c_in, length, c_out, geom, "forward", bias is not None)
+    return _int_fold_walk(walk, a, a_st, a_bits, b, b_st, b_bits, bias_codes, bias_e, exps, gsz, g, raw_group_size)
+
+
+def linear_int_fold(
+    a_codes: np.ndarray,
+    a_stored: np.ndarray,
+    a_bits: tuple[int, int, int],
+    b_codes: np.ndarray,
+    b_stored: np.ndarray,
+    b_bits: tuple[int, int, int],
+    bias: tuple[np.ndarray, np.ndarray, tuple[int, int, int]] | None,
+    batch: int,
+    in_f: int,
+    out_f: int,
+    raw_group_size: int,
+) -> IntFold:
+    """Section 13 "The integer fold" for the Linear forward (y = x W^T + b,
+    x [B, inF] row-major, W stored [outF, inF]) along linear_walk's forward
+    order: E_top of output (b, o) = the max group exponent over input row b
+    + the max over weight row o, max'ed with o's bias exponent; E_acc of a
+    raw target group = max E_top over its outputs + g, g = fold_guard_bits(
+    inF, ...); then the section-13 fold (_int_fold_walk). The rows are the
+    contiguous storage runs the Linear layer hands the kernel."""
+    a = np.asarray(a_codes, dtype=np.int64).ravel()
+    b = np.asarray(b_codes, dtype=np.int64).ravel()
+    a_st, b_st = np.asarray(a_stored, dtype=np.int64), np.asarray(b_stored, dtype=np.int64)
+    bias_a, bias_b = exponent_bias(a_bits[1]), exponent_bias(b_bits[1])
+    if bias is not None:
+        bias_codes = np.asarray(bias[0], dtype=np.int64).ravel()
+        bias_e = np.asarray(bias[1], dtype=np.int64)[group_ids(out_f, bias[2][2])] - exponent_bias(bias[2][1])
+        m_bias = bias[2][0]
+    else:
+        bias_codes, bias_e, m_bias = None, None, 0
+    g = fold_guard_bits(in_f, a_bits[0], b_bits[0], m_bias)
+    x_row_max = [_row_group_max(a_st, bias_a, a_bits[2], bb * in_f, in_f) for bb in range(batch)]
+    w_row_max = [_row_group_max(b_st, bias_b, b_bits[2], o * in_f, in_f) for o in range(out_f)]
+
+    def top(o: int) -> int:
+        bb, oc = divmod(o, out_f)
+        e = x_row_max[bb] + w_row_max[oc]
+        return max(e, int(bias_e[oc])) if bias_e is not None else e
+
+    n_out = batch * out_f
+    gsz = n_out if raw_group_size == 0 else raw_group_size
+    if n_out == 0:
+        z = np.zeros(0, dtype=np.int64)
+        return IntFold(z, np.zeros(1, dtype=np.int64), z.astype(np.float64), z.astype(np.float64), g, raw_group_size, 0, 0, 0, 0)
+    if n_out % gsz:
+        raise ValueError(f"raw groupSize {gsz} does not divide the output ({n_out})")
+    exps = np.array([max(top(o) for o in range(t * gsz, (t + 1) * gsz)) + g for t in range(n_out // gsz)], dtype=np.int64)
+    walk = linear_walk(batch, in_f, out_f, "forward", bias is not None)
+    return _int_fold_walk(walk, a, a_st, a_bits, b, b_st, b_bits, bias_codes, bias_e, exps, gsz, g, raw_group_size)
 
 
 def _bitlen(v: int) -> int:

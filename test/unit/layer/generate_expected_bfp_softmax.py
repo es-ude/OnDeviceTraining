@@ -64,6 +64,7 @@ Run via `uv run` (CMake wires this automatically, see CMakeLists.txt)."""
 import argparse
 import math
 import sys
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -72,6 +73,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
 from sym_gold import (_bfp_group_of, assert_rounding_canary, bfp_quantize_grouped,
+                      bfp_reblock_raw_half_away_ref,
                       emit_float_array, emit_int32_array, emit_int32_scalar, emit_uint8_array)
 
 # ---- Task 3 constants (BfpSoftmaxExp.h). QLN2/QB/QC/QFLOOR are RE-DERIVED
@@ -161,21 +163,19 @@ def iexp_q(qw, mode):
     return shift_right_rounded(ql, z, mode)
 
 
-def softmax_values_bfp(codes, exps, qc, mode):
-    """softmaxValuesBfp (Softmax.c): numerics-spec steps 1-5 on unpacked
-    mantissa codes with a live grid. Returns the RAW float32 outputs (BFP D7) --
-    the OUT_WRITE epilogue packs them."""
+def softmax_exp_codes_bfp(codes, exps, qc, mode):
+    """softmaxExpCodesBfp (Softmax.c): numerics-spec steps 1-4 on unpacked
+    mantissa codes with a live grid. Returns the i-exp codes qe_i (scale
+    A * 2^-28) the forward normalises in integers and the backward in float32."""
     n = len(codes)
     bias = bfp_bias(qc)
     E = [exps[_bfp_group_of(i, qc["group_size"])] - bias for i in range(n)]
 
-    # (1) Max: ldexpf compare, strict > keeps the FIRST max.
+    # (1) Max: the EXACT value compare (rationals), strict > keeps the FIRST max.
     m_max, e_max = codes[0], E[0]
-    x_max = ldexp_f32(codes[0], E[0])
     for i in range(1, n):
-        xi = ldexp_f32(codes[i], E[i])
-        if xi > x_max:
-            x_max, m_max, e_max = xi, codes[i], E[i]
+        if Fraction(codes[i]) * Fraction(2) ** E[i] > Fraction(m_max) * Fraction(2) ** e_max:
+            m_max, e_max = codes[i], E[i]
 
     # (2) Align onto the work-or-coarser grid: at most ONE rounded shift per
     # element. The net shift s_i MAY be NEGATIVE (spec amended 2026-09-08,
@@ -186,8 +186,7 @@ def softmax_values_bfp(codes, exps, qc, mode):
     sigma = e_max + F
     down = -sigma if sigma < 0 else 0
     m_max_w = shift_right_rounded(m_max, down, mode)
-    s = []
-    total = f32(0.0)
+    qes = []
     for i in range(n):
         si = (e_max - E[i]) + down
         if si >= 0:
@@ -225,12 +224,44 @@ def softmax_values_bfp(codes, exps, qc, mode):
         else:
             qw = qt
         assert INT32_MIN <= qw <= INT32_MAX, f"qW {qw} leaves int32"
-        # (4) Integer core; (5) float boundary.
-        qe = iexp_q(qw, mode)
+        # (4) Integer core.
+        qes.append(iexp_q(qw, mode))
+    return qes
+
+
+def softmax_values_bfp(codes, exps, qc, mode):
+    """softmaxValuesBfp (Softmax.c), the BACKWARD's recompute: steps 1-4, then
+    the float32 step 5 -- (float)qe * 0.3585f, ldexpf(.., -28), sum in index
+    order, per-element divide."""
+    s = []
+    total = f32(0.0)
+    for qe in softmax_exp_codes_bfp(codes, exps, qc, mode):
         e = ldexp_f32(f32_mul(f32(qe), A_OUT), -28)
         s.append(e)
         total = f32_add(total, e)
     return [f32_div(v, total) for v in s]
+
+
+RAW_FRAC_BITS = 30
+
+
+def softmax_forward_raw_bfp(codes, exps, qc, mode):
+    """softmaxForwardBfpRaw (Softmax.c), the FORWARD: steps 1-4, then the
+    integer step 5 from its definition (section 5.9 step 5), in exact
+    rationals (not the C restoring division): p = the smallest p >= 0 with
+    n * QE_MAX <= INT32_MAX * 2^p, S = round_half_up(sum qe / 2^p),
+    mant_i = round_half_up(qe_i * 2^(30 - p) / S). Raw exponent -30."""
+    qes = softmax_exp_codes_bfp(codes, exps, qc, mode)
+    n = len(qes)
+    qe_max = QB * QB + QC
+    assert all(0 <= q <= qe_max for q in qes)
+    p = 0
+    while n * qe_max > INT32_MAX * 2 ** p:
+        p += 1
+    s = math.floor(Fraction(sum(qes), 2 ** p) + Fraction(1, 2))
+    mant = [math.floor(Fraction(q * 2 ** (RAW_FRAC_BITS - p), s) + Fraction(1, 2)) for q in qes]
+    assert all(0 <= v <= INT32_MAX for v in mant)
+    return mant
 
 
 def softmax_float64(vals):
@@ -321,6 +352,17 @@ BWD_DLDS_QC = {"mantissa_bits": 8, "exponent_bits": 8, "group_size": 0}
 BWD_STAGED_DLDS_VALS = [0.1582, -0.099, 0.233, 0.04105, -0.311, 0.13, -0.021, 0.323]
 
 
+def pack_forward(codes, exps, qc, mode, out_qc):
+    """The integer forward end to end: the raw of softmax_forward_raw_bfp on
+    the TARGET's geometry (every group at exponent -30), re-blocked by the
+    section-13 rule (HALF_AWAY -- the fixtures' op rounding)."""
+    mant = softmax_forward_raw_bfp(codes, exps, qc, mode)
+    gs = out_qc["group_size"]
+    num_groups = 1 if gs == 0 else len(mant) // gs
+    return bfp_reblock_raw_half_away_ref(mant, [-RAW_FRAC_BITS] * num_groups, gs,
+                                         out_qc["mantissa_bits"], out_qc["exponent_bits"])
+
+
 def pack(raw, qc):
     """The OUT_WRITE epilogue: conversionMatrix[FLOAT32][BFP] re-derives the
     TARGET's per-group exponents and rounds with the OP's mode (HALF_AWAY for
@@ -384,10 +426,30 @@ def main() -> None:
                        "on the alignment shift -- the knob tests would be vacuous")
 
     # -- SM-A gold: both knob positions --
-    a_raw_trunc = softmax_values_bfp(SM_X_CODES, SM_X_EXPS, SM_X_QC, "trunc")
-    a_raw_ha = softmax_values_bfp(SM_X_CODES, SM_X_EXPS, SM_X_QC, "half_away")
-    a_codes_trunc, a_exps_trunc = pack(a_raw_trunc, OUT_QC)
-    a_codes_ha, a_exps_ha = pack(a_raw_ha, OUT_QC)
+    a_codes_trunc, a_exps_trunc = pack_forward(SM_X_CODES, SM_X_EXPS, SM_X_QC, "trunc", OUT_QC)
+    # The raw itself (kernel-level gold) for every native fixture, both knobs
+    # on SM-A; each within the integer normalisation's 2^-31 + the float32
+    # recompute's 2^-22 relative of the backward's float step 5 on the same qe.
+    raw_golds = {
+        "kSmBfpRawMantTrunc": softmax_forward_raw_bfp(SM_X_CODES, SM_X_EXPS, SM_X_QC, "trunc"),
+        "kSmBfpRawMantHalfAway": softmax_forward_raw_bfp(SM_X_CODES, SM_X_EXPS, SM_X_QC,
+                                                         "half_away"),
+        "kSmBfpCnRawMantTrunc": softmax_forward_raw_bfp(SM_CN_X_CODES, SM_CN_X_EXPS, SM_CN_X_QC,
+                                                        "trunc"),
+        "kSmBfpCsRawMantTrunc": softmax_forward_raw_bfp(SM_CS_X_CODES, SM_CS_X_EXPS, SM_CS_X_QC,
+                                                        "trunc"),
+    }
+    for (name, mant), (codes_, exps_, qc_, mode_) in zip(raw_golds.items(), (
+            (SM_X_CODES, SM_X_EXPS, SM_X_QC, "trunc"), (SM_X_CODES, SM_X_EXPS, SM_X_QC, "half_away"),
+            (SM_CN_X_CODES, SM_CN_X_EXPS, SM_CN_X_QC, "trunc"),
+            (SM_CS_X_CODES, SM_CS_X_EXPS, SM_CS_X_QC, "trunc"))):
+        s_float = softmax_values_bfp(codes_, exps_, qc_, mode_)
+        for v, f in zip(mant, s_float):
+            assert abs(v * 2.0 ** -RAW_FRAC_BITS - float(f)) <= 2.0 ** -31 + 2.0 ** -22 * float(f), (
+                f"{name}: integer and float32 normalisation disagree beyond their bounds")
+    assert raw_golds["kSmBfpRawMantTrunc"] != raw_golds["kSmBfpRawMantHalfAway"], (
+        "SM-A raw: the knob does not reach the raw")
+    a_codes_ha, a_exps_ha = pack_forward(SM_X_CODES, SM_X_EXPS, SM_X_QC, "half_away", OUT_QC)
 
     # (i) Knob discrimination: the packed wires MUST differ.
     assert (a_codes_trunc, a_exps_trunc) != (a_codes_ha, a_exps_ha), (
@@ -435,10 +497,10 @@ def main() -> None:
             "positive-in-coarse-block regime is unexercised")
 
     # -- SM-CN gold: both knob positions; pack at SM-A's outputQ geometry --
-    cn_raw_trunc = softmax_values_bfp(SM_CN_X_CODES, SM_CN_X_EXPS, SM_CN_X_QC, "trunc")
-    cn_raw_ha = softmax_values_bfp(SM_CN_X_CODES, SM_CN_X_EXPS, SM_CN_X_QC, "half_away")
-    cn_codes_trunc, cn_exps_trunc = pack(cn_raw_trunc, OUT_QC)
-    cn_codes_ha, cn_exps_ha = pack(cn_raw_ha, OUT_QC)
+    cn_codes_trunc, cn_exps_trunc = pack_forward(SM_CN_X_CODES, SM_CN_X_EXPS, SM_CN_X_QC,
+                                                 "trunc", OUT_QC)
+    cn_codes_ha, cn_exps_ha = pack_forward(SM_CN_X_CODES, SM_CN_X_EXPS, SM_CN_X_QC,
+                                           "half_away", OUT_QC)
 
     # (vi) The underflow elements must land at code 0 (their e_i is EXACTLY 0),
     # and every element -- the +1.0 one included -- must sit within the i-exp
@@ -488,8 +550,7 @@ def main() -> None:
     assert zero_up31, "SM-CS: no ZERO code reaches the up>=31 clause (the UB fix's pin)"
 
     # -- SM-CS gold (knob TRUNC; SM-A remains the knob discriminator) --
-    cs_raw = softmax_values_bfp(SM_CS_X_CODES, SM_CS_X_EXPS, SM_CS_X_QC, "trunc")
-    cs_codes, cs_exps = pack(cs_raw, OUT_QC)
+    cs_codes, cs_exps = pack_forward(SM_CS_X_CODES, SM_CS_X_EXPS, SM_CS_X_QC, "trunc", OUT_QC)
     cs_ref = softmax_float64(cs_deq)
     # (vii) Saturated elements pack to code 0 exactly; the ZERO-code elements
     # keep NONZERO mass matching the float softmax (exp(-x_max)/sum) -- a
@@ -518,8 +579,7 @@ def main() -> None:
                     "exponent_bits": STAGED_OUT_QC["exponent_bits"], "group_size": 0}
         codes, exps = bfp_quantize_grouped([float(v) for v in b_vals], mantissa_bits,
                                            stage_qc["exponent_bits"], 0)
-        raw = softmax_values_bfp(codes, exps, stage_qc, "trunc")
-        return pack(raw, STAGED_OUT_QC), codes, exps, stage_qc
+        return pack_forward(codes, exps, stage_qc, "trunc", STAGED_OUT_QC), codes, exps, stage_qc
 
     b_out, b_staged_codes, b_staged_exps, b_stage_qc = staged_forward(
         STAGED_OUT_QC["mantissa_bits"])
@@ -639,6 +699,8 @@ def main() -> None:
         emit_int32_scalar("kSmBfpOutExponentBits", OUT_QC["exponent_bits"]),
         emit_int32_scalar("kSmBfpOutNumGroups", OUT_NUM_GROUPS),
         emit_int32_scalar("kSmBfpOutGroupSize", OUT_QC["group_size"]),
+        "/* the integer forward's BFP_RAW mantissas (every group at exponent -30) */\n",
+        *[emit_int32_array(name, torch.tensor(mant)) for name, mant in raw_golds.items()],
         emit_int32_array("kSmBfpOutCodesTrunc", torch.tensor(a_codes_trunc)),
         emit_uint8_array("kSmBfpOutExponentsTrunc", a_exps_trunc),
         emit_int32_array("kSmBfpOutCodesHalfAway", torch.tensor(a_codes_ha)),

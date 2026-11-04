@@ -115,37 +115,41 @@ static void softmaxForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, ten
     }
 }
 
-/* BFP epic PR6 Task 4 (P6-2..P6-5): the native ARITH_BFP softmax -- pipeline
- * contract docs/conventions/arithmetic-bfp.md §5.9 (R-S2) steps 1-5; the
- * goldgen mirrors this function statement for statement.
+/* BFP epic PR6 Task 4 (P6-2..P6-5): the native ARITH_BFP softmax's integer
+ * steps 1-4 -- pipeline contract docs/conventions/arithmetic-bfp.md §5.9
+ * (R-S2); the goldgen mirrors this function statement for statement. Writes
+ * the i-exp code qe_i (scale A * 2^-28, >= 0) of every element to `qe`; the
+ * forward normalises them in integers (softmaxForwardBfpRaw), the backward's
+ * recompute in float32 (softmaxValuesBfp), so both see the same codes.
  * Operands arrive in the funnel's unpacked-BFP scratch form (int32 mantissa
  * codes + live bfpQConfig_t). `mode` is the layer's bfpExpShiftRounding knob:
  * it governs ONLY the integer right-shift sites here (the alignment shift and
  * the >>z inside bfpIExpQ) -- staging and the OUT_WRITE pack keep the normal
- * roundingMode_t machinery. Raw out is FLOAT32 (BFP D7). Task 5's backward
- * recompute path calls this helper verbatim. */
-static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, float *sOut,
-                             rngStream_t *shift) {
+ * roundingMode_t machinery. */
+static void softmaxExpCodesBfp(const tensor_t *input, bfpShiftRounding_t mode, int32_t *qe,
+                               rngStream_t *shift) {
     /* n == 0 handled by caller. */
     const bfpQConfig_t *qC = input->quantization->qConfig;
+    if (qC->mantissaBits > 16) {
+        PRINT_ERROR("Softmax BFP: mantissaBits %u > 16 -- the exact max compare needs "
+                    "|code| <= 2^15",
+                    (unsigned)qC->mantissaBits);
+        exit(1);
+    }
     const int32_t bias = bfpExponentBias(qC);
     bfpGroupRange_t qRange = {0};
     const int32_t *m = (const int32_t *)input->data;
     /* calcNumberOfElementsByTensor takes a non-const tensor_t* but only
-     * reads; the cast keeps this helper's const-view contract for Task 5's
-     * backward recompute caller. */
+     * reads; the cast keeps this helper's const-view contract. */
     const size_t n = calcNumberOfElementsByTensor((tensor_t *)input);
 
-    /* (1) Max (P6-4): ldexpf compare, strict > keeps the FIRST max; remember
-     * the winner's mantissa and UNBIASED exponent. */
+    /* (1) Max (P6-4): the exact (code, E) compare, strict > keeps the FIRST
+     * max; remember the winner's mantissa and UNBIASED exponent. */
     int32_t mMax = m[0];
     int32_t eMax = (int32_t)qC->exponents[bfpGroupAt(&qRange, qC, 0)] - bias;
-    float xMax = ldexpf((float)m[0], (int)eMax);
     for (size_t i = 1; i < n; i++) {
         const int32_t ei = (int32_t)qC->exponents[bfpGroupAt(&qRange, qC, i)] - bias;
-        const float xi = ldexpf((float)m[i], (int)ei);
-        if (xi > xMax) {
-            xMax = xi;
+        if (bfpValueGreater(m[i], (int)ei, mMax, (int)eMax)) {
             mMax = m[i];
             eMax = ei;
         }
@@ -162,7 +166,6 @@ static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, flo
     const int32_t sigma = eMax + BFP_SOFTMAX_EXP_FRAC_BITS;
     const uint32_t down = (sigma < 0) ? (uint32_t)(-sigma) : 0u;
     const int32_t mMaxW = bfpShiftRightRounded(mMax, down, mode, shift);
-    float sum = 0.f;
     for (size_t i = 0; i < n; i++) {
         const int32_t ei = (int32_t)qC->exponents[bfpGroupAt(&qRange, qC, i)] - bias;
         const int32_t si = (eMax - ei) + (int32_t)down;
@@ -219,15 +222,140 @@ static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, flo
         } else {
             qW = qT;
         }
-        /* (4) Integer core (lossy site 3 is the >>z inside); (5) float
-         * boundary (P6-5): S_out = A * 2^-28, float sum in index order. */
-        const int32_t qe = bfpIExpQ(qW, mode, shift);
-        const float e = ldexpf((float)qe * BFP_SOFTMAX_A, -28);
+        /* (4) Integer core (lossy site 3 is the >>z inside). */
+        qe[i] = bfpIExpQ(qW, mode, shift);
+    }
+}
+
+/* The backward's recompute (R-S4): steps 1-4, then the float32 step 5 --
+ * S_out = A * 2^-28, float sum in index order, per-element divide. */
+static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, float *sOut,
+                             rngStream_t *shift) {
+    const size_t n = calcNumberOfElementsByTensor((tensor_t *)input);
+    int32_t qe[n];
+    softmaxExpCodesBfp(input, mode, qe, shift);
+    float sum = 0.f;
+    for (size_t i = 0; i < n; i++) {
+        const float e = ldexpf((float)qe[i] * BFP_SOFTMAX_A, -28);
         sOut[i] = e;
         sum += e;
     }
     for (size_t i = 0; i < n; i++) {
         sOut[i] /= sum;
+    }
+}
+
+/* Step 5 of the integer forward, in place: q_i (the i-exp codes, >= 0) ->
+ * round(q_i / sum q * 2^F), F = BFP_SOFTMAX_RAW_FRAC_BITS. The common scale
+ * A * 2^-28 cancels, so no constant multiplies.
+ *  - Sum: the true sum T reaches n * QE_MAX > 2^31 for n >= 3, so it is kept
+ *    as T = hi * 2^p + lo (lo < 2^p, one carry per term) with p the smallest
+ *    p >= 0 such that n * QE_MAX <= INT32_MAX * 2^p (so hi fits); the divisor
+ *    is S = round_half_up(T / 2^p), exact up to that one rounding.
+ *  - Divide: mant_i = round_half_up(q_i * 2^(F-p) / S), a restoring division
+ *    of 32 quotient bits (F + 1 plus the half bit), no hardware divide. It
+ *    starts from r = q_i >> (p + 1), which must be < S for the quotient to
+ *    fit 32 bits: S >= T / 2^p - 1/2 and T > 2^p (the argmax's qe is ~QE_MAX)
+ *    give it, and it is CHECKED once per call (qMax). r < S <= INT32_MAX
+ *    keeps 2r + 1 inside uint32. |mant| <= 2^F (1 + 2^(p-1)/T) + 1 < 2^31.
+ * Rounding is HALF_AWAY (= half up, all values >= 0), never SR and never the
+ * knob's: the re-block owns the op's rounding mode. */
+/* The largest n with n * QE_MAX <= INT32_MAX * 2^p, per p (compile-time
+ * constants, so choosing p costs no 64-bit arithmetic at run time). */
+#define SM_MAX_TERMS(p) ((uint32_t)(((uint64_t)INT32_MAX << (p)) / BFP_SOFTMAX_QE_MAX))
+static const uint32_t kSoftmaxMaxTerms[29] = {
+    SM_MAX_TERMS(0),  SM_MAX_TERMS(1),  SM_MAX_TERMS(2),  SM_MAX_TERMS(3),  SM_MAX_TERMS(4),
+    SM_MAX_TERMS(5),  SM_MAX_TERMS(6),  SM_MAX_TERMS(7),  SM_MAX_TERMS(8),  SM_MAX_TERMS(9),
+    SM_MAX_TERMS(10), SM_MAX_TERMS(11), SM_MAX_TERMS(12), SM_MAX_TERMS(13), SM_MAX_TERMS(14),
+    SM_MAX_TERMS(15), SM_MAX_TERMS(16), SM_MAX_TERMS(17), SM_MAX_TERMS(18), SM_MAX_TERMS(19),
+    SM_MAX_TERMS(20), SM_MAX_TERMS(21), SM_MAX_TERMS(22), SM_MAX_TERMS(23), SM_MAX_TERMS(24),
+    SM_MAX_TERMS(25), SM_MAX_TERMS(26), SM_MAX_TERMS(27), SM_MAX_TERMS(28)};
+#undef SM_MAX_TERMS
+
+static void softmaxNormalizeRaw(int32_t *q, size_t n) {
+    unsigned p = 0;
+    while (p <= 28u && n > kSoftmaxMaxTerms[p]) {
+        p++;
+    }
+    if (p > 28u) {
+        PRINT_ERROR("Softmax BFP: %zu elements are beyond the int32 normalisation", n);
+        exit(1);
+    }
+    const uint32_t mask = (1u << p) - 1u;
+    uint32_t hi = 0;
+    uint32_t lo = 0;
+    uint32_t qMax = 0;
+    for (size_t i = 0; i < n; i++) {
+        const uint32_t v = (uint32_t)q[i];
+        hi += v >> p;
+        lo += v & mask;
+        if (lo > mask) {
+            hi++;
+            lo -= mask + 1u;
+        }
+        if (v > qMax) {
+            qMax = v;
+        }
+    }
+    const uint32_t s = hi + ((p > 0u && lo >= (1u << (p - 1u))) ? 1u : 0u);
+    if ((qMax >> (p + 1u)) >= s) {
+        PRINT_ERROR("Softmax BFP: normalisation divisor %u below the largest code %u >> %u "
+                    "(no i-exp code near exp(0))",
+                    (unsigned)s, (unsigned)qMax, p + 1u);
+        exit(1);
+    }
+    const unsigned zeroBits = BFP_SOFTMAX_RAW_FRAC_BITS - p + 1u;
+    for (size_t i = 0; i < n; i++) {
+        const uint32_t v = (uint32_t)q[i];
+        uint32_t r = v >> (p + 1u);
+        uint32_t quot = 0;
+        for (unsigned b = p + 1u; b-- > 0u;) {
+            r = (r << 1) | ((v >> b) & 1u);
+            quot <<= 1;
+            if (r >= s) {
+                r -= s;
+                quot |= 1u;
+            }
+        }
+        for (unsigned b = 0; b < zeroBits; b++) {
+            r <<= 1;
+            quot <<= 1;
+            if (r >= s) {
+                r -= s;
+                quot |= 1u;
+            }
+        }
+        q[i] = (int32_t)((quot >> 1) + (quot & 1u));
+    }
+}
+
+void softmaxForwardBfpRaw(const tensor_t *input, bfpShiftRounding_t mode, rngStream_t *shift,
+                          tensor_t *rawOut) {
+    if (input->quantization->type != BFP) {
+        PRINT_ERROR("softmaxForwardBfpRaw: input must be BFP (unpacked scratch form)");
+        exit(1);
+    }
+    if (rawOut->quantization->type != BFP_RAW) {
+        PRINT_ERROR("softmaxForwardBfpRaw: output must be BFP_RAW (the integer forward raw)");
+        exit(1);
+    }
+    const size_t n = calcNumberOfElementsByTensor((tensor_t *)input);
+    if (calcNumberOfElementsByTensor(rawOut) != n) {
+        PRINT_ERROR("softmaxForwardBfpRaw: output holds %zu elements, the input %zu",
+                    calcNumberOfElementsByTensor(rawOut), n);
+        exit(1);
+    }
+    validateBfpQConfigShape(input->quantization->qConfig, n);
+    bfpRawQConfig_t *rawQC = rawOut->quantization->qConfig;
+    bfpRawRequireOutput(rawQC, n, "softmaxForwardBfpRaw");
+    if (n == 0) {
+        return;
+    }
+    int32_t *mant = (int32_t *)rawOut->data;
+    softmaxExpCodesBfp(input, mode, mant, shift);
+    softmaxNormalizeRaw(mant, n);
+    for (size_t t = 0; t < rawQC->numGroups; t++) {
+        rawQC->exponents[t] = -BFP_SOFTMAX_RAW_FRAC_BITS;
     }
 }
 
@@ -243,15 +371,9 @@ static void softmaxForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, 
                                     const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
+    (void)rs;
     const softmaxKernelCtx_t *kctx = ctx;
-    const softmaxConfig_t *cfg = kctx->cfg;
-    tensor_t *input = ops[0];
-    size_t count = calcNumberOfElementsByTensor(input);
-    if (count == 0) {
-        return;
-    }
-    validateBfpQConfigShape(input->quantization->qConfig, count);
-    softmaxValuesBfp(input, cfg->bfpExpShiftRounding, (float *)rawOut->data, kctx->shift);
+    softmaxForwardBfpRaw(ops[0], kctx->cfg->bfpExpShiftRounding, kctx->shift, rawOut);
 }
 
 /* #152: the native BFP pipeline runs ONE max/alignment grid and
@@ -327,7 +449,9 @@ void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output,
                         .arithmetic = cfg->forwardMath,
                         .key = layerExecOpKey(exec, RNG_TAG_FORWARD, SOFTMAX_OP_FORWARD, &opKey),
                         .mode = OUT_WRITE,
-                        .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL}},
+                        .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL},
+                        /* Forward raw contract: the backward op never sets it. */
+                        .bfpRawOut = true},
             output);
         return;
     }

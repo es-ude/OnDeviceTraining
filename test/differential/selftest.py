@@ -146,6 +146,26 @@ def integer_fold_reblock_matches_the_pack_where_it_is_exact():
     assert list(deq) == [float(2**24), float(2**24 + 4)]
 
 
+@check
+def linear_int_fold_follows_section_13_by_hand():
+    # x [1, 2] m16 floors at E = 0, W [1, 2] m16 floors: N = 2 > limit 1, g = 1,
+    # two segments of 2^30 each halved exactly -> mant 2^30 at E_acc = 1.
+    bits16 = (16, 8, 0)
+    f = bfp_ref.linear_int_fold(np.array([-32768, -32768]), np.array([127]), bits16,
+                                np.array([-32768, -32768]), np.array([127]), bits16, None, 1, 2, 1, 0)
+    assert f.g == 1 and list(f.exps) == [1] and list(f.mant) == [2**30] and f.n_splits == 1
+    # E_top = row max of x + row max of W, max'ed with the bias exponent; two outputs
+    # in one raw group take the larger. x row: E {+3, -2}; W rows: {0} and {+4}
+    # (gs 2, one group per row); bias E {+10, -9} -> tops {10, 7}, E_acc = 10 + g.
+    bits8 = (8, 8, 2)
+    f = bfp_ref.linear_int_fold(np.array([1, 1, 1, 1]), np.array([130, 125]), bits8,
+                                np.array([1, 1, 1, 1, 1, 1, 1, 1]), np.array([127, 131]), (8, 8, 4),
+                                (np.array([3, -3]), np.array([137, 118]), (8, 8, 1)), 1, 4, 2, 0)
+    assert f.g == bfp_ref.fold_guard_bits(4, 8, 8, 8) and list(f.exps) == [10 + f.g]
+    # the exact sums: out0 = 3*2^10 + 2*(2^3 + 2^-2), out1 = -3*2^-9 + 2*(2^7 + 2^2)
+    assert list(f.exact) == [3 * 2**10 + 2 * (2**3 + 2**-2), -3 * 2**-9 + 2 * (2**7 + 2**2)]
+
+
 def main() -> int:
     failed = 0
     for fn in CHECKS:

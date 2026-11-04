@@ -736,6 +736,234 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
     }
 }
 
+/* Max unbiased exponent of each reduction LINE of a matmul operand (line l =
+ * the elements one output row reads from `a`, or one output column from
+ * `b`). When the reduction axis is the physically innermost dimension (1-D
+ * operands trivially), line l is the storage run [l * k, (l + 1) * k) and one
+ * forward cursor serves all lines (no division). Any other view gets the
+ * operand-wide max over all groups: coarser, still an upper bound. */
+static void matmulBfpLineMaxExponents(const tensor_t *t, size_t reductionAxis, size_t lines,
+                                      size_t k, int16_t *lineMax) {
+    const bfpQConfig_t *qC = t->quantization->qConfig;
+    int32_t expBias = bfpExponentBias(qC);
+    if (t->shape->numberOfDimensions < 2 || t->shape->orderOfDimensions[1] == reductionAxis) {
+        bfpRowCursor_t c = {.group = 0, .groupEnd = qC->groupSize};
+        for (size_t l = 0; l < lines; l++) {
+            lineMax[l] = (int16_t)bfpRowMaxExponent(&c, qC, expBias, l * k, k);
+        }
+        return;
+    }
+    int e = (int)qC->exponents[0] - expBias;
+    for (size_t g = 1; g < qC->numGroups; g++) {
+        int eg = (int)qC->exponents[g] - expBias;
+        if (eg > e) {
+            e = eg;
+        }
+    }
+    for (size_t l = 0; l < lines; l++) {
+        lineMax[l] = (int16_t)e;
+    }
+}
+
+/* Integer-only forward (arithmetic-bfp.md §13): matmulBfpTensors' walk
+ * verbatim -- loop order, MAC count, calcElementIndexByIndices, bfpGroupAt on
+ * both operands -- with the float fold replaced by the integer fold (see
+ * Matmul.h). */
+void matmulBfpRawTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
+                         tensor_t *outputTensor) {
+    if (aTensor->shape->numberOfDimensions > 2 || bTensor->shape->numberOfDimensions > 2) {
+        PRINT_ERROR("Matmul only supports up to 2D Tensors");
+        exit(1);
+    }
+    if (aTensor->quantization->type != BFP || bTensor->quantization->type != BFP) {
+        PRINT_ERROR("matmulBfpRawTensors: operands must be BFP (unpacked scratch form)");
+        exit(1);
+    }
+    if (outputTensor->quantization->type != BFP_RAW) {
+        PRINT_ERROR("matmulBfpRawTensors: output must be BFP_RAW (the integer forward raw)");
+        exit(1);
+    }
+
+    bfpQConfig_t *aQC = aTensor->quantization->qConfig;
+    bfpQConfig_t *bQC = bTensor->quantization->qConfig;
+
+    size_t aNumberOfDims = aTensor->shape->numberOfDimensions;
+    size_t *aDims = aTensor->shape->dimensions;
+    size_t bNumberOfDims = bTensor->shape->numberOfDimensions;
+    size_t *bDims = bTensor->shape->dimensions;
+
+    size_t aRows, aColumns;
+    if (aNumberOfDims < 2) {
+        aRows = 1;
+        aColumns = getDimensionsByIndex(aTensor, 0);
+    } else {
+        aRows = getDimensionsByIndex(aTensor, 0);
+        aColumns = getDimensionsByIndex(aTensor, 1);
+    }
+    size_t bRows = getDimensionsByIndex(bTensor, 0);
+    size_t bColumns = (bNumberOfDims < 2) ? 1 : getDimensionsByIndex(bTensor, 1);
+
+    if (aColumns != bRows) {
+        PRINT_ERROR("Rows dont match Columns");
+        PRINT_DEBUG("aColumns: %zu, bRows: %zu", aColumns, bRows);
+        exit(1);
+    }
+
+    validateBfpQConfigShape(aQC, calcNumberOfElementsByTensor(aTensor));
+    validateBfpQConfigShape(bQC, calcNumberOfElementsByTensor(bTensor));
+
+    bfpQConfig_t *biasQC = NULL;
+    if (bias != NULL) {
+        if (bias->quantization->type != BFP) {
+            PRINT_ERROR("matmulBfpRawTensors: bias must be BFP");
+            exit(1);
+        }
+        if (calcNumberOfElementsByTensor(bias) != bColumns) {
+            PRINT_ERROR("matmulBfpRawTensors: bias element count != output columns");
+            exit(1);
+        }
+        biasQC = bias->quantization->qConfig;
+        validateBfpQConfigShape(biasQC, bColumns);
+    }
+
+    size_t outElems = aRows * bColumns;
+    if (calcNumberOfElementsByTensor(outputTensor) != outElems) {
+        PRINT_ERROR("matmulBfpRawTensors: output holds %zu elements, the product has %zu",
+                    calcNumberOfElementsByTensor(outputTensor), outElems);
+        exit(1);
+    }
+    bfpRawQConfig_t *rawQC = outputTensor->quantization->qConfig;
+    size_t gsz = bfpRawRequireOutput(rawQC, outElems, "matmulBfpRawTensors");
+    int16_t *rawE = rawQC->exponents;
+    if (outElems == 0) {
+        return;
+    }
+
+    /* Static headroom proof (§13 item 3) over the reduction; over-long
+     * same-exponent runs split at the segment limit instead of failing. */
+    int guard = bfpFoldGuardBits(aColumns, aQC->mantissaBits, bQC->mantissaBits,
+                                 biasQC != NULL ? biasQC->mantissaBits : 0, "matmulBfpRawTensors");
+    size_t segmentLimit = bfpSegmentLimit(aQC->mantissaBits, bQC->mantissaBits);
+
+    int32_t const *aArr = (int32_t const *)aTensor->data;
+    int32_t const *bArr = (int32_t const *)bTensor->data;
+    int32_t const *biasArr = bias != NULL ? (int32_t const *)bias->data : NULL;
+    int32_t *mant = (int32_t *)outputTensor->data;
+    int32_t aExpBias = bfpExponentBias(aQC);
+    int32_t bExpBias = bfpExponentBias(bQC);
+
+    /* Pre-pass (stack tables sized by the topology, never by the MACs): per
+     * output row / column the max exponent of the line it reduces over, per
+     * column the bias exponent; E_acc of a raw target group = the max over its
+     * outputs of max(rowTop + colTop, biasE) + g, walked in output order. */
+    int16_t aMax[aRows];
+    int16_t bMax[bColumns];
+    int16_t biasE[biasQC != NULL ? bColumns : 1];
+    matmulBfpLineMaxExponents(aTensor, 1, aRows, aColumns, aMax);
+    matmulBfpLineMaxExponents(bTensor, 0, bColumns, aColumns, bMax);
+    if (biasQC != NULL) {
+        bfpGroupRange_t biasRange = {0};
+        int32_t biasExpBias = bfpExponentBias(biasQC);
+        for (size_t c = 0; c < bColumns; c++) {
+            biasE[c] =
+                (int16_t)((int)biasQC->exponents[bfpGroupAt(&biasRange, biasQC, c)] - biasExpBias);
+        }
+    }
+    {
+        size_t t = 0;
+        size_t tEnd = gsz;
+        int top = INT_MIN;
+        size_t o = 0;
+        for (size_t rowIndex = 0; rowIndex < aRows; rowIndex++) {
+            for (size_t columnIndex = 0; columnIndex < bColumns; columnIndex++) {
+                int e = aMax[rowIndex] + bMax[columnIndex];
+                if (biasQC != NULL && biasE[columnIndex] > e) {
+                    e = biasE[columnIndex];
+                }
+                if (e > top) {
+                    top = e;
+                }
+                if (++o == tEnd) {
+                    rawE[t++] = (int16_t)(top + guard);
+                    tEnd += gsz;
+                    top = INT_MIN;
+                }
+            }
+        }
+    }
+
+    bfpGroupRange_t aRange = {0};
+    bfpGroupRange_t bRange = {0};
+    size_t targetGroup = 0;
+    size_t targetEnd = gsz;
+    int eAcc = rawE[0];
+
+    size_t resultCounter = 0;
+    for (size_t rowIndex = 0; rowIndex < aRows; rowIndex++) {
+        for (size_t columnIndex = 0; columnIndex < bColumns; columnIndex++) {
+            if (resultCounter >= targetEnd) {
+                targetGroup++;
+                targetEnd += gsz;
+                eAcc = rawE[targetGroup];
+            }
+            /* The bias is one more segment (§13 item 6); the column changes
+             * every output, so it is aligned per output. */
+            int32_t acc = biasArr != NULL
+                              ? bfpAlignPartial(biasArr[columnIndex], eAcc - biasE[columnIndex])
+                              : 0;
+            int32_t partial = 0;
+            size_t segCount = 0;
+            size_t currentAGroup = 0;
+            size_t currentBGroup = 0;
+            for (size_t i = 0; i < aColumns; i++) {
+                size_t aValueIndex;
+                if (aNumberOfDims == 1) {
+                    aValueIndex = i;
+                } else {
+                    size_t aIndices[] = {rowIndex, i};
+                    aValueIndex = calcElementIndexByIndices(aNumberOfDims, aDims, aIndices,
+                                                            aTensor->shape->orderOfDimensions);
+                }
+                size_t bValueIndex;
+                if (bNumberOfDims == 1) {
+                    bValueIndex = i;
+                } else {
+                    size_t bIndices[] = {i, columnIndex};
+                    bValueIndex = calcElementIndexByIndices(bNumberOfDims, bDims, bIndices,
+                                                            bTensor->shape->orderOfDimensions);
+                }
+                size_t aGroup = bfpGroupAt(&aRange, aQC, aValueIndex);
+                size_t bGroup = bfpGroupAt(&bRange, bQC, bValueIndex);
+                if (i == 0) {
+                    currentAGroup = aGroup;
+                    currentBGroup = bGroup;
+                } else if (aGroup != currentAGroup || bGroup != currentBGroup ||
+                           segCount == segmentLimit) {
+                    /* A segment closes on EITHER operand's group change or at
+                     * the int32 limit (run split); its partial is aligned to
+                     * E_acc. */
+                    acc += bfpAlignPartial(partial,
+                                           eAcc - ((int)aQC->exponents[currentAGroup] - aExpBias +
+                                                   (int)bQC->exponents[currentBGroup] - bExpBias));
+                    partial = 0;
+                    segCount = 0;
+                    currentAGroup = aGroup;
+                    currentBGroup = bGroup;
+                }
+                partial += mulInt32s(aArr[aValueIndex], bArr[bValueIndex]);
+                segCount++;
+            }
+            if (aColumns > 0) {
+                acc += bfpAlignPartial(partial,
+                                       eAcc - ((int)aQC->exponents[currentAGroup] - aExpBias +
+                                               (int)bQC->exponents[currentBGroup] - bExpBias));
+            }
+            mant[resultCounter] = acc;
+            resultCounter++;
+        }
+    }
+}
+
 size_t getMatmulInstructionCounter() {
     return matmulInstructionCounter;
 }

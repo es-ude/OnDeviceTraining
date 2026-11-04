@@ -259,6 +259,7 @@ add_elastic_ai_unit_test(
         TensorConversion
         odt_test_death
         odt_test_keyed_draw
+        odt_test_bfp_raw_fixture
 )
 add_dependencies(UnitTestSoftmax generate_expected_softmax)
 add_dependencies(UnitTestSoftmax generate_expected_bfp_softmax)

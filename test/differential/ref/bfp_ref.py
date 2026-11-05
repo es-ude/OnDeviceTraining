@@ -826,6 +826,50 @@ def linear_int_fold(
     return _int_fold_walk(walk, a, a_st, a_bits, b, b_st, b_bits, bias_codes, bias_e, exps, gsz, g, raw_group_size)
 
 
+def linear_backward_int_fold(
+    direction: str,
+    loss: tuple[np.ndarray, np.ndarray, tuple[int, int, int]],
+    other: tuple[np.ndarray, np.ndarray, tuple[int, int, int]],
+    batch: int,
+    in_f: int,
+    out_f: int,
+    raw_group_size: int,
+) -> IntFold:
+    """Section 14 "Linear dx / weightGrad / biasGrad": the section-13 integer
+    fold along linear_walk's dx (L @ W, W stored [outF, inF], reduction over
+    outF) or weightGrad (L^T @ x, reduction over the batch) order, no bias
+    segment. E_top of output (r, c) = rowTop(r) + colTop(c), each the max
+    group exponent over the elements of the output's reduction line where
+    the reduction runs along the operand's physically innermost axis (the dx
+    loss rows), else the operand-wide max (the dx weight columns, both
+    weightGrad operands); E_acc of a raw target group = max E_top over its
+    outputs + fold_guard_bits(K, m_loss, m_other, 0)."""
+    lc, ls, lb = loss
+    oc, os_, ob = other
+    a = np.asarray(lc, dtype=np.int64).ravel()
+    b = np.asarray(oc, dtype=np.int64).ravel()
+    a_st, b_st = np.asarray(ls, dtype=np.int64), np.asarray(os_, dtype=np.int64)
+    bias_a, bias_b = exponent_bias(lb[1]), exponent_bias(ob[1])
+    k = out_f if direction == "dx" else batch
+    rows = batch if direction == "dx" else out_f
+    g = fold_guard_bits(k, lb[0], ob[0], 0)
+    loss_all = _row_group_max(a_st, bias_a, lb[2], 0, a.size)
+    col_top = _row_group_max(b_st, bias_b, ob[2], 0, b.size)
+    if direction == "dx":
+        row_top = [_row_group_max(a_st, bias_a, lb[2], r * out_f, out_f) for r in range(rows)]
+    else:
+        row_top = [loss_all] * rows
+    n_out = rows * in_f
+    gsz = n_out if raw_group_size == 0 else raw_group_size
+    if n_out == 0 or k == 0:
+        raise ValueError("an empty backward GEMM is not modelled")
+    if n_out % gsz:
+        raise ValueError(f"raw groupSize {gsz} does not divide the output ({n_out})")
+    exps = np.array([max(row_top[o // in_f] + col_top for o in range(t * gsz, (t + 1) * gsz)) + g for t in range(n_out // gsz)], dtype=np.int64)
+    walk = linear_walk(batch, in_f, out_f, direction, False)
+    return _int_fold_walk(walk, a, a_st, lb, b, b_st, ob, None, None, exps, gsz, g, raw_group_size)
+
+
 def _bitlen(v: int) -> int:
     return int(v).bit_length()
 

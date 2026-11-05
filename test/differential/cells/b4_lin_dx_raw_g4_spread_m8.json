@@ -1,0 +1,58 @@
+{
+  "name": "b4_lin_dx_raw_g4_spread_m8",
+  "description": "B4 Linear dx kernel tier (section 14): the integer BFP_RAW in raw groups of 4 on the spread fixture, mantissas and exponents bit for bit.",
+  "family": "bfp_gemm",
+  "op": "linear",
+  "direction": "dx",
+  "tiers": [
+    "kernel"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3301,
+    "batch": 2,
+    "inF": 16,
+    "outF": 12,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 8,
+      "absmax": 0.25,
+      "expSpread": 4
+    },
+    "bias": {
+      "m": 6,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    },
+    "loss": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 4,
+      "absmax": 1.0,
+      "expSpread": 10
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  },
+  "raw": {
+    "groupSize": 4
+  }
+}

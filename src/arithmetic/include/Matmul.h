@@ -66,8 +66,9 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
                                         const symGroupedWeight_t *groupedWeight, rngStream_t *rs);
 
 /*! BFP epic PR2 (Task 3): block-floating-point GEMM with the FLOAT32 raw --
- *  since the integer-only forward (matmulBfpRawTensors below) it serves the
- *  Linear BACKWARD kernels (dx, weightGrad). Operands are in
+ *  since the integer forward and backward (matmulBfpRawTensors below) it
+ *  serves only the Linear weightGrad into FLOAT32 grads and under the fixed
+ *  grid (the float bridge). Operands are in
  *  the executeOp funnel's UNPACKED-BFP scratch form: ->data holds int32
  *  sign-extended mantissa codes, ->quantization is BFP with a live
  *  bfpQConfig_t (the form exists only between funnel prologue and kernel).
@@ -95,8 +96,9 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
  *  int64 anywhere). */
 void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias, tensor_t *outputTensor);
 
-/*! Integer-only BFP GEMM forward (docs/conventions/arithmetic-bfp.md §13, the
- *  Linear forward; matmulBfpTensors above stays the backward's float fold).
+/*! Integer-only BFP GEMM (docs/conventions/arithmetic-bfp.md §13: the Linear
+ *  forward; §14: the Linear dx and the weightGrad into BFP grads, through the
+ *  same entry on the backward operands' views).
  *  Same operands, walk and group tracking as matmulBfpTensors; the output is
  *  BFP_RAW (int32 mantissas + one unbiased exponent per raw target group,
  *  geometry from the output's own bfpRawQConfig_t, every exponent written)

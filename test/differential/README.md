@@ -308,8 +308,8 @@ directly (Conv1d); `linear_grid` / `full_scale` (Linear, above); `convert`
   integer raw instead (section 13; `bfp_ref.reblock_raw`, exact codes and
   exponents).
 - `b4_*` -- B4, native backward: Linear dx / weightGrad / biasGrad on both
-  tiers (`linearCalcPropLossBfp`, `linearCalcWeightGradsBfp`,
-  `linearCalcBiasGradsBfp` raw; the layer's ONE backward into a FLOAT32 dx
+  tiers (`linearCalcPropLossBfp` integer raw, `linearCalcWeightGradsBfp`,
+  `linearCalcBiasGradsBfp` float raw; the layer's ONE backward into a FLOAT32 dx
   wire and FLOAT32 grads -- the ACC epilogue is the exact float add into a
   zeroed grad, so the layer tier IS the raw tier), Conv1d / ConvT1d dx,
   weightGrad and biasGrad on the layer tier (their grad kernels have no
@@ -337,6 +337,21 @@ directly (Conv1d); `linear_grid` / `full_scale` (Linear, above); `convert`
   roundings + half a code of that call's grid. `..._zero_rows_m8` puts loss
   rows in the zero state (`zeroGroups`), the case where E_acc bounds would
   place the raw grid far above the data.
+  Linear dx is integer end to end too (section 14, the section-13 fold on
+  the backward GEMM, `bfp_ref.linear_backward_int_fold`): the kernel tier
+  (`b4_lin_dx_*`) emits the `BFP_RAW` (raw groups from `raw.groupSize`,
+  mantissas and exponents bit for bit), the layer tier dequantizes it onto
+  a FLOAT32 dx wire or re-blocks it onto a BFP one (`b3_lin_dx_wire_pt_m8`,
+  `b4_lin_dx_wire_g8_spread_m8`: a grouped weight whose columns hop groups,
+  so E_top takes its operand-wide max). `b4_lin_dw_grad_bfp_*` -- Linear
+  weightGrad + biasGrad into per-tensor BFP grads on the layer tier
+  (spec.gradStorage "BFP", spec.calls): the GEMM raw itself (no row re-grid,
+  section 14), the bias by the Conv1d bias rule on the `[B, outF, 1]` view +
+  the data-derived raw, then the exact accumulate chain; `_m16_b2` is the
+  m16 batch the float fold refused (one-product segments, positive guard),
+  `_zero_m8_b3` puts an input and a loss group in the zero state (they count
+  in the operand-wide E_top). The Linear kernel-tier weightGrad / biasGrad
+  rows stay the float bridge (FLOAT32 grads).
 - `b5_fq_*` -- B5, the fake-quant twin: the layer under `ARITH_FLOAT32`
   with BFP-stored weights / bias / loss (m12, grouped) against the same
   layer with every BFP operand replaced by its exact float32

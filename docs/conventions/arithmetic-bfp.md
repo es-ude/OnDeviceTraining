@@ -456,11 +456,12 @@ hand a float kernel unpacked int32 mantissa scratch through a `float*` cast —
 silent wrong arithmetic, not a crash.
 
 - **`weightGrad` is an output-centric walk**, not the forward's input-centric
-  one. Linear reuses `matmulBfpTensors` directly — the kernel is
+  one. Linear reuses the GEMM entries directly — the kernels are
   orientation-agnostic (per-element group lookup honors `orderOfDimensions`),
-  so `linearCalcWeightGradsBfp` is a thin transpose-view wrapper
-  (`transposeTensor(loss, 0, 1)` around the same GEMM entry the forward and
-  `dx` both call). Conv1d runs the FLOAT32 weightGrad loop on integer
+  so `linearCalcWeightGradsBfp` (float fold, `matmulBfpTensors`) and
+  `linearCalcWeightGradsBfpRaw` (integer, `matmulBfpRawTensors`, into BFP
+  grads, §14) are thin transpose-view wrappers (`transposeTensor(loss, 0,
+  1)` around the same GEMM walk the forward and `dx` use). Conv1d runs the FLOAT32 weightGrad loop on integer
   accumulators (§14). Conv1dTransposed instead walks `(outChannel,
   inChannel, kernelTap)` as the OUTER loops and `(batch, outputPosition)` as
   the reduction — each `(oc, ic, k)` cell accumulates its own same-exponent
@@ -482,8 +483,8 @@ silent wrong arithmetic, not a crash.
   group than its `groupSize`" argument the product guard uses. All three
   layers' `biasGrad` share this one bound
   (`linearCalcBiasGradsBfp`/`conv1dCalcBiasGradsBfp`/
-  `conv1dTransposedCalcBiasGradsBfp`). Into BFP grads Conv1d folds the
-  segment partials in integers instead of `ldexpf` (§14).
+  `conv1dTransposedCalcBiasGradsBfp`). Into BFP grads Conv1d and Linear
+  fold the segment partials in integers instead of `ldexpf` (§14).
 - **`dx` (`propLoss`) reuses the OTHER family's own forward kernel — the D9
   gather adjoint (§6), not a dedicated backward kernel** — except Conv1d.
   Conv1d's `dx` is mathematically a Conv1dTransposed op; its
@@ -492,9 +493,10 @@ silent wrong arithmetic, not a crash.
   Conv1dTransposed's `dx` is mathematically
   a Conv1d op, so ITS `propLossKernelBfp` dispatches to `conv1dKernelBfp`.
   Linear's `dx` (`linearCalcPropLossBfp`) is
-  `matmulBfpTensors(loss, weights, NULL, propLoss)` — the same
-  orientation-agnostic GEMM the forward and `weightGrad` both call, with
-  `weights` as the second operand instead of the forward input.
+  `matmulBfpRawTensors(loss, weights, NULL, propLoss)` — the same
+  orientation-agnostic integer GEMM the forward calls, with `weights` as
+  the second operand instead of the forward input (integer end to end,
+  §14).
 - **BFP-stored operands entering any backward op go through the EXACT SAME
   fold contract as the forward (§5.3), never a re-quantize** — except Conv1d
   `dx` and `weightGrad`, which align every product on its own (§14). Every operand
@@ -1801,8 +1803,9 @@ re-packed with float (per element `fdiv` + `roundf` / float SR, per group
 `frexpf`) — on a core without an FPU that pack alone costs more than the
 integer MACs it follows. This section records the integer replacement for the
 FORWARD path (2026-11-04). The backward keeps D7's FLOAT32 raw, except the
-Conv1d dx (§14, `BFP_RAW_BACKWARD_DX`, 2026-11-05) and the Conv1d weightGrad /
-biasGrad into BFP grad storage (§14, `BFP_RAW_BACKWARD_ACC`, 2026-11-05).
+Conv1d and Linear dx (§14, `BFP_RAW_BACKWARD_DX`, 2026-11-05) and the Conv1d
+and Linear weightGrad / biasGrad into BFP grad storage (§14,
+`BFP_RAW_BACKWARD_ACC`, 2026-11-05).
 
 **The raw.** `qtype_t BFP_RAW` with `bfpRawQConfig_t {int16_t *exponents;
 numGroups; groupSize}` (`Quantization.h`): int32 mantissas in the tensor data
@@ -1814,22 +1817,22 @@ serialized, copied or cloned, and every other dtype switch rejects it; the
 enum value is appended last so stored tags stay stable. An op opts in per
 call with `opSpec_t.bfpRawOut` (`ExecuteOp.h`, `bfpRawContract_t`):
 `BFP_RAW_FORWARD` for the integer forward, `BFP_RAW_BACKWARD_DX` for a
-backward op writing a dx wire (the Conv1d dx, §14). Both are `ARITH_BFP` and
+backward op writing a dx wire (the Conv1d and Linear dx, §14). Both are `ARITH_BFP` and
 `OUT_WRITE` only, raw geometry copied from the target (a BFP target's
 `{numGroups, groupSize}`; a FLOAT32 target has no groups, so `{1,0}` — one
 exponent over the whole output); any other target dtype, arithmetic type,
 epilogue or contract value fails fast. The third value,
 `BFP_RAW_BACKWARD_ACC`, is a grad op accumulating into BFP grad STORAGE (the
-Conv1d weightGrad / biasGrad, §14): `ARITH_BFP`, `OUT_ACC_DYNAMIC_RESCALE`
+Conv1d and Linear weightGrad / biasGrad, §14): `ARITH_BFP`, `OUT_ACC_DYNAMIC_RESCALE`
 and a BFP target only (raw on the grad's geometry); the epilogue is the
 integer engine of §15 (`accumulateBfpRawIntoBfpRescale`), which rounds by
 the grad's own storage mode — the ACC rule (#282) — drawing from the op's
 `RNG_TAG_ACC` stream 0. A FLOAT32 grad or the fixed grid
 (`OUT_ACC_FIXED_SCALE`) with this value fails fast; the layer keeps
 `BFP_RAW_NONE` (the FLOAT32 raw) for both. The explicit per-op value is the raw
-contract: the Linear/Softmax backward adapters that share forward kernel
-code never switch raw format by accident, because they leave it
-`BFP_RAW_NONE`. A kernel that is given a `BFP_RAW` MUST write every group's
+contract: a backward adapter that shares forward kernel code never switches
+raw format by accident — Softmax's leaves it `BFP_RAW_NONE`, Linear's set
+their own backward value (§14). A kernel that is given a `BFP_RAW` MUST write every group's
 exponent.
 
 **The re-block** (`conversionMatrix[BFP_RAW][BFP]`, `reblockBfpRawTensor`,
@@ -2028,9 +2031,11 @@ row, column, reduction loops, `calcElementIndexByIndices` per MAC,
    max over all groups: coarser, still an upper bound.
 2. Items 3-7 above unchanged; the bias segment is aligned per OUTPUT (the
    column changes every output, so there is no per-channel hoist).
-3. The backward kernels (dx, weightGrad: `matmulBfpTensors`) keep the
-   FLOAT32 raw and `bfpValidateBlockHeadroom`'s fail-fast; the forward
-   splits instead.
+3. The backward runs the same entry since 2026-11-05 (§14: the dx and the
+   weightGrad into BFP grads, on the backward operands' views); only the
+   weightGrad into FLOAT32 grads and under the fixed grid keeps
+   `matmulBfpTensors`' FLOAT32 raw and `bfpValidateBlockHeadroom`'s
+   fail-fast.
 4. Cost: the index math stays per MAC (the same-algorithm rule), and
    `calcElementIndexByIndices` divides once per dimension per call, i.e.
    per MAC on the M0+ in BOTH arms (allow-listed in the census); every
@@ -2056,8 +2061,8 @@ scale `2^-30` by construction, and `qe`'s own grid is already coarser.
 fold above); `conv1dKernelBfp` (FLOAT32 raw) remains for the ConvT1d dx
 adjoint. The MaxPool, AvgPool, Linear and Softmax forwards emit `BFP_RAW`
 too; their backwards keep the FLOAT32 raw (MaxPool's argmax meaning is
-unchanged, Linear's dx / weightGrad stay on `matmulBfpTensors`, Softmax's
-backward recomputes with the float32 step 5). Every other op keeps the
+unchanged, Softmax's backward recomputes with the float32 step 5) except
+Linear's, which runs the integer GEMM since 2026-11-05 (§14). Every other op keeps the
 FLOAT32 raw. Numbers of native BFP configs changed with these forwards by
 design; fake-quant and FLOAT32 paths are untouched.
 
@@ -2086,7 +2091,7 @@ libm and int64 calls in the HAR forward kernels, the re-block and the operand
 unpack, and only per-call, per-group-change, per-output and shared-index-math
 divisions, each allow-listed for its one root.
 
-## 14. Conv1d dx and weightGrad on integer accumulators (scatter, experiment)
+## 14. Integer backward: Conv1d dx and weightGrad scatter (experiment), Linear GEMM
 
 Rule: an `ARITH_BFP` kernel runs the same algorithm as its FLOAT32 twin —
 loops, loop order, MAC count, index math. The Conv1d dx (`propLoss`) and
@@ -2204,7 +2209,64 @@ summation order and therefore the numbers.
   grid are re-derived on every micro-batch call; old exponents are published
   only after their group's last read (§15).
 - **Unchanged:** the Conv1dTransposed forward and its weightGrad keep the
-  gather (§6); Linear keeps its GEMM.
+  gather (§6); Linear keeps its GEMM walk (integer since 2026-11-05, below).
+
+**Linear dx / weightGrad / biasGrad (2026-11-05).** Linear's backward has no
+scatter to adopt: its BFP kernels already walk like FLOAT32 (one GEMM per op,
+output-major, reduction inner, both operands group-tracked). The integer
+twin is the forward's §13 fold on the same walk — `matmulBfpRawTensors`,
+called by the backward cores exactly where the float fold
+(`matmulBfpTensors`) was called:
+
+- **dx** (`linearCalcPropLossBfp`): `loss [B, outF] · W` with the weight AS
+  STORED `[outF, inF]`; every `ARITH_BFP` dx sets `BFP_RAW_BACKWARD_DX`
+  (§13), so the dx is the raw on the dx wire's geometry, then the integer
+  re-block by the op's mode (SR for HAR, one draw per element in element
+  order from `rngFold(op key, RNG_TAG_OUT, 0)`, op key `LINEAR_OP_PROP_LOSS`)
+  or, onto a FLOAT32 dx, the `{1,0}` raw + exact dequant.
+- **weightGrad** (`linearCalcWeightGradsBfpRaw`): `loss^T · x` through the
+  zero-copy transpose view; into BFP grads under `OUT_ACC_DYNAMIC_RESCALE`
+  (`BFP_RAW_BACKWARD_ACC`), the raw on the grad's geometry. FLOAT32 grads
+  and the fixed grid keep `linearCalcWeightGradsBfp` (the float fold,
+  unchanged).
+- **The accumulation exponent of a backward GEMM.** §13's rule: `E_acc` of a
+  raw target group = the max over its outputs of `rowTop + colTop`, plus `g =
+  bfpFoldGuardBits(K, ma, mb, 0)` over the reduction length `K` (dx: `outF`;
+  weightGrad: the batch). `rowTop` / `colTop` is the max group exponent over
+  the elements of the output's reduction LINE when the reduction runs along
+  the operand's physically innermost axis — the dx loss rows — and the
+  operand-wide max otherwise: the dx weight columns (strided by `inF`) and
+  both weightGrad operands (the batch is the outer axis of the loss and of
+  `x`). The operand-wide max is coarser and still sound (it bounds every
+  group a line can visit). Over-long same-exponent runs split at the segment
+  limit (no fail-fast): the m16 weightGrad, whose float fold refused a batch
+  of 2 at `bfpValidateBlockHeadroom`, now runs.
+- **No data rule for the GEMM raw.** Conv1d's grad raw takes its exponent
+  from the data (above) because the scatter keeps one `E_acc` per ROW and the
+  emit re-grids every row of a raw group onto one exponent — an inflated row
+  would round the others. The GEMM has no such step: `E_acc` is chosen per
+  raw target group BEFORE the MAC loop and the finished sums are never
+  re-gridded. A looser raw exponent only adds zero low bits, which neither
+  consumer sees: the engine (§15) takes its working grid from `E_r +
+  bitlen(A_r)`, the re-block (§13) from the mantissa absmax. The remaining
+  deterministic loss is the in-loop alignment: a segment more than `−g`
+  binades below its group's bound rounds HALF_AWAY (at most ½·2^E_acc per
+  segment). A loose bound moves that line up: an operand group in the zero
+  state (stored = bias, `E = 0`) counts in the max although its codes are
+  zero, as in every §13 fold.
+- **biasGrad** (`linearCalcBiasGradsBfpRaw`): the Conv1d bias rule on the
+  `[B, outF]` loss (one position per row): feature outer, batch inner,
+  consecutive codes of one loss group form a segment (exact int32 partial,
+  `bfpValidateSumHeadroom`), `sum += bfpAlignPartial(partial, E_acc −
+  E_segment)`, `E_acc` per feature = max over the batch of its codes' group
+  exponents + `bfpSumFoldGuardBits(B, m)`, then `bfpRawEmitFromRows` (rows
+  of one sum, exponent from the data: each feature has its own `E_acc`).
+  FLOAT32 grads and the fixed grid keep the float fold.
+- **Accumulate:** the engine above (§15) with the op's ACC(0) stream, op
+  keys `LINEAR_OP_WEIGHT_GRAD` / `LINEAR_OP_BIAS_GRAD`. Linear's factory
+  default bias mode is `OUT_ACC_FIXED_SCALE` (Conv1d's too): a BFP bias grad
+  there keeps the float bridge and the float fixed grid; the HAR trainer
+  sets `OUT_ACC_DYNAMIC_RESCALE` for both grads of every GEMM layer.
 
 ## 15. Integer training primitives: scalar, add-and-round, integer rescale accumulate
 

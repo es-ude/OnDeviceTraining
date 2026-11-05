@@ -307,6 +307,42 @@ static inline int32_t bfpScalarMulMant(int32_t mant, bfpScalar_t s) {
     return mant * s.q;
 }
 
+/*! 1 / count as a scalar, from the integer count alone (the macro-batch mean
+ * factor; no float). A power of two is exact: {2^14, -14 - log2(count)}.
+ * Otherwise, with L = bitlen(count), q = round(2^(14 + L) / count) by a
+ * 16-step restoring division (shifts and subtractions: no divide helper on a
+ * core without a divider) -- 2^(L-1) < count < 2^L puts the quotient in
+ * (2^14, 2^15), no ties exist, a round-up to 2^15 renormalizes; relative
+ * error <= 2^-15. count must be in [1, 2^31) (the remainder doubles below
+ * 2^32); 0 or larger fails fast. */
+static inline bfpScalar_t bfpScalarFromCount(size_t count, const char *what) {
+    if (count == 0 || count >= ((size_t)1 << 31)) {
+        PRINT_ERROR("%s: mean count %zu outside [1, 2^31)", what, count);
+        exit(1);
+    }
+    const uint32_t c = (uint32_t)count;
+    const int l = (int)bfpBitLength32(c);
+    if ((c & (c - 1u)) == 0) {
+        return (bfpScalar_t){.q = 16384, .e = (int16_t)(-14 - (l - 1))};
+    }
+    /* floor(2^(L + 15) / c), 16 bits, MSB first: r starts at 2^L >= c. */
+    uint32_t r = 1u << l;
+    uint32_t q16 = 0;
+    for (int i = 0; i < 16; i++) {
+        const uint32_t bit = r >= c;
+        r -= bit ? c : 0u;
+        q16 = (q16 << 1) | bit;
+        r <<= 1;
+    }
+    int32_t q = (int32_t)((q16 + 1u) >> 1); /* round(2^(L + 14) / c) */
+    int e = -14 - l;
+    if (q == 32768) {
+        q = 16384;
+        e += 1;
+    }
+    return (bfpScalar_t){.q = q, .e = (int16_t)e};
+}
+
 /*! A value on the grid 2^G in quotient/remainder form:
  *   value / 2^G = q + (frac + t) / 2^32,  t in [0, 1),  sticky = (t != 0).
  * q is the FLOOR quotient (signed), frac the top 32 bits of the remainder in

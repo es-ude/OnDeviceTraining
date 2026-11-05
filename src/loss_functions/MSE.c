@@ -168,3 +168,9 @@ float computeMeanScaleMSE(size_t totalSamples, tensor_t *modelOutput) {
     size_t numFeaturesPerSample = calcNumberOfElementsByTensor(modelOutput) / microbatch;
     return 1.0f / (float)(totalSamples * numFeaturesPerSample);
 }
+
+size_t computeMeanDivisorMSE(size_t totalSamples, tensor_t *modelOutput) {
+    requireBatchedOutput(modelOutput, "label view", "computeMeanDivisorMSE");
+    size_t microbatch = modelOutput->shape->dimensions[0];
+    return totalSamples * (calcNumberOfElementsByTensor(modelOutput) / microbatch);
+}

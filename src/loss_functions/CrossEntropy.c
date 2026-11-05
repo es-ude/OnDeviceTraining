@@ -189,3 +189,8 @@ float computeMeanScaleCE(size_t totalSamples, tensor_t *modelOutput) {
     (void)modelOutput;
     return 1.0f / (float)totalSamples;
 }
+
+size_t computeMeanDivisorCE(size_t totalSamples, tensor_t *modelOutput) {
+    (void)modelOutput;
+    return totalSamples;
+}

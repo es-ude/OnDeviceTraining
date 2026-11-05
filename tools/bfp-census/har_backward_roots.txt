@@ -38,3 +38,9 @@ Linear.c            linearBackward           self
 Linear.c            propLossKernelBfp
 Linear.c            weightGradKernelBfpRaw
 Linear.c            biasGradKernelBfpRaw
+# Macro-batch mean scale of BFP grads (trainingEpochDefault -> scaleOptimizerGradientsMean):
+# the entry (self: its non-BFP arms run in an out-of-line helper, not walked), the
+# integer in-place scale, and CE's integer divisor (reached through the loss vtable).
+OptimizerApi.c      scaleOptimizerGradientsMean   self
+TensorConversion.c  scaleBfpTensorByScalarInPlace
+CrossEntropy.c      computeMeanDivisorCE

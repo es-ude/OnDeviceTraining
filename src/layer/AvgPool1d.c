@@ -146,6 +146,20 @@ static void avgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
         (float)cfg->kernel->size; // count_include_pad=true: divisor = K always
 }
 
+int avgPool1dBfpLog2Divisor(size_t kSize, const char *what) {
+    if (kSize == 0 || (kSize & (kSize - 1)) != 0) {
+        PRINT_ERROR("%s: BFP math needs a power-of-two kernel size (the mean is an exponent "
+                    "shift; count_include_pad keeps the divisor K at every output), got K = %zu",
+                    what, kSize);
+        exit(1);
+    }
+    int log2K = 0;
+    while (((size_t)1 << log2K) < kSize) {
+        log2K++;
+    }
+    return log2K;
+}
+
 /* Integer-only forward (arithmetic-bfp.md section 13), ARITH_BFP arm:
  * operands arrive as the funnel's unpacked-BFP scratch (exponents BORROWED
  * for a BFP-stored input, funnel-staged for a FLOAT32 one). The walk is the
@@ -156,10 +170,11 @@ static void avgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
  * exponent over the rows its outputs read, plus the sum guard
  * (bfpSumFoldGuardBits, K terms). Alignment is bfpAlignPartial (left exact,
  * right HALF_AWAY, never SR -- the re-block owns the op's rounding). The
- * mean: a power-of-two K folds -log2 K into the raw exponent (exact; HAR's
- * K = 32), any other K is ONE roundedDivHalfAwayInt32 per output.
- * count_include_pad=true falls out free: padded positions are not visited
- * and the divisor stays K. bfpValidateSumHeadroom bounds each partial. */
+ * mean folds -log2 K into the raw exponent (exact; HAR's K = 32): BFP math
+ * takes a power-of-two K only (avgPool1dBfpLog2Divisor fails fast
+ * otherwise). count_include_pad=true falls out free: padded positions are
+ * not visited and the divisor stays K. bfpValidateSumHeadroom bounds each
+ * partial. */
 void avgPool1dForwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                   const void *ctx, struct rngStream *rs) {
     (void)n;
@@ -180,6 +195,7 @@ void avgPool1dForwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, te
                     (int)input->quantization->type, (int)rawOut->quantization->type);
         exit(1);
     }
+    const int log2K = avgPool1dBfpLog2Divisor(cfg->kernel->size, "AvgPool1d forward BFP");
     size_t batch = input->shape->dimensions[0];
     size_t channels = input->shape->dimensions[1];
     size_t inputLength = input->shape->dimensions[2];
@@ -208,13 +224,6 @@ void avgPool1dForwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, te
 
     const size_t kSize = cfg->kernel->size;
     int guard = bfpSumFoldGuardBits(kSize, qC->mantissaBits, "AvgPool1d forward BFP");
-    int log2K = 0;
-    bool kIsPow2 = (kSize & (kSize - 1)) == 0;
-    if (kIsPow2) {
-        while (((size_t)1 << log2K) < kSize) {
-            log2K++;
-        }
-    }
 
     int32_t const *xArr = (int32_t const *)input->data;
     /* Pre-pass (one read per input code, cursors, no division): per raw group
@@ -289,7 +298,7 @@ void avgPool1dForwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, te
                                            eAcc - ((int)qC->exponents[currentGroup] - expBias));
                 }
 
-                mant[outIdx] = kIsPow2 ? acc : roundedDivHalfAwayInt32(acc, (int32_t)kSize);
+                mant[outIdx] = acc;
             }
         }
     }
@@ -485,8 +494,7 @@ typedef struct avgPoolBwdWalk {
     int32_t *acc;
     const windowGeometry1d_t *geom;
     size_t rows;
-    int32_t kSize;
-    int log2K; /* -1: K is not a power of two */
+    int log2K;
 } avgPoolBwdWalk_t;
 
 BFP_WALK_NOINLINE void avgPool1dBackwardBfpWalk(const avgPoolBwdWalk_t *p) {
@@ -495,20 +503,17 @@ BFP_WALK_NOINLINE void avgPool1dBackwardBfpWalk(const avgPoolBwdWalk_t *p) {
     const size_t outputLength = geom->outputLength;
     const size_t inputLength = geom->inputLength;
     const size_t dilation = geom->dilation;
-    const bool kIsPow2 = p->log2K >= 0;
-    const int lift = kIsPow2 ? p->log2K : 0;
     bfpGroupRange_t qRange = {0};
     size_t outIdx = 0;
     for (size_t row = 0; row < p->rows; row++) {
         /* the alignment grid: the value exponent plus log2 K back */
-        const int eAlign = p->eAccOfRow[row] + lift;
+        const int eAlign = p->eAccOfRow[row] + p->log2K;
         int32_t *accRow = p->acc + row * inputLength;
         for (size_t outPos = 0; outPos < outputLength; outPos++, outIdx++) {
             windowSlice1d_t slice = windowSlice1dAt(geom, outPos);
             size_t g = bfpGroupAt(&qRange, qC, outIdx);
-            int32_t aligned =
+            int32_t contribution =
                 bfpAlignPartial(p->gy[outIdx], eAlign - ((int)qC->exponents[g] - p->expBias));
-            int32_t contribution = kIsPow2 ? aligned : roundedDivHalfAwayInt32(aligned, p->kSize);
 
             for (size_t i = 0; i < slice.validCount; i++) {
                 accRow[slice.firstValidInputIdx + i * dilation] += contribution;
@@ -525,15 +530,12 @@ BFP_WALK_NOINLINE void avgPool1dBackwardBfpWalk(const avgPoolBwdWalk_t *p) {
  * g = bfpSumFoldGuardBits over C terms, C = (effK - 1) / stride + 1 the
  * windows covering one cell. A loss code enters by bfpAlignPartial (left
  * exact; HALF_AWAY right for a code more than -g binades below its row's
- * top). A power-of-two K folds -log2 K into the row's exponent (exact, HAR's
- * K = 32); any other K divides the aligned code ONCE per output,
- * roundedDivHalfAwayInt32, on that fine grid: |q| <= |code| keeps the C-term
- * bound, the quotient keeps 31 - log2 C - log2 K bits, and its half-unit
- * error is at least 2^(31 - m - log2 C - log2 K) times below the wire's
- * step. Rounding onto the wire grid (SR under SR) is the funnel's re-block of
- * the raw, the data rule of bfpRawEmitFromRows on the dx geometry. No float;
- * one division per output only for a non-power-of-two K. The per-row table
- * (one int per (batch, channel)) is the only stack beyond the funnel's raw. */
+ * top). K is a power of two (avgPool1dBfpLog2Divisor fails fast
+ * otherwise, ruling R1): -log2 K folds into the row's exponent, exact (HAR's
+ * K = 32). Rounding onto the wire grid (SR under SR) is the funnel's
+ * re-block of the raw, the data rule of bfpRawEmitFromRows on the dx
+ * geometry. No float, no division per output. The per-row table (one int
+ * per (batch, channel)) is the only stack beyond the funnel's raw. */
 void avgPool1dBackwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                    const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -554,6 +556,7 @@ void avgPool1dBackwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, t
                     (int)lossGrad->quantization->type, (int)rawOut->quantization->type);
         exit(1);
     }
+    const int log2K = avgPool1dBfpLog2Divisor(cfg->kernel->size, "AvgPool1d backward BFP");
     size_t batch = lossGrad->shape->dimensions[0];
     size_t channels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
@@ -582,21 +585,9 @@ void avgPool1dBackwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, t
     if (nOut == 0) {
         return;
     }
-    const size_t kSize = cfg->kernel->size;
-    if (kSize > (size_t)INT32_MAX) {
-        PRINT_ERROR("AvgPool1d backward BFP: kernel size %zu beyond the int32 divisor", kSize);
-        exit(1);
-    }
     size_t span = geom.dilation * (geom.kernelSize - 1) + 1;
     int g = bfpSumFoldGuardBits((span - 1) / geom.stride + 1, qC->mantissaBits,
                                 "AvgPool1d backward BFP");
-    int log2K = -1;
-    if ((kSize & (kSize - 1)) == 0) {
-        log2K = 0;
-        while (((size_t)1 << log2K) < kSize) {
-            log2K++;
-        }
-    }
 
     const int32_t *gyArr = (const int32_t *)lossGrad->data;
     int eAccOfRow[rows];
@@ -604,7 +595,7 @@ void avgPool1dBackwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, t
     for (size_t r = 0; r < rows; r++) {
         eAccOfRow[r] = bfpLiveTopOrZero(bfpRowMaxExponent(&cursor, qC, expBias, gyArr,
                                                           r * outputLength, outputLength)) +
-                       g - (log2K > 0 ? log2K : 0);
+                       g - log2K;
     }
 
     int32_t *acc = (int32_t *)rawOut->data;
@@ -616,7 +607,6 @@ void avgPool1dBackwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, t
                                                  .acc = acc,
                                                  .geom = &geom,
                                                  .rows = rows,
-                                                 .kSize = (int32_t)kSize,
                                                  .log2K = log2K});
     bfpRawEmitFromRows(acc, nOut, eAccOfRow, inputLength, rawQC, "AvgPool1d backward BFP");
 }

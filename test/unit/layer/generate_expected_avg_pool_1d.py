@@ -339,20 +339,23 @@ def emit_sym_fixture(parts, fx):
 
 
 # ---- BFP epic PR4 (R-P4): AvgPool1d ARITH_BFP forward ------------------
-# Geometry: input [1, 2, 8], kernel 3, VALID, stride 1, DILATION 2 ->
-# effective kernel 5, out_len 4. Dilation is load-bearing: every window
-# visits non-consecutive storage indices, so a run precompute instead of the
-# per-element bfpGroupOf lookup binds the wrong exponent. The input grid is
-# {4 groups x 4} over the 16 storage elements, so channel 0 spans groups
-# 0/1 and channel 1 spans groups 2/3 -- every window crosses a boundary.
-# K = 3 is NOT a power of two, so the integer forward divides once per output
-# (a power-of-two K would fold into the raw exponent instead).
+# Geometry: input [1, 2, 8], kernel 4, SAME, STRIDE 2 -> pad 1 left/right,
+# out_len 4. The stride is load-bearing: windows start at non-consecutive
+# storage indices, so a run precompute instead of the per-element bfpGroupOf
+# lookup binds the wrong exponent. The input grid is {4 groups x 4} over the
+# 16 storage elements, so channel 0 spans groups 0/1 and channel 1 spans
+# groups 2/3 -- the middle windows cross a boundary, the edge windows cover a
+# padded cell (count_include_pad: the divisor stays K), and neighbouring
+# windows overlap (a dx cell receives two contributions).
+# BFP math takes a power-of-two K only (the mean is an exponent shift, ruling
+# R1 in arithmetic-bfp section 14); K = 4 folds -2 into the raw exponent.
 BFP_AVG_BATCH = 1
 BFP_AVG_CHANNELS = 2
 BFP_AVG_INPUT_LENGTH = 8
-BFP_AVG_KERNEL_SIZE = 3
-BFP_AVG_STRIDE = 1
-BFP_AVG_DILATION = 2
+BFP_AVG_KERNEL_SIZE = 4
+BFP_AVG_STRIDE = 2
+BFP_AVG_DILATION = 1
+BFP_AVG_PADDING = "SAME"
 BFP_AVG_MANTISSA_BITS = 6
 BFP_AVG_EXPONENT_BITS = 8
 BFP_AVG_IN_NUM_GROUPS = 4
@@ -371,7 +374,7 @@ BFP_AVG_STAGE_INPUT = [1.3, -2.6, 3.3, -1.55, 10.0, -6.1, 4.2, 7.9,
 
 def emit_bfp_fixtures(parts):
     geom = window_geometry_1d(BFP_AVG_INPUT_LENGTH, BFP_AVG_KERNEL_SIZE, BFP_AVG_STRIDE,
-                              BFP_AVG_DILATION, "VALID")
+                              BFP_AVG_DILATION, BFP_AVG_PADDING)
     assert geom["out_len"] == 4, geom
     in_qc = {"mantissa_bits": BFP_AVG_MANTISSA_BITS,
              "exponent_bits": BFP_AVG_EXPONENT_BITS,
@@ -400,9 +403,9 @@ def emit_bfp_fixtures(parts):
 
     # (1b) The pinned-FLOAT32 fake-quant bridge: exact dequantized values
     # summed in float32 (exact here: every partial sum is a float32), ONE
-    # float32 divide by K. The integer native result above rounds twice
-    # (half-away integer divide, then (float)mant), so the two may differ by
-    # one float32 ulp -- the bridge test pins this gold, and the ulp bound.
+    # float32 divide by K. K is a power of two (the only K BFP math takes),
+    # so both the divide and the integer path's exponent fold are exact: the
+    # bridge equals the integer native result bit for bit.
     bias = 2 ** (BFP_AVG_EXPONENT_BITS - 1) - 1
     float_path = []
     for r in range(BFP_AVG_BATCH * BFP_AVG_CHANNELS):
@@ -416,9 +419,7 @@ def emit_bfp_fixtures(parts):
             assert Fraction(float(np.float32(total))) == total, "float32 sum not exact"
             float_path.append(float(np.float32(np.float32(total) /
                                                np.float32(BFP_AVG_KERNEL_SIZE))))
-    assert float_path != fwd, (
-        "the float bridge equals the integer native result everywhere -- the "
-        "one-ulp double-rounding note would be unobservable (fine, but then drop it)")
+    assert float_path == fwd, "power-of-two K: the float bridge must equal the integer result"
     parts.append(emit_float_array("kBfpAvgPoolExpectedFloatBridge",
                                   torch.tensor(float_path, dtype=torch.float32)))
 

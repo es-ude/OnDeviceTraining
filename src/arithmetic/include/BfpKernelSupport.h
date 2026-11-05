@@ -16,6 +16,20 @@
  * now, the conv kernels in later tasks). Header-only static inline -- no new
  * library. */
 
+/*! The hot walk of an integer kernel lives in its OWN non-inlined function,
+ * apart from the pre-pass that sizes stack tables by the topology (VLAs). A
+ * VLA forces a frame pointer (r7 on Thumb-1), and Cortex-M0+ code reaches
+ * an r7 slot in one load only below 128 B and in two below 256 B; past that
+ * GCC materialises every spill address with a chain of ~12 instructions. A
+ * frame without VLAs addresses its slots off sp (one load up to 1020 B), so
+ * the walk's register allocation no longer depends on how big the pre-pass
+ * frame happens to be. Same idea as SYM_ACCUM_NOINLINE (SymAccumGuard.h). */
+#if defined(__GNUC__) || defined(__clang__)
+#define BFP_WALK_NOINLINE static __attribute__((noinline))
+#else
+#define BFP_WALK_NOINLINE static
+#endif
+
 /*! Group id of a storage index; the {numGroups=1, groupSize=0} per-tensor
  * sentinel maps everything to group 0. */
 static inline size_t bfpGroupOf(const bfpQConfig_t *qC, size_t storageIdx) {

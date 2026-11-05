@@ -560,6 +560,74 @@ void conv1dCalcWeightGradsSymInt32(conv1dConfig_t *cfg, tensor_t *forwardInput, 
         cfg->weights->grad);
 }
 
+/* What the scatter walk of weightGradBfpScatter reads (eAccOf from its
+ * pre-pass). */
+typedef struct conv1dWgBfpScatterWalk {
+    size_t batch, groups, inChannels, inputLength, outChannels, outputLength, kernelSize;
+    size_t inChPerGroup, outChPerGroup;
+    windowGeometry1d_t geom;
+    const bfpQConfig_t *xQC;
+    const bfpQConfig_t *gyQC;
+    int32_t xExpBias, gyExpBias;
+    const int32_t *xArr;
+    const int32_t *gyArr;
+    const int *eAccOf; /* [outChannels] */
+    int32_t *acc;
+} conv1dWgBfpScatterWalk_t;
+
+/* The MAC walk (BFP_WALK_NOINLINE: no VLA in this frame). */
+BFP_WALK_NOINLINE void weightGradBfpScatterWalk(const conv1dWgBfpScatterWalk_t *p) {
+    size_t batch = p->batch, groups = p->groups, inChannels = p->inChannels;
+    size_t inputLength = p->inputLength, outChannels = p->outChannels;
+    size_t outputLength = p->outputLength, kernelSize = p->kernelSize;
+    size_t inChPerGroup = p->inChPerGroup, outChPerGroup = p->outChPerGroup;
+    windowGeometry1d_t geom = p->geom;
+    const bfpQConfig_t *xQC = p->xQC;
+    const bfpQConfig_t *gyQC = p->gyQC;
+    int32_t xExpBias = p->xExpBias, gyExpBias = p->gyExpBias;
+    int32_t const *xArr = p->xArr;
+    int32_t const *gyArr = p->gyArr;
+    const int *eAccOf = p->eAccOf;
+    int32_t *acc = p->acc;
+
+    bfpGroupRange_t xRange = {0};
+    bfpGroupRange_t gyRange = {0};
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+
+            for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                size_t oc = outLo + ocOffset;
+                for (size_t outPos = 0; outPos < outputLength; outPos++) {
+                    windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
+                    size_t gyIdx = (b * outChannels + oc) * outputLength + outPos;
+                    int32_t gy = gyArr[gyIdx];
+                    int gyShift =
+                        eAccOf[oc] -
+                        ((int)gyQC->exponents[bfpGroupAt(&gyRange, gyQC, gyIdx)] - gyExpBias);
+
+                    for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                        size_t ic = inLo + icOffset;
+                        for (size_t i = 0; i < slice.validCount; i++) {
+                            size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
+                            size_t kernelIdx = slice.firstValidKernelOffset + i;
+
+                            size_t xIdx = (b * inChannels + ic) * inputLength + inputIdx;
+                            int shift =
+                                gyShift -
+                                ((int)xQC->exponents[bfpGroupAt(&xRange, xQC, xIdx)] - xExpBias);
+                            acc[(oc * inChPerGroup + icOffset) * kernelSize + kernelIdx] +=
+                                bfpAlignPartial(mulInt32s(xArr[xIdx], gy), shift);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /* weightGradKernelFloat's loop with an int32 raw accumulator per gw element
  * (acc, gwElems entries). Every product x * gy enters as product *
  * 2^-(E_acc - Ex - Egy) (bfpAlignPartial: exact left shift or half-away right
@@ -680,42 +748,25 @@ static void weightGradBfpScatter(const conv1dConfig_t *cfg, tensor_t *forwardInp
         }
     }
 
-    bfpGroupRange_t xRange = {0};
-    bfpGroupRange_t gyRange = {0};
-
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t g = 0; g < groups; g++) {
-            size_t inLo = g * inChPerGroup;
-            size_t outLo = g * outChPerGroup;
-
-            for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
-                size_t oc = outLo + ocOffset;
-                for (size_t outPos = 0; outPos < outputLength; outPos++) {
-                    windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
-                    size_t gyIdx = (b * outChannels + oc) * outputLength + outPos;
-                    int32_t gy = gyArr[gyIdx];
-                    int gyShift =
-                        eAccOf[oc] -
-                        ((int)gyQC->exponents[bfpGroupAt(&gyRange, gyQC, gyIdx)] - gyExpBias);
-
-                    for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
-                        size_t ic = inLo + icOffset;
-                        for (size_t i = 0; i < slice.validCount; i++) {
-                            size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
-                            size_t kernelIdx = slice.firstValidKernelOffset + i;
-
-                            size_t xIdx = (b * inChannels + ic) * inputLength + inputIdx;
-                            int shift =
-                                gyShift -
-                                ((int)xQC->exponents[bfpGroupAt(&xRange, xQC, xIdx)] - xExpBias);
-                            acc[(oc * inChPerGroup + icOffset) * kernelSize + kernelIdx] +=
-                                bfpAlignPartial(mulInt32s(xArr[xIdx], gy), shift);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    conv1dWgBfpScatterWalk_t walk = {.batch = batch,
+                                     .groups = groups,
+                                     .inChannels = inChannels,
+                                     .inputLength = inputLength,
+                                     .outChannels = outChannels,
+                                     .outputLength = outputLength,
+                                     .kernelSize = kernelSize,
+                                     .inChPerGroup = inChPerGroup,
+                                     .outChPerGroup = outChPerGroup,
+                                     .geom = geom,
+                                     .xQC = xQC,
+                                     .gyQC = gyQC,
+                                     .xExpBias = xExpBias,
+                                     .gyExpBias = gyExpBias,
+                                     .xArr = xArr,
+                                     .gyArr = gyArr,
+                                     .eAccOf = eAccOf,
+                                     .acc = acc};
+    weightGradBfpScatterWalk(&walk);
 }
 
 /* FLOAT32 grads and the fixed grid (BFP_RAW_NONE): the scatter's sums become

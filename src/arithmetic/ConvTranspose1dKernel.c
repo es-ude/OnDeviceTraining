@@ -732,6 +732,85 @@ static size_t convT1dMaxTapOverlap(size_t kernelSize, size_t stride, size_t dila
     return best;
 }
 
+/* What the scatter walk of convTranspose1dKernelBfpScatter reads; eAccOf is
+ * the pre-pass's table. */
+typedef struct convT1dBfpScatterWalk {
+    size_t batch, groups, inChannels, inputLength, outChannels, outputLength, kernelSize;
+    size_t inChPerGroup, outChPerGroup, padLeft;
+    int guard;
+    const kernel_t *kernel;
+    const bfpQConfig_t *inQC;
+    const bfpQConfig_t *wQC;
+    int32_t inExpBias, wExpBias;
+    const int32_t *xArr;
+    const int32_t *wArr;
+    const int *eAccOf; /* [batch * groups] */
+    int32_t *acc;
+} convT1dBfpScatterWalk_t;
+
+/* The MAC walk (BFP_WALK_NOINLINE: no VLA in this frame). */
+BFP_WALK_NOINLINE void convTranspose1dKernelBfpScatterWalk(const convT1dBfpScatterWalk_t *p) {
+    size_t batch = p->batch, groups = p->groups, inChannels = p->inChannels;
+    size_t inputLength = p->inputLength, outChannels = p->outChannels;
+    size_t outputLength = p->outputLength, kernelSize = p->kernelSize;
+    size_t inChPerGroup = p->inChPerGroup, outChPerGroup = p->outChPerGroup;
+    size_t padLeft = p->padLeft;
+    int guard = p->guard;
+    const kernel_t *kernel = p->kernel;
+    const bfpQConfig_t *inQC = p->inQC;
+    const bfpQConfig_t *wQC = p->wQC;
+    int32_t inExpBias = p->inExpBias, wExpBias = p->wExpBias;
+    int32_t const *xArr = p->xArr;
+    int32_t const *wArr = p->wArr;
+    const int *eAccOf = p->eAccOf;
+    int32_t *acc = p->acc;
+
+    long long padLeftSigned = (long long)padLeft;
+    long long outputLengthSigned = (long long)outputLength;
+    long long dilation = (long long)kernel->dilation;
+    bfpGroupRange_t inRange = {0};
+    bfpGroupRange_t wRange = {0};
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+            int eAcc = eAccOf[b * groups + g];
+            if (eAcc == BFP_NO_LIVE_EXP) {
+                eAcc = guard; /* every product is zero: any finite grid holds them */
+            }
+
+            for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                size_t ic = inLo + icOffset;
+                for (size_t inPos = 0; inPos < inputLength; inPos++) {
+                    size_t inIdx = (b * inChannels + ic) * inputLength + inPos;
+                    int32_t xv = xArr[inIdx];
+                    int xShift = eAcc - ((int)inQC->exponents[bfpGroupAt(&inRange, inQC, inIdx)] -
+                                         inExpBias);
+                    long long outBase = (long long)(inPos * kernel->stride) - padLeftSigned;
+
+                    for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                        size_t oc = outLo + ocOffset;
+                        for (size_t k = 0; k < kernelSize; k++) {
+                            long long outIdx = outBase + (long long)k * dilation;
+                            if (outIdx < 0 || outIdx >= outputLengthSigned) {
+                                continue;
+                            }
+
+                            size_t wIdx = (ic * outChPerGroup + ocOffset) * kernelSize + k;
+                            int shift =
+                                xShift -
+                                ((int)wQC->exponents[bfpGroupAt(&wRange, wQC, wIdx)] - wExpBias);
+                            acc[(b * outChannels + oc) * outputLength + (size_t)outIdx] +=
+                                bfpAlignPartial(mulInt32s(xv, wArr[wIdx]), shift);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /* Contract in ConvTranspose1dKernel.h. */
 void convTranspose1dKernelBfpScatter(tensor_t const *input, tensor_t const *weight,
                                      kernel_t const *kernel, size_t groups, size_t outputPadding,
@@ -826,50 +905,27 @@ void convTranspose1dKernelBfpScatter(tensor_t const *input, tensor_t const *weig
         }
     }
 
-    long long padLeftSigned = (long long)padLeft;
-    long long outputLengthSigned = (long long)outputLength;
-    long long dilation = (long long)kernel->dilation;
-    bfpGroupRange_t inRange = {0};
-    bfpGroupRange_t wRange = {0};
-
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t g = 0; g < groups; g++) {
-            size_t inLo = g * inChPerGroup;
-            size_t outLo = g * outChPerGroup;
-            int eAcc = eAccOf[b * groups + g];
-            if (eAcc == BFP_NO_LIVE_EXP) {
-                eAcc = guard; /* every product is zero: any finite grid holds them */
-            }
-
-            for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
-                size_t ic = inLo + icOffset;
-                for (size_t inPos = 0; inPos < inputLength; inPos++) {
-                    size_t inIdx = (b * inChannels + ic) * inputLength + inPos;
-                    int32_t xv = xArr[inIdx];
-                    int xShift = eAcc - ((int)inQC->exponents[bfpGroupAt(&inRange, inQC, inIdx)] -
-                                         inExpBias);
-                    long long outBase = (long long)(inPos * kernel->stride) - padLeftSigned;
-
-                    for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
-                        size_t oc = outLo + ocOffset;
-                        for (size_t k = 0; k < kernelSize; k++) {
-                            long long outIdx = outBase + (long long)k * dilation;
-                            if (outIdx < 0 || outIdx >= outputLengthSigned) {
-                                continue;
-                            }
-
-                            size_t wIdx = (ic * outChPerGroup + ocOffset) * kernelSize + k;
-                            int shift =
-                                xShift -
-                                ((int)wQC->exponents[bfpGroupAt(&wRange, wQC, wIdx)] - wExpBias);
-                            acc[(b * outChannels + oc) * outputLength + (size_t)outIdx] +=
-                                bfpAlignPartial(mulInt32s(xv, wArr[wIdx]), shift);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    convT1dBfpScatterWalk_t walk = {.batch = batch,
+                                    .groups = groups,
+                                    .inChannels = inChannels,
+                                    .inputLength = inputLength,
+                                    .outChannels = outChannels,
+                                    .outputLength = outputLength,
+                                    .kernelSize = kernelSize,
+                                    .inChPerGroup = inChPerGroup,
+                                    .outChPerGroup = outChPerGroup,
+                                    .padLeft = padLeft,
+                                    .guard = guard,
+                                    .kernel = kernel,
+                                    .inQC = inQC,
+                                    .wQC = wQC,
+                                    .inExpBias = inExpBias,
+                                    .wExpBias = wExpBias,
+                                    .xArr = xArr,
+                                    .wArr = wArr,
+                                    .eAccOf = eAccOf,
+                                    .acc = acc};
+    convTranspose1dKernelBfpScatterWalk(&walk);
 
     /* The raw (BFP_RAW contract: one exponent per TARGET group). A target
      * group may straddle dx rows of different (batch, conv group), so its

@@ -113,6 +113,53 @@ void testCalculateGradsSequentialClosedForm() {
     freeSoftmaxLayer(model[1]);
 }
 
+/* A FLOAT32 head (Softmax forward and p - y in float, p FLOAT32) keeps the
+ * seed on p's own FLOAT32 wire: the Softmax's propLossQ is unused there, so
+ * an 8-bit SYM_INT32 one must not quantize the loss gradient. With
+ * W = 0 and b = log p the logits give p = [0.5, 0.49999, 0.00001]; label
+ * class 0, so the bias grad (batch 1: the raw seed) is p - y and its third
+ * entry 1e-5 survives (an 8-bit grid on |0.5| has a step of 0.5/127). */
+void testCrossEntropyFloatHeadIgnoresAnUnusedSymPropLossQ(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *sym8 = quantizationInitSymInt32WithBits(HALF_AWAY, 8);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *model[2];
+    model[0] = linearLayerInit(
+        &(linearInit_t){.inFeatures = 2, .outFeatures = 3, .weightInit.key = &initKey0}, &lq);
+    layerQuant_t lqSoftmax = lq;
+    lqSoftmax.propLossQ = sym8;
+    model[1] = softmaxLayerInit(&lqSoftmax);
+
+    const float p[3] = {0.5f, 0.49999f, 0.00001f};
+    float W[6] = {0};
+    float B[3] = {logf(p[0]), logf(p[1]), logf(p[2])};
+    modelLoadStateDict(model, 2,
+                       (stateDictEntry_t[]){{.name = "fc", .weightData = W, .biasData = B}}, 1);
+    tensor_t *x = makeRowVec2(1.0f, 1.0f);
+    tensor_t *label = makeRowVecN((const float[]){1.0f, 0.0f, 0.0f}, 3);
+
+    trainingStats_t *stats = calculateGradsSequential(
+        model, 2,
+        (lossConfig_t){
+            .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
+        REDUCTION_MEAN, x, label, NULL);
+
+    float bg[3];
+    memcpy(bg, getGradFromParameter(model[0]->config->linear->bias)->data, sizeof bg);
+    freeTrainingStats(stats);
+    freeTensor(x);
+    freeTensor(label);
+    freeLinearLayer(model[0]);
+    freeSoftmaxLayer(model[1]);
+    freeQuantization(sym8);
+
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, -0.5f, bg[0]);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.49999f, bg[1]);
+    TEST_ASSERT_FLOAT_WITHIN(1e-7f, 0.00001f, bg[2]);
+}
+
 #define MAX_EVENTS 64
 typedef struct {
     size_t idx;
@@ -1383,6 +1430,7 @@ void testCalculateGradsIsIndependentOfDrawsAroundItsSteps(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testCalculateGradsSequentialClosedForm);
+    RUN_TEST(testCrossEntropyFloatHeadIgnoresAnUnusedSymPropLossQ);
     RUN_TEST(testTracedGradsFiresInOrder);
     RUN_TEST(testTraceModelParamsFiresPerTrainableParam);
     RUN_TEST(testTraceModelGradsSkipsFrozenLayerNeverPassesNull);

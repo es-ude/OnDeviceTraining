@@ -2396,9 +2396,11 @@ config IS the declaration, and the mechanism adds no new field -- the slots
 every layer declares arithmetic with are read as the head:
 `forwardMath` (the Softmax forward), `propLossMath` (the combined gradient:
 it replaces exactly this layer's backward), `outputQ` (`p`'s wire) and
-`propLossQ` (the loss-grad wire: the seed GRAD n IS the Softmax's dx, so
-the remat wire table gives it the Softmax's `propLossQ`, type-derived; under
-MSE the seed still inherits the model output's config).
+`propLossQ` (the loss-grad wire: on a head with any BFP the seed GRAD n IS
+the Softmax's dx, so the remat wire table gives it the Softmax's
+`propLossQ`, type-derived -- `crossEntropyHeadDeclaresBfp`; on a FLOAT32 or
+SYM head, and under MSE, the seed still inherits the model output's config
+and `propLossQ` stays unused, exactly as before the heads existed).
 `requireCrossEntropyHead` (`LayerConfigAccess.c`, called by
 `rematBackwardRange`) accepts a head without any BFP unchanged (FLOAT32 and
 SYM models), and with any BFP exactly two tuples:
@@ -2429,8 +2431,11 @@ as the required knob `BFP_HEAD=float|bfp`.
   in `[−30, 0]`, also when 1.0 needs the code `2^(m−1)`, one beyond the
   m-bit maximum (`p` near 1 at `E = −(m−1)`); `|term| <= 2^30 + 2^15`. A `p`
   group below `2^−30` (a confidently wrong prediction in a grouped `p`)
-  rounds the label's code half away onto `2^−30` first (`< 2^−31` absolute,
-  next to a value near −1); `E_g > 0` with a nonzero code is `p > 1` and
+  holds the label exactly only if its `p` lies ON the `2^−30` grid (the
+  code's low `−30 − E_g` bits zero), which every integer-Softmax `p` does
+  (Q30, re-blocked onto a finer group by exact left shifts): it is shifted
+  there exactly; a finer fraction fails fast rather than being dropped
+  before the SR re-block; `E_g > 0` with a nonzero code is `p > 1` and
   fails fast. Per raw target group (the loss-grad wire's geometry) the
   exponent is the data rule of `bfpRawEmitFromRows` (`E_t = max(E +
   bitlen|term|) − 31`, two passes recomputing the terms, no table, `p`'s

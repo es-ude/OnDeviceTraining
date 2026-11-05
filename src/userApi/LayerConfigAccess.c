@@ -78,6 +78,15 @@ static bool headWireIs(const quantization_t *q, qtype_t t) {
     return q != NULL && q->type == t;
 }
 
+bool crossEntropyHeadDeclaresBfp(const layer_t *last) {
+    if (last == NULL || last->type != SOFTMAX) {
+        return false;
+    }
+    const softmaxConfig_t *cfg = last->config->softmax;
+    return cfg->forwardMath.type == ARITH_BFP || cfg->propLossMath.type == ARITH_BFP ||
+           headWireIs(cfg->outputQ, BFP) || headWireIs(cfg->propLossQ, BFP);
+}
+
 void requireCrossEntropyHead(layer_t *last, const char *what) {
     if (last == NULL || last->type != SOFTMAX) {
         PRINT_ERROR("%s: CrossEntropy skips the last layer's backward (its gradient is the "
@@ -89,9 +98,7 @@ void requireCrossEntropyHead(layer_t *last, const char *what) {
     const softmaxConfig_t *cfg = last->config->softmax;
     arithmeticType_t fwd = cfg->forwardMath.type;
     arithmeticType_t bwd = cfg->propLossMath.type;
-    bool anyBfp = fwd == ARITH_BFP || bwd == ARITH_BFP || headWireIs(cfg->outputQ, BFP) ||
-                  headWireIs(cfg->propLossQ, BFP);
-    if (!anyBfp) {
+    if (!crossEntropyHeadDeclaresBfp(last)) {
         return;
     }
     bool bfpHead = fwd == ARITH_BFP && bwd == ARITH_BFP && headWireIs(cfg->outputQ, BFP) &&
@@ -112,9 +119,9 @@ void requireCrossEntropyHead(layer_t *last, const char *what) {
 }
 
 /* Producer's declared backward config for the dx wire it emits (#221). NULL = no declared config
- * (Flatten) -> passthrough of the upstream dtype. Under CrossEntropy the loss-grad seed is the last
- * Softmax's dx and takes its propLossQ (the remat wire table); under MSE it inherits the model
- * output's dtype. */
+ * (Flatten) -> passthrough of the upstream dtype. The loss-grad seed takes the last Softmax's
+ * propLossQ only under CrossEntropy with a BFP-declaring head (crossEntropyHeadDeclaresBfp, the
+ * remat wire table); otherwise it inherits the model output's dtype. */
 quantization_t *backwardWireQ(layer_t *layer) {
     switch (layer->type) {
     case LINEAR:

@@ -862,6 +862,9 @@ static int64_t refDivHalfAway(int64_t v, int64_t d) {
 }
 
 static int64_t refAlign(int64_t v, int k) {
+    if (v == 0) {
+        return 0; /* a zero group may sit any distance above E_acc */
+    }
     if (k <= 0) {
         return v * ((int64_t)1 << -k);
     }
@@ -897,11 +900,14 @@ static void refAvgPool(const bfpAvgCase_t *c, int32_t *mant, int16_t *rawE) {
         for (size_t j = t * gsz; j < (t + 1) * gsz; j++) {
             size_t row = j / outLen;
             for (size_t i = 0; i < c->len; i++) {
+                if (c->codes[row * c->len + i] == 0) {
+                    continue; /* zero groups never set E_acc */
+                }
                 int e = bfpAvgE(c, row * c->len + i);
                 top = e > top ? e : top;
             }
         }
-        int eAcc = top + g;
+        int eAcc = (top == INT32_MIN ? 0 : top) + g;
         rawE[t] = (int16_t)(log2K >= 0 ? eAcc - log2K : eAcc);
         for (size_t j = t * gsz; j < (t + 1) * gsz; j++) {
             size_t row = j / outLen, o = j % outLen;
@@ -1041,6 +1047,33 @@ static void avgPoolBfpRawIntoFloatRawBody(void) {
     cfg.kernel = &kern;
     tensor_t *ops[1] = {&in.tensor};
     avgPool1dForwardKernelBfpRaw(ops, 1, notRaw, NULL, &cfg, NULL);
+}
+
+/* Zero groups never set E_acc: input [1, 1, 8] in groups of 4, group 0 all
+ * zero in the zero state (E = 0), group 1 live at E = -28; K = 2, stride 2
+ * (a power of two: the raw is the exact window sum under E - 1). Every
+ * output equals its exact value. */
+void testAvgPool1dBfpRawZeroGroupDoesNotSetTheAccumulator(void) {
+    int32_t codes[8] = {0, 0, 0, 0, 113, -77, 91, -59};
+    uint8_t exps[2] = {127, 127 - 28};
+    size_t inDims[3] = {1, 1, 8};
+    size_t outDims[3] = {1, 1, 4};
+    bfpScratchFixture_t in;
+    bfpScratchInit(&in, 3, inDims, codes, exps, 2, 4, 8, 8);
+    bfpRawFixture_t raw;
+    bfpRawInit(&raw, 3, outDims, 1, 0);
+    kernel_t kern;
+    initKernel(&kern, 2, VALID, 1, 2);
+    avgPool1dConfig_t cfg = {0};
+    cfg.kernel = &kern;
+    tensor_t *ops[1] = {&in.tensor};
+
+    avgPool1dForwardKernelBfpRaw(ops, 1, &raw.tensor, NULL, &cfg, NULL);
+
+    for (size_t o = 0; o < 4; o++) {
+        int64_t sum = (int64_t)codes[2 * o] + codes[2 * o + 1];
+        assertBfpValueExact(raw.mant[o], raw.exps[0], sum, -28 - 1, o);
+    }
 }
 
 void testAvgPool1dBfpRawRejectsANonRawOutput(void) {
@@ -1436,6 +1469,7 @@ int main(void) {
     RUN_TEST(testAvgPool1dBfpRawNonPow2KRoundsOncePerOutput);
     RUN_TEST(testAvgPool1dBfpRawWorstCaseCodesAcrossExponentGaps);
     RUN_TEST(testAvgPool1dBfpRawRejectsANonRawOutput);
+    RUN_TEST(testAvgPool1dBfpRawZeroGroupDoesNotSetTheAccumulator);
     RUN_TEST(testAvgPool1dForwardBfpRequiresBfpOutputQ);
     RUN_TEST(testAvgPool1dForwardBfpRejectsMismatchedOutputShape);
     RUN_TEST(testAvgPool1dForwardBfpSumHeadroomGuardIsWired);

@@ -156,11 +156,14 @@ static inline int32_t bfpShrHalfAway(int32_t v, unsigned k) {
 
 /*! The fold alignment: k >= 0 is bfpShrHalfAway, k < 0 an EXACT left shift
  * (no rounding, no overflow -- the headroom proof of bfpFoldGuardBits
- * guarantees |v| * 2^-k fits int32 for every segment and bias the kernel
- * can produce; -k <= 30 by the same proof). */
+ * guarantees |v| * 2^-k fits int32 for every NONZERO segment and bias the
+ * kernel can produce; -k <= 30 by the same proof). A zero partial may come
+ * from a group that does not set E_acc (no nonzero code in the pre-pass run),
+ * whose exponent can sit any distance above E_acc: -k >= 32 returns its 0
+ * without the out-of-range shift. */
 static inline int32_t bfpAlignPartial(int32_t v, int k) {
     if (k < 0) {
-        return (int32_t)((uint32_t)v << (unsigned)(-k));
+        return k > -32 ? (int32_t)((uint32_t)v << (unsigned)(-k)) : 0;
     }
     return bfpShrHalfAway(v, (unsigned)k);
 }
@@ -472,11 +475,52 @@ typedef struct bfpRowCursor {
     size_t groupEnd; /* flat end (exclusive) of `group` */
 } bfpRowCursor_t;
 
-/*! Max unbiased exponent over the groups the run intersects. */
+/*! Marker of bfpRowMaxExponent: the run holds no nonzero code. Never add to
+ * it (bfpLiveExpSum); a max over markers and exponents is a plain max. */
+#define BFP_NO_LIVE_EXP INT_MIN
+
+/*! a + b of two pre-pass exponents, the marker if either is one: a product
+ * with a factor from a run without nonzero codes is zero, so it bounds
+ * nothing. */
+static inline int bfpLiveExpSum(int a, int b) {
+    return (a == BFP_NO_LIVE_EXP || b == BFP_NO_LIVE_EXP) ? BFP_NO_LIVE_EXP : a + b;
+}
+
+/*! The int16 form of a pre-pass exponent for the stack tables (a live
+ * exponent is in [-254, 256], so INT16_MIN is free for the marker). */
+static inline int16_t bfpLiveExpTo16(int e) {
+    return e == BFP_NO_LIVE_EXP ? INT16_MIN : (int16_t)e;
+}
+static inline int bfpLiveExpFrom16(int16_t e) {
+    return e == INT16_MIN ? BFP_NO_LIVE_EXP : (int)e;
+}
+
+/*! The top of a unit (an E_acc row or raw target group) whose every
+ * contribution was the marker: the zero state's exponent 0, the value every
+ * all-zero operand produced before (its sums are all 0, so any finite grid
+ * holds them exactly). */
+static inline int bfpLiveTopOrZero(int e) {
+    return e == BFP_NO_LIVE_EXP ? 0 : e;
+}
+
+/*! Max unbiased exponent over the groups holding a NONZERO code of the run
+ * [start, start + count) of `codes` (the operand's unpacked int32 scratch),
+ * BFP_NO_LIVE_EXP when the run holds none. A zero code adds nothing to any
+ * sum, so its group's exponent bounds nothing: an all-zero group in the zero
+ * state (stored = bias, E = 0) would otherwise lift E_acc above live data
+ * many binades lower and round it before the final rounding. One read per
+ * code at most (a group whose exponent cannot raise the max is skipped
+ * unread); no division. */
 static inline int bfpRowMaxExponent(bfpRowCursor_t *c, const bfpQConfig_t *qC, int32_t expBias,
-                                    size_t start, size_t count) {
+                                    const int32_t *codes, size_t start, size_t count) {
+    size_t stop = start + count;
     if (qC->groupSize == 0) {
-        return (int)qC->exponents[0] - expBias;
+        for (size_t i = start; i < stop; i++) {
+            if (codes[i] != 0) {
+                return (int)qC->exponents[0] - expBias;
+            }
+        }
+        return BFP_NO_LIVE_EXP;
     }
     while (start >= c->groupEnd) {
         c->group++;
@@ -484,14 +528,23 @@ static inline int bfpRowMaxExponent(bfpRowCursor_t *c, const bfpQConfig_t *qC, i
     }
     size_t g = c->group;
     size_t gEnd = c->groupEnd;
-    int e = (int)qC->exponents[g] - expBias;
-    size_t stop = start + count;
-    while (stop > gEnd) {
-        g++;
-        gEnd += qC->groupSize;
+    int e = BFP_NO_LIVE_EXP;
+    size_t i = start;
+    while (i < stop) {
+        size_t segEnd = gEnd < stop ? gEnd : stop;
         int eg = (int)qC->exponents[g] - expBias;
         if (eg > e) {
-            e = eg;
+            for (size_t j = i; j < segEnd; j++) {
+                if (codes[j] != 0) {
+                    e = eg;
+                    break;
+                }
+            }
+        }
+        i = segEnd;
+        if (i == gEnd) {
+            g++;
+            gEnd += qC->groupSize;
         }
     }
     return e;

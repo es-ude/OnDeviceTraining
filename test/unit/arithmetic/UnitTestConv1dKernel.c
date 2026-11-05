@@ -1187,6 +1187,77 @@ void testConv1dKernelBfpRawBiasExponentDominatesTheProducts(void) {
     TEST_ASSERT_EQUAL_INT32(-129792, out.mant[0]);
 }
 
+/* ---- Zero groups never set E_acc -------------------------------------------
+ * An all-zero group stores the zero state (stored = bias, E = 0). Live data
+ * 28 binades lower must keep every bit: E_acc follows the groups holding a
+ * nonzero code, never a zero group's exponent (a zero code adds nothing to
+ * any sum, so the headroom proof does not need it). Checked against the
+ * exact int64 value of every output, not a mirror of the rule. */
+
+static const int32_t kZgLive[] = {113, -77, 91, -59};
+static const int32_t kZgW[] = {101, -67, 45};
+
+/* conv1dKernelBfpRaw with one output channel, K = 3 VALID, per-tensor raw;
+ * returns the exact sum of output i in units of 2^eLive. */
+static int64_t zgConvExact(const int32_t *x, size_t i) {
+    int64_t s = 0;
+    for (size_t k = 0; k < 3; k++) {
+        s += (int64_t)x[i + k] * kZgW[k];
+    }
+    return s;
+}
+
+/* Input [1, 1, 8] in groups of 4: group 0 all zero in the zero state, group 1
+ * live at E = -28; weight per tensor at E = 0. */
+void testConv1dKernelBfpRawZeroInputGroupDoesNotSetTheAccumulator(void) {
+    int32_t x[8] = {0, 0, 0, 0};
+    memcpy(&x[4], kZgLive, sizeof(kZgLive));
+    uint8_t xE[] = {127, 127 - 28};
+    uint8_t wE[] = {127};
+    bfpScratchFixture_t in, w;
+    size_t inDims[] = {1, 1, 8};
+    size_t wDims[] = {1, 1, 3};
+    bfpScratchInit(&in, 3, inDims, x, xE, 2, 4, 8, 8);
+    bfpScratchInit(&w, 3, wDims, kZgW, wE, 1, 0, 8, 8);
+    bfpRawFixture_t out;
+    size_t outDims[] = {1, 1, 6};
+    bfpRawInit(&out, 3, outDims, 1, 0);
+    kernel_t kernel;
+    initKernel(&kernel, 3, VALID, 1, 1);
+
+    conv1dKernelBfpRaw(&in.tensor, &w.tensor, NULL, &kernel, 1, &out.tensor);
+
+    for (size_t i = 0; i < 6; i++) {
+        assertBfpValueExact(out.mant[i], out.exps[0], zgConvExact(x, i), -28, i);
+    }
+}
+
+/* A zero bias code (zero state, E = 0) next to products at E = -28. */
+void testConv1dKernelBfpRawZeroBiasDoesNotSetTheAccumulator(void) {
+    uint8_t xE[] = {127 - 28};
+    uint8_t wE[] = {127};
+    int32_t biasCode[] = {0};
+    uint8_t biasE[] = {127};
+    bfpScratchFixture_t in, w, bias;
+    size_t inDims[] = {1, 1, 4};
+    size_t wDims[] = {1, 1, 3};
+    size_t biasDims[] = {1};
+    bfpScratchInit(&in, 3, inDims, kZgLive, xE, 1, 0, 8, 8);
+    bfpScratchInit(&w, 3, wDims, kZgW, wE, 1, 0, 8, 8);
+    bfpScratchInit(&bias, 1, biasDims, biasCode, biasE, 1, 0, 8, 8);
+    bfpRawFixture_t out;
+    size_t outDims[] = {1, 1, 2};
+    bfpRawInit(&out, 3, outDims, 1, 0);
+    kernel_t kernel;
+    initKernel(&kernel, 3, VALID, 1, 1);
+
+    conv1dKernelBfpRaw(&in.tensor, &w.tensor, &bias.tensor, &kernel, 1, &out.tensor);
+
+    for (size_t i = 0; i < 2; i++) {
+        assertBfpValueExact(out.mant[i], out.exps[0], zgConvExact(kZgLive, i), -28, i);
+    }
+}
+
 /* Exact power-of-two grids: the raw's dequant (float)mant * 2^E must be
  * bit-identical to the float kernel's rounding-free fold on the same codes. */
 void testConv1dKernelBfpRawPowerOfTwoDequantMatchesFloatKernel(void) {
@@ -1701,5 +1772,7 @@ int main(void) {
     RUN_TEST(testConv1dKernelBfpRawPowerOfTwoDequantMatchesFloatKernel);
     RUN_TEST(testConv1dKernelBfpRawRejectsNonRawOutput);
     RUN_TEST(testConv1dKernelBfpRawRejectsMismatchedRawGeometry);
+    RUN_TEST(testConv1dKernelBfpRawZeroInputGroupDoesNotSetTheAccumulator);
+    RUN_TEST(testConv1dKernelBfpRawZeroBiasDoesNotSetTheAccumulator);
     return UNITY_END();
 }

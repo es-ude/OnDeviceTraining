@@ -336,7 +336,10 @@ directly (Conv1d); `linear_grid` / `full_scale` (Linear, above); `convert`
   predict codes and the stored exponent exactly; Leg B per call = the raw's
   roundings + half a code of that call's grid. `..._zero_rows_m8` puts loss
   rows in the zero state (`zeroGroups`), the case where E_acc bounds would
-  place the raw grid far above the data.
+  place the raw grid far above the data; `..._zero_rows_m16` gives every
+  channel one zero row and one live row 25-30 binades lower, into m16 grads
+  fine enough to show every in-loop bit (zero groups never set E_acc,
+  section 13).
   Linear dx is integer end to end too (section 14, the section-13 fold on
   the backward GEMM, `bfp_ref.linear_backward_int_fold`): the kernel tier
   (`b4_lin_dx_*`) emits the `BFP_RAW` (raw groups from `raw.groupSize`,
@@ -349,9 +352,17 @@ directly (Conv1d); `linear_grid` / `full_scale` (Linear, above); `convert`
   section 14), the bias by the Conv1d bias rule on the `[B, outF, 1]` view +
   the data-derived raw, then the exact accumulate chain; `_m16_b2` is the
   m16 batch the float fold refused (one-product segments, positive guard),
-  `_zero_m8_b3` puts an input and a loss group in the zero state (they count
-  in the operand-wide E_top). The Linear kernel-tier weightGrad / biasGrad
-  rows stay the float bridge (FLOAT32 grads).
+  `_zero_m8_b3` puts an input and a loss group in the zero state (they set
+  nothing in the operand-wide E_top), `_zero_m16_b3` the same at a live loss
+  25-30 binades below them into m16 grads. The Linear kernel-tier weightGrad
+  / biasGrad rows stay the float bridge (FLOAT32 grads).
+  **Zero-group cells** (section 13 "Zero groups never set `E_acc`"):
+  `b2_conv_fwd_zero_groups_m8w6`, `b2_lin_fwd_zero_groups_m8w8_n64` (zero
+  input groups and an all-zero bias in the zero state above live data at
+  absmax 1e-7), `b4_conv_dx_zero_rows_m8`, `b4_lin_dx_raw_zero_rows_m8`,
+  `b4_conv_dw_grad_bfp_zero_rows_m16`, `b4_lin_dw_grad_bfp_zero_m16_b3`:
+  bit-exact only when kernel AND mirror leave zero groups out of every
+  pre-pass max (planted either side: every one of them MISMATCHes).
 - `b5_fq_*` -- B5, the fake-quant twin: the layer under `ARITH_FLOAT32`
   with BFP-stored weights / bias / loss (m12, grouped) against the same
   layer with every BFP operand replaced by its exact float32

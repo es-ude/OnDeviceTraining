@@ -1297,14 +1297,14 @@ def bfp_align_partial(v, k):
     return bfp_shr_half_away(v, k)
 
 
-def _bfp_row_group_max(exps, bias, group_size, start, count):
-    """Max unbiased exponent over the groups a flat row [start, start+count)
-    intersects (group_size 0 = the per-tensor sentinel, group 0 only)."""
-    if group_size == 0:
-        return exps[0] - bias
-    g_lo = start // group_size
-    g_hi = (start + count - 1) // group_size
-    return max(exps[g] - bias for g in range(g_lo, g_hi + 1))
+def _bfp_row_group_max(codes, exps, bias, group_size, start, count):
+    """Max unbiased exponent over the NONZERO codes of a flat row
+    [start, start+count) (group_size 0 = the per-tensor sentinel, group 0
+    only); None when the row holds no nonzero code (zero groups never set
+    E_acc, section 13)."""
+    es = [exps[0 if group_size == 0 else i // group_size] - bias
+          for i in range(start, start + count) if codes[i] != 0]
+    return max(es) if es else None
 
 
 def conv1d_bfp_raw_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc, bias_codes, bias_exp,
@@ -1320,8 +1320,9 @@ def conv1d_bfp_raw_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc, bias_codes, b
 
     Rule (section 13): E_top(row (b, oc)) = max over the conv group's input
     rows of their group-max exponent + the weight row's group-max exponent,
-    max'ed with the bias exponent of oc; E_acc(target group) = max E_top over
-    the output rows the group covers + g, with g from bfp_fold_guard_bits
+    max'ed with the bias exponent of oc -- every maximum over the NONZERO
+    codes (a zero bias code sets nothing); E_acc(target group) = max E_top
+    over the output rows the group covers (none set: 0) + g, with g from bfp_fold_guard_bits
     (N = in_channels/conv_groups * kernel_size). Per output: acc = align(bias
     code, E_acc - E_bias); the walk of conv1d_bfp_ref with one int partial
     per same-exponent segment, folded on EITHER operand's group change AND
@@ -1341,10 +1342,11 @@ def conv1d_bfp_raw_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc, bias_codes, b
                             bias_qc["mantissa_bits"] if bias_codes is not None else 0)
 
     # Pre-pass: row-wise exponent maxima (O(groups)).
-    in_row_max = [[_bfp_row_group_max(x_exp, x_bias, x_qc["group_size"],
+    in_row_max = [[_bfp_row_group_max(x_codes, x_exp, x_bias, x_qc["group_size"],
                                       (b * in_channels + ic) * input_length, input_length)
                    for ic in range(in_channels)] for b in range(batch)]
-    w_row_max = [_bfp_row_group_max(w_exp, w_bias, w_qc["group_size"], oc * n_terms, n_terms)
+    w_row_max = [_bfp_row_group_max(w_codes, w_exp, w_bias, w_qc["group_size"], oc * n_terms,
+                                    n_terms)
                  for oc in range(out_channels)]
     bias_e = None
     if bias_codes is not None:
@@ -1355,9 +1357,10 @@ def conv1d_bfp_raw_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc, bias_codes, b
     def row_top(row):
         b, oc = divmod(row, out_channels)
         cg = oc // out_ch_per_group
-        e = max(in_row_max[b][cg * in_ch_per_group + i] for i in range(in_ch_per_group))
-        e += w_row_max[oc]
-        if bias_e is not None and bias_e[oc] > e:
+        ins = [in_row_max[b][cg * in_ch_per_group + i] for i in range(in_ch_per_group)]
+        ins = [e for e in ins if e is not None]
+        e = None if not ins or w_row_max[oc] is None else max(ins) + w_row_max[oc]
+        if bias_e is not None and bias_codes[oc] != 0 and (e is None or bias_e[oc] > e):
             e = bias_e[oc]
         return e
 
@@ -1370,7 +1373,8 @@ def conv1d_bfp_raw_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc, bias_codes, b
     exps = []
     for t in range(num_groups):
         rows = range((t * gsz) // out_len, ((t + 1) * gsz - 1) // out_len + 1)
-        exps.append(max(row_top(r) for r in rows) + g)
+        tops = [e for e in (row_top(r) for r in rows) if e is not None]
+        exps.append((max(tops) if tops else 0) + g)
 
     mant, exact, bound = [], [], []
     for b in range(batch):
@@ -1455,10 +1459,10 @@ def linear_bfp_raw_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc, bias_codes, b
     limit = bfp_segment_limit(x_qc["mantissa_bits"], w_qc["mantissa_bits"])
     g = bfp_fold_guard_bits(in_features, x_qc["mantissa_bits"], w_qc["mantissa_bits"],
                             bias_qc["mantissa_bits"] if bias_codes is not None else 0)
-    x_row_max = [_bfp_row_group_max(x_exp, x_bias, x_qc["group_size"], b * in_features,
-                                    in_features) for b in range(batch)]
-    w_row_max = [_bfp_row_group_max(w_exp, w_bias, w_qc["group_size"], o * in_features,
-                                    in_features) for o in range(out_features)]
+    x_row_max = [_bfp_row_group_max(x_codes, x_exp, x_bias, x_qc["group_size"],
+                                    b * in_features, in_features) for b in range(batch)]
+    w_row_max = [_bfp_row_group_max(w_codes, w_exp, w_bias, w_qc["group_size"],
+                                    o * in_features, in_features) for o in range(out_features)]
     bias_e = None
     if bias_codes is not None:
         bb = 2 ** (bias_qc["exponent_bits"] - 1) - 1
@@ -1466,16 +1470,22 @@ def linear_bfp_raw_ref(x_codes, x_exp, x_qc, w_codes, w_exp, w_qc, bias_codes, b
                   for o in range(out_features)]
 
     def top(b, o):
-        e = x_row_max[b] + w_row_max[o]
-        return max(e, bias_e[o]) if bias_e is not None else e
+        # zero rows / a zero bias code set nothing (section 13); None = nothing
+        e = None if x_row_max[b] is None or w_row_max[o] is None else x_row_max[b] + w_row_max[o]
+        if bias_e is not None and bias_codes[o] != 0 and (e is None or bias_e[o] > e):
+            e = bias_e[o]
+        return e
 
     n_out = batch * out_features
     gsz = n_out if raw_group_size == 0 else raw_group_size
     if n_out == 0:
         return dict(mant=[], exps=[0], exact=[], g=g, bound=[])
     assert n_out % gsz == 0, "linear_bfp_raw_ref: raw_group_size must divide the output"
-    exps = [max(top(*divmod(o, out_features)) for o in range(t * gsz, (t + 1) * gsz)) + g
-            for t in range(n_out // gsz)]
+    exps = []
+    for t in range(n_out // gsz):
+        tops = [e for e in (top(*divmod(o, out_features)) for o in range(t * gsz, (t + 1) * gsz))
+                if e is not None]
+        exps.append((max(tops) if tops else 0) + g)
 
     mant, exact, bound = [], [], []
     for b in range(batch):
@@ -2482,11 +2492,13 @@ def avgpool1d_bfp_raw_ref(codes, exps, qc, batch, channels, geom, raw_group_size
     gsz = n_out if raw_group_size == 0 else raw_group_size
     assert n_out % gsz == 0
     rows = batch * channels
-    row_top = [_bfp_row_group_max(exps, bias, qc["group_size"], r * L, L) for r in range(rows)]
+    row_top = [_bfp_row_group_max(codes, exps, bias, qc["group_size"], r * L, L)
+               for r in range(rows)]
     e_acc = []
     for t in range(n_out // gsz):
         covered = range((t * gsz) // out_len, ((t + 1) * gsz - 1) // out_len + 1)
-        e_acc.append(max(row_top[r] for r in covered) + g)
+        tops = [row_top[r] for r in covered if row_top[r] is not None]
+        e_acc.append((max(tops) if tops else 0) + g)
 
     mant = []
     crossings = 0

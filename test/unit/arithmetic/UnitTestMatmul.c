@@ -2161,6 +2161,9 @@ static int64_t refShrHalfAway(int64_t v, int k) {
 }
 
 static int64_t refAlign(int64_t v, int k, size_t *rounded) {
+    if (v == 0) {
+        return 0; /* a zero group may sit any distance above E_acc */
+    }
     if (k < 0) {
         int64_t r = v * ((int64_t)1 << -k);
         TEST_ASSERT_TRUE(r >= INT32_MIN && r <= INT32_MAX);
@@ -2203,21 +2206,22 @@ static void refLinearRaw(const linRawCase_t *c, linRawRef_t *r) {
         int top = INT32_MIN;
         for (size_t o = t * gsz; o < (t + 1) * gsz; o++) {
             size_t row = o / c->cols, col = o % c->cols;
+            /* maxima over the NONZERO codes only (zero groups never set E_acc) */
             int aMax = INT32_MIN, wMax = INT32_MIN;
             for (size_t i = 0; i < c->k; i++) {
                 int ea = linUnbiased(c->aExps, c->aGs, row * c->k + i);
                 int ew = linUnbiased(c->wExps, c->wGs, col * c->k + i);
-                aMax = ea > aMax ? ea : aMax;
-                wMax = ew > wMax ? ew : wMax;
+                aMax = c->a[row * c->k + i] != 0 && ea > aMax ? ea : aMax;
+                wMax = c->w[col * c->k + i] != 0 && ew > wMax ? ew : wMax;
             }
-            int e = aMax + wMax;
-            if (c->bias != NULL) {
+            int e = aMax == INT32_MIN || wMax == INT32_MIN ? INT32_MIN : aMax + wMax;
+            if (c->bias != NULL && c->bias[col] != 0) {
                 int eb = linUnbiased(c->biasExps, c->biasGs, col);
                 e = eb > e ? eb : e;
             }
             top = e > top ? e : top;
         }
-        r->exps[t] = (int16_t)(top + r->g);
+        r->exps[t] = (int16_t)((top == INT32_MIN ? 0 : top) + r->g);
     }
     for (size_t o = 0; o < nOut; o++) {
         size_t row = o / c->cols, col = o % c->cols;
@@ -2441,6 +2445,96 @@ void testMatmulBfpRawWorstCaseBiasAtTheFloorAndAboveTheProducts(void) {
     TEST_ASSERT_EQUAL_INT(-10, ref.g);
     TEST_ASSERT_EQUAL_INT16(10, ref.exps[0]);
     TEST_ASSERT_EQUAL_INT32(-129792, ref.mant[0]);
+}
+
+/* ---- Zero groups never set E_acc -------------------------------------------
+ * An all-zero group (zero state: stored = bias, E = 0) next to live codes 28
+ * binades lower: every output must equal its exact int64 value. */
+
+static const int32_t kMmZgW[] = {101, -67, 45,  13,  -99, 87,  21,   -5,
+                                 77,  3,   -41, 119, 63,  -17, -127, 9};
+
+/* a [1, 8] in groups of 4: the first all zero, the second live at E = -28;
+ * w [8, 2] per tensor at E = 0. */
+void testMatmulBfpRawZeroRowGroupDoesNotSetTheAccumulator(void) {
+    int32_t a[8] = {0, 0, 0, 0, 113, -77, 91, -59};
+    uint8_t aE[] = {127, 127 - 28};
+    uint8_t wE[] = {127};
+    bfpScratchFixture_t aF, wF;
+    size_t aDims[] = {1, 8};
+    size_t wDims[] = {8, 2};
+    bfpScratchInit(&aF, 2, aDims, a, aE, 2, 4, 8, 8);
+    bfpScratchInit(&wF, 2, wDims, kMmZgW, wE, 1, 0, 8, 8);
+    bfpRawFixture_t out;
+    size_t outDims[] = {1, 2};
+    bfpRawInit(&out, 2, outDims, 1, 0);
+
+    matmulBfpRawTensors(&aF.tensor, &wF.tensor, NULL, &out.tensor);
+
+    for (size_t c = 0; c < 2; c++) {
+        int64_t exact = 0;
+        for (size_t i = 0; i < 8; i++) {
+            exact += (int64_t)a[i] * kMmZgW[i * 2 + c];
+        }
+        assertBfpValueExact(out.mant[c], out.exps[0], exact, -28, c);
+    }
+}
+
+/* The strided operand (operand-wide max): w storage [4, 2] in groups of 2
+ * (storage row i = group i), rows 0 and 1 all zero, rows 2 and 3 live at
+ * E = -20; a per tensor at E = -8. */
+void testMatmulBfpRawStridedOperandIgnoresZeroGroups(void) {
+    static const int32_t a[] = {113, -77, 91, -59};
+    static const int32_t w[] = {0, 0, 0, 0, 97, -83, 71, 55};
+    uint8_t aE[] = {127 - 8};
+    uint8_t wE[] = {127, 127, 127 - 20, 127 - 20};
+    bfpScratchFixture_t aF, wF;
+    size_t aDims[] = {1, 4};
+    size_t wDims[] = {4, 2};
+    bfpScratchInit(&aF, 2, aDims, a, aE, 1, 0, 8, 8);
+    bfpScratchInit(&wF, 2, wDims, w, wE, 4, 2, 8, 8);
+    bfpRawFixture_t out;
+    size_t outDims[] = {1, 2};
+    bfpRawInit(&out, 2, outDims, 1, 0);
+
+    matmulBfpRawTensors(&aF.tensor, &wF.tensor, NULL, &out.tensor);
+
+    for (size_t c = 0; c < 2; c++) {
+        int64_t exact = 0;
+        for (size_t i = 0; i < 4; i++) {
+            exact += (int64_t)a[i] * w[i * 2 + c];
+        }
+        assertBfpValueExact(out.mant[c], out.exps[0], exact, -28, c);
+    }
+}
+
+/* Zero bias codes (zero state, E = 0) next to products at E = -28. */
+void testMatmulBfpRawZeroBiasDoesNotSetTheAccumulator(void) {
+    static const int32_t a[] = {113, -77, 91, -59};
+    int32_t bias[] = {0, 0};
+    uint8_t aE[] = {127 - 14};
+    uint8_t wE[] = {127 - 14};
+    uint8_t biasE[] = {127};
+    bfpScratchFixture_t aF, wF, bF;
+    size_t aDims[] = {1, 4};
+    size_t wDims[] = {4, 2};
+    size_t bDims[] = {2};
+    bfpScratchInit(&aF, 2, aDims, a, aE, 1, 0, 8, 8);
+    bfpScratchInit(&wF, 2, wDims, kMmZgW, wE, 1, 0, 8, 8);
+    bfpScratchInit(&bF, 1, bDims, bias, biasE, 1, 0, 8, 8);
+    bfpRawFixture_t out;
+    size_t outDims[] = {1, 2};
+    bfpRawInit(&out, 2, outDims, 1, 0);
+
+    matmulBfpRawTensors(&aF.tensor, &wF.tensor, &bF.tensor, &out.tensor);
+
+    for (size_t c = 0; c < 2; c++) {
+        int64_t exact = 0;
+        for (size_t i = 0; i < 4; i++) {
+            exact += (int64_t)a[i] * kMmZgW[i * 2 + c];
+        }
+        assertBfpValueExact(out.mant[c], out.exps[0], exact, -28, c);
+    }
 }
 
 /* A weight view whose reduction axis is NOT the physically innermost one
@@ -3090,6 +3184,9 @@ int main(void) {
     RUN_TEST(testMatmulBfpRawWorstCaseM16xM8SplitsAtTheSegmentLimit);
     RUN_TEST(testMatmulBfpRawWorstCaseBiasAtTheFloorAndAboveTheProducts);
     RUN_TEST(testMatmulBfpRawStridedWeightViewUsesTheTensorWideMax);
+    RUN_TEST(testMatmulBfpRawZeroRowGroupDoesNotSetTheAccumulator);
+    RUN_TEST(testMatmulBfpRawStridedOperandIgnoresZeroGroups);
+    RUN_TEST(testMatmulBfpRawZeroBiasDoesNotSetTheAccumulator);
     RUN_TEST(testMatmulBfpRawPowerOfTwoDequantMatchesFloatKernel);
     RUN_TEST(testMatmulBfpRawRejectsANonRawOutputAndBadRawGeometry);
 

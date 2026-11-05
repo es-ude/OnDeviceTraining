@@ -9,10 +9,12 @@
  * int32.
  *
  * Definition: every destination row group R (dx: one (batch, conv group);
- * weightGrad: one output channel) has E_top(R) >= every product exponent that
- * reaches R (the row maxima of the two operands, paired as the kernel's
- * contributors pair), E_acc = E_top + g with g the int32 headroom guard over
- * N products per destination. Each product enters as product * 2^-(E_acc -
+ * weightGrad: one output channel) has E_top(R) >= every NONZERO product
+ * exponent that reaches R (the row maxima of the two operands over their
+ * nonzero codes, paired as the kernel's contributors pair; a row without a
+ * nonzero code pairs to nothing; R with nothing takes E_top = 0, the zero
+ * state), E_acc = E_top + g with g the int32 headroom guard over N products
+ * per destination. Each product enters as product * 2^-(E_acc -
  * E_product), rounded half away from zero. weightGrad's value is
  * float(sum) * 2^E_acc; dx is the BFP_RAW of the kernel (one exponent per raw
  * target group, bfpRefConv1dDxRaw).
@@ -52,13 +54,29 @@ static inline int bfpRefExp(const bfpRefOperand_t *o, size_t idx) {
     return (int)o->exps[g] - ((1 << (o->e - 1)) - 1);
 }
 
+/* Max exponent over the NONZERO codes of [start, start + count); INT_MIN if
+ * there is none (a zero code adds nothing to any sum, so it bounds nothing). */
 static inline int bfpRefMaxExp(const bfpRefOperand_t *o, size_t start, size_t count) {
     int best = INT_MIN;
     for (size_t i = start; i < start + count; i++) {
+        if (o->codes[i] == 0) {
+            continue;
+        }
         int e = bfpRefExp(o, i);
         best = e > best ? e : best;
     }
     return best;
+}
+
+/* The exponent of a product of two row maxima; INT_MIN (nothing) if either
+ * row has no nonzero code. */
+static inline int bfpRefPairExp(int a, int b) {
+    return a == INT_MIN || b == INT_MIN ? INT_MIN : a + b;
+}
+
+/* E_top + g, with E_top = 0 (the zero state) when nothing set it. */
+static inline int bfpRefEAcc(int eTop, int g) {
+    return (eTop == INT_MIN ? 0 : eTop) + g;
 }
 
 /* Smallest g in [-30, 31] with n 2^(ma+mb-2) 2^-g + n + 1 <= INT32_MAX
@@ -75,6 +93,9 @@ static inline int bfpRefGuard(size_t n, unsigned ma, unsigned mb) {
 }
 
 static inline int64_t bfpRefAlign(int64_t p, int k, bfpRefStats_t *st) {
+    if (p == 0) {
+        return 0; /* exactly 0 on every grid (its group may sit far above E_acc) */
+    }
     if (k <= 0) {
         st->leftShift += k < 0;
         return p * ((int64_t)1 << -k);
@@ -126,11 +147,12 @@ static inline void bfpRefConv1dDxSums(const bfpRefGeom_t *G, const bfpRefOperand
             int eTop = INT_MIN;
             for (size_t ocl = 0; ocl < coutG; ocl++) {
                 size_t oc = grp * coutG + ocl;
-                int e = bfpRefMaxExp(gy, (b * G->cout + oc) * G->outLength, G->outLength) +
-                        bfpRefMaxExp(w, oc * cinG * G->kernelSize, cinG * G->kernelSize);
+                int e =
+                    bfpRefPairExp(bfpRefMaxExp(gy, (b * G->cout + oc) * G->outLength, G->outLength),
+                                  bfpRefMaxExp(w, oc * cinG * G->kernelSize, cinG * G->kernelSize));
                 eTop = e > eTop ? e : eTop;
             }
-            int eAcc = eTop + g;
+            int eAcc = bfpRefEAcc(eTop, g);
             for (size_t i = 0; i < G->length; i++) {
                 int64_t acc = 0;
                 for (size_t ocl = 0; ocl < coutG; ocl++) {
@@ -158,7 +180,7 @@ static inline void bfpRefConv1dDxSums(const bfpRefGeom_t *G, const bfpRefOperand
                 int64_t mag = acc < 0 ? -acc : acc;
                 st->absMaxSum = mag > st->absMaxSum ? mag : st->absMaxSum;
                 sum[idx] = acc;
-                eAccOut[idx] = eAcc;
+                eAccOut[idx] = eTop == INT_MIN ? INT_MIN : eAcc; /* INT_MIN: no product */
             }
         }
     }
@@ -166,7 +188,8 @@ static inline void bfpRefConv1dDxSums(const bfpRefGeom_t *G, const bfpRefOperand
 
 /* dx as the BFP_RAW the kernel emits: per raw target group t (rawGroupSize
  * elements, 0 = the whole output) E_t = the max E_acc over the group's
- * elements; each sum is re-gridded from its own E_acc to 2^E_t, rounding half
+ * elements whose row group has a nonzero product (none: 0 + g, the zero
+ * state); each sum is re-gridded from its own E_acc to 2^E_t, rounding half
  * away from zero (a gap of 62+ binades leaves 0). `mant` holds the output's
  * element count, `rawE` its group count. */
 static inline bfpRefStats_t bfpRefConv1dDxRaw(const bfpRefGeom_t *G, const bfpRefOperand_t *gy,
@@ -177,14 +200,21 @@ static inline bfpRefStats_t bfpRefConv1dDxRaw(const bfpRefGeom_t *G, const bfpRe
     int64_t sum[n > 0 ? n : 1];
     int eAcc[n > 0 ? n : 1];
     bfpRefConv1dDxSums(G, gy, w, sum, eAcc, &st);
+    int g = bfpRefGuard((G->cout / G->groups) * bfpRefMaxTapOverlap(G), gy->m, w->m);
     size_t gsz = rawGroupSize == 0 ? n : rawGroupSize;
     for (size_t t = 0; gsz > 0 && t < n / gsz; t++) {
         int eT = INT_MIN;
         for (size_t i = t * gsz; i < (t + 1) * gsz; i++) {
             eT = eAcc[i] > eT ? eAcc[i] : eT;
         }
+        eT = eT == INT_MIN ? g : eT; /* no row with a product: the zero state, 0 + g */
         rawE[t] = (int16_t)eT;
         for (size_t i = t * gsz; i < (t + 1) * gsz; i++) {
+            if (eAcc[i] == INT_MIN) {
+                TEST_ASSERT_TRUE(sum[i] == 0);
+                mant[i] = 0;
+                continue;
+            }
             int k = eT - eAcc[i];
             int64_t mag = sum[i] < 0 ? -sum[i] : sum[i];
             int64_t r = k >= 62 ? 0 : (k == 0 ? mag : (mag + ((int64_t)1 << (k - 1))) >> k);
@@ -220,11 +250,12 @@ static inline void bfpRefConv1dWeightGradSums(const bfpRefGeom_t *G, const bfpRe
         size_t grp = oc / coutG;
         int eTop = INT_MIN;
         for (size_t b = 0; b < G->batch; b++) {
-            int e = bfpRefMaxExp(x, (b * G->cin + grp * cinG) * G->length, cinG * G->length) +
-                    bfpRefMaxExp(gy, (b * G->cout + oc) * G->outLength, G->outLength);
+            int e = bfpRefPairExp(
+                bfpRefMaxExp(x, (b * G->cin + grp * cinG) * G->length, cinG * G->length),
+                bfpRefMaxExp(gy, (b * G->cout + oc) * G->outLength, G->outLength));
             eTop = e > eTop ? e : eTop;
         }
-        int eAcc = eTop + g;
+        int eAcc = bfpRefEAcc(eTop, g);
         for (size_t icl = 0; icl < cinG; icl++) {
             size_t ic = grp * cinG + icl;
             for (size_t k = 0; k < G->kernelSize; k++) {
@@ -267,8 +298,9 @@ static inline bfpRefStats_t bfpRefConv1dWeightGrad(const bfpRefGeom_t *G, const 
  * that order, consecutive codes of one loss group form a segment whose code
  * sum is exact; each segment sum enters the destination as sum * 2^-(E_acc -
  * E_group), rounded half away from zero, with E_acc = max over b of the loss
- * row (b, oc)'s max exponent + g, g the guard of a pure SUM of batch *
- * outLength codes (the product guard with mb = 1). */
+ * row (b, oc)'s max exponent over its nonzero codes (none at all: 0) + g, g
+ * the guard of a pure SUM of batch * outLength codes (the product guard with
+ * mb = 1). */
 static inline void bfpRefConv1dBiasGradSums(const bfpRefGeom_t *G, const bfpRefOperand_t *gy,
                                             int64_t *sumOut, int *eAccOut, bfpRefStats_t *st) {
     int g = bfpRefGuard(G->batch * G->outLength, gy->m, 1u);
@@ -278,7 +310,7 @@ static inline void bfpRefConv1dBiasGradSums(const bfpRefGeom_t *G, const bfpRefO
             int e = bfpRefMaxExp(gy, (b * G->cout + oc) * G->outLength, G->outLength);
             eTop = e > eTop ? e : eTop;
         }
-        int eAcc = G->batch > 0 && G->outLength > 0 ? eTop + g : 0;
+        int eAcc = G->batch > 0 && G->outLength > 0 ? bfpRefEAcc(eTop, g) : 0;
         int64_t sum = 0;
         int64_t seg = 0;
         size_t segGroup = SIZE_MAX;
@@ -371,12 +403,13 @@ static inline void bfpRefRawFromRows(const int64_t *sum, const int *eAcc, size_t
  *               B = W stored [outF, inF]; out [batch, inF], k = outF.
  *   weightGrad: A = loss^T (r = outF, i = batch), B = x [batch, inF];
  *               out [outF, inF], k = batch.
- * E_top of output (r, c) = rowTop(r) + colTop(c): the max exponent over the
- * line's own elements where the reduction runs along the operand's
+ * E_top of output (r, c) = rowTop(r) + colTop(c) (nothing if either has no
+ * nonzero code): the max exponent over the line's own NONZERO codes where
+ * the reduction runs along the operand's
  * physically innermost axis (the dx loss rows), else the operand-wide max
  * (the dx weight columns and both weightGrad operands). E_acc of a raw target
  * group (rawGroupSize elements, 0 = whole output) = max E_top over its
- * outputs + g, g the guard over N = k products. A segment = consecutive
+ * outputs (none set: 0) + g, g the guard over N = k products. A segment = consecutive
  * reduction steps with the same (A group, B group), closed early after
  * INT32_MAX >> (ma + mb - 2) products; its exact int64 partial enters as
  * partial * 2^-(E_acc - E_a - E_b), half away from zero. mant = the sums,
@@ -404,9 +437,10 @@ static inline void bfpRefLinearBackwardRaw(bfpRefLinDir_t dir, size_t batch, siz
         for (size_t o = t * gsz; o < (t + 1) * gsz; o++) {
             size_t r = o / cols;
             int rowTop = dx ? bfpRefMaxExp(loss, r * outF, outF) : lossAll;
-            top = rowTop + colTop > top ? rowTop + colTop : top;
+            int e = bfpRefPairExp(rowTop, colTop);
+            top = e > top ? e : top;
         }
-        rawE[t] = (int16_t)(top + g);
+        rawE[t] = (int16_t)bfpRefEAcc(top, g);
     }
     for (size_t o = 0; o < nOut; o++) {
         size_t r = o / cols;

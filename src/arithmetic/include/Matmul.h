@@ -109,7 +109,9 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias, tens
  *  SR) and the bias is one more segment. Over-long same-exponent runs SPLIT
  *  at bfpSegmentLimit (no fail-fast). rowTop / colTop are per-line maxima when
  *  the reduction axis is physically innermost (Linear's input and transposed
- *  weight), else the operand-wide max (coarser, still sound). */
+ *  weight), else the operand-wide max (coarser, still sound) -- every
+ *  maximum over the groups holding a NONZERO code, and E_bias only for a
+ *  nonzero bias code (zero groups never set E_acc; nothing set: 0). */
 void matmulBfpRawTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
                          tensor_t *outputTensor);
 

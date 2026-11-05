@@ -128,10 +128,12 @@ void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t con
  *  float, no division per MAC, no int64. conv1dKernelBfp (FLOAT32 raw)
  *  stays for the backward (the ConvT1d dx adjoint uses it).
  *
- *  Pre-pass (O(groups)): per output row (b, oc) E_top = max over the conv
- *  group's input rows of their group-max exponent + the weight row's
- *  group-max exponent, max'ed with oc's bias exponent; every raw target
- *  group's exponent is E_acc = max E_top over the rows it covers +
+ *  Pre-pass (one read per operand code): per output row (b, oc) E_top = max
+ *  over the conv group's input rows of their group-max exponent + the weight
+ *  row's group-max exponent, max'ed with oc's bias exponent -- every maximum
+ *  over the groups holding a NONZERO code (a zero code or zero bias sets
+ *  nothing; nothing set: 0); every raw target group's exponent is E_acc =
+ *  max E_top over the rows it covers +
  *  bfpFoldGuardBits(inChannels/groups * kernelSize, widths) -- the static
  *  headroom proof (BfpKernelSupport.h). Per output: acc starts at the bias
  *  code aligned to E_acc (bfpAlignPartial, hoisted per channel and group);

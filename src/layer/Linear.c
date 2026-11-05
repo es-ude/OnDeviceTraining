@@ -404,12 +404,12 @@ void linearCalcBiasGradsBfp(tensor_t *loss, tensor_t *biasGrad) {
 /* linearCalcBiasGradsBfp's walk (feature outer, batch inner) and segments
  * with an int32 destination instead of the float fold: each same-group
  * segment's exact code sum enters as partial * 2^-(E_acc - E_segment)
- * (bfpAlignPartial), E_acc per feature = max over the batch of its codes'
- * group exponents + the guard of a pure sum of `batch` codes
- * (bfpSumFoldGuardBits), so no destination can leave int32. Then the BFP_RAW
- * on the grad's geometry with the exponent from the data (bfpRawEmitFromRows,
- * rows of one sum): an inflated feature bound (an all-zero loss group in the
- * zero state) never re-grids the other features. */
+ * (bfpAlignPartial), E_acc per feature = max over the batch of its NONZERO
+ * codes' group exponents (none: 0) + the guard of a pure sum of `batch`
+ * codes (bfpSumFoldGuardBits), so no destination can leave int32. Then the
+ * BFP_RAW on the grad's geometry with the exponent from the data
+ * (bfpRawEmitFromRows, rows of one sum): a loose feature bound never
+ * re-grids the other features. */
 void linearCalcBiasGradsBfpRaw(tensor_t *loss, tensor_t *biasGrad) {
     if (loss->quantization->type != BFP) {
         PRINT_ERROR("linearCalcBiasGradsBfpRaw: loss must be BFP (unpacked scratch form)");
@@ -435,19 +435,23 @@ void linearCalcBiasGradsBfpRaw(tensor_t *loss, tensor_t *biasGrad) {
     const int32_t *codes = (const int32_t *)loss->data;
     int32_t *acc = (int32_t *)biasGrad->data;
 
-    /* Pre-pass in storage order (one cursor, no division): E_acc per feature. */
+    /* Pre-pass in storage order (one cursor, no division): E_acc per feature,
+     * from its nonzero codes only (a zero code never sets it). */
     int eAccOf[numFeatures];
     for (size_t f = 0; f < numFeatures; f++) {
-        eAccOf[f] = batch > 0 ? INT_MIN : 0; /* a feature without codes keeps 0 */
+        eAccOf[f] = batch > 0 ? BFP_NO_LIVE_EXP : 0; /* a feature without codes keeps 0 */
     }
     if (batch > 0) {
         int guard = bfpSumFoldGuardBits(batch, qC->mantissaBits, "linearCalcBiasGradsBfpRaw");
         bfpRowCursor_t c = {.group = 0, .groupEnd = qC->groupSize};
         for (size_t n = 0; n < batch; n++) {
             for (size_t f = 0; f < numFeatures; f++) {
-                int e = bfpRowMaxExponent(&c, qC, expBias, n * numFeatures + f, 1) + guard;
+                int e = bfpRowMaxExponent(&c, qC, expBias, codes, n * numFeatures + f, 1);
                 eAccOf[f] = e > eAccOf[f] ? e : eAccOf[f];
             }
+        }
+        for (size_t f = 0; f < numFeatures; f++) {
+            eAccOf[f] = bfpLiveTopOrZero(eAccOf[f]) + guard;
         }
     }
 

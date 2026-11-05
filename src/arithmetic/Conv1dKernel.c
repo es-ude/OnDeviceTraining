@@ -659,18 +659,23 @@ void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t con
 
 /* ---- Integer-only forward (arithmetic-bfp.md §13): conv1dKernelBfpRaw ---- */
 
-/* The row maxima of the pre-pass, read per output row (b, oc). */
+/* The row maxima of the pre-pass, read per output row (b, oc); INT16_MIN
+ * marks a run without nonzero codes. */
 typedef struct bfpRowTops {
     const int16_t *inMaxByBatchGroup; /* [batch * groups]: input rows of a conv group */
     const int16_t *wMax;              /* [outChannels]: the weight row */
     const int16_t *biasE;             /* [outChannels] or NULL */
+    const int32_t *biasCodes;         /* [outChannels] or NULL: a zero bias sets nothing */
     const uint16_t *convGroupOf;      /* [outChannels] */
     size_t groups;
 } bfpRowTops_t;
 
+/* The row's top, or BFP_NO_LIVE_EXP when nothing in it is nonzero. */
 static int bfpRowTop(const bfpRowTops_t *t, size_t b, size_t oc) {
-    int e = t->inMaxByBatchGroup[b * t->groups + t->convGroupOf[oc]] + t->wMax[oc];
-    if (t->biasE != NULL && t->biasE[oc] > e) {
+    int e =
+        bfpLiveExpSum(bfpLiveExpFrom16(t->inMaxByBatchGroup[b * t->groups + t->convGroupOf[oc]]),
+                      bfpLiveExpFrom16(t->wMax[oc]));
+    if (t->biasE != NULL && t->biasCodes[oc] != 0 && t->biasE[oc] > e) {
         e = t->biasE[oc];
     }
     return e;
@@ -756,9 +761,11 @@ void conv1dKernelBfpRaw(tensor_t const *input, tensor_t const *weight, tensor_t 
     int32_t inExpBias = bfpExponentBias(inQC);
     int32_t wExpBias = bfpExponentBias(wQC);
 
-    /* Pre-pass (O(groups), stack tables sized by the topology, never by the
-     * output): per (batch, conv group) the input rows' max exponent, per
-     * output channel the weight row's max and the bias exponent. */
+    /* Pre-pass (one read per operand code, stack tables sized by the
+     * topology, never by the output): per (batch, conv group) the input
+     * rows' max exponent, per output channel the weight row's max and the
+     * bias exponent -- each over the groups holding a nonzero code (a zero
+     * code adds nothing, so its group's exponent bounds nothing). */
     int16_t inMaxByBatchGroup[batch * groups];
     int16_t wMax[outChannels];
     int16_t biasE[outChannels];
@@ -768,15 +775,16 @@ void conv1dKernelBfpRaw(tensor_t const *input, tensor_t const *weight, tensor_t 
         size_t row = 0;
         for (size_t b = 0; b < batch; b++) {
             for (size_t cg = 0; cg < groups; cg++) {
-                int e = INT_MIN;
+                int e = BFP_NO_LIVE_EXP;
                 for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
-                    int er = bfpRowMaxExponent(&c, inQC, inExpBias, row * inputLength, inputLength);
+                    int er = bfpRowMaxExponent(&c, inQC, inExpBias, xArr, row * inputLength,
+                                               inputLength);
                     if (er > e) {
                         e = er;
                     }
                     row++;
                 }
-                inMaxByBatchGroup[b * groups + cg] = (int16_t)e;
+                inMaxByBatchGroup[b * groups + cg] = bfpLiveExpTo16(e);
             }
         }
     }
@@ -791,8 +799,8 @@ void conv1dKernelBfpRaw(tensor_t const *input, tensor_t const *weight, tensor_t 
                 cgEnd += outChPerGroup;
             }
             convGroupOf[oc] = (uint16_t)cg;
-            wMax[oc] =
-                (int16_t)bfpRowMaxExponent(&c, wQC, wExpBias, oc * reductionLen, reductionLen);
+            wMax[oc] = bfpLiveExpTo16(
+                bfpRowMaxExponent(&c, wQC, wExpBias, wArr, oc * reductionLen, reductionLen));
             biasE[oc] = biasQC != NULL
                             ? (int16_t)((int)biasQC->exponents[bfpGroupAt(&biasRange, biasQC, oc)] -
                                         bfpExponentBias(biasQC))
@@ -802,6 +810,7 @@ void conv1dKernelBfpRaw(tensor_t const *input, tensor_t const *weight, tensor_t 
     bfpRowTops_t tops = {.inMaxByBatchGroup = inMaxByBatchGroup,
                          .wMax = wMax,
                          .biasE = biasQC != NULL ? biasE : NULL,
+                         .biasCodes = biasQC != NULL ? bArr : NULL,
                          .convGroupOf = convGroupOf,
                          .groups = groups};
 
@@ -835,7 +844,7 @@ void conv1dKernelBfpRaw(tensor_t const *input, tensor_t const *weight, tensor_t 
                     eTop = e;
                 }
             }
-            rawE[t] = (int16_t)(eTop + guard);
+            rawE[t] = (int16_t)(bfpLiveTopOrZero(eTop) + guard);
         }
     }
 

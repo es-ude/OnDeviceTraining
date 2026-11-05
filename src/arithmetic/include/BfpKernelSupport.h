@@ -411,9 +411,9 @@ static inline bfpQr_t bfpQrOfTerm(int32_t m, int k) {
 /*! Out of line and cold: the fail-fast of bfpQrAdd's sticky rule stays out of
  * the callers' hot loops (one test-and-branch there). */
 #if defined(__GNUC__) || defined(__clang__)
-__attribute__((noinline, cold))
+__attribute__((noinline, cold, unused))
 #endif
-static inline void bfpQrTwoStickyFail(void) {
+static void bfpQrTwoStickyFail(void) {
     PRINT_ERROR("bfpQrAdd: both operands carry a sticky tail -- the sum would be inexact "
                 "(the caller's working grid must leave one term exact, arithmetic-bfp.md §15)");
     exit(1);

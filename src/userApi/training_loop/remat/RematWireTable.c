@@ -116,8 +116,12 @@ static size_t gradsBelowSeed(size_t deepest, ptrdiff_t top) {
 
 /* Production order: with ACT j at id j and GRADs in the
  * order BACKWARD writes them, every range begins in wire-id order. */
+/* The seed GRAD n: under CrossEntropy it IS the last Softmax's dx (the
+ * combined gradient replaces its backward), so its template is the
+ * Softmax's propLossQ, type-derived (deriveFacts); under MSE it inherits ACT
+ * n, the model output it is the gradient of. */
 static void numberWires(rematWireFact_t *facts, layer_t **model, size_t n, size_t deepest,
-                        ptrdiff_t top, bool hasBackward) {
+                        ptrdiff_t top, bool hasBackward, lossFuncType_t lt) {
     for (size_t j = 0; j <= n; j++) {
         facts[j] = (rematWireFact_t){
             .kind = REMAT_WIRE_ACT, .index = (uint16_t)j, .inheritFrom = REMAT_NONE};
@@ -126,8 +130,9 @@ static void numberWires(rematWireFact_t *facts, layer_t **model, size_t n, size_
         return;
     }
     size_t id = n + 1u;
-    facts[id++] = (rematWireFact_t){
-        .kind = REMAT_WIRE_GRAD, .index = (uint16_t)n, .inheritFrom = (uint16_t)n};
+    facts[id++] = (rematWireFact_t){.kind = REMAT_WIRE_GRAD,
+                                    .index = (uint16_t)n,
+                                    .inheritFrom = lt == CROSS_ENTROPY ? REMAT_NONE : (uint16_t)n};
     for (ptrdiff_t l = top; l > (ptrdiff_t)deepest; l--) {
         bool passThrough = model[l]->type == FLATTEN; /* type-derived */
         facts[id++] = (rematWireFact_t){.kind = REMAT_WIRE_GRAD,
@@ -176,9 +181,10 @@ static void deriveFacts(rematWireFact_t *facts, size_t numWires, layer_t **model
     for (size_t id = n + 1u; id < numWires; id++) {
         rematWireFact_t *f = &facts[id];
         const rematWireFact_t *act = &facts[f->index];
-        const quantization_t *tmpl = (f->inheritFrom != REMAT_NONE)
-                                         ? facts[f->inheritFrom].tmpl
-                                         : backwardWireQ(model[f->index]);
+        /* index n is only the CE seed here: the last Softmax's dx wire */
+        const quantization_t *tmpl = (f->inheritFrom != REMAT_NONE) ? facts[f->inheritFrom].tmpl
+                                     : (f->index == n)              ? backwardWireQ(model[n - 1u])
+                                                       : backwardWireQ(model[f->index]);
         setWireFacts(f, tmpl, act->rank, act->elements);
     }
 }
@@ -313,7 +319,7 @@ bool rematWireTableInit(rematWireTable_t **out, layer_t **model, size_t n, lossC
     if (facts == NULL) {
         return false;
     }
-    numberWires(facts, model, n, deepest, top, hasBackward);
+    numberWires(facts, model, n, deepest, top, hasBackward, loss.funcType);
     deriveFacts(facts, numWires, model, n, inputLike, maxRank);
 
     size_t totalBytes = 0;
@@ -558,7 +564,8 @@ void rematWireTableBind(rematWireTable_t *t, layer_t **model, size_t n, lossFunc
     /* O(maxRank) stack (four size_t[maxRank] shape arrays); the per-wire
      * facts live in the table block. */
     rematWireFact_t *facts = t->bindScratch;
-    numberWires(facts, model, t->modelSize, t->deepest, t->backwardTop, t->hasBackward);
+    numberWires(facts, model, t->modelSize, t->deepest, t->backwardTop, t->hasBackward,
+                t->lossType);
     deriveFacts(facts, t->numWires, model, t->modelSize, input, t->maxRank);
     requireWireKey(t, facts);
     writeHeaders(t, model, mode, input, facts);

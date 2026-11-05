@@ -443,8 +443,8 @@ def test_bfp_configs_are_ordered_and_grouped_with_plotting():
     from examples.har_classifier.compare_memory import CONFIG_ORDER
     from examples._shared import plotting
     bfp = [c for c in CONFIG_ORDER if c.startswith("bfp_")]
-    assert bfp[0] == "bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst"
-    assert len(bfp) == 14
+    assert bfp[0] == "bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst_hbfp"
+    assert len(bfp) == 15
     assert plotting._MEM_CONFIG_ORDER == CONFIG_ORDER
     assert plotting._MEM_CATEGORIES == CATEGORIES
     assert set(plotting._MEM_CAT_COLORS) == set(CATEGORIES)

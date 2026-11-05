@@ -520,7 +520,8 @@ checkpointing, limitations, literature).
 - **Loss functions** — `MSE` (FLOAT32 + SYM_INT32 + BFP, fwd+bwd) and `CROSS_ENTROPY`
   (fwd FLOAT32 + SYM_INT32 + BFP; bwd FLOAT32 + SYM_INT32 + ASYM + BFP) — every
   non-FLOAT32 arm of both losses is fake-quant (#206; BFP since epic PR4): dequant,
-  float core, requant. `lossConfig_t {funcType, backwardReduction, classWeights}`;
+  float core, requant; except the CE backward on a BFP softmax output, which is the
+  integer head's `p - y` (arithmetic-bfp.md §14). `lossConfig_t {funcType, backwardReduction, classWeights}`;
   `reduction_t` is `REDUCTION_SUM | REDUCTION_MEAN`, `defaultLossConfig(funcType)`
   sets `backwardReduction = REDUCTION_MEAN`, `classWeights = NULL`; the forward
   reduction is a per-call argument (`trainingRun` hardcodes MEAN). CE backward is the **fused softmax+CE
@@ -715,11 +716,15 @@ checkpointing, limitations, literature).
   FLOAT32 grads and the fixed grid keep the float path). Linear's `dx`, `weightGrad`
   and `biasGrad` follow the same contracts on its GEMM walk (`matmulBfpRawTensors`,
   2026-11-05). MaxPool1d / AvgPool1d `dx` and the input Quantization layer's
-  BFP -> BFP `dx` are integer too (`BFP_RAW_BACKWARD_DX`; AvgPool's power-of-two
-  divisor is an exponent shift, any other one integer quotient per output), and
-  the CrossEntropy loss boundary (float `p - y`, ONE conversion into the grad
-  wire) is the only float left in a BFP training step; CrossEntropy requires the
-  model's last layer to be the Softmax it skips (fail fast otherwise). BFP grad and
+  BFP -> BFP `dx` are integer too (`BFP_RAW_BACKWARD_DX`; under BFP math AvgPool
+  takes a power-of-two kernel only, the mean is an exponent shift). The model
+  HEAD (Softmax forward + CrossEntropy's `p - y`) is an explicit choice declared
+  by the last Softmax's config and validated at init (two heads, no default):
+  **bfp** = integer Softmax and integer `p - y` (no float on the gradient path),
+  **float** = float Softmax and `p - y` with ONE conversion onto the loss-grad
+  wire (the Softmax's `propLossQ`); the loss value stays float (monitoring).
+  CrossEntropy requires the model's last layer to be the Softmax it skips (fail
+  fast otherwise, when a backward runs). BFP grad and
   optimizer-state storage (`gradInit`, `SgdApi`/`AdamWApi` momentum/moment
   cloning, PPCA replay state) is a **per-tensor-only** knob — a grouped BFP
   template is rejected at every one of those call sites ("per-tensor only, #300

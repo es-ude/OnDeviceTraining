@@ -15,21 +15,29 @@
  *     head wires always fall back to per-tensor -- recorded in wires_resolved).
  *     Under BFP wires + native math an input Quantization layer writes the
  *     input.out wire first, so the integer forward never sees a float.
- *   - math: native = ARITH_BFP on the four GEMM slots; fq = those slots and
- *     Softmax's forward pinned ARITH_FLOAT32 (the GEMM fake-quant reference,
- *     NOT a whole-model twin: Relu/pools keep their BFP arms).
+ *   - math: native = ARITH_BFP on the four GEMM slots; fq = those slots
+ *     pinned ARITH_FLOAT32 (the GEMM fake-quant reference, NOT a whole-model
+ *     twin: Relu/pools keep their BFP arms; the head is BFP_HEAD's).
+ *   - head (BFP_HEAD, REQUIRED, no default): the Softmax forward + the
+ *     combined CrossEntropy gradient p - y (Softmax's own backward is
+ *     skipped). float: FLOAT32 Softmax forward (logits dequantized), CE
+ *     value and p - y in float, ONE float -> BFP conversion onto the
+ *     loss-grad wire (the Softmax's propLossQ); bfp: the integer Softmax and
+ *     the integer p - y, no float on the gradient path (BFP wires only). The
+ *     loss VALUE is float on both heads (monitoring, off the gradient path).
  *   - rounding: OUT_WRITE rounds by the OPERATION's mode, so the
  *     carriers are the math slots: forward/weightGrad/biasGrad HALF_AWAY
  *     (deterministic inference + staging), propLossMath SR_HALF_AWAY under
  *     BFP_ROUNDING=sr (dx packs), grad/state templates and the optimizer
- *     write-back likewise. The CE loss-grad pack has no carrier and stays
- *     HALF_AWAY (documented exception, README "Block floating point").
+ *     write-back likewise. The CE loss-grad pack (both heads) rounds by the
+ *     loss-grad wire's template, built with the same training-side mode.
  *   - grads / momentum: FLOAT32 by default; BFP_GRADS=1 / BFP_STATE=1 opt
  *     into per-tensor BFP storage (grouped BFP grads are rejected upstream).
  *   - optimizer: SGD-M via optimizerStep; updateMath FLOAT32 (#310).
  *
- * Knobs: BFP_MANTISSA_BITS BFP_EXPONENT_BITS BFP_WEIGHT_BLOCK BFP_WIRE_BLOCK
- * BFP_MATH BFP_GRADS BFP_STATE BFP_ROUNDING (examples/_shared/param_gate.h)
+ * Knobs: BFP_HEAD (required) BFP_MANTISSA_BITS BFP_EXPONENT_BITS
+ * BFP_WEIGHT_BLOCK BFP_WIRE_BLOCK BFP_MATH BFP_GRADS BFP_STATE BFP_ROUNDING
+ * (examples/_shared/param_gate.h)
  * + LR MOMENTUM EPOCHS SEED LR_SCHEDULE LR_MIN LOG_PATH
  * LOG_CODE_MOVEMENT (inherited). The SYM-only knobs are ignored with a WARN. */
 
@@ -144,11 +152,11 @@ static const char *const kLayerNames[MODEL_SIZE] = {"conv1", "relu1",   "pool1",
 static const size_t kOutElems[MODEL_SIZE] = {2048, 2048, 1024, 2048, 2048, 1024,
                                              2048, 2048, 64,   64,   6,    6};
 /* dx PRODUCED by layer k = its input elements; 0 = never allocated (conv1 is
- * the deepest trainable layer, #380 PR2; softmax is skipped by CrossEntropy's
- * fused backward, the loss boundary: float p - y, ONE conversion into the BFP
- * loss grad; every backward op below it is integer). The CE loss grad (6 elements) clones softmax.out's template. */
+ * the deepest trainable layer, #380 PR2). softmax's dx is the CE loss grad:
+ * CrossEntropy's combined p - y replaces the Softmax backward and writes the
+ * Softmax's dx wire (its propLossQ, 6 elements). */
 static const size_t kDxElems[MODEL_SIZE] = {0,    2048, 2048, 1024, 2048, 2048,
-                                            1024, 2048, 2048, 64,   64,   0};
+                                            1024, 2048, 2048, 64,   64,   6};
 static const bool kIsGemm[MODEL_SIZE] = {true, false, false, true,  false, false,
                                          true, false, false, false, true,  false};
 
@@ -156,16 +164,22 @@ static roundingMode_t trainingSideRounding(void) {
     return (g_cfg.rounding == BFP_ROUNDING_SR) ? SR_HALF_AWAY : HALF_AWAY;
 }
 
-static quantization_t *makeWireTemplate(groupShape_t gs) {
+static quantization_t *makeWireTemplateRounded(groupShape_t gs, roundingMode_t mode) {
     if (g_cfg.wireMode == WIRE_BLOCK_FLOAT) {
         return g_floatQ;
     }
     if (gs.numGroups == 1) {
-        return quantizationInitBfp(g_cfg.mantissaBits, g_cfg.exponentBits, HALF_AWAY);
+        return quantizationInitBfp(g_cfg.mantissaBits, g_cfg.exponentBits, mode);
     }
-    return quantizationInitBfpGrouped(g_cfg.mantissaBits, g_cfg.exponentBits, HALF_AWAY,
-                                      gs.numGroups, gs.groupSize);
+    return quantizationInitBfpGrouped(g_cfg.mantissaBits, g_cfg.exponentBits, mode, gs.numGroups,
+                                      gs.groupSize);
 }
+
+static quantization_t *makeWireTemplate(groupShape_t gs) {
+    return makeWireTemplateRounded(gs, HALF_AWAY);
+}
+
+#define SOFTMAX_IDX 11
 
 static void buildWireTemplates(void) {
     g_floatQ = quantizationInitFloat();
@@ -183,8 +197,17 @@ static void buildWireTemplates(void) {
             g_dxQ[i] = NULL;
         } else {
             g_dxShape[i] = resolveWireShape(kDxElems[i], g_cfg.wireMode, g_cfg.wireSize);
-            g_dxQ[i] = makeWireTemplate(g_dxShape[i]);
+            /* the loss-grad wire: CE packs p - y by this template's mode */
+            g_dxQ[i] = (i == SOFTMAX_IDX)
+                           ? makeWireTemplateRounded(g_dxShape[i], trainingSideRounding())
+                           : makeWireTemplate(g_dxShape[i]);
         }
+    }
+    if (g_cfg.head == BFP_HEAD_FLOAT && g_outQ[SOFTMAX_IDX] != g_floatQ) {
+        /* the float head keeps p in FLOAT32: no pack between Softmax and CE */
+        freeQuantization(g_outQ[SOFTMAX_IDX]);
+        g_outQ[SOFTMAX_IDX] = g_floatQ;
+        g_outShape[SOFTMAX_IDX] = (groupShape_t){.numGroups = 1, .groupSize = 0};
     }
     if (g_cfg.bfpGrads) {
         g_gradQ =
@@ -245,11 +268,16 @@ static layerQuant_t layerQuantFor(size_t i) {
         lq.weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
         lq.biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
     }
-    if (i == 11 && g_cfg.math == BFP_MATH_FQ) {
-        /* fq pins Softmax's FORWARD only (funnel-routed, accepts a BFP input);
-         * its propLossMath stays derived -- CrossEntropy's fused backward
-         * skips the softmax layer, so it is never reached. */
-        lq.forwardMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+    if (i == SOFTMAX_IDX) {
+        /* The head, explicit (BFP_HEAD; requireCrossEntropyHead validates the
+         * tuple at init). propLossQ is the loss-grad wire; propLossMath
+         * declares the combined p - y. float: FLOAT32 Softmax on the
+         * (dequantized) logits, p FLOAT32, p - y float, one conversion onto
+         * the wire. bfp: the integer Softmax and the integer p - y. */
+        arithmeticType_t headMath = (g_cfg.head == BFP_HEAD_BFP) ? ARITH_BFP : ARITH_FLOAT32;
+        lq.outputQ = g_outQ[i];
+        lq.forwardMath = (arithmetic_t){.type = headMath, .roundingMode = HALF_AWAY};
+        lq.propLossMath = (arithmetic_t){.type = headMath, .roundingMode = trainingSideRounding()};
     }
     return lq;
 }
@@ -603,8 +631,8 @@ static size_t stateMetadataBytes(optimizer_t *o) {
 
 /* Wire profiles for mem_instrument, read off the templates the
  * trainer actually built; numGroups is derived from the wire's N exactly as
- * the allocators do. Slot dx[11] stands for the CE loss grad (6 elements),
- * which clones softmax.out's template. */
+ * the allocators do. Slot dx[11] is the CE loss grad (6 elements) on the
+ * Softmax's dx wire. */
 static harWireProfile_t profileFrom(const quantization_t *q, size_t elems) {
     if (q->type == FLOAT32) {
         return (harWireProfile_t){.present = true, .type = FLOAT32, .bits = 32, .numGroups = 0};
@@ -623,7 +651,6 @@ static void fillWireProfiles(harWireProfile_t out[HAR_NUM_LAYERS],
         dx[i] = (kDxElems[i] == 0) ? (harWireProfile_t){.present = false}
                                    : profileFrom(g_dxQ[i], kDxElems[i]);
     }
-    dx[11] = profileFrom(g_outQ[11], kOutElems[11]);
 }
 #endif /* ODT_MEM_PROFILE */
 
@@ -739,9 +766,10 @@ static void headroomPreflight(void) {
     size_t inRun[4] = {g_inLayer ? runOf(g_inShape) : 0, bfpWires ? runOf(g_outShape[2]) : 0,
                        bfpWires ? runOf(g_outShape[5]) : 0, bfpWires ? runOf(g_outShape[9]) : 0};
     /* dY entering each GEMM's backward = dx produced by the layer above:
-     * relu1.dx, relu2.dx, relu3.dx, and the loss grad (clones softmax.out). */
+     * relu1.dx, relu2.dx, relu3.dx, and the loss grad (softmax.dx). */
     size_t dyRun[4] = {bfpWires ? runOf(g_dxShape[1]) : 0, bfpWires ? runOf(g_dxShape[4]) : 0,
-                       bfpWires ? runOf(g_dxShape[7]) : 0, bfpWires ? runOf(g_outShape[11]) : 0};
+                       bfpWires ? runOf(g_dxShape[7]) : 0,
+                       bfpWires ? runOf(g_dxShape[SOFTMAX_IDX]) : 0};
     static const size_t fwdK[4] = {63, 80, 96, 64};   /* inCh*K, inFeatures */
     static const size_t wgradK[4] = {128, 64, 32, 1}; /* L of the output, batch 1 for linear */
     static const size_t dxK[4] = {0, 160, 192, 6};    /* outCh*K; conv1 has no dx */
@@ -791,15 +819,16 @@ typedef struct wireGateCtx {
 static wireGateCtx_t g_wireGate;
 static bool g_wireGateDone = false;
 
+/* tmpl: the template the trainer built for this wire (g_floatQ = FLOAT32). */
 static void checkWire(wireGateCtx_t *g, const char *what, tensor_t *t, size_t elems,
-                      groupShape_t shape) {
+                      groupShape_t shape, const quantization_t *tmpl) {
     size_t n = calcNumberOfElementsByTensor(t);
     if (n != elems) {
         fprintf(stderr, "WIRE GATE FAIL: %s has %zu elements, expected %zu\n", what, n, elems);
         g->fails++;
         return;
     }
-    paramGateExpect_t expect = (g_cfg.wireMode == WIRE_BLOCK_FLOAT)
+    paramGateExpect_t expect = (tmpl == g_floatQ)
                                    ? (paramGateExpect_t){.type = FLOAT32}
                                    : (paramGateExpect_t){.type = BFP,
                                                          .bits = g_cfg.mantissaBits,
@@ -831,21 +860,23 @@ static void wireGateSink(void *ctx, size_t layerIdx, layerType_t layerType, cons
                     (int)layerType);
             g->fails++;
         }
-        checkWire(g, "fwd input.out", tensor, IN_ELEMS, g_inShape);
+        checkWire(g, "fwd input.out", tensor, IN_ELEMS, g_inShape, g_inQ);
     } else if (strcmp(phase, "fwd") == 0 && layerIdx < g_modelSize) {
         slot = b;
         snprintf(what, sizeof(what), "fwd %s.out", kLayerNames[b]);
-        checkWire(g, what, tensor, kOutElems[b], g_outShape[b]);
+        checkWire(g, what, tensor, kOutElems[b], g_outShape[b], g_outQ[b]);
     } else if (strcmp(phase, "lossgrad") == 0 && layerIdx == g_modelSize) {
         slot = MODEL_SIZE;
-        checkWire(g, "lossgrad (clones softmax.out)", tensor, kOutElems[11], g_outShape[11]);
+        checkWire(g, "lossgrad (softmax.dx)", tensor, kDxElems[SOFTMAX_IDX], g_dxShape[SOFTMAX_IDX],
+                  g_dxQ[SOFTMAX_IDX]);
     } else if (strcmp(phase, "agrad") == 0 && !isInputLayer && layerIdx < g_modelSize - 1) {
         slot = MODEL_SIZE + 1 + b;
         if (b == MODEL_SIZE - 2) { /* agrad@linear == the loss grad tensor */
-            checkWire(g, "agrad linear (loss grad)", tensor, kOutElems[11], g_outShape[11]);
+            checkWire(g, "agrad linear (loss grad)", tensor, kDxElems[SOFTMAX_IDX],
+                      g_dxShape[SOFTMAX_IDX], g_dxQ[SOFTMAX_IDX]);
         } else {
             snprintf(what, sizeof(what), "agrad %s (= %s.dx)", kLayerNames[b], kLayerNames[b + 1]);
-            checkWire(g, what, tensor, kDxElems[b + 1], g_dxShape[b + 1]);
+            checkWire(g, what, tensor, kDxElems[b + 1], g_dxShape[b + 1], g_dxQ[b + 1]);
         }
     } else {
         fprintf(stderr, "WIRE GATE FAIL: unexpected event %s@%zu\n", phase, layerIdx);
@@ -941,12 +972,14 @@ int main(void) {
     const char *logPath = getenv("LOG_PATH");
     const char *mathStr = (g_cfg.math == BFP_MATH_FQ) ? "fq" : "native";
     const char *roundingStr = (g_cfg.rounding == BFP_ROUNDING_DET) ? "det" : "sr";
+    const char *headStr = (g_cfg.head == BFP_HEAD_BFP) ? "bfp" : "float";
 
     fprintf(stdout,
             "CONFIG mantissa_bits=%u exponent_bits=%u weight_block=%s wire_block=%s bfp_math=%s "
-            "bfp_grads=%d bfp_state=%d bfp_rounding=%s lr=%.5f momentum=%.3f epochs=%d seed=%u\n",
+            "bfp_grads=%d bfp_state=%d bfp_rounding=%s bfp_head=%s lr=%.5f momentum=%.3f "
+            "epochs=%d seed=%u\n",
             g_cfg.mantissaBits, g_cfg.exponentBits, g_cfg.weightBlockStr, g_cfg.wireBlockStr,
-            mathStr, (int)g_cfg.bfpGrads, (int)g_cfg.bfpState, roundingStr, (double)g_lr,
+            mathStr, (int)g_cfg.bfpGrads, (int)g_cfg.bfpState, roundingStr, headStr, (double)g_lr,
             (double)g_momentum, g_epochs, g_seed);
 
 #ifdef ODT_MEM_PROFILE
@@ -1066,12 +1099,13 @@ int main(void) {
                     "\"weight_dtype\": \"bfp\", \"mantissa_bits\": %u, \"exponent_bits\": %u, "
                     "\"weight_block\": \"%s\", \"wire_block\": \"%s\", \"bfp_math\": \"%s\", "
                     "\"bfp_grads\": %d, \"bfp_state\": %d, \"bfp_rounding\": \"%s\", "
+                    "\"bfp_head\": \"%s\", "
                     "\"groups_resolved\": {\"conv1\": [%zu, %zu], \"conv2\": [%zu, %zu], "
                     "\"conv3\": [%zu, %zu], \"linear\": [%zu, %zu]}, ",
                     g_epochs, BATCH, (double)g_lr, (double)g_momentum, g_seed,
                     g_useCosine ? "cosine" : "none", (double)g_lrMin, g_cfg.mantissaBits,
                     g_cfg.exponentBits, g_cfg.weightBlockStr, g_cfg.wireBlockStr, mathStr,
-                    (int)g_cfg.bfpGrads, (int)g_cfg.bfpState, roundingStr,
+                    (int)g_cfg.bfpGrads, (int)g_cfg.bfpState, roundingStr, headStr,
                     groupInfo.conv1.numGroups, groupInfo.conv1.groupSize, groupInfo.conv2.numGroups,
                     groupInfo.conv2.groupSize, groupInfo.conv3.numGroups, groupInfo.conv3.groupSize,
                     groupInfo.linear.numGroups, groupInfo.linear.groupSize);

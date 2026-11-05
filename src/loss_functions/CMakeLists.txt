@@ -3,6 +3,10 @@ add_library(CrossEntropy
 target_include_directories(CrossEntropy PUBLIC include)
 target_link_libraries(CrossEntropy PRIVATE
         Tensor
+        Quantization
+        ArithmeticType
+        Rounding
+        ExecuteOp
         Log
         Common
         CommonLayerLibs

@@ -32,5 +32,9 @@ Linear.c            linearForward        self
 Linear.c            linearForwardKernelBfpRaw
 Softmax.c           softmaxForward       self
 Softmax.c           softmaxForwardKernelBfp
+# The float head (BFP_HEAD=float, ruling R2): the FLOAT32 Softmax forward on the
+# dequantized logits is the head's forward island -- allow-listed and stopped at the
+# root (documents the boundary). The bfp head runs the integer kernel above.
+Softmax.c           softmaxForwardKernel
 # OUT_WRITE epilogue (conversionMatrix[BFP_RAW][BFP]):
 TensorConversion.c  reblockBfpRawTensor

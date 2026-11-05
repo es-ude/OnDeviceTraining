@@ -1,5 +1,7 @@
 #define SOURCE_FILE "UnitTestCrossEntropy"
 
+#include "BfpRawFixture.h"
+#include "BfpScatterRef.h"
 #include "CrossEntropy.h"
 #include "DeathTest.h"
 #include "LayerExec.h"
@@ -12,7 +14,9 @@
 #include "TensorConversion.h"
 #include "expected_cross_entropy_sym.h"
 #include "unity.h"
+#include <limits.h>
 #include <math.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -781,6 +785,343 @@ void testCrossEntropyBackwardRequantizesTheGradWithItsLossStream(void) {
     TEST_ASSERT_EQUAL_HEX32(0x7114be1fu, ceCellState);
 }
 
+/* ---- head bfp: the integer combined gradient p - y (ruling R2) ----------
+ * p is the integer Softmax's BFP output, y a FLOAT32 one-hot label (read by
+ * bit pattern: 1.0f / +-0.0f, no float compare). Each element is an int32
+ * term on its own grid: a non-label element is its code on its p group's
+ * exponent E_g; the label element subtracts 1.0 = 2^-E on the grid E =
+ * clamp(E_g, -30, 0), exact for E_g in [-30, 0] -- also when 1.0 needs code
+ * 2^(m-1), one beyond the m-bit maximum. The raw of every target group then
+ * takes the data rule (E_t = max(E + bitlen|term|) - 31), and the funnel
+ * re-blocks it onto the loss-grad wire by the wire's mode. */
+
+/* [rows, cols] BFP tensor (m, e = 8), grouped (groupSize > 0) or per tensor,
+ * from codes and BIASED stored exponents. */
+static tensor_t *ceBfp2d(size_t rows, size_t cols, uint8_t m, size_t numGroups, size_t groupSize,
+                         const int32_t *codes, const uint8_t *stored, roundingMode_t mode) {
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = rows;
+    dims[1] = cols;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    quantization_t *q = groupSize == 0
+                            ? quantizationInitBfp(m, 8, mode)
+                            : quantizationInitBfpGrouped(m, 8, mode, numGroups, groupSize);
+    tensor_t *t = initTensor(shape, q, NULL);
+    size_t n = rows * cols;
+    if (codes != NULL) {
+        int32_t tmp[64];
+        TEST_ASSERT_TRUE(n <= 64);
+        memcpy(tmp, codes, n * sizeof(int32_t));
+        byteConversion((uint8_t *)tmp, 32, t->data, m, n);
+    }
+    bfpQConfig_t *qc = q->qConfig;
+    for (size_t g = 0; g < qc->numGroups; g++) {
+        qc->exponents[g] = stored != NULL ? stored[g] : 127;
+    }
+    return t;
+}
+
+static tensor_t *ceFloat2d(size_t rows, size_t cols, const float *values) {
+    size_t dims[2] = {rows, cols};
+    return buildFloatTensorShaped(dims, 2, (float *)values);
+}
+
+typedef struct ceIntCase {
+    size_t rows, cols;
+    uint8_t m;
+    size_t pNumGroups, pGroupSize; /* p's grouping (0 = per tensor) */
+    const int32_t *codes;
+    const uint8_t *stored; /* biased, e = 8 */
+    const size_t *label;   /* one class per row */
+    size_t rawNumGroups, rawGroupSize;
+} ceIntCase_t;
+
+/* The int64 reference, from the definition: the exact value of p_i - y_i on
+ * the grid e_i = min(E_g, 0) (exact for every E_g >= -62), then the data-rule
+ * re-grid of BfpScatterRef.h. Exact whenever the kernel is (E_g >= -30). */
+static void ceIntReference(const ceIntCase_t *c, int32_t *mant, int16_t *rawE) {
+    size_t n = c->rows * c->cols;
+    int64_t sum[64];
+    int eAcc[64];
+    for (size_t i = 0; i < n; i++) {
+        size_t g = c->pGroupSize == 0 ? 0 : i / c->pGroupSize;
+        int eg = (int)c->stored[g] - 127;
+        int e = eg < 0 ? eg : 0;
+        bool one = (i % c->cols) == c->label[i / c->cols];
+        sum[i] = (int64_t)c->codes[i] * ((int64_t)1 << (eg - e)) - (one ? (int64_t)1 << (-e) : 0);
+        eAcc[i] = e;
+    }
+    bfpRefStats_t st = {0};
+    bfpRefRawFromRows(sum, eAcc, n, c->rawGroupSize, mant, rawE, &st);
+}
+
+static void ceOneHot(const ceIntCase_t *c, float *y) {
+    for (size_t i = 0; i < c->rows * c->cols; i++) {
+        y[i] = (i % c->cols) == c->label[i / c->cols] ? 1.0f : 0.0f;
+    }
+}
+
+static void ceCheckIntegerRaw(const ceIntCase_t *c) {
+    size_t n = c->rows * c->cols;
+    size_t dims[2] = {c->rows, c->cols};
+    bfpScratchFixture_t p;
+    bfpScratchInit(&p, 2, dims, c->codes, c->stored, c->pGroupSize == 0 ? 1 : c->pNumGroups,
+                   c->pGroupSize, c->m, 8);
+    float y[64];
+    ceOneHot(c, y);
+    tensor_t *label = ceFloat2d(c->rows, c->cols, y);
+    bfpRawFixture_t raw;
+    bfpRawInit(&raw, 2, dims, c->rawNumGroups, c->rawGroupSize);
+    tensor_t *ops[1] = {&p.tensor};
+
+    crossEntropySoftmaxBackwardKernelBfp(ops, 1, &raw.tensor, NULL, label, NULL);
+
+    int32_t mant[64];
+    int16_t rawE[16];
+    ceIntReference(c, mant, rawE);
+    assertRawEquals(&raw, mant, n, rawE, c->rawNumGroups);
+    freeTensor(label);
+}
+
+/* p_max near 1 (code 127 on 2^-7 at m 8: 0.9921875) with the label at the
+ * max (p - 1 = -1/128) and at a non-max class (the 1.0 is code 128 = 2^(m-1)
+ * on that grid, one beyond the 8-bit maximum: exact in int32); a label whose
+ * p is 0; grouped p with groups 6 binades apart into a per-tensor raw and
+ * into raw groups that straddle the p groups; two rows; m 16. */
+void testCeIntegerHeadRawMatchesTheInt64Reference(void) {
+    int32_t near1[6] = {127, 1, 0, 0, 0, 0};
+    uint8_t e7[1] = {120};
+    size_t atMax[1] = {0}, atOther[1] = {3}, atZero[1] = {5};
+    ceIntCase_t a = {1, 6, 8, 1, 0, near1, e7, atMax, 1, 0};
+    ceCheckIntegerRaw(&a);
+    a.label = atOther;
+    ceCheckIntegerRaw(&a);
+    a.label = atZero;
+    ceCheckIntegerRaw(&a);
+
+    int32_t grouped[6] = {90, -3, 17, 64, 5, 127};
+    uint8_t ge[3] = {120, 114, 126};
+    size_t l2[1] = {2};
+    ceIntCase_t b = {1, 6, 8, 3, 2, grouped, ge, l2, 1, 0};
+    ceCheckIntegerRaw(&b);
+    b.rawNumGroups = 2;
+    b.rawGroupSize = 3; /* raw groups straddle p groups 1 */
+    ceCheckIntegerRaw(&b);
+    b.label = atOther;
+    ceCheckIntegerRaw(&b);
+
+    int32_t two[6] = {100, 20, 7, 3, 120, 5};
+    uint8_t te[2] = {120, 121};
+    size_t lab2[2] = {1, 1};
+    ceIntCase_t r2 = {2, 3, 8, 2, 3, two, te, lab2, 2, 3};
+    ceCheckIntegerRaw(&r2);
+
+    int32_t wide[6] = {32767, 12, -1, 0, 4000, 9};
+    uint8_t w15[1] = {112}; /* E = -15: 1.0 = 2^15 codes, one beyond the m16 maximum */
+    size_t lw[1] = {4};
+    ceIntCase_t c16 = {1, 6, 16, 1, 0, wide, w15, lw, 1, 0};
+    ceCheckIntegerRaw(&c16);
+}
+
+/* 1.0 exactly beyond the m-bit maximum: p = 0 at the label on 2^-7, so the
+ * term is -128 = -2^(m-1) codes -- the raw holds exactly -1.0. An all-zero p
+ * group in the zero state (E = 0) holding the label: the term is -1 on 2^0. */
+void testCeIntegerHeadSubtractsOneExactly(void) {
+    int32_t codes[4] = {127, 0, 0, 0};
+    uint8_t e7[1] = {120};
+    size_t lab[1] = {1};
+    ceIntCase_t a = {1, 4, 8, 1, 0, codes, e7, lab, 1, 0};
+    ceCheckIntegerRaw(&a);
+    size_t dims[2] = {1, 4};
+    bfpScratchFixture_t p;
+    bfpScratchInit(&p, 2, dims, codes, e7, 1, 0, 8, 8);
+    tensor_t *label = ceFloat2d(1, 4, (float[]){0.f, 1.f, 0.f, 0.f});
+    bfpRawFixture_t raw;
+    bfpRawInit(&raw, 2, dims, 1, 0);
+    tensor_t *ops[1] = {&p.tensor};
+    crossEntropySoftmaxBackwardKernelBfp(ops, 1, &raw.tensor, NULL, label, NULL);
+    TEST_ASSERT_TRUE(bfpValueExactlyEqual(raw.mant[1], raw.exps[0], -1, 0));
+    TEST_ASSERT_TRUE(bfpValueExactlyEqual(raw.mant[0], raw.exps[0], 127, -7));
+
+    int32_t zeroGroup[4] = {120, 3, 0, 0};
+    uint8_t zg[2] = {120, 127};
+    size_t lz[1] = {3};
+    ceIntCase_t z = {1, 4, 8, 2, 2, zeroGroup, zg, lz, 1, 0};
+    ceCheckIntegerRaw(&z);
+    z.rawNumGroups = 2;
+    z.rawGroupSize = 2;
+    ceCheckIntegerRaw(&z);
+    freeTensor(label);
+}
+
+/* A label whose p group sits below 2^-30 (E_g = -40: every p there under
+ * 2^-33): 1.0 cannot share that grid in int32, so the term is placed on 2^-30
+ * and p rounds half away there first -- an absolute error of at most 2^-31,
+ * 2^-24 of an m 8 code step of the -1 it joins. */
+void testCeIntegerHeadPlacesALabelBelowTwoToMinus30OnThatGrid(void) {
+    int32_t codes[4] = {127, 64, 101, 3};
+    uint8_t st[2] = {120, 87}; /* E = -7, -40 */
+    size_t dims[2] = {1, 4};
+    bfpScratchFixture_t p;
+    bfpScratchInit(&p, 2, dims, codes, st, 2, 2, 8, 8);
+    tensor_t *label = ceFloat2d(1, 4, (float[]){0.f, 0.f, 1.f, 0.f});
+    bfpRawFixture_t raw;
+    bfpRawInit(&raw, 2, dims, 2, 2);
+    tensor_t *ops[1] = {&p.tensor};
+    crossEntropySoftmaxBackwardKernelBfp(ops, 1, &raw.tensor, NULL, label, NULL);
+    double got = ldexp((double)raw.mant[2], raw.exps[1]);
+    double exact = ldexp(101.0, -40) - 1.0;
+    TEST_ASSERT_TRUE(fabs(got - exact) <= ldexp(1.0, -31));
+    /* its non-label neighbour shares the raw group of the -1: half a raw step */
+    TEST_ASSERT_TRUE(bfpValueExactlyEqual(raw.mant[3], raw.exps[1], 3, -40) ||
+                     fabs(ldexp((double)raw.mant[3], raw.exps[1]) - ldexp(3.0, -40)) <=
+                         ldexp(1.0, raw.exps[1] - 1));
+
+    /* The rounding onto 2^-30 is half away, not a floor: 127 * 2^-37 is 0.99
+     * of 2^-30, so the term is (1 - 2^30) * 2^-30 exactly. */
+    int32_t near[4] = {127, 64, 127, 3};
+    uint8_t st37[2] = {120, 90}; /* E = -7, -37 */
+    bfpScratchFixture_t q;
+    bfpScratchInit(&q, 2, dims, near, st37, 2, 2, 8, 8);
+    bfpRawFixture_t raw2;
+    bfpRawInit(&raw2, 2, dims, 2, 2);
+    tensor_t *ops2[1] = {&q.tensor};
+    crossEntropySoftmaxBackwardKernelBfp(ops2, 1, &raw2.tensor, NULL, label, NULL);
+    TEST_ASSERT_TRUE(bfpValueExactlyEqual(raw2.mant[2], raw2.exps[1], 1 - ((int64_t)1 << 30), -30));
+    freeTensor(label);
+}
+
+/* Layer level: the raw re-blocked onto the loss-grad wire by the WIRE's
+ * mode; under SR one draw per element in element order from the op's OUT
+ * stream: rngFold(rngFold(rngFold(key, BACKWARD, 0), OP, 0), OUT, 0). */
+static void ceIntoBfpWire(roundingMode_t mode, uint64_t seed, size_t gradGroups, size_t gradSize) {
+    int32_t codes[6] = {90, -3, 17, 64, 5, 127};
+    uint8_t ge[3] = {120, 114, 126};
+    size_t lab[1] = {2};
+    ceIntCase_t c = {1, 6, 8, 3, 2, codes, ge, lab, gradSize == 0 ? 1 : gradGroups, gradSize};
+    tensor_t *p = ceBfp2d(1, 6, 8, 3, 2, codes, ge, HALF_AWAY);
+    float y[6];
+    ceOneHot(&c, y);
+    tensor_t *label = ceFloat2d(1, 6, y);
+    tensor_t *grad = ceBfp2d(1, 6, 8, gradGroups, gradSize, NULL, NULL, mode);
+    layerExec_t exec = {.key = rngKeyFromSeed(seed)};
+
+    crossEntropySoftmaxBackward(p, label, grad, mode == SR_HALF_AWAY ? &exec : NULL);
+
+    int32_t mant[64];
+    int16_t rawE[16];
+    ceIntReference(&c, mant, rawE);
+    rngStream_t out = rngOpen(
+        rngFold(rngFold(rngFold(exec.key, RNG_TAG_BACKWARD, 0u), RNG_TAG_OP, 0u), RNG_TAG_OUT, 0u));
+    int32_t refCodes[6];
+    uint8_t refStored[3];
+    bfpRefReblockRaw(mant, rawE, 6, gradSize, 8, 8, mode == SR_HALF_AWAY ? &out : NULL, refCodes,
+                     refStored);
+    int32_t got[6];
+    unpackSignExtend(grad->data, 8, 0, got, 6);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(refCodes, got, 6);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(refStored,
+                                  ((bfpQConfig_t *)grad->quantization->qConfig)->exponents,
+                                  gradSize == 0 ? 1 : gradGroups);
+    freeTensor(grad);
+    freeTensor(label);
+    freeTensor(p);
+}
+
+void testCeIntegerHeadReblocksOntoTheLossGradWireByItsMode(void) {
+    ceIntoBfpWire(HALF_AWAY, 0u, 1, 0);
+    ceIntoBfpWire(SR_HALF_AWAY, 41u, 1, 0);
+    ceIntoBfpWire(HALF_AWAY, 0u, 2, 3);
+    ceIntoBfpWire(SR_HALF_AWAY, 42u, 2, 3);
+}
+
+/* SR statistics of the re-block: p = [101, 13, 9, 5] / 128, label 0, into an
+ * m 4 grad wire (code step 2^-5: every value between two codes), many keys: every output
+ * code is one of its two neighbours and the mean is the exact value within
+ * 5 sigma (per element, Bernoulli on the dropped fraction). */
+void testCeIntegerHeadSrReblockIsUnbiased(void) {
+    int32_t codes[4] = {101, 13, 9, 5};
+    uint8_t e7[1] = {120};
+    tensor_t *p = ceBfp2d(1, 4, 8, 1, 0, codes, e7, HALF_AWAY);
+    tensor_t *label = ceFloat2d(1, 4, (float[]){1.f, 0.f, 0.f, 0.f});
+    const double exact[4] = {101.0 / 128 - 1.0, 13.0 / 128, 9.0 / 128, 5.0 / 128};
+    const size_t trials = 4000;
+    double sum[4] = {0}, sumSq[4] = {0};
+    for (size_t t = 0; t < trials; t++) {
+        tensor_t *grad = ceBfp2d(1, 4, 4, 1, 0, NULL, NULL, SR_HALF_AWAY);
+        layerExec_t exec = {.key = rngKeyFromSeed(1000u + t)};
+        crossEntropySoftmaxBackward(p, label, grad, &exec);
+        int32_t got[4];
+        unpackSignExtend(grad->data, 4, 0, got, 4);
+        int e = (int)((bfpQConfig_t *)grad->quantization->qConfig)->exponents[0] - 127;
+        TEST_ASSERT_EQUAL_INT(-5, e); /* |p - y| max 27/128 = 6.75 * 2^-5 <= 7 * 2^-5 */
+        for (size_t i = 0; i < 4; i++) {
+            double v = ldexp((double)got[i], e);
+            double lo = floor(exact[i] / ldexp(1.0, e)) * ldexp(1.0, e);
+            TEST_ASSERT_TRUE(v == lo || v == lo + ldexp(1.0, e));
+            sum[i] += v;
+            sumSq[i] += v * v;
+        }
+        freeTensor(grad);
+    }
+    for (size_t i = 0; i < 4; i++) {
+        double mean = sum[i] / (double)trials;
+        double var = sumSq[i] / (double)trials - mean * mean;
+        double sigma = sqrt((var > 0 ? var : 0) / (double)trials) + 1e-12;
+        TEST_ASSERT_TRUE_MESSAGE(fabs(mean - exact[i]) <= 5.0 * sigma + ldexp(1.0, -20),
+                                 "SR re-block is unbiased");
+    }
+    freeTensor(label);
+    freeTensor(p);
+}
+
+/* Half-specified heads fail fast: a BFP p needs a BFP loss-grad wire, a
+ * FLOAT32 one-hot label (0 or 1 by bit pattern), and a probability <= 1 at
+ * the label. */
+static void ceDieBfpPFloatGrad(void) {
+    int32_t codes[4] = {64, 32, 16, 16};
+    uint8_t e7[1] = {120};
+    tensor_t *p = ceBfp2d(1, 4, 8, 1, 0, codes, e7, HALF_AWAY);
+    tensor_t *label = ceFloat2d(1, 4, (float[]){1.f, 0.f, 0.f, 0.f});
+    tensor_t *grad = ceFloat2d(1, 4, (float[]){0.f, 0.f, 0.f, 0.f});
+    crossEntropySoftmaxBackward(p, label, grad, NULL);
+}
+static void ceDieBfpLabel(void) {
+    int32_t codes[4] = {64, 32, 16, 16};
+    uint8_t e7[1] = {120};
+    tensor_t *p = ceBfp2d(1, 4, 8, 1, 0, codes, e7, HALF_AWAY);
+    tensor_t *label = ceBfp2d(1, 4, 8, 1, 0, (int32_t[]){64, 0, 0, 0}, (uint8_t[]){121}, HALF_AWAY);
+    tensor_t *grad = ceBfp2d(1, 4, 8, 1, 0, NULL, NULL, HALF_AWAY);
+    crossEntropySoftmaxBackward(p, label, grad, NULL);
+}
+static void ceDieSoftLabel(void) {
+    int32_t codes[4] = {64, 32, 16, 16};
+    uint8_t e7[1] = {120};
+    tensor_t *p = ceBfp2d(1, 4, 8, 1, 0, codes, e7, HALF_AWAY);
+    tensor_t *label = ceFloat2d(1, 4, (float[]){0.5f, 0.5f, 0.f, 0.f});
+    tensor_t *grad = ceBfp2d(1, 4, 8, 1, 0, NULL, NULL, HALF_AWAY);
+    crossEntropySoftmaxBackward(p, label, grad, NULL);
+}
+static void ceDieProbabilityAboveOne(void) {
+    int32_t codes[4] = {3, 0, 0, 0};
+    uint8_t e1[1] = {128}; /* E = +1: p = 6 */
+    tensor_t *p = ceBfp2d(1, 4, 8, 1, 0, codes, e1, HALF_AWAY);
+    tensor_t *label = ceFloat2d(1, 4, (float[]){1.f, 0.f, 0.f, 0.f});
+    tensor_t *grad = ceBfp2d(1, 4, 8, 1, 0, NULL, NULL, HALF_AWAY);
+    crossEntropySoftmaxBackward(p, label, grad, NULL);
+}
+
+void testCeIntegerHeadRejectsAHalfSpecifiedBoundary(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "the integer head needs a BFP loss-grad wire",
+                             ceDieBfpPFloatGrad());
+    ASSERT_EXITS_WITH_OUTPUT(1, "the integer head needs a FLOAT32 one-hot label", ceDieBfpLabel());
+    ASSERT_EXITS_WITH_OUTPUT(1, "is not one-hot (0 or 1)", ceDieSoftLabel());
+    ASSERT_EXITS_WITH_OUTPUT(1, "a probability above 1", ceDieProbabilityAboveOne());
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(unitTestCrossEntropySoftmaxBackward);
@@ -807,5 +1148,11 @@ int main() {
     RUN_TEST(testCrossEntropyForward_NonFiniteSoftmaxReturnsNanInsteadOfAborting);
     RUN_TEST(testCrossEntropyForward_InfiniteSoftmaxReturnsNanInsteadOfAborting);
     RUN_TEST(testCrossEntropyBackwardRequantizesTheGradWithItsLossStream);
+    RUN_TEST(testCeIntegerHeadRawMatchesTheInt64Reference);
+    RUN_TEST(testCeIntegerHeadSubtractsOneExactly);
+    RUN_TEST(testCeIntegerHeadPlacesALabelBelowTwoToMinus30OnThatGrid);
+    RUN_TEST(testCeIntegerHeadReblocksOntoTheLossGradWireByItsMode);
+    RUN_TEST(testCeIntegerHeadSrReblockIsUnbiased);
+    RUN_TEST(testCeIntegerHeadRejectsAHalfSpecifiedBoundary);
     return UNITY_END();
 }

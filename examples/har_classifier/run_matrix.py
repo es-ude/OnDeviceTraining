@@ -53,19 +53,22 @@ ROOT = HERE.parents[1]
 def bfp_config_name(env: dict[str, str]) -> str:
     """The BFP name grammar (#410 PR7): EVERY knob is encoded so --resume
     can never confuse two numerically different runs:
-      bfp_wb{t|pc|N}_ab{f|t|N}_m{M}_e{E}_x{nat|fq}_g{0|1}_s{0|1}_r{sr|det}_l{const|cos}"""
+      bfp_wb{t|pc|N}_ab{f|t|N}_m{M}_e{E}_x{nat|fq}_g{0|1}_s{0|1}_r{sr|det}_l{const|cos}_h{flt|bfp}
+    (h = BFP_HEAD, the required model-head knob)."""
     wb = {"tensor": "t", "channel": "pc"}.get(env["BFP_WEIGHT_BLOCK"], env["BFP_WEIGHT_BLOCK"])
     ab = {"float": "f", "tensor": "t"}.get(env["BFP_WIRE_BLOCK"], env["BFP_WIRE_BLOCK"])
     x = {"native": "nat", "fq": "fq"}[env["BFP_MATH"]]
     sched = {"none": "const", "cosine": "cos"}[env["LR_SCHEDULE"]]
+    head = {"float": "flt", "bfp": "bfp"}[env["BFP_HEAD"]]
     return (f"bfp_wb{wb}_ab{ab}_m{env['BFP_MANTISSA_BITS']}_e{env['BFP_EXPONENT_BITS']}"
-            f"_x{x}_g{env['BFP_GRADS']}_s{env['BFP_STATE']}_r{env['BFP_ROUNDING']}_l{sched}")
+            f"_x{x}_g{env['BFP_GRADS']}_s{env['BFP_STATE']}_r{env['BFP_ROUNDING']}_l{sched}"
+            f"_h{head}")
 
 
 def _bfp(**knobs: str) -> tuple[str, dict[str, str]]:
     env = {"BFP_WEIGHT_BLOCK": "32", "BFP_WIRE_BLOCK": "16", "BFP_MANTISSA_BITS": "6",
            "BFP_EXPONENT_BITS": "8", "BFP_MATH": "native", "BFP_GRADS": "0", "BFP_STATE": "0",
-           "BFP_ROUNDING": "sr", "LR_SCHEDULE": "none"}
+           "BFP_ROUNDING": "sr", "LR_SCHEDULE": "none", "BFP_HEAD": "bfp"}
     env.update(knobs)
     return ("train_c_har_classifier_bfp", env)
 
@@ -73,13 +76,17 @@ def _bfp(**knobs: str) -> tuple[str, dict[str, str]]:
 # BFP epic PR7 (#410) stage-1 arms: the anchor wb32/ab16/m6/e8 native/sr, then one
 # axis varied per row. abf = FLOAT32 wires (arm A, activations staged per-tensor at
 # the weight widths -- NOT a float arm); xfq = GEMM fake-quant reference (NOT a
-# whole-model twin, see README); g1/s1 = per-tensor BFP grad / momentum storage.
+# whole-model twin, see README); g1/s1 = per-tensor BFP grad / momentum storage;
+# h = the model head (BFP_HEAD, required): hbfp = integer Softmax + integer p - y,
+# hflt = float Softmax + float p - y with one conversion onto the loss-grad wire
+# (the only head FLOAT32 wires take).
 _BFP_STAGE1 = [
     _bfp(),
+    _bfp(BFP_HEAD="float"),
     _bfp(BFP_WEIGHT_BLOCK="tensor"),
     _bfp(BFP_WEIGHT_BLOCK="channel"),
     _bfp(BFP_WEIGHT_BLOCK="8"),
-    _bfp(BFP_WIRE_BLOCK="float"),
+    _bfp(BFP_WIRE_BLOCK="float", BFP_HEAD="float"),
     _bfp(BFP_WIRE_BLOCK="tensor"),
     _bfp(BFP_WIRE_BLOCK="32"),
     _bfp(BFP_MANTISSA_BITS="4"),

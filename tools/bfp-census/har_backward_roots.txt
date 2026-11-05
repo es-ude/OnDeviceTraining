@@ -38,11 +38,19 @@ Linear.c            linearBackward           self
 Linear.c            propLossKernelBfp
 Linear.c            weightGradKernelBfpRaw
 Linear.c            biasGradKernelBfpRaw
-# The loss boundary (allow-listed as the one float island, scoped to these roots):
-# CrossEntropy's combined Softmax + CE gradient -- loss-facing dequant, float p - y,
-# ONE float -> BFP conversion into the grad wire. The Softmax backward it replaces
-# never runs (the backward starts one layer below the Softmax).
-CrossEntropy.c      crossEntropySoftmaxBackward
+# The loss boundary: CrossEntropy's combined Softmax + CE gradient p - y (the Softmax
+# backward it replaces never runs). The dispatch (self: its own calls -- the shape
+# checks, the bfp head's funnel op and op key; its float arms are out of line), then
+# per model head (ruling R2):
+#   bfp head:   the integer p - y kernel, walked, with NO allow-list entry -- no float,
+#               no division on the gradient path (the re-block is the root above);
+#   float head: the loss island, allow-listed and stopped at the root (its rows
+#               document the boundary): float p - y + ONE float -> BFP conversion into
+#               the grad wire (FakeQuant), or the all-FLOAT32 arm under float wires.
+CrossEntropy.c      crossEntropySoftmaxBackward   self
+CrossEntropy.c      crossEntropySoftmaxBackwardKernelBfp
+CrossEntropy.c      crossEntropySoftmaxBackwardFakeQuant
+CrossEntropy.c      crossEntropySoftmaxBackwardFloat
 # ReLU dx: dispatch (self), then the code-domain sign mask (walked).
 Relu.c              reluBackward             self
 Relu.c              reluBackwardBfp

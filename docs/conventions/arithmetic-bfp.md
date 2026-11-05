@@ -2321,7 +2321,8 @@ a 16-bit code times `q` is `<= 2^30 − 2^15` in magnitude, exact in `int32`.
 bits of the remainder, `sticky = (t != 0)`. `bfpQrOfTerm` aligns a term
 (right shifts keep every dropped bit in `frac`/`sticky`, at any distance;
 left shifts are exact, the caller bounds them), `bfpQrAdd` adds two (exact
-when at most one is sticky), `bfpQrShr` re-grids coarser by any distance,
+when at most one is sticky; two sticky operands fail fast -- a checked rule,
+not a comment), `bfpQrShr` re-grids coarser by any distance,
 exactly. Floors use `~(~v >> k)` for negative `v`, never a signed right
 shift.
 
@@ -2424,3 +2425,42 @@ ahead, two fixed 257-slot rings, ≈2.3 KB frame); a chunk of unchanged groups i
 neither unpacked nor packed, so path 1 costs one read of the codes. Power-of-two
 results equal the float `scaleBfpTensorInPlace` (exact there too) wherever the
 float walker does not overflow `mant · 2^E` near the top of the float range.
+
+### 15.7 Integer SGD momentum store
+
+With a BFP gradient AND a BFP momentum state, `sgdStepM`'s state op is
+`momentumStoreBfpInPlace(state, grad, mu, rm, rs)`: `v' = mu · v + g`, the float
+op's formula and order (no dampening, no Nesterov), then the param op reads the
+STORED `v'` (still the float funnel until the parameter update turns integer).
+Nonzero weight decay and a momentum outside `(0, 1]` fail fast, at
+`sgdMCreateOptim` and again at the step; there is no float fallback. Any other
+dtype pair (FLOAT32 state, or a FLOAT32 gradient) keeps the float op unchanged.
+`mu` is encoded once at `sgdInit` (`bfpScalarFromFloat`, §15; float allowed at
+configuration only) into `sgd_t.momentumQ / momentumE`.
+
+Per destination group, each operand under its OWN exponent: `v_i · q` (int32,
+`< 2^30`) on `2^(E_v + e)` and the gradient code `g_i` on `2^E_g`.
+`E_c = max(E_v + e + bitlen(q · A_v), E_g + bitlen(A_g)) − 30`, capped at the
+state's top exponent: the term that sets `E_c` lands with a shift `<= 0`, exact,
+so at most one operand of `bfpQrAdd` carries a tail. The exact sum's absmax
+gives the fresh exponent by the integer rule, floored at `E_c`, D6-clamped; the
+exact sum is then re-gridded and rounded ONCE by `rm` (the optimizer's
+write-back mode, #282 -- not the state's storage mode), the discarded tail
+carried to that rounding, so a small `g` is never erased before SR (dead-zone
+test: `v = 64Δ`, `g = −Δ/256` reaches `63Δ` with probability `1/256`).
+Cap regime: only the gradient can push `E_c` past the cap (`E_v <= capE` and
+`e <= −14` keep the state's term `< 2^16` there); a gradient term reaching
+`2^30` on the capped grid saturates its element with its own sign. The state's
+geometry must equal the gradient's (both per-tensor in-tree); widths and
+exponent biases may differ.
+
+**RNG.** The OUT stream of the state op's key, `(PARAM, p) → (OP, 0) → (OUT,
+0)`, one draw per element in element order on every path (zero group, exact,
+saturated) -- the stream and draw count of the float op's OUT_WRITE re-pack it
+replaces, so the param op's stream (`OP 1`) and every other stream are
+unchanged. Same window structure as the accumulate engine (scan one group
+boundary ahead, two fixed 257-slot rings, two fixed 256-element chunk buffers,
+≈3.3 KB frame, no VLA); the per-element emit runs in its own small out-of-line
+frame. Differs from the float op only by the 15-bit `mu` (relative error
+`<= 2^-15`) and the exact tails; on HAR bfp8 the state's float staging (whole
+tensors on the stack) is gone.

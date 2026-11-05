@@ -408,10 +408,27 @@ static inline bfpQr_t bfpQrOfTerm(int32_t m, int k) {
     return r;
 }
 
+/*! Out of line and cold: the fail-fast of bfpQrAdd's sticky rule stays out of
+ * the callers' hot loops (one test-and-branch there). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline, cold))
+#endif
+static inline void bfpQrTwoStickyFail(void) {
+    PRINT_ERROR("bfpQrAdd: both operands carry a sticky tail -- the sum would be inexact "
+                "(the caller's working grid must leave one term exact, arithmetic-bfp.md §15)");
+    exit(1);
+}
+
 /*! x + y on the same grid. The CALLER guarantees the sum's floor quotient fits
- * int32. Exact when at most one operand is sticky (both sticky: frac may be
- * one unit of 2^-32 low -- the two unknown tails can carry). */
+ * int32. Exact only when at most one operand is sticky -- with two, the
+ * unknown tails can carry and frac may be one unit of 2^-32 low. That rule is
+ * CHECKED: two sticky operands fail fast. A term from bfpQrOfTerm is sticky
+ * only for a shift beyond 32, so a working grid on which the larger term
+ * drops at most 32 bits (the engines' E_c rule) never trips it. */
 static inline bfpQr_t bfpQrAdd(bfpQr_t x, bfpQr_t y) {
+    if (x.sticky && y.sticky) {
+        bfpQrTwoStickyFail();
+    }
     bfpQr_t r;
     r.frac = x.frac + y.frac;
     const uint32_t carry = r.frac < x.frac;
@@ -509,7 +526,13 @@ static inline int32_t bfpQrRound(bfpQr_t x, roundingMode_t rm, uint32_t u, uint3
  * 2^30 in magnitude (then the sum fits int32) and so that at most one term
  * drops more than 32 bits -- true whenever the larger term sits within two
  * bits of 2^30 on the grid, as the accumulate engine's E_c rule guarantees.
- * Draws nothing itself: under SR the caller passes u, one draw per element. */
+ * Draws nothing itself: under SR the caller passes u, one draw per element.
+ * Always inlined: it is the body of the engines' per-element emit loops, and
+ * with more than one caller in a translation unit GCC (-O2, Cortex-M0+)
+ * would otherwise emit it out of line -- a nine-argument call per element. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((always_inline))
+#endif
 static inline int32_t bfpAddAndRound(int32_t a, int ka, int32_t b, int kb, unsigned kd,
                                      roundingMode_t rm, uint32_t u, uint32_t posCap,
                                      uint32_t negCap) {

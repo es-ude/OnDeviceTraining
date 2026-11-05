@@ -128,3 +128,20 @@ target_link_libraries(UnitTestBfpIntegerMeanScale PRIVATE
         odt_test_death
 )
 __register_target_as_unit_test(UnitTestBfpIntegerMeanScale)
+# Integer SGD momentum store on BFP state: momentumStoreBfpInPlace
+# (TensorConversion) and the checked sticky rule of bfpQrAdd (BfpKernelSupport.h).
+add_executable(UnitTestBfpIntegerMomentum UnitTestBfpIntegerMomentum.c)
+target_link_libraries(UnitTestBfpIntegerMomentum PRIVATE
+        unity
+        TensorConversion
+        Tensor
+        Rounding
+        Quantization
+        StorageApi
+        RNG
+        Common
+        m
+        odt_test_death
+        odt_test_rng_pin
+)
+__register_target_as_unit_test(UnitTestBfpIntegerMomentum)

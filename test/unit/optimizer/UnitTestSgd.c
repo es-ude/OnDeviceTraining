@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "ArithmeticType.h"
+#include "BfpKernelSupport.h"
 #include "BorrowedLayer.h"
 #include "DeathTest.h"
 #include "Layer.h"
@@ -2820,6 +2821,229 @@ void testOptimizerStepOverNoParametersUnderAKeyDoesNotExit(void) {
     ASSERT_EXITS_WITH_OUTPUT(0, "", stepNoParametersUnderAKey());
 }
 
+/* ---- Integer momentum store on BFP state (BFP grad + BFP state) ----------
+ * With a BFP gradient AND a BFP state the state op is the integer engine
+ * momentumStoreBfpInPlace (mu encoded once at sgdInit), drawing on the stream
+ * the funnel's OUT_WRITE re-pack used: OUT of the state op's key (op 0). The
+ * param op still runs the funnel and reads the STORED new state. */
+
+#define BFP_MOM_N 64
+
+static tensor_t *buildBfpTensor1DBits(const float *src, size_t n, uint8_t mantissaBits) {
+    tensor_t *t = buildFloatTensor1D(src, n);
+    quantization_t *tq = quantizationInitBfp(mantissaBits, 8, HALF_AWAY);
+    requantizeTensorInPlace(t, tq);
+    freeQuantization(tq);
+    return t;
+}
+
+static tensor_t *buildBfpTensor1D(const float *src, size_t n) {
+    return buildBfpTensor1DBits(src, n, 8);
+}
+
+static size_t bfpPayloadBytes(const tensor_t *t) {
+    const bfpQConfig_t *qc = t->quantization->qConfig;
+    return (calcNumberOfElementsByTensor((tensor_t *)t) * qc->mantissaBits + 7) / 8;
+}
+
+static void copyBfpPayload(tensor_t *dst, const tensor_t *src) {
+    memcpy(dst->data, src->data, bfpPayloadBytes(src));
+    ((bfpQConfig_t *)dst->quantization->qConfig)->exponents[0] =
+        ((const bfpQConfig_t *)src->quantization->qConfig)->exponents[0];
+}
+
+static bool bfpPayloadEqual(const tensor_t *a, const tensor_t *b) {
+    return memcmp(a->data, b->data, bfpPayloadBytes(a)) == 0 &&
+           ((const bfpQConfig_t *)a->quantization->qConfig)->exponents[0] ==
+               ((const bfpQConfig_t *)b->quantization->qConfig)->exponents[0];
+}
+
+typedef struct {
+    tensor_t *p, *g, *state;
+    parameter_t *param;
+    sgd_t sgd;
+    optimImpl_t impl;
+    parameter_t *params[1];
+    tensor_t *stateBuffers[1];
+    states_t st;
+    states_t *stArr[1];
+    optimizer_t optim;
+} bfpMomFix_t;
+
+/* One parameter: BFP8 param, grad g (BFP16, or FLOAT32 when gFloat != NULL),
+ * BFP8 state (or no state at mu == 0); write-back mode wb. */
+static void bfpMomFixInit(bfpMomFix_t *f, const float *pv, const float *gv, const float *gFloat,
+                          const float *sv, float lr, float mu, float wd, roundingMode_t wb) {
+    f->p = buildBfpTensor1D(pv, BFP_MOM_N);
+    f->g = gFloat != NULL ? buildFloatTensor1D(gFloat, BFP_MOM_N)
+                          : buildBfpTensor1DBits(gv, BFP_MOM_N, 16);
+    f->param = parameterInit(f->p, f->g);
+    f->state = sv != NULL ? buildBfpTensor1D(sv, BFP_MOM_N) : NULL;
+    sgdInit(&f->sgd, lr, mu, wd, (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    f->impl.sgd = &f->sgd;
+    f->params[0] = f->param;
+    f->stateBuffers[0] = f->state;
+    f->st = (states_t){.stateBuffers = f->stateBuffers, .statesPerParameter = 1};
+    f->stArr[0] = &f->st;
+    f->optim = (optimizer_t){.type = SGD_M,
+                             .impl = &f->impl,
+                             .parameter = f->params,
+                             .states = sv != NULL ? f->stArr : NULL,
+                             .sizeStates = 1,
+                             .writeBackRounding = wb};
+}
+
+static void bfpMomFixFree(bfpMomFix_t *f) {
+    if (f->state != NULL) {
+        freeTensor(f->state);
+    }
+    freeParameter(f->param);
+}
+
+/* State BFP8 on 2^-7, gradient BFP16 on 2^-22 (all values exact). Element 1
+ * separates the integer store from the float op: with mu = 58983 * 2^-16
+ * (exact in float, encoded as q = 29492, e = -15) the integer sum is
+ * 2 * 29492 * 2^-22 + 22936 * 2^-22 = 2.5 code steps EXACTLY (HALF_AWAY ->
+ * 3), the float op's 2 * 0.9000091... + 0.6999511... = 2.49997 (-> 2). */
+#define BFP_MOM_MU (58983.0f / 65536.0f)
+
+static void bfpMomValues(float *p, float *g, float *s) {
+    for (size_t i = 0; i < BFP_MOM_N; i++) {
+        p[i] = 0.5f * sinf(0.37f * (float)i + 0.1f);
+        g[i] = ldexpf((float)((int)((i * 53u) % 2001u) - 1000), -22);
+        s[i] = ldexpf((float)((int)((i * 37u) % 201u) - 100), -7);
+    }
+    s[0] = ldexpf(127.0f, -7); /* pins the state grid: 0.9 * 127 > 63.5 */
+    g[0] = 0.0f;
+    s[1] = ldexpf(2.0f, -7);
+    g[1] = ldexpf(22936.0f, -22); /* pins the gradient grid: 22936 <= 32767 */
+}
+
+static bfpMomFix_t bfpMomA, bfpMomF, bfpMomB;
+
+static void assertSgdRunsTheIntegerMomentumStore(roundingMode_t wb) {
+    float pv[BFP_MOM_N], gv[BFP_MOM_N], sv[BFP_MOM_N], gDeq[BFP_MOM_N];
+    bfpMomValues(pv, gv, sv);
+    const rngKey_t updateKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED + 8u);
+    const float lr = 0.05f;
+
+    /* the expected state: the engine on the state op's OUT stream */
+    tensor_t *expState = buildBfpTensor1D(sv, BFP_MOM_N);
+    tensor_t *expGrad = buildBfpTensor1DBits(gv, BFP_MOM_N, 16);
+    rngKey_t opKey;
+    rngStream_t rs = rngOpen(rngFold(
+        *optimizerUpdateOpKey(&updateKey, 0u, 0u /* SGD_OP_STATE */, &opKey), RNG_TAG_OUT, 0u));
+    momentumStoreBfpInPlace(expState, expGrad, bfpScalarFromFloat(BFP_MOM_MU, "t"), wb, &rs);
+    int32_t expCode1[2];
+    unpackSignExtend(expState->data, 8, 0, expCode1, 2);
+
+    bfpMomFixInit(&bfpMomA, pv, gv, NULL, sv, lr, BFP_MOM_MU, 0.0f, wb);
+    sgdStepM(&bfpMomA.optim, &updateKey);
+    const bool stateIsEngine = bfpPayloadEqual(bfpMomA.state, expState);
+
+    /* vacuity: the same values through the float op (FLOAT32 grad holding
+     * the BFP grad's exact values) */
+    dequantChunkToFloat(expGrad, 0, BFP_MOM_N, gDeq);
+    bfpMomFixInit(&bfpMomF, pv, NULL, gDeq, sv, lr, BFP_MOM_MU, 0.0f, wb);
+    sgdStepM(&bfpMomF.optim, &updateKey);
+    int32_t floatCode1[2];
+    unpackSignExtend(bfpMomF.state->data, 8, 0, floatCode1, 2);
+
+    /* the param op read the STORED new state: the stateless op with that
+     * state as its gradient, same key (both param ops are op 1), is the same */
+    bfpMomFixInit(&bfpMomB, pv, gv, NULL, NULL, lr, 0.0f, 0.0f, wb);
+    freeTensor(bfpMomB.param->grad);
+    bfpMomB.g = buildBfpTensor1D(sv, BFP_MOM_N);
+    bfpMomB.param->grad = bfpMomB.g;
+    copyBfpPayload(bfpMomB.g, bfpMomA.state);
+    sgdStepM(&bfpMomB.optim, &updateKey);
+    const bool paramFromStoredState = bfpPayloadEqual(bfpMomB.p, bfpMomA.p);
+
+    freeTensor(expState);
+    freeTensor(expGrad);
+    bfpMomFixFree(&bfpMomA);
+    bfpMomFixFree(&bfpMomF);
+    bfpMomFixFree(&bfpMomB);
+    TEST_ASSERT_TRUE_MESSAGE(stateIsEngine, "BFP state op must be the integer momentum store");
+    TEST_ASSERT_TRUE_MESSAGE(paramFromStoredState, "param op must read the stored new state");
+    if (wb == HALF_AWAY) {
+        TEST_ASSERT_EQUAL_INT32_MESSAGE(3, expCode1[1], "integer tie lifts");
+        TEST_ASSERT_EQUAL_INT32_MESSAGE(2, floatCode1[1], "vacuity: float op stays below");
+    }
+}
+
+void testSgdBfpGradAndBfpStateRunTheIntegerMomentumStore(void) {
+    assertSgdRunsTheIntegerMomentumStore(HALF_AWAY);
+    assertSgdRunsTheIntegerMomentumStore(SR_HALF_AWAY);
+}
+
+static void bfpMomentumStepWith(float mu, float wd) {
+    float pv[BFP_MOM_N], gv[BFP_MOM_N], sv[BFP_MOM_N];
+    bfpMomValues(pv, gv, sv);
+    const rngKey_t updateKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED);
+    bfpMomFixInit(&bfpMomA, pv, gv, NULL, sv, 0.05f, mu, wd, SR_HALF_AWAY);
+    sgdStepM(&bfpMomA.optim, &updateKey);
+}
+static void bfpMomentumStepWithWeightDecay(void) {
+    bfpMomentumStepWith(0.9f, 1e-4f);
+}
+static void bfpMomentumStepWithMomentumAboveOne(void) {
+    bfpMomentumStepWith(1.5f, 0.0f);
+}
+static void bfpMomentumStepPlain(void) {
+    bfpMomentumStepWith(0.9f, 0.0f);
+}
+
+/* The factory refuses the same configuration up front: BFP momentum on a BFP
+ * weight gradient with weight decay (the bias grad stays FLOAT32 here). */
+static void createBfpMomentumOnBfpGradWith(float mu, float wd) {
+    shape_t *wShape = reserveMemory(sizeof(shape_t));
+    size_t *w2 = reserveMemory(2 * sizeof(size_t));
+    w2[0] = 2;
+    w2[1] = 3;
+    size_t *o2 = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, o2);
+    setShape(wShape, w2, 2, o2);
+    tensor_t *wParam = initTensor(wShape, quantizationInitFloat(), NULL);
+    quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    parameter_t *weights = parameterInit(wParam, gradInit(wParam, bfpQ, NULL));
+    size_t *bDims = reserveMemory(1 * sizeof(size_t));
+    bDims[0] = 2;
+    size_t *bOrder = reserveMemory(1 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, bOrder);
+    shape_t *bShape = reserveMemory(sizeof(shape_t));
+    setShape(bShape, bDims, 1, bOrder);
+    tensor_t *bParam = initTensor(bShape, quantizationInitFloat(), NULL);
+    parameter_t *bias = parameterInit(bParam, gradInitFloat(bParam, NULL));
+    layer_t *layer = buildBorrowedLinearLayer(weights, bias, quantizationInitFloat());
+    layer_t *model[1] = {layer};
+    (void)sgdMCreateOptim(0.1f, mu, wd, model, 1, bfpQ,
+                          (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+}
+static void createBfpMomentumWithWeightDecay(void) {
+    createBfpMomentumOnBfpGradWith(0.9f, 1e-4f);
+}
+static void createBfpMomentumAboveOne(void) {
+    createBfpMomentumOnBfpGradWith(1.5f, 0.0f);
+}
+static void createBfpMomentumPlain(void) {
+    createBfpMomentumOnBfpGradWith(0.9f, 0.0f);
+}
+
+void testSgdMCreateOptimRejectsAnUnimplementedBfpMomentumStore(void) {
+    ASSERT_EXITS_WITH_FAILURE(createBfpMomentumWithWeightDecay());
+    ASSERT_EXITS_WITH_FAILURE(createBfpMomentumAboveOne());
+    ASSERT_EXITS_WITH(0, createBfpMomentumPlain());
+}
+
+/* Not implemented in the integer store, so a fail fast, never a silent float
+ * fallback: coupled weight decay, and a momentum outside (0, 1]. */
+void testSgdBfpMomentumStoreRejectsWeightDecayAndMomentumAboveOne(void) {
+    ASSERT_EXITS_WITH_FAILURE(bfpMomentumStepWithWeightDecay());
+    ASSERT_EXITS_WITH_FAILURE(bfpMomentumStepWithMomentumAboveOne());
+    ASSERT_EXITS_WITH(0, bfpMomentumStepPlain());
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testOptimizerSkipsFrozenLayerInCountAndCollection);
@@ -2880,5 +3104,8 @@ int main() {
     RUN_TEST(testOptimizerStepExitsWhenAParameterIndexExceedsUint32Max);
 #endif
     RUN_TEST(testOptimizerStepOverNoParametersUnderAKeyDoesNotExit);
+    RUN_TEST(testSgdBfpGradAndBfpStateRunTheIntegerMomentumStore);
+    RUN_TEST(testSgdBfpMomentumStoreRejectsWeightDecayAndMomentumAboveOne);
+    RUN_TEST(testSgdMCreateOptimRejectsAnUnimplementedBfpMomentumStore);
     return UNITY_END();
 }

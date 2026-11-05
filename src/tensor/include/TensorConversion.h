@@ -279,6 +279,40 @@ struct bfpScalar;
  * (2^14 <= q <= 2^15 - 1), SR without a stream. n == 0 -> zero state. */
 void scaleBfpTensorByScalarInPlace(tensor_t *t, struct bfpScalar s, rngStream_t *rs);
 
+/*! @brief The INTEGER SGD momentum store v' = mu * v + g, in place on a BFP
+ * state v, from a BFP gradient g and a scalar mu = q * 2^e in [0, 1] -- no
+ * float, no division, no int64 (arithmetic-bfp.md §15.7; the integer twin of
+ * the float update op state = momentum * state + grad).
+ *
+ * Per destination group, each operand under its OWN exponent: the term
+ * v_i * q (exact in int32) on 2^(E_v + e) and g_i on 2^E_g. A working grid
+ * 2^E_c from the actual absmax of both terms (E_c = max(top) - 30, so each
+ * aligned term stays below 2^30 and their sum fits int32; re-derived on every
+ * call), capped at the state's top exponent; the exact sum in
+ * quotient/remainder form (the term that sets E_c is exact, so at most one
+ * operand carries a tail -- bfpQrAdd checks it); the fresh exponent from the
+ * SUM (cancellation included) by the integer exponent rule, floored at E_c,
+ * then the BFP D6 clamp; ONE rounding per element by `rm` -- the
+ * operation's write-back mode, not the state's storage mode (#282) -- with
+ * the discarded tail carried to it (SR "lift iff u < frac" on a 32-bit
+ * fraction; below 2^-32 of a code step truncated, the §15 cutoff), clamped
+ * to [-2^(m-1), qMax]. Under SR exactly one draw per element in element
+ * order on every path (zero, exact, saturated): the draw count of the float
+ * op's OUT_WRITE re-pack. A gradient so far above the state's exponent cap
+ * that its term reaches 2^30 on the capped grid saturates its element
+ * exactly. An all-zero sum is the zero state (stored = bias); n == 0 too.
+ *
+ * In place, alias-safe: the state's old exponents are published only after
+ * the last read of their group (the rescale engines' one-group window, two
+ * fixed rings and two fixed chunk buffers: bounded stack, no VLA). The
+ * gradient is read only. Fails fast: non-BFP state or gradient, element-count
+ * or {numGroups, groupSize} mismatch (one group cursor serves both), mantissa
+ * width > 16, a gradient sharing the state's data, mu not normalized or
+ * outside [0, 1], a rounding mode other than HALF_AWAY / SR_HALF_AWAY, SR
+ * without a stream. */
+void momentumStoreBfpInPlace(tensor_t *state, const tensor_t *grad, struct bfpScalar mu,
+                             roundingMode_t rm, rngStream_t *rs);
+
 /*! @brief BFP_RAW -> BFP: the integer re-block of the funnel's forward raw
  * (int32 mantissas + one UNBIASED int16 exponent per TARGET group) onto the
  * target's grid -- shifts and integer rounding only, no float.

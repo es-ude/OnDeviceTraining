@@ -19,6 +19,29 @@
 /*! Builds a momentum-state tensor at `param`'s shape but with its OWN
  * quantization (`momentumQuant`, deep-cloned via getQLike) -- decouples the
  * accumulator's dtype from the parameter's storage dtype (#277 Task 2). */
+/* A BFP state on a BFP gradient is the integer momentum store (Sgd.c), which
+ * has no weight-decay term and needs 0 < momentumFactor <= 1: refuse such a
+ * configuration at creation rather than at the first step (sgdStepM checks
+ * again for hand-built optimizers). */
+static void rejectUnimplementedBfpMomentumStore(const optimizer_t *optim, const sgd_t *sgd,
+                                                const quantization_t *momentumQuant) {
+    if (optim->states == NULL || momentumQuant->type != BFP) {
+        return;
+    }
+    for (size_t i = 0; i < optim->sizeStates; i++) {
+        if (optim->parameter[i]->grad->quantization->type != BFP) {
+            continue;
+        }
+        if (sgd->weightDecay != 0.0f || !sgd->momentumIntValid) {
+            PRINT_ERROR("sgdMCreateOptim: BFP momentum on BFP gradients is the integer "
+                        "momentum store, which needs weightDecay == 0 (got %g) and 0 < "
+                        "momentumFactor <= 1 (got %g)",
+                        (double)sgd->weightDecay, (double)sgd->momentumFactor);
+            exit(1);
+        }
+    }
+}
+
 static tensor_t *momentumStateInit(tensor_t *param, quantization_t *momentumQuant) {
     /* Group-quant PR2 carrier gate (mirrors gradInit,
      * TensorApi.c): groups are legal ONLY on GEMM-family weight tensors --
@@ -114,5 +137,6 @@ optimizer_t *sgdMCreateOptim(float learningRate, float momentumFactor, float wei
     }
 
     validateOptimizerGradStorage(optim, "sgdMCreateOptim");
+    rejectUnimplementedBfpMomentumStore(optim, sgd, momentumQuant);
     return optim;
 }

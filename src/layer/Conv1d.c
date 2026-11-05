@@ -565,9 +565,10 @@ void conv1dCalcWeightGradsSymInt32(conv1dConfig_t *cfg, tensor_t *forwardInput, 
  * 2^-(E_acc - Ex - Egy) (bfpAlignPartial: exact left shift or half-away right
  * shift), E_acc fixed per output channel before the walk (eAccOf, one entry
  * per output channel): max over the batch of the input rows' max exponent
- * (the channel's conv group) + the loss row's max exponent, plus the guard
- * of bfpFoldGuardBits over N = batch * (most output positions one tap
- * reaches). So no accumulator can leave int32; every product is its own
+ * (the channel's conv group) + the loss row's max exponent, each over the
+ * groups holding a nonzero code (a zero group never sets E_acc; nothing
+ * set: 0), plus the guard of bfpFoldGuardBits over N = batch * (most output
+ * positions one tap reaches). So no accumulator can leave int32; every product is its own
  * one-product segment. Shared by both weightGrad kernels below, which
  * differ only in what they make of the finished sums. */
 static void weightGradBfpScatter(const conv1dConfig_t *cfg, tensor_t *forwardInput,
@@ -653,22 +654,29 @@ static void weightGradBfpScatter(const conv1dConfig_t *cfg, tensor_t *forwardInp
         for (size_t b = 0; b < batch; b++) {
             for (size_t g = 0; g < groups; g++) {
                 xMaxOf[b * groups + g] = bfpRowMaxExponent(
-                    &xc, xQC, xExpBias, (b * inChannels + g * inChPerGroup) * inputLength,
+                    &xc, xQC, xExpBias, xArr, (b * inChannels + g * inChPerGroup) * inputLength,
                     inChPerGroup * inputLength);
             }
         }
         int eTop[outChannels];
         bfpRowCursor_t gc = {.group = 0, .groupEnd = gyQC->groupSize};
         for (size_t b = 0; b < batch; b++) {
+            size_t cg = 0; /* oc's conv group, by cursor (no division) */
+            size_t cgEnd = outChPerGroup;
             for (size_t oc = 0; oc < outChannels; oc++) {
-                int e = bfpRowMaxExponent(&gc, gyQC, gyExpBias,
-                                          (b * outChannels + oc) * outputLength, outputLength) +
-                        xMaxOf[b * groups + oc / outChPerGroup];
+                if (oc >= cgEnd) {
+                    cg++;
+                    cgEnd += outChPerGroup;
+                }
+                int e = bfpLiveExpSum(bfpRowMaxExponent(&gc, gyQC, gyExpBias, gyArr,
+                                                        (b * outChannels + oc) * outputLength,
+                                                        outputLength),
+                                      xMaxOf[b * groups + cg]);
                 eTop[oc] = (b == 0 || e > eTop[oc]) ? e : eTop[oc];
             }
         }
         for (size_t oc = 0; oc < outChannels; oc++) {
-            eAccOf[oc] = eTop[oc] + guard;
+            eAccOf[oc] = bfpLiveTopOrZero(eTop[oc]) + guard;
         }
     }
 
@@ -957,7 +965,8 @@ static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
  * of the float fold (BFP grads under DYNAMIC_RESCALE, BFP_RAW_BACKWARD_ACC):
  * each same-group segment's exact code sum enters as partial *
  * 2^-(E_acc - E_segment) (bfpAlignPartial), E_acc per output channel = max
- * over the batch of the loss row's max exponent + the guard of a pure sum of
+ * over the batch of the loss row's max exponent over its nonzero codes
+ * (none: 0) + the guard of a pure sum of
  * batch * outputLength codes (bfpSumFoldGuardBits: the fold proof with the
  * second factor 1), so no destination can leave int32. Then the BFP_RAW on
  * the grad's geometry (bfpRawEmitFromRows, rows of one sum). */
@@ -1004,11 +1013,13 @@ static void biasGradKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, ten
         bfpRowCursor_t gc = {.group = 0, .groupEnd = gyQC->groupSize};
         for (size_t b = 0; b < batch; b++) {
             for (size_t oc = 0; oc < outChannels; oc++) {
-                int e = bfpRowMaxExponent(&gc, gyQC, expBias, (b * outChannels + oc) * outputLength,
-                                          outputLength) +
-                        guard;
+                int e = bfpRowMaxExponent(&gc, gyQC, expBias, gyArr,
+                                          (b * outChannels + oc) * outputLength, outputLength);
                 eAccOf[oc] = (b == 0 || e > eAccOf[oc]) ? e : eAccOf[oc];
             }
+        }
+        for (size_t oc = 0; oc < outChannels; oc++) {
+            eAccOf[oc] = bfpLiveTopOrZero(eAccOf[oc]) + guard;
         }
     }
 

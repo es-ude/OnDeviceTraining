@@ -4383,10 +4383,10 @@ void testLinearBfpGradsExponentExtremes(void) {
 
 /* The bias sum's guard is a pure-SUM guard (N 2^(m-1), not the product bound
  * N 2^(2m-2)): one loss group per code (every code its own segment). Each
- * feature's batch-0 code is a zero in the zero state (E = 0, the feature's
- * top), the others sit 15-20 binades lower. With batch 10 the sum guard (-20)
- * keeps every segment exact; the product guard (-13) would round the lowest
- * ones -- and the raw exponent follows the data, not the inflated bound. */
+ * feature's batch-0 code is a 1 at E = 0 (the feature's top; a ZERO code
+ * there would set nothing), the others sit 15-20 binades lower. With batch 10
+ * the sum guard (-20) keeps every segment exact; the product guard (-13)
+ * would round the lowest ones. */
 void testLinearBfpBiasGradSegmentsFoldExactlyUnderTheSumGuard(void) {
     lbCase_t c = kLbMixed;
     c.batch = 10;
@@ -4399,7 +4399,7 @@ void testLinearBfpBiasGradSegmentsFoldExactlyUnderTheSumGuard(void) {
     for (size_t j = 0; j < 2; j++) {
         lbFill(&ops[j], 515u + (uint32_t)j, 8, 80, 1, -2, 2, 40, 40, -20, -15);
         for (size_t f = 0; f < 4; f++) {
-            ops[j].loss[f] = 0; /* batch 0 of feature f */
+            ops[j].loss[f] = 1; /* batch 0 of feature f */
             ops[j].lossE[f] = 127;
         }
     }
@@ -4571,6 +4571,42 @@ void testLinearCalcPropLossBfpEmitsTheGemmRaw(void) {
                                 &st);
         TEST_ASSERT_TRUE(st.fitsInt32);
         assertRawEquals(&out, mant, 16, rawE, groups);
+    }
+}
+
+/* Zero groups never set E_acc: loss [2, 4] in groups of 4, batch row 0 all
+ * zero in the zero state (E = 0), row 1 live at E = -28. Bias raw: every
+ * feature's sum is row 1's code, exactly; dW = loss^T x (x per tensor at
+ * E = 0; the transposed loss is the strided operand-wide max): exact too. */
+void testLinearBfpRawGradsZeroLossGroupDoesNotSetTheAccumulator(void) {
+    int32_t loss[8] = {0, 0, 0, 0, 113, -77, 91, -59};
+    uint8_t lossE[] = {127, 127 - 28};
+    bfpScratchFixture_t lossF;
+    size_t lossDims[] = {2, 4};
+    bfpScratchInit(&lossF, 2, lossDims, loss, lossE, 2, 4, 8, 8);
+
+    bfpRawFixture_t bias;
+    size_t biasDims[] = {4};
+    bfpRawInit(&bias, 1, biasDims, 1, 0);
+    linearCalcBiasGradsBfpRaw(&lossF.tensor, &bias.tensor);
+    for (size_t f = 0; f < 4; f++) {
+        assertBfpValueExact(bias.mant[f], bias.exps[0], loss[4 + f], -28, f);
+    }
+
+    int32_t x[6] = {101, -67, 45, 13, -99, 87};
+    uint8_t xE[] = {127};
+    bfpScratchFixture_t xF;
+    size_t xDims[] = {2, 3};
+    bfpScratchInit(&xF, 2, xDims, x, xE, 1, 0, 8, 8);
+    bfpRawFixture_t dw;
+    size_t dwDims[] = {4, 3};
+    bfpRawInit(&dw, 2, dwDims, 1, 0);
+    linearCalcWeightGradsBfpRaw(&lossF.tensor, &xF.tensor, &dw.tensor);
+    for (size_t f = 0; f < 4; f++) {
+        for (size_t i = 0; i < 3; i++) {
+            int64_t exact = (int64_t)loss[f] * x[i] + (int64_t)loss[4 + f] * x[3 + i];
+            assertBfpValueExact(dw.mant[f * 3 + i], dw.exps[0], exact, -28, f * 3 + i);
+        }
     }
 }
 
@@ -4892,6 +4928,7 @@ int main(void) {
     RUN_TEST(testLinearCalcWeightGradsBfpRawMatchesTheGemmReference);
     RUN_TEST(testLinearCalcPropLossBfpEmitsTheGemmRaw);
     RUN_TEST(testLinearCalcBiasGradsBfpRawExponentFollowsTheDataNotTheBound);
+    RUN_TEST(testLinearBfpRawGradsZeroLossGroupDoesNotSetTheAccumulator);
     RUN_TEST(testLinearBackwardBfpDxIntoBfpWireMatchesIntegerReference);
     RUN_TEST(testLinearBackwardBfpDxWorstCaseM16IntoBfpWireIsExact);
     RUN_TEST(testLinearBackwardBfpDxIntoBfpWireSrFollowsTheOpModeAndTheOutStream);

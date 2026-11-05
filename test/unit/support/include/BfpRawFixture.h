@@ -13,7 +13,9 @@
  * Unity's.
  */
 
+#include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "Quantization.h"
@@ -99,6 +101,40 @@ static inline void assertRawEquals(const bfpRawFixture_t *f, const int32_t *mant
     TEST_ASSERT_EQUAL_INT16_ARRAY(exps, f->exps, numGroups);
     TEST_ASSERT_EQUAL_INT32(BFP_RAW_SENTINEL_MANT, f->mant[n]); /* nothing past the output */
     TEST_ASSERT_EQUAL_INT16(BFP_RAW_SENTINEL_EXP, f->exps[numGroups]);
+}
+
+/* a * 2^ea == b * 2^eb exactly (|a|, |b| < 2^62): an output value against the
+ * test's own exact int64 sum, independent of how the kernel split it into
+ * mantissa and exponent. */
+static inline bool bfpValueExactlyEqual(int64_t a, int ea, int64_t b, int eb) {
+    if (ea < eb) {
+        int64_t t = a;
+        a = b;
+        b = t;
+        int te = ea;
+        ea = eb;
+        eb = te;
+    }
+    if (a == 0) {
+        return b == 0;
+    }
+    int d = ea - eb;
+    if (d > 61) {
+        return false;
+    }
+    int64_t lim = (int64_t)1 << (62 - d);
+    if (a >= lim || a <= -lim) {
+        return false;
+    }
+    return a * ((int64_t)1 << d) == b;
+}
+
+static inline void assertBfpValueExact(int64_t mant, int e, int64_t exactSum, int exactE,
+                                       size_t idx) {
+    char msg[160];
+    snprintf(msg, sizeof(msg), "output %zu: %lld * 2^%d != exact %lld * 2^%d", idx, (long long)mant,
+             e, (long long)exactSum, exactE);
+    TEST_ASSERT_TRUE_MESSAGE(bfpValueExactlyEqual(mant, e, exactSum, exactE), msg);
 }
 
 #endif /* ODT_TEST_BFP_RAW_FIXTURE_H */

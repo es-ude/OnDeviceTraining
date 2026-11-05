@@ -1,0 +1,62 @@
+{
+  "name": "b4_lin_dx_raw_zero_rows_m8",
+  "description": "B4 Linear dx kernel tier, raw groups of 4: loss groups 0 and 4 in the zero state, live loss at absmax 1e-7; mantissas and exponents bit for bit. Zero groups (codes 0, stored = bias, E = 0) sit far above live data 25-30 binades lower: E_acc follows the groups holding a nonzero code, never a zero group's exponent (sections 13/14, zero groups), so the live bits survive.",
+  "family": "bfp_gemm",
+  "op": "linear",
+  "direction": "dx",
+  "tiers": [
+    "kernel"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3294,
+    "batch": 2,
+    "inF": 16,
+    "outF": 12,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 8,
+      "absmax": 0.25,
+      "expSpread": 4
+    },
+    "bias": {
+      "m": 6,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    },
+    "loss": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 4,
+      "absmax": 1e-07,
+      "expSpread": 2,
+      "zeroGroups": [
+        0,
+        4
+      ]
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  },
+  "raw": {
+    "groupSize": 4
+  }
+}

@@ -1,6 +1,6 @@
 {
   "name": "b4_lin_dw_grad_bfp_zero_m8_b3",
-  "description": "B4 Linear weightGrad + biasGrad into m8 BFP grads, 2 calls, with an input group and a loss group in the zero state (codes 0, stored = bias): they count in the operand-wide E_top of the weightGrad (documented looser in-loop grid), the bias raw exponent follows the data.",
+  "description": "B4 Linear weightGrad + biasGrad into m8 BFP grads, 2 calls, with an input group and a loss group in the zero state (codes 0, stored = bias): they set nothing in the operand-wide E_top of the weightGrad (a zero group never sets E_acc), the bias raw exponent follows the data.",
   "family": "bfp_gemm",
   "op": "linear",
   "direction": "weightGrad",

@@ -794,7 +794,10 @@ void convTranspose1dKernelBfpScatter(tensor_t const *input, tensor_t const *weig
 
     /* Pre-pass (stack tables sized by the topology): E_acc per (batch, conv
      * group) = max over the group's input channels of input-row max +
-     * weight-row max, plus the guard. A group without products keeps 0. */
+     * weight-row max, plus the guard, each row max over the groups holding a
+     * nonzero code. A (batch, conv group) whose every product is zero sets
+     * nothing (BFP_NO_LIVE_EXP; its walk uses the zero state's 0 + g). A
+     * group without products keeps 0. */
     int eAccOf[batch * groups];
     for (size_t i = 0; i < batch * groups; i++) {
         eAccOf[i] = 0;
@@ -804,20 +807,21 @@ void convTranspose1dKernelBfpScatter(tensor_t const *input, tensor_t const *weig
         int wRowMax[inChannels];
         bfpRowCursor_t wc = {.group = 0, .groupEnd = wQC->groupSize};
         for (size_t ic = 0; ic < inChannels; ic++) {
-            wRowMax[ic] = bfpRowMaxExponent(&wc, wQC, wExpBias, ic * wRowLen, wRowLen);
+            wRowMax[ic] = bfpRowMaxExponent(&wc, wQC, wExpBias, wArr, ic * wRowLen, wRowLen);
         }
         bfpRowCursor_t xc = {.group = 0, .groupEnd = inQC->groupSize};
         for (size_t b = 0; b < batch; b++) {
             for (size_t g = 0; g < groups; g++) {
-                int eTop = INT_MIN;
+                int eTop = BFP_NO_LIVE_EXP;
                 for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
                     size_t ic = g * inChPerGroup + icOffset;
-                    int e = bfpRowMaxExponent(&xc, inQC, inExpBias,
-                                              (b * inChannels + ic) * inputLength, inputLength) +
-                            wRowMax[ic];
+                    int e = bfpLiveExpSum(bfpRowMaxExponent(&xc, inQC, inExpBias, xArr,
+                                                            (b * inChannels + ic) * inputLength,
+                                                            inputLength),
+                                          wRowMax[ic]);
                     eTop = e > eTop ? e : eTop;
                 }
-                eAccOf[b * groups + g] = eTop + guard;
+                eAccOf[b * groups + g] = eTop == BFP_NO_LIVE_EXP ? BFP_NO_LIVE_EXP : eTop + guard;
             }
         }
     }
@@ -833,6 +837,9 @@ void convTranspose1dKernelBfpScatter(tensor_t const *input, tensor_t const *weig
             size_t inLo = g * inChPerGroup;
             size_t outLo = g * outChPerGroup;
             int eAcc = eAccOf[b * groups + g];
+            if (eAcc == BFP_NO_LIVE_EXP) {
+                eAcc = guard; /* every product is zero: any finite grid holds them */
+            }
 
             for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
                 size_t ic = inLo + icOffset;
@@ -868,13 +875,15 @@ void convTranspose1dKernelBfpScatter(tensor_t const *input, tensor_t const *weig
      * group may straddle dx rows of different (batch, conv group), so its
      * exponent is the max E_acc over the rows it covers, and each sum on a
      * lower row is re-gridded to it: a HALF_AWAY right shift of the finished
-     * sum (it only shrinks, so the headroom proof above still holds). Rows
-     * and groups advance with cursors, no division. Where every row of a
-     * group shares one E_acc (HAR: micro-batch 1, conv groups 1) the shift
+     * sum (it only shrinks, so the headroom proof above still holds). A row
+     * whose products are all zero sets nothing and is not re-gridded (its
+     * sums are 0); a group of such rows only takes the zero state's 0 + g.
+     * Rows and groups advance with cursors, no division. Where every row of
+     * a group shares one E_acc (HAR: micro-batch 1, conv groups 1) the shift
      * is 0 and the sums pass unchanged. */
     size_t t = 0;
     size_t tEnd = gsz;
-    int eT = INT_MIN;
+    int eT = BFP_NO_LIVE_EXP;
     size_t cg = 0;
     size_t cgEnd = outChPerGroup;
     for (size_t b = 0; b < batch; b++) {
@@ -892,8 +901,8 @@ void convTranspose1dKernelBfpScatter(tensor_t const *input, tensor_t const *weig
                 if (tEnd > rowEnd) {
                     break; /* the group goes on into the next row */
                 }
-                rawE[t++] = (int16_t)eT;
-                eT = INT_MIN;
+                rawE[t++] = (int16_t)(eT == BFP_NO_LIVE_EXP ? guard : eT);
+                eT = BFP_NO_LIVE_EXP;
                 if (tEnd >= rowEnd) {
                     tEnd += gsz;
                     break; /* the next group starts with the next row */
@@ -922,7 +931,7 @@ void convTranspose1dKernelBfpScatter(tensor_t const *input, tensor_t const *weig
                     tEnd += gsz;
                 }
                 size_t runEnd = tEnd < rowEnd ? tEnd : rowEnd;
-                int k = (int)rawE[t] - eRow;
+                int k = eRow == BFP_NO_LIVE_EXP ? 0 : (int)rawE[t] - eRow;
                 if (k != 0) {
                     for (size_t i = idx; i < runEnd; i++) {
                         acc[i] = bfpAlignPartial(acc[i], k);

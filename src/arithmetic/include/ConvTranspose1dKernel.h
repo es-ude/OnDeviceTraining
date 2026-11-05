@@ -153,7 +153,9 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
  *  element as product * 2^-(E_acc - Ea - Eb) (bfpAlignPartial: exact left
  *  shift, or half away from zero right shift). E_acc is fixed before the walk
  *  per (batch, conv group): the largest input-row exponent plus weight-row
- *  exponent over the group's input channels, plus the guard g of
+ *  exponent over the group's input channels (row maxima over the groups
+ *  holding a NONZERO code; a pair with an all-zero row sets nothing), plus
+ *  the guard g of
  *  bfpFoldGuardBits over N = in_channels/groups * (taps that can land on one
  *  output position: k, k' with (k - k') * dilation a multiple of stride). So
  *  no accumulator can leave int32 whatever the operands; every product is its
@@ -161,9 +163,9 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
  *
  *  Output: the BFP_RAW (opSpec_t.bfpRawOut = BFP_RAW_BACKWARD_DX) on the dx
  *  wire's geometry. Each raw target group's exponent is the max E_acc over
- *  the output rows it covers (a group may straddle channels, conv groups and
- *  the batch); a sum on a row with a lower E_acc is re-gridded to it by ONE
- *  HALF_AWAY right shift of the finished sum (bfpAlignPartial; a shift only
+ *  the output rows it covers that have a nonzero product (a group may
+ *  straddle channels, conv groups and the batch; none: 0 + g); a sum on a row with a lower E_acc is
+ * re-gridded to it by ONE HALF_AWAY right shift of the finished sum (bfpAlignPartial; a shift only
  *  shrinks, so the headroom proof holds). Error per element <= N/2 units of
  *  its row's 2^E_acc plus 1/2 unit of the group's 2^E_t. Every group's
  *  exponent is written, the empty output included. Integer only: rows and

@@ -77,12 +77,12 @@ Conv1d.c:propLossKernelBfp windowGeometry1dCalc __aeabi_uidiv 3
 
 # ---- Conv1d weightGrad into BFP grads (weightGradKernelBfpRaw) ----------------
 # The shared scatter (weightGradBfpScatter, the C4 loop, unchanged): two uidiv at
-# entry (inChannels / groups, outChannels / groups; per call), one per (batch,
-# output channel) in the E_acc pre-pass (oc / outChPerGroup), two = the inlined
+# entry (inChannels / groups, outChannels / groups; per call), two = the inlined
 # bfpGroupAt recomputes (input, loss), one only when an index leaves its group.
+# The E_acc pre-pass finds oc's conv group by cursor (no division).
 # The kernel's own: gwElems / outChannels (the row length, per call). The raw
 # emit (bfpRawEmitFromRows) runs on cursors and divides nothing.
-Conv1d.c:weightGradKernelBfpRaw weightGradBfpScatter __aeabi_uidiv 5
+Conv1d.c:weightGradKernelBfpRaw weightGradBfpScatter __aeabi_uidiv 4
 Conv1d.c:weightGradKernelBfpRaw weightGradKernelBfpRaw __aeabi_uidiv 1
 # Shared window geometry (per call), tap ranges (per tap, per call) and window
 # slice (per (batch, output channel, output position) -- the FLOAT32 loop's own).

@@ -738,10 +738,12 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
 
 /* Max unbiased exponent of each reduction LINE of a matmul operand (line l =
  * the elements one output row reads from `a`, or one output column from
- * `b`). When the reduction axis is the physically innermost dimension (1-D
- * operands trivially), line l is the storage run [l * k, (l + 1) * k) and one
- * forward cursor serves all lines (no division). Any other view gets the
- * operand-wide max over all groups: coarser, still an upper bound. */
+ * `b`), over the groups holding a nonzero code of the line (int16 marker
+ * INT16_MIN: none). When the reduction axis is the physically innermost
+ * dimension (1-D operands trivially), line l is the storage run
+ * [l * k, (l + 1) * k) and one forward cursor serves all lines (no
+ * division). Any other view gets the operand-wide max: coarser, still an
+ * upper bound. */
 static void matmulBfpLineMaxExponents(const tensor_t *t, size_t reductionAxis, size_t lines,
                                       size_t k, int16_t *lineMax) {
     const bfpQConfig_t *qC = t->quantization->qConfig;
@@ -749,19 +751,15 @@ static void matmulBfpLineMaxExponents(const tensor_t *t, size_t reductionAxis, s
     if (t->shape->numberOfDimensions < 2 || t->shape->orderOfDimensions[1] == reductionAxis) {
         bfpRowCursor_t c = {.group = 0, .groupEnd = qC->groupSize};
         for (size_t l = 0; l < lines; l++) {
-            lineMax[l] = (int16_t)bfpRowMaxExponent(&c, qC, expBias, l * k, k);
+            lineMax[l] = bfpLiveExpTo16(
+                bfpRowMaxExponent(&c, qC, expBias, (const int32_t *)t->data, l * k, k));
         }
         return;
     }
-    int e = (int)qC->exponents[0] - expBias;
-    for (size_t g = 1; g < qC->numGroups; g++) {
-        int eg = (int)qC->exponents[g] - expBias;
-        if (eg > e) {
-            e = eg;
-        }
-    }
+    bfpRowCursor_t c = {.group = 0, .groupEnd = qC->groupSize};
+    int e = bfpRowMaxExponent(&c, qC, expBias, (const int32_t *)t->data, 0, lines * k);
     for (size_t l = 0; l < lines; l++) {
-        lineMax[l] = (int16_t)e;
+        lineMax[l] = bfpLiveExpTo16(e);
     }
 }
 
@@ -855,7 +853,9 @@ void matmulBfpRawTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
     /* Pre-pass (stack tables sized by the topology, never by the MACs): per
      * output row / column the max exponent of the line it reduces over, per
      * column the bias exponent; E_acc of a raw target group = the max over its
-     * outputs of max(rowTop + colTop, biasE) + g, walked in output order. */
+     * outputs of max(rowTop + colTop, biasE) + g, walked in output order. A
+     * line without nonzero codes and a zero bias code set nothing; a group
+     * with nothing set takes the zero state's top 0. */
     int16_t aMax[aRows];
     int16_t bMax[bColumns];
     int16_t biasE[biasQC != NULL ? bColumns : 1];
@@ -876,15 +876,16 @@ void matmulBfpRawTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
         size_t o = 0;
         for (size_t rowIndex = 0; rowIndex < aRows; rowIndex++) {
             for (size_t columnIndex = 0; columnIndex < bColumns; columnIndex++) {
-                int e = aMax[rowIndex] + bMax[columnIndex];
-                if (biasQC != NULL && biasE[columnIndex] > e) {
+                int e = bfpLiveExpSum(bfpLiveExpFrom16(aMax[rowIndex]),
+                                      bfpLiveExpFrom16(bMax[columnIndex]));
+                if (biasArr != NULL && biasArr[columnIndex] != 0 && biasE[columnIndex] > e) {
                     e = biasE[columnIndex];
                 }
                 if (e > top) {
                     top = e;
                 }
                 if (++o == tEnd) {
-                    rawE[t++] = (int16_t)(top + guard);
+                    rawE[t++] = (int16_t)(bfpLiveTopOrZero(top) + guard);
                     tEnd += gsz;
                     top = INT_MIN;
                 }

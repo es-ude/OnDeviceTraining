@@ -216,36 +216,40 @@ void avgPool1dForwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, te
         }
     }
 
-    /* Pre-pass (O(groups), cursors, no division): per raw group the max
-     * exponent over the input rows its outputs read (row r of the output
-     * reads input row r), plus g; the raw exponent also carries -log2 K. */
+    int32_t const *xArr = (int32_t const *)input->data;
+    /* Pre-pass (one read per input code, cursors, no division): per raw group
+     * the max exponent over the groups holding a nonzero code of the input
+     * rows its outputs read (row r of the output reads input row r), plus g
+     * (a group without one: the zero state's top 0); the raw exponent also
+     * carries -log2 K. */
     {
         bfpRowCursor_t cursor = {.group = 0, .groupEnd = qC->groupSize};
         size_t row = 0;
         size_t rowEnd = outputLength;
-        int rowTop = bfpRowMaxExponent(&cursor, qC, expBias, 0, inputLength);
+        int rowTop = bfpRowMaxExponent(&cursor, qC, expBias, xArr, 0, inputLength);
         for (size_t t = 0; t < rawQC->numGroups; t++) {
             size_t tStart = t * gsz;
             size_t tEnd = tStart + gsz;
             while (tStart >= rowEnd) {
                 row++;
                 rowEnd += outputLength;
-                rowTop = bfpRowMaxExponent(&cursor, qC, expBias, row * inputLength, inputLength);
+                rowTop =
+                    bfpRowMaxExponent(&cursor, qC, expBias, xArr, row * inputLength, inputLength);
             }
             int eTop = rowTop;
             while (tEnd > rowEnd) {
                 row++;
                 rowEnd += outputLength;
-                rowTop = bfpRowMaxExponent(&cursor, qC, expBias, row * inputLength, inputLength);
+                rowTop =
+                    bfpRowMaxExponent(&cursor, qC, expBias, xArr, row * inputLength, inputLength);
                 if (rowTop > eTop) {
                     eTop = rowTop;
                 }
             }
-            rawE[t] = (int16_t)(eTop + guard - log2K);
+            rawE[t] = (int16_t)(bfpLiveTopOrZero(eTop) + guard - log2K);
         }
     }
 
-    int32_t const *xArr = (int32_t const *)input->data;
     int32_t *mant = (int32_t *)rawOut->data;
     bfpGroupRange_t qRange = {0};
     size_t targetGroup = 0;

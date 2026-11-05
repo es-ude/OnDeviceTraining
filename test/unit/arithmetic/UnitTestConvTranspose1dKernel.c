@@ -1721,6 +1721,50 @@ void testConvTranspose1dKernelBfpScatterRawGroupStraddlingBatchesTakesTheMaxExpo
     TEST_ASSERT_EQUAL_INT16(r.raw.exps[2] - 20, r.raw.exps[0]);
 }
 
+/* Zero groups never set E_acc: loss [2, 2, 4] in one group per row, every
+ * row in the zero state (E = 0) except (batch 1, channel 1), live at E = -28;
+ * weight per tensor at E = 0. Batch 1's E_acc must follow its one live row,
+ * not its zero row (the pre-pass), and the per-tensor raw, which straddles
+ * both batches, must follow batch 1, not batch 0 that holds no live row (the
+ * re-grid). Every dx value equals its exact int64 sum. */
+void testConvTranspose1dKernelBfpScatterZeroGroupsDoNotSetTheAccumulator(void) {
+    ctDxCase_t c = {.batch = 2,
+                    .cin = 1,
+                    .length = 6,
+                    .cout = 2,
+                    .groups = 1,
+                    .kernelSize = 3,
+                    .stride = 1,
+                    .dilation = 1,
+                    .padding = 0,
+                    .m = 8,
+                    .gyGroupSize = 4,
+                    .wGroupSize = 0,
+                    .rawGroupSize = 0};
+    int32_t gyCodes[16] = {0};
+    static const int32_t live[4] = {113, -77, 91, -59};
+    memcpy(&gyCodes[12], live, sizeof(live));
+    int32_t wCodes[6] = {101, -67, 45, 13, -99, 87}; /* [cout 2][cinG 1][K 3] */
+    uint8_t gyExps[] = {127, 127, 127, 127 - 28};
+    uint8_t wExps[] = {127};
+    ctDxResult_t r;
+    ctRunBfpScatterDx(&c, gyCodes, gyExps, wCodes, wExps, &r);
+
+    for (size_t b = 0; b < 2; b++) {
+        for (size_t p = 0; p < 6; p++) {
+            int64_t exact = 0;
+            for (size_t oc = 0; oc < 2; oc++) {
+                for (size_t k = 0; k < 3; k++) {
+                    if (p >= k && p - k < 4) {
+                        exact += (int64_t)gyCodes[(b * 2 + oc) * 4 + (p - k)] * wCodes[oc * 3 + k];
+                    }
+                }
+            }
+            assertBfpValueExact(r.raw.mant[b * 6 + p], r.raw.exps[0], exact, -28, b * 6 + p);
+        }
+    }
+}
+
 /* A straddle gap beyond the int32 range (100 + 100 binades): the low batch's
  * sums re-grid to exactly 0, the high batch's stay exact. */
 void testConvTranspose1dKernelBfpScatterRawGroupHugeGapFlushesTheLowRows(void) {
@@ -1850,6 +1894,7 @@ int main(void) {
     RUN_TEST(testConvTranspose1dKernelBfpScatterHeadroomCountsOnlyMeetingTaps);
     RUN_TEST(testConvTranspose1dKernelBfpScatterRawGroupStraddlingBatchesTakesTheMaxExponent);
     RUN_TEST(testConvTranspose1dKernelBfpScatterRawGroupHugeGapFlushesTheLowRows);
+    RUN_TEST(testConvTranspose1dKernelBfpScatterZeroGroupsDoNotSetTheAccumulator);
     RUN_TEST(testConvTranspose1dKernelBfpScatterRejectsFloatOutput);
     return UNITY_END();
 }

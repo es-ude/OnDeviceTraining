@@ -1883,8 +1883,9 @@ float fold:
    rows `(b, oc)` it covers (a group may straddle channels and batches) of
    `max_ic(rowmax E_in) + rowmax E_w`, max'ed with the channel's unbiased
    bias exponent — the row maxima are per input row `(b, ic)` of the conv
-   group and per weight row `oc`, computed once per call over the groups the
-   rows intersect (O(groups), cursors, no division). This is a cheap
+   group and per weight row `oc`, computed once per call over the groups
+   holding a NONZERO code of the row (cursors, no division; a zero bias code
+   sets nothing — see "Zero groups never set `E_acc`" below). This is a cheap
    over-approximation of the max segment exponent (a row, not a window).
 3. `g` is the static headroom proof (`bfpFoldGuardBits`), the
    **product-bound rule**: with `N = inChannels/groups · kernelSize`, in
@@ -1892,7 +1893,8 @@ float fold:
    value, so every intermediate sum is, whatever the signs or the fold
    order:
    - product segments: `|partial_s| · 2^(E_s − E_acc) <= count_s · 2^(ma+mb−2)
-     · 2^−g` (every `|code| <= 2^(m−1)`, `E_s <= E_top`); run splitting only
+     · 2^−g` (every `|code| <= 2^(m−1)`, `E_s <= E_top` for every NONZERO
+     segment; a zero segment adds 0 at any alignment); run splitting only
      partitions the `N` products (`Σ count_s <= N`), so all product segments
      together contribute `<= P · 2^−g`, `P = N · 2^(ma+mb−2)`. Each UNALIGNED
      partial separately stays within int32 because a segment holds at most
@@ -1941,6 +1943,33 @@ A FLOAT32 target gets ONE `E_acc` over the whole output (the `{1,0}` raw):
 outputs more than `~31 + g` binades below the global row max lose mantissa
 bits, and `(float)mant` rounds above `2^24`. The BFP-wire path (the proof
 config) is per group and unaffected.
+
+**Zero groups never set `E_acc` (2026-11-05).** Every pre-pass max of §13
+and §14 — the row / line maxima of both operands, the operand-wide max of a
+strided operand, the bias exponent, and the dx raw's max-`E_acc` re-grid
+across rows — runs over the groups holding a NONZERO code of the run, never
+over a group whose codes there are all zero: a zero code adds nothing to any
+sum, so it bounds nothing, and the proof of item 3 only needs every nonzero
+segment below `E_top`. An all-zero group stores the zero state (`stored =
+bias`, `E = 0`), typically far ABOVE the live data next to it (a
+ReLU-zeroed loss row beside gradients at `E ≈ −25`); counting it lifted
+`E_acc` by up to ~20 binades and rounded live partials HALF_AWAY before the
+final SR or re-block — a dead zone where the float fold had been exact.
+Mechanics: `bfpRowMaxExponent` takes the operand's codes and returns the
+marker `BFP_NO_LIVE_EXP` for a run without a nonzero code; a product pairs
+to nothing if either factor's run is marked (`bfpLiveExpSum`); a unit (raw
+target group, `E_acc` row) with nothing set takes the zero state's top 0,
+i.e. `0 + g` — what an all-zero operand produced before. The pre-pass reads
+each operand code at most once per call (O(elements), never per MAC; a group
+whose exponent cannot raise the max is not read). A zero partial whose group
+sits any distance above `E_acc` aligns to 0 (`bfpAlignPartial`: `−k >= 32`
+returns 0 instead of the out-of-range shift). Measured, HAR 1 epoch seed 1,
+bfp8 `BFP_GRADS=1 BFP_STATE=0`: live partials right-shifted inexactly
+before → after the rule — Conv1d dx 203.8 M → 0 (829 M dropped bits, 3.0 M
+partials flushed to 0), Conv1d weightGrad 6.02 M → 0.12 M, Conv1d biasGrad
+23 → 0, Conv1d forward 100.1 M → 99.5 M (the rest is the live exponent
+spread), Linear forward 345 → 344, Linear backward and AvgPool 0 both. The `*_zero_*` differential
+cells mismatch under a kernel or a mirror that counts zero groups.
 
 **Relation to the float authority.** On data where the float path is exact
 (`|mant| < 2^24`, a power-of-two scale, `k <= 24`) the integer rule
@@ -1995,9 +2024,9 @@ emit `BFP_RAW` on the target's geometry.
    pass 2 re-reads each winner's exponent through its argmax — O(outputs),
    no output-sized table.
 3. AvgPool fold: the Conv1d fold with codes in place of products. `E_acc` of
-   a raw target group = the max group exponent over the input ROWS its
-   outputs read (row `r` of the output reads input row `r`; cursors, no
-   division) `+ g`, `g = bfpSumFoldGuardBits(K, m)` — item 3's proof with
+   a raw target group = the max group exponent over the nonzero codes of the
+   input ROWS its outputs read (row `r` of the output reads input row `r`;
+   cursors, no division; none: 0) `+ g`, `g = bfpSumFoldGuardBits(K, m)` — item 3's proof with
    the second factor bounded by 1: the smallest `g` with
    `K · 2^(m−1) · 2^−g + (K + 1) <= INT32_MAX` (HAR m = 8, K = 32: `g = −18`).
    One int32 partial per same-group segment (`bfpValidateSumHeadroom` bounds
@@ -2018,9 +2047,10 @@ emit `BFP_RAW` on the target's geometry.
 row, column, reduction loops, `calcElementIndexByIndices` per MAC,
 `bfpGroupAt` on both operands — with the Conv1d fold:
 
-1. `E_top` of output `(r, c)` = max group exponent over the reduction LINE
-   of input row `r` + over weight row `c` (the line output column `c`
-   reduces over), max'ed with column `c`'s bias exponent; `E_acc` of a raw
+1. `E_top` of output `(r, c)` = max group exponent over the nonzero codes
+   of the reduction LINE of input row `r` + over weight row `c` (the line
+   output column `c` reduces over), max'ed with column `c`'s bias exponent
+   when its code is nonzero (zero groups never set `E_acc`, above); `E_acc` of a raw
    target group = max `E_top` over its outputs (walked in output order,
    O(outputs)) `+ g`, `g = bfpFoldGuardBits(inFeatures, ...)` (HAR m8,
    N = 64, bias m8: `g = −10`). A line is one contiguous storage run when
@@ -2109,8 +2139,10 @@ summation order and therefore the numbers.
   destination row group. dx: per (batch, conv group), `E_top` = max over the
   group's loss channels of (loss-row max exponent + weight-row max exponent).
   weightGrad: per output channel, `E_top` = max over the batch of (loss-row
-  max + max over the conv group's input rows). `E_top` bounds every product
-  exponent that reaches the row (the row-maxima pairing of §13).
+  max + max over the conv group's input rows). `E_top` bounds every nonzero
+  product exponent that reaches the row (the row-maxima pairing of §13, each
+  maximum over the row's nonzero codes; a (batch, conv group) whose products
+  are all zero sets nothing and does not take part in the dx raw's re-grid).
 - **Headroom:** `g = bfpFoldGuardBits(N, ma, mb, 0)` (§13), N = the most
   products one destination can receive from the actual geometry. dx:
   `Cout/groups` × the most taps that meet on one position (taps k, k' meet
@@ -2177,9 +2209,9 @@ summation order and therefore the numbers.
   engine's own `2^-32` SR cutoff and the in-loop product alignment, which
   is coarser). An all-zero group writes exponent 0 (the engine ignores the exponent
   of an all-zero raw); zero sums are never shifted. Why not dx's max-`E_acc`
-  rule: `E_acc` is a bound, and an all-zero loss group in the zero state
-  (stored = bias, `E = 0`) or a loose N inflates a row's bound far above its
-  data; under a per-tensor grad that inflated row would re-grid every other
+  rule: `E_acc` is a bound, and a loose N (or, before zero groups were
+  excluded from every pre-pass, §13, an all-zero loss group in the zero
+  state) inflates a row's bound far above its data; under a per-tensor grad that inflated row would re-grid every other
   row HALF_AWAY to a few bits. Measured on HAR bfp8 `BFP_GRADS=1` (1 epoch,
   18,000 weightGrad calls): with the max-`E_acc` rule 12.6 % of calls kept
   fewer than 9 bits at the tensor top (a rounding at or above the 8-bit grad
@@ -2194,7 +2226,8 @@ summation order and therefore the numbers.
   of one loss group, an exact int32 partial, `bfpValidateSumHeadroom`) and
   folds each segment partial into an int32 destination:
   `sum += bfpAlignPartial(partial, E_acc − E_segment)`, `E_acc` per output
-  channel = max over the batch of the loss row's max exponent + `g`, `g =
+  channel = max over the batch of the loss row's max exponent over its
+  nonzero codes (none: 0) + `g`, `g =
   bfpSumFoldGuardBits(batch · outputLength, m)` (the §13 proof for a pure
   SUM, `N · 2^(m−1)`): rounding `<= ½ · 2^E_acc` per segment, only for
   segments more than `−g` binades below the top. Then the same raw emit
@@ -2233,7 +2266,7 @@ called by the backward cores exactly where the float fold
   raw target group = the max over its outputs of `rowTop + colTop`, plus `g =
   bfpFoldGuardBits(K, ma, mb, 0)` over the reduction length `K` (dx: `outF`;
   weightGrad: the batch). `rowTop` / `colTop` is the max group exponent over
-  the elements of the output's reduction LINE when the reduction runs along
+  the nonzero codes of the output's reduction LINE when the reduction runs along
   the operand's physically innermost axis — the dx loss rows — and the
   operand-wide max otherwise: the dx weight columns (strided by `inF`) and
   both weightGrad operands (the batch is the outer axis of the loss and of
@@ -2251,9 +2284,9 @@ called by the backward cores exactly where the float fold
   bitlen(A_r)`, the re-block (§13) from the mantissa absmax. The remaining
   deterministic loss is the in-loop alignment: a segment more than `−g`
   binades below its group's bound rounds HALF_AWAY (at most ½·2^E_acc per
-  segment). A loose bound moves that line up: an operand group in the zero
-  state (stored = bias, `E = 0`) counts in the max although its codes are
-  zero, as in every §13 fold.
+  segment). A loose bound moves that line up: the operand-wide max of a
+  strided operand counts live groups the line never visits (an all-zero
+  group no longer counts anywhere, §13).
 - **biasGrad** (`linearCalcBiasGradsBfpRaw`): the Conv1d bias rule on the
   `[B, outF]` loss (one position per row): feature outer, batch inner,
   consecutive codes of one loss group form a segment (exact int32 partial,

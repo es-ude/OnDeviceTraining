@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "BfpAccumulateRef.h"
+#include "BfpRawFixture.h"
 #include "BfpScatterRef.h"
 #include "BorrowedLayer.h"
 #include "Conv1d.h"
@@ -3924,11 +3925,11 @@ void testConv1dBfpGradsIntoSrBfpStorageDrawFromTheAccStream(void) {
 
 /* The bias sum's guard is a pure-SUM guard (N 2^(m-1), not the product
  * bound N 2^(2m-2)): one loss group per code (every code its own segment).
- * Each channel's first code is a zero in the zero state (E = 0, the row's
- * top), the others sit 15-20 binades lower. With batch * outputLength = 10
+ * Each channel's first code is a 1 at E = 0 (the row's top; a ZERO code
+ * there would set nothing), the others sit 15-20 binades lower. With batch * outputLength = 10
  * codes the sum guard (-20) keeps every segment exact; the product guard
- * (-13) would round the lowest ones to a few bits -- far above the step of
- * the grad, whose grid follows the actual (small) sums. */
+ * (-13) would round the lowest ones to a few bits -- coarser than the m16
+ * grad's step. */
 void testConv1dBfpBiasGradSegmentsFoldExactlyUnderTheSumGuard(void) {
     static gaOperands_t ops[2];
     static gaResult_t r;
@@ -3938,7 +3939,7 @@ void testConv1dBfpBiasGradSegmentsFoldExactlyUnderTheSumGuard(void) {
     for (size_t j = 0; j < 2; j++) {
         gaFill(&ops[j], 515u + (uint32_t)j, 8, 80, 10, -2, 2, 40, 40, -20, -15);
         for (size_t oc = 0; oc < 4; oc++) {
-            ops[j].gy[oc * 5] = 0; /* batch 0, outPos 0 of channel oc */
+            ops[j].gy[oc * 5] = 1; /* batch 0, outPos 0 of channel oc */
             ops[j].gyE[oc * 5] = 127;
         }
     }
@@ -3995,6 +3996,83 @@ void testConv1dBfpWeightGradRawExponentFollowsTheDataNotTheBound(void) {
         top = a > top ? a : top;
     }
     TEST_ASSERT_TRUE(top >= 64); /* channel 1 owns the grid: its top uses all 8 bits */
+}
+
+/* ---- Zero groups never set E_acc -------------------------------------------
+ * An all-zero operand group (zero state: stored = bias, E = 0) next to live
+ * codes 28 binades lower. The grads are m16 and start from zero, and every
+ * exact sum fits 15 bits, so the stored grad equals the exact value iff the
+ * kernel's raw kept every bit. */
+
+static const gaCase_t kGaZg = {.batch = 1,
+                               .cin = 1,
+                               .length = 8,
+                               .cout = 1,
+                               .groups = 1,
+                               .kernelSize = 3,
+                               .stride = 1,
+                               .dilation = 1,
+                               .padding = 0,
+                               .m = 8,
+                               .xGroupSize = 4,
+                               .gyGroupSize = 3,
+                               .gm = 16,
+                               .ge = 8,
+                               .grm = HALF_AWAY,
+                               .wgGroupSize = 0,
+                               .bgGroupSize = 0,
+                               .initWgE = 127,
+                               .initBgE = 127};
+
+static void zgAssertGradExact(int32_t code, uint8_t stored, int64_t exact, int exactE, size_t i) {
+    TEST_ASSERT_TRUE(exact > -32768 && exact < 32768);
+    assertBfpValueExact(code, (int)stored - 127, exact, exactE, i);
+}
+
+/* weightGrad: x [1, 1, 8] in groups of 4 (group 0 live at E = -6, group 1
+ * all zero); loss [1, 1, 6] in groups of 3 (group 0 live at E = -28, group 1
+ * all zero). Every product is at E = -34. */
+void testConv1dBfpWeightGradZeroGroupsDoNotSetTheAccumulator(void) {
+    static gaOperands_t ops[1];
+    static gaResult_t r;
+    static const int32_t x[8] = {7, -5, 3, -9, 0, 0, 0, 0};
+    static const int32_t gy[6] = {113, -77, 91, 0, 0, 0};
+    memcpy(ops[0].x, x, sizeof(x));
+    memcpy(ops[0].gy, gy, sizeof(gy));
+    ops[0].xE[0] = 127 - 6;
+    ops[0].xE[1] = 127;
+    ops[0].gyE[0] = 127 - 28;
+    ops[0].gyE[1] = 127;
+    gaRun(&kGaZg, ops, 1, NULL, &r);
+    for (size_t k = 0; k < 3; k++) {
+        int64_t exact = 0;
+        for (size_t t = 0; t < 6; t++) {
+            exact += (int64_t)gy[t] * x[t + k];
+        }
+        zgAssertGradExact(r.wCodes[k], r.wE[0], exact, -34, k);
+    }
+}
+
+/* biasGrad: loss [2, 1, 4] in one group per batch row, row 0 all zero, row 1
+ * live at E = -28. */
+void testConv1dBfpBiasGradZeroGroupDoesNotSetTheAccumulator(void) {
+    gaCase_t c = kGaZg;
+    c.batch = 2;
+    c.length = 6;
+    c.xGroupSize = 0;
+    c.gyGroupSize = 4;
+    static gaOperands_t ops[1];
+    static gaResult_t r;
+    static const int32_t gy[8] = {0, 0, 0, 0, 113, -77, 91, -59};
+    for (size_t i = 0; i < 12; i++) {
+        ops[0].x[i] = (int32_t)(i % 5) - 2;
+    }
+    ops[0].xE[0] = 127;
+    memcpy(ops[0].gy, gy, sizeof(gy));
+    ops[0].gyE[0] = 127;
+    ops[0].gyE[1] = 127 - 28;
+    gaRun(&c, ops, 1, NULL, &r);
+    zgAssertGradExact(r.bCodes[0], r.bE[0], 113 - 77 + 91 - 59, -28, 0);
 }
 
 /* Cancellation to the exact zero state: one product per grad element, codes
@@ -4236,6 +4314,8 @@ int main() {
     RUN_TEST(testConv1dBfpGradsIntoSrBfpStorageDrawFromTheAccStream);
     RUN_TEST(testConv1dBfpBiasGradSegmentsFoldExactlyUnderTheSumGuard);
     RUN_TEST(testConv1dBfpWeightGradRawExponentFollowsTheDataNotTheBound);
+    RUN_TEST(testConv1dBfpWeightGradZeroGroupsDoNotSetTheAccumulator);
+    RUN_TEST(testConv1dBfpBiasGradZeroGroupDoesNotSetTheAccumulator);
     RUN_TEST(testConv1dBfpGradsCancelToTheZeroState);
     RUN_TEST(testConv1dBfpGradsExponentExtremes);
     RUN_TEST(testConv1dBfpWeightGradFixedScaleKeepsTheFloatBridge);

@@ -88,7 +88,12 @@ float crossEntropyForward(tensor_t *softmaxOutput, tensor_t *distribution, reduc
     requireOperandMatchesOutput(softmaxOutput, distribution, "distribution", "crossEntropyForward");
     switch (softmaxOutput->quantization->type) {
     case FLOAT32:
-        return crossEntropyForwardFloat(softmaxOutput, distribution, reduction);
+        /* The float arm raw-casts BOTH operands: a quantized label next to a
+         * FLOAT32 output goes through the dequantizing arm instead. */
+        if (distribution->quantization->type == FLOAT32) {
+            return crossEntropyForwardFloat(softmaxOutput, distribution, reduction);
+        }
+        return crossEntropyForwardFakeQuant(softmaxOutput, distribution, reduction);
     case SYM_INT32:
     case BFP:
         return crossEntropyForwardFakeQuant(softmaxOutput, distribution, reduction);
@@ -158,7 +163,17 @@ static void crossEntropySoftmaxBackwardFakeQuant(tensor_t *softmaxOutput, tensor
     convertTensor(&lossFloat, loss, rs);
 }
 
-// IMPORTANT: This implementation already takes the softmax backward into account
+/* The combined Softmax + CrossEntropy gradient p - y: the training loop skips
+ * the model's last layer (which must be the Softmax, rematBackwardRange) and
+ * seeds the backward with this. It is the LOSS BOUNDARY of a quantized model
+ * (arithmetic-bfp.md section 14): the only float of a BFP training step after
+ * the input quantization layer. Loss-facing dequant of p and y, p - y in
+ * float, then ONE conversion into the grad wire's own dtype and config
+ * (convertTensor, drawing from the RNG_TAG_LOSS stream under SR); everything
+ * below it is integer. The float arm raw-casts all three operands, so it runs
+ * only when all three are FLOAT32; any other mix -- a quantized output, a
+ * quantized label, or a FLOAT32 output feeding a BFP grad wire -- takes the
+ * converting arm, so a float can never be written into a packed payload. */
 void crossEntropySoftmaxBackward(tensor_t *softmaxOutput, tensor_t *distribution, tensor_t *loss,
                                  const layerExec_t *exec) {
     requireOperandMatchesOutput(softmaxOutput, distribution, "distribution",
@@ -168,7 +183,13 @@ void crossEntropySoftmaxBackward(tensor_t *softmaxOutput, tensor_t *distribution
     rngStream_t lossStorage;
     switch (softmaxOutput->quantization->type) {
     case FLOAT32:
-        crossEntropySoftmaxBackwardFloat(softmaxOutput, distribution, loss);
+        if (distribution->quantization->type == FLOAT32 && loss->quantization->type == FLOAT32) {
+            crossEntropySoftmaxBackwardFloat(softmaxOutput, distribution, loss);
+            break;
+        }
+        crossEntropySoftmaxBackwardFakeQuant(
+            softmaxOutput, distribution, loss,
+            layerExecPurposeStream(exec, RNG_TAG_BACKWARD, RNG_TAG_LOSS, &lossStorage));
         break;
     case SYM_INT32:
     case ASYM:

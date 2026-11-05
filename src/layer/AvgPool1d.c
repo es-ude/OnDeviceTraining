@@ -474,18 +474,71 @@ static void avgPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
         ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->scale / (float)cfg->kernel->size;
 }
 
-/* BFP epic PR4 (R-P4 backward): funnel-routed dx, the exact shape of the
- * ARITH_SYM_INT32 arm above. Each output cell's contribution is its EXACT
- * dequant (mantissa * 2^(E-bias) -- a lossless float32 multiply by a power of
- * two) divided by K, accumulated DIRECTLY in the FLOAT32 raw intermediate
- * (BFP D7). There are no int32 partial sums across the scattered writes, so this
- * kernel needs NO sum-headroom guard (unlike the forward's window sum). rawOut
- * is the funnel's uninitialized Phase-2 scratch, so it is memset before the
- * accumulating `+=` (overlapping windows hit the same input cell). */
-static void avgPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                       const void *ctx, rngStream_t *rs) {
+/* The scatter of the integer dx (BFP_WALK_NOINLINE: no VLA in this frame).
+ * The FLOAT32 arm's loops, order and index math: one contribution per
+ * output, added to every valid member of its window. */
+typedef struct avgPoolBwdWalk {
+    const int32_t *gy;
+    const bfpQConfig_t *qC;
+    int32_t expBias;
+    const int *eAccOfRow; /* the row's VALUE exponent (-log2 K folded in) */
+    int32_t *acc;
+    const windowGeometry1d_t *geom;
+    size_t rows;
+    int32_t kSize;
+    int log2K; /* -1: K is not a power of two */
+} avgPoolBwdWalk_t;
+
+BFP_WALK_NOINLINE void avgPool1dBackwardBfpWalk(const avgPoolBwdWalk_t *p) {
+    const bfpQConfig_t *qC = p->qC;
+    const windowGeometry1d_t *geom = p->geom;
+    const size_t outputLength = geom->outputLength;
+    const size_t inputLength = geom->inputLength;
+    const size_t dilation = geom->dilation;
+    const bool kIsPow2 = p->log2K >= 0;
+    const int lift = kIsPow2 ? p->log2K : 0;
+    bfpGroupRange_t qRange = {0};
+    size_t outIdx = 0;
+    for (size_t row = 0; row < p->rows; row++) {
+        /* the alignment grid: the value exponent plus log2 K back */
+        const int eAlign = p->eAccOfRow[row] + lift;
+        int32_t *accRow = p->acc + row * inputLength;
+        for (size_t outPos = 0; outPos < outputLength; outPos++, outIdx++) {
+            windowSlice1d_t slice = windowSlice1dAt(geom, outPos);
+            size_t g = bfpGroupAt(&qRange, qC, outIdx);
+            int32_t aligned =
+                bfpAlignPartial(p->gy[outIdx], eAlign - ((int)qC->exponents[g] - p->expBias));
+            int32_t contribution = kIsPow2 ? aligned : roundedDivHalfAwayInt32(aligned, p->kSize);
+
+            for (size_t i = 0; i < slice.validCount; i++) {
+                accRow[slice.firstValidInputIdx + i * dilation] += contribution;
+            }
+        }
+    }
+}
+
+/* Integer-only dx (arithmetic-bfp.md section 14), ARITH_BFP arm, ops =
+ * {lossGrad} (unpacked-BFP scratch). The FLOAT32 arm adds gy / K to every
+ * valid member of the window (count_include_pad: padded positions are not
+ * visited, the divisor stays K). Per dx row (one (batch, channel)): the code
+ * grid E = (max exponent over the loss row's NONZERO codes; 0 if none) + g,
+ * g = bfpSumFoldGuardBits over C terms, C = (effK - 1) / stride + 1 the
+ * windows covering one cell. A loss code enters by bfpAlignPartial (left
+ * exact; HALF_AWAY right for a code more than -g binades below its row's
+ * top). A power-of-two K folds -log2 K into the row's exponent (exact, HAR's
+ * K = 32); any other K divides the aligned code ONCE per output,
+ * roundedDivHalfAwayInt32, on that fine grid: |q| <= |code| keeps the C-term
+ * bound, the quotient keeps 31 - log2 C - log2 K bits, and its half-unit
+ * error is at least 2^(31 - m - log2 C - log2 K) times below the wire's
+ * step. Rounding onto the wire grid (SR under SR) is the funnel's re-block of
+ * the raw, the data rule of bfpRawEmitFromRows on the dx geometry. No float;
+ * one division per output only for a non-power-of-two K. The per-row table
+ * (one int per (batch, channel)) is the only stack beyond the funnel's raw. */
+void avgPool1dBackwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                   const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
+    (void)rs;
     const avgPool1dConfig_t *cfg = ctx;
     tensor_t *lossGrad = ops[0];
 
@@ -493,6 +546,12 @@ static void avgPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
         PRINT_ERROR("AvgPool1d backward BFP: lossGrad and rawOut must both be rank-3 [batch, "
                     "channels, length], got ranks %zu and %zu",
                     lossGrad->shape->numberOfDimensions, rawOut->shape->numberOfDimensions);
+        exit(1);
+    }
+    if (lossGrad->quantization->type != BFP || rawOut->quantization->type != BFP_RAW) {
+        PRINT_ERROR("AvgPool1d backward BFP: needs a BFP (unpacked scratch) lossGrad and a BFP_RAW "
+                    "output (opSpec_t.bfpRawOut), got dtypes %d -> %d",
+                    (int)lossGrad->quantization->type, (int)rawOut->quantization->type);
         exit(1);
     }
     size_t batch = lossGrad->shape->dimensions[0];
@@ -509,37 +568,57 @@ static void avgPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOu
     }
     /* All three dims (F5): the scatter index is (b * channels + c) *
      * inputLength + inputIdx with batch/channels off the LOSSGRAD, and the
-     * memset below sizes batch * channels * inputLength floats — a rawOut that
+     * memset below sizes batch * channels * inputLength codes — a rawOut that
      * agrees only on inputLength is both memset and scattered past its end. */
     poolRequireDims3(rawOut, batch, channels, inputLength, "AvgPool1d backward BFP (rawOut)");
 
     const bfpQConfig_t *qC = lossGrad->quantization->qConfig;
     validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(lossGrad));
     const int32_t expBias = bfpExponentBias(qC);
-    bfpGroupRange_t qRange = {0};
-
-    int32_t const *gyArr = (int32_t const *)lossGrad->data;
-    float *gxArr = (float *)rawOut->data;
-    const float divisor = (float)cfg->kernel->size;
-
-    memset(gxArr, 0, batch * channels * inputLength * sizeof(float));
-
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t c = 0; c < channels; c++) {
-            for (size_t outPos = 0; outPos < outputLength; outPos++) {
-                windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
-                size_t outIdx = (b * channels + c) * outputLength + outPos;
-                size_t g = bfpGroupAt(&qRange, qC, outIdx);
-                float contribution =
-                    bfpLdexpInt32(gyArr[outIdx], (int)qC->exponents[g] - expBias) / divisor;
-
-                for (size_t i = 0; i < slice.validCount; i++) {
-                    size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
-                    gxArr[(b * channels + c) * inputLength + inputIdx] += contribution;
-                }
-            }
+    bfpRawQConfig_t *rawQC = rawOut->quantization->qConfig;
+    size_t rows = batch * channels;
+    size_t nOut = rows * inputLength;
+    bfpRawRequireOutput(rawQC, nOut, "AvgPool1d backward BFP");
+    if (nOut == 0) {
+        return;
+    }
+    const size_t kSize = cfg->kernel->size;
+    if (kSize > (size_t)INT32_MAX) {
+        PRINT_ERROR("AvgPool1d backward BFP: kernel size %zu beyond the int32 divisor", kSize);
+        exit(1);
+    }
+    size_t span = geom.dilation * (geom.kernelSize - 1) + 1;
+    int g = bfpSumFoldGuardBits((span - 1) / geom.stride + 1, qC->mantissaBits,
+                                "AvgPool1d backward BFP");
+    int log2K = -1;
+    if ((kSize & (kSize - 1)) == 0) {
+        log2K = 0;
+        while (((size_t)1 << log2K) < kSize) {
+            log2K++;
         }
     }
+
+    const int32_t *gyArr = (const int32_t *)lossGrad->data;
+    int eAccOfRow[rows];
+    bfpRowCursor_t cursor = {.group = 0, .groupEnd = qC->groupSize};
+    for (size_t r = 0; r < rows; r++) {
+        eAccOfRow[r] = bfpLiveTopOrZero(bfpRowMaxExponent(&cursor, qC, expBias, gyArr,
+                                                          r * outputLength, outputLength)) +
+                       g - (log2K > 0 ? log2K : 0);
+    }
+
+    int32_t *acc = (int32_t *)rawOut->data;
+    memset(acc, 0, nOut * sizeof(int32_t));
+    avgPool1dBackwardBfpWalk(&(avgPoolBwdWalk_t){.gy = gyArr,
+                                                 .qC = qC,
+                                                 .expBias = expBias,
+                                                 .eAccOfRow = eAccOfRow,
+                                                 .acc = acc,
+                                                 .geom = &geom,
+                                                 .rows = rows,
+                                                 .kSize = (int32_t)kSize,
+                                                 .log2K = log2K});
+    bfpRawEmitFromRows(acc, nOut, eAccOfRow, inputLength, rawQC, "AvgPool1d backward BFP");
 }
 
 void avgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
@@ -583,7 +662,7 @@ void avgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGra
         (void)forwardInput; // not needed: window geometry comes from kernel + shapes
         executeOp(
             &(opSpec_t){
-                .kernel = avgPool1dBackwardKernelBfp,
+                .kernel = avgPool1dBackwardKernelBfpRaw,
                 .ctx = cfg,
                 .inputs = (tensor_t *[]){lossGrad},
                 .nInputs = 1,
@@ -591,6 +670,7 @@ void avgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGra
                 .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, AVGPOOL1D_OP_PROP_LOSS, &opKey),
                 .mode = OUT_WRITE,
                 .bfpStage = {lossGrad->quantization->type == FLOAT32 ? &stage : NULL, NULL, NULL},
+                .bfpRawOut = BFP_RAW_BACKWARD_DX, /* the integer dx raw */
             },
             propLoss);
         break;

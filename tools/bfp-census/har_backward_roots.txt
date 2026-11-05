@@ -8,7 +8,7 @@
 # so each is its own root; the dispatchers are `self` roots. The one float route
 # a self root cannot see on this path -- staging a FLOAT32-stored loss gradient --
 # is unreachable under BFP wires: every dx wire the Conv1d / Linear dx reads is BFP.
-# Not yet here (still float, later steps): every other layer's backward.
+# Every HAR backward op is here; the one float left is the loss boundary below.
 #
 # The funnel (prologue, raw setup, epilogue dispatch) and the conversion entry:
 ExecuteOp.c         executeOp            self
@@ -38,6 +38,27 @@ Linear.c            linearBackward           self
 Linear.c            propLossKernelBfp
 Linear.c            weightGradKernelBfpRaw
 Linear.c            biasGradKernelBfpRaw
+# The loss boundary (allow-listed as the one float island, scoped to these roots):
+# CrossEntropy's combined Softmax + CE gradient -- loss-facing dequant, float p - y,
+# ONE float -> BFP conversion into the grad wire. The Softmax backward it replaces
+# never runs (the backward starts one layer below the Softmax).
+CrossEntropy.c      crossEntropySoftmaxBackward
+# ReLU dx: dispatch (self), then the code-domain sign mask (walked).
+Relu.c              reluBackward             self
+Relu.c              reluBackwardBfp
+# MaxPool1d / AvgPool1d dx: the dispatch (self), then the integer kernels (each walks
+# its pre-pass, its noinline scatter walk and the raw emit); the re-block is the root
+# above.
+MaxPool1d.c         maxPool1dBackward        self
+MaxPool1d.c         maxPool1dBackwardKernelBfpRaw
+AvgPool1d.c         avgPool1dBackward        self
+AvgPool1d.c         avgPool1dBackwardKernelBfpRaw
+# Flatten dx: payload and exponent copy (walked).
+Flatten.c           flattenBackward
+# Input layer dx (BFP -> BFP; HAR never runs it, no dx below conv1): dispatch (self;
+# its other dtype pairs convert through executeConvert, not walked), the integer kernel.
+QuantizationLayer.c quantizationBackward     self
+QuantizationLayer.c quantizationBackwardKernelBfp
 # Macro-batch mean scale of BFP grads (trainingEpochDefault -> scaleOptimizerGradientsMean):
 # the entry (self: its non-BFP arms run in an out-of-line helper, not walked), the
 # integer in-place scale, and CE's integer divisor (reached through the loss vtable).

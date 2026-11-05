@@ -717,12 +717,14 @@ void testStepExitsOnAReforwardAfterTheLastBackward(void) {
     freeFixture(&f, &s);
 }
 
-/* Linear(2->4) frozen, ReLU, Linear(4->2) under CE: top = n - 2 = 1 lies
- * below deepest = 2, so no BACKWARD runs and a REFORWARD has no reader. */
+/* Linear(2->4) frozen, ReLU, Softmax under CE: top = n - 2 = 1 lies below
+ * deepest = n = 3 (nothing trains; CE requires the last Softmax, so a top
+ * below deepest exists only when nothing trains), so no BACKWARD runs and a
+ * REFORWARD has no reader. */
 static void buildCeTopBelowDeepestModel(fixture_t *f) {
     f->model[0] = makeLinear(2, 4, true, 0);
     f->model[1] = makeRelu(&g_floatQ);
-    f->model[2] = makeLinear(4, 2, false, 2);
+    f->model[2] = makeSoftmax();
     f->n = 3;
     f->lt = CROSS_ENTROPY;
     f->x = makeResidentInput(&f->in, (size_t[]){1, 2}, 2);
@@ -1264,18 +1266,18 @@ void testFinishExitsWhenARowEatsTheLastStepInternally(void) {
     freeFixture(&f, &s);
 }
 
-/* [Linear 4 -> 3] under CE, n = 1: top = -1 < deepest = 0, so the
- * stream is FORWARD 0, LOSS_FORWARD, LOSS_BACKWARD and no BACKWARD at all;
- * wires ACT 0, ACT 1, the seed GRAD 1. */
+/* [Softmax] under CE, n = 1 (CE requires the last Softmax): top = -1, and
+ * nothing trains, so the stream is FORWARD 0, LOSS_FORWARD and no BACKWARD
+ * at all. */
 static void buildCeSingleLinearModel(fixture_t *f) {
-    f->model[0] = makeLinear(4, 3, false, 0);
+    f->model[0] = makeSoftmax();
     f->n = 1;
     f->lt = CROSS_ENTROPY;
     f->x = makeResidentInput(&f->in, (size_t[]){1, 4}, 2);
 }
 
-/* With n = 1 under CE, LOSS_BACKWARD and zero BACKWARDs is a
- * complete stream, as in today's loop. */
+/* With n = 1 under CE (the Softmax alone), a stream without BACKWARD is
+ * complete. */
 void testFinishAcceptsCeWithOneLayerAndNoBackwardStep(void) {
     assertEveryStepAccepted(initArena, buildCeSingleLinearModel);
     assertEveryStepAccepted(initHeap, buildCeSingleLinearModel);

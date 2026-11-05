@@ -168,16 +168,40 @@ static inline int32_t bfpShrHalfAway(int32_t v, unsigned k) {
     return v < 0 ? -(int32_t)r : (int32_t)r;
 }
 
+#ifdef DEBUG_MODE_DEBUG
+/*! Debug builds only: a NONZERO partial on bfpAlignPartial's -k >= 32 branch
+ * is a broken headroom proof (it would be flushed silently). Cold, out of
+ * line. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline, cold, unused))
+#endif
+static void bfpAlignPartialFlushFail(int32_t v, int k) {
+    PRINT_ERROR("bfpAlignPartial: nonzero partial %ld shifted left by %d >= 32 -- the fold's "
+                "headroom proof caps a nonzero partial at 30 (arithmetic-bfp.md section 13)",
+                (long)v, -k);
+    exit(1);
+}
+#endif
+
 /*! The fold alignment: k >= 0 is bfpShrHalfAway, k < 0 an EXACT left shift
  * (no rounding, no overflow -- the headroom proof of bfpFoldGuardBits
  * guarantees |v| * 2^-k fits int32 for every NONZERO segment and bias the
  * kernel can produce; -k <= 30 by the same proof). A zero partial may come
  * from a group that does not set E_acc (no nonzero code in the pre-pass run),
  * whose exponent can sit any distance above E_acc: -k >= 32 returns its 0
- * without the out-of-range shift. */
+ * without the out-of-range shift. Debug builds (DEBUG_MODE_DEBUG) check that
+ * the value there IS 0; release builds compile no check. */
 static inline int32_t bfpAlignPartial(int32_t v, int k) {
     if (k < 0) {
-        return k > -32 ? (int32_t)((uint32_t)v << (unsigned)(-k)) : 0;
+        if (k > -32) {
+            return (int32_t)((uint32_t)v << (unsigned)(-k));
+        }
+#ifdef DEBUG_MODE_DEBUG
+        if (v != 0) {
+            bfpAlignPartialFlushFail(v, k);
+        }
+#endif
+        return 0;
     }
     return bfpShrHalfAway(v, (unsigned)k);
 }

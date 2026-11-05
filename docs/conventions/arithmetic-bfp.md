@@ -2121,7 +2121,7 @@ libm and int64 calls in the HAR forward kernels, the re-block and the operand
 unpack, and only per-call, per-group-change, per-output and shared-index-math
 divisions, each allow-listed for its one root.
 
-## 14. Integer backward: Conv1d dx and weightGrad scatter (experiment), Linear GEMM
+## 14. Integer backward: Conv1d dx and weightGrad scatter (experiment), Linear GEMM, pools, loss boundary
 
 Rule: an `ARITH_BFP` kernel runs the same algorithm as its FLOAT32 twin —
 loops, loop order, MAC count, index math. The Conv1d dx (`propLoss`) and
@@ -2300,6 +2300,63 @@ called by the backward cores exactly where the float fold
   default bias mode is `OUT_ACC_FIXED_SCALE` (Conv1d's too): a BFP bias grad
   there keeps the float bridge and the float fixed grid; the HAR trainer
   sets `OUT_ACC_DYNAMIC_RESCALE` for both grads of every GEMM layer.
+
+**Pools, ReLU, Flatten, input layer and the loss boundary (2026-11-05).**
+After this step the only float of a BFP training step (BFP wires, native
+math) is the loss boundary; `tools/bfp-census/har_backward_roots.txt` gates it.
+
+- **MaxPool1d dx** (`maxPool1dBackwardKernelBfpRaw`): the FLOAT32 arm's loop
+  (rows, outputs, the saved argmax, the `-1` sentinel) and scatter-add. One
+  `E_acc` per dx row (one (batch, channel)) = the loss row's max exponent
+  over its NONZERO codes (none: 0) + `g`, `g = bfpSumFoldGuardBits(C, m)`, `C
+  = (effK − 1) / stride + 1` the windows whose span covers one cell. A cell
+  can only win windows covering it, so a stale argmax inside the input but
+  outside its window's span would break that bound: it fails fast (span
+  check, no division). A code enters `acc += bfpAlignPartial(code, E_acc −
+  E_group)` (left exact; HALF_AWAY right only for a code more than `−g`
+  binades below its row's top, `−g = 23` at m = 8, C = 1). The raw is
+  `bfpRawEmitFromRows` (the data rule above) on the dx wire's geometry, then
+  the integer re-block by the op's mode (SR under SR, one draw per element in
+  element order from `rngFold(op key, RNG_TAG_OUT, 0)`, op key
+  `MAXPOOL1D_OP_PROP_LOSS`: the float re-pack's stream and positions).
+- **AvgPool1d dx** (`avgPool1dBackwardKernelBfpRaw`): the FLOAT32 loop (one
+  contribution per output, added to every valid window member; padded
+  positions are not visited and the divisor stays `K`, as in FLOAT32). The
+  same per-row grid and guard (C terms). A power-of-two `K` folds `−log2 K`
+  into the row's exponent (exact; HAR's K = 32); any other `K` divides the
+  aligned code ONCE per output, `roundedDivHalfAwayInt32`, on the fine raw
+  grid: `|q| <= |code|` keeps the C-term bound, the quotient keeps `31 −
+  log2 C − log2 K` bits, and its half-unit error sits at least `2^(31 − m −
+  log2 C − log2 K)` below the wire's code step. This quotient rounds
+  HALF_AWAY like every in-loop alignment (the C4 rule); the only rounding
+  onto a wire grid is the re-block, SR under SR.
+- **Granularity (both pools).** One `E_acc` per dx row: a loss group more
+  than `−g` binades below its row's top rounds on the row's grid even if its
+  dx cells form their own wire group (the float scatter kept them exact).
+  Measured on HAR (identity, below) it never fires; finer (per raw target
+  group) exponents would need a destination-group lookup per scatter.
+  The row table is one `int` per (batch, channel) on the stack.
+- **ReLU dx:** already integer (R-P2, above): the code-domain sign mask, exponents
+  carried. **Flatten dx:** payload and exponent copy.
+- **Input layer dx** (`quantizationBackward`): straight-through. Between two
+  BFP grids it is integer (`quantizationBackwardKernelBfp`, one funnel op,
+  `BFP_RAW_BACKWARD_DX`): each loss code is a row of its source group, the
+  raw is the data rule on the target geometry (exact unless a code sits more
+  than 31 binades below its target group's top), the re-block rounds by the
+  target template's mode (the conversion cell's rule) and draws (SR) from the
+  op's OUT stream (op key `QUANTIZATION_OP_PROP_LOSS`) instead of the
+  convert purpose stream. Every other pair (a FLOAT32 input-gradient export,
+  SYM) keeps `executeConvert`. HAR never runs it (no dx below conv1).
+- **The loss boundary** (`crossEntropySoftmaxBackward`): the combined
+  Softmax + CrossEntropy gradient is the float island -- loss-facing dequant
+  of `p` and `y`, `p − y` in float, then ONE conversion into the grad wire
+  (`convertTensor` on the `RNG_TAG_LOSS` stream). The float arm raw-casts its
+  operands, so it runs only when output, label and grad wire are ALL
+  FLOAT32; any other mix (a FLOAT32 output into a BFP grad wire, a quantized
+  label) takes the converting arm. The training loop skips the model's last
+  layer exactly once under CrossEntropy (`rematBackwardRange`), and that
+  layer must be the Softmax: any other last layer (or an empty model) fails
+  fast, so no layer's backward is dropped silently.
 
 ## 15. Integer training primitives: scalar, add-and-round, integer rescale accumulate
 

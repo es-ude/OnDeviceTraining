@@ -562,6 +562,7 @@ add_elastic_ai_unit_test(
         StorageApi
         odt_test_death
         odt_test_keyed_draw
+        odt_test_bfp_raw_fixture
 )
 
 add_elastic_ai_unit_test(

@@ -494,6 +494,54 @@ void testCrossEntropySoftmaxBackwardBfpRequantizesIntoFreshGrid(void) {
     freeTensor(bfpP);
 }
 
+/* The loss boundary (arithmetic-bfp.md section 14): CE's float island reads
+ * every operand through its own dtype, so the FLOAT32 arm (raw float casts)
+ * runs only when ALL its operands are FLOAT32. A FLOAT32 softmax output with a
+ * BFP grad wire is the island too: p - y in float, then ONE float -> BFP
+ * conversion into the wire -- never floats written into a packed BFP payload. */
+void testCrossEntropySoftmaxBackwardFloatOutputIntoABfpGradWireIsTheLossBoundary(void) {
+    float exactP[4] = {0.5f, 0.25f, 0.125f, 0.125f};
+    float y[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    int32_t sentinel[4] = {-9, -9, -9, -9};
+    tensor_t *floatP = buildFloatTensor1D(4, exactP);
+    tensor_t *label = buildFloatTensor1D(4, y);
+    tensor_t *loss = buildBfpTensor1DWithCodes(4, 6, 8, sentinel, 127);
+
+    crossEntropySoftmaxBackward(floatP, label, loss, NULL);
+
+    int32_t got[4];
+    unpackSignExtend(loss->data, 6, 0, got, 4);
+    int32_t expected[4] = {-16, 8, 4, 4};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, 4);
+    TEST_ASSERT_EQUAL_UINT8(122, ((bfpQConfig_t *)loss->quantization->qConfig)->exponents[0]);
+    freeTensor(loss);
+    freeTensor(label);
+    freeTensor(floatP);
+}
+
+/* A BFP label next to a FLOAT32 output is dequantized, not read as floats:
+ * y = [1, 0, 0, 0] is grid-exact at m 6 (code 16 on 2^-4, stored 123). */
+void testCrossEntropyFloatOutputWithABfpLabelDequantizesTheLabel(void) {
+    float exactP[4] = {0.5f, 0.25f, 0.125f, 0.125f};
+    float y[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    int32_t yCodes[4] = {16, 0, 0, 0};
+    tensor_t *floatP = buildFloatTensor1D(4, exactP);
+    tensor_t *floatLabel = buildFloatTensor1D(4, y);
+    tensor_t *bfpLabel = buildBfpTensor1DWithCodes(4, 6, 8, yCodes, 123);
+    float viaFloat = crossEntropyForward(floatP, floatLabel, REDUCTION_SUM, NULL);
+    float viaBfp = crossEntropyForward(floatP, bfpLabel, REDUCTION_SUM, NULL);
+    TEST_ASSERT_EQUAL_FLOAT(viaFloat, viaBfp);
+
+    tensor_t *gFloat = buildFloatTensor1D(4, (float[]){9, 9, 9, 9});
+    crossEntropySoftmaxBackward(floatP, bfpLabel, gFloat, NULL);
+    const float expected[4] = {-0.5f, 0.25f, 0.125f, 0.125f};
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, (float *)gFloat->data, 4);
+    freeTensor(gFloat);
+    freeTensor(bfpLabel);
+    freeTensor(floatLabel);
+    freeTensor(floatP);
+}
+
 /* BFP epic PR4: every scratch buffer in the fake-quant bodies
  * is a VLA sized from the MODEL OUTPUT's element count, but each convertTensor
  * walks its OWN source's count and the distribution scratch even borrows the
@@ -746,6 +794,8 @@ int main() {
     RUN_TEST(testCrossEntropySoftmaxBackwardSymWritesRequantizedGrad);
     RUN_TEST(testCrossEntropyForwardBfpEqualsFloat32OnExactGrid);
     RUN_TEST(testCrossEntropySoftmaxBackwardBfpRequantizesIntoFreshGrid);
+    RUN_TEST(testCrossEntropySoftmaxBackwardFloatOutputIntoABfpGradWireIsTheLossBoundary);
+    RUN_TEST(testCrossEntropyFloatOutputWithABfpLabelDequantizesTheLabel);
     RUN_TEST(testCrossEntropyForwardBfpRejectsDistributionCountMismatch);
     RUN_TEST(testCrossEntropySoftmaxBackwardBfpRejectsDistributionCountMismatch);
     RUN_TEST(testCrossEntropySoftmaxBackwardBfpRejectsLossWireCountMismatch);

@@ -145,7 +145,8 @@ static const size_t kOutElems[MODEL_SIZE] = {2048, 2048, 1024, 2048, 2048, 1024,
                                              2048, 2048, 64,   64,   6,    6};
 /* dx PRODUCED by layer k = its input elements; 0 = never allocated (conv1 is
  * the deepest trainable layer, #380 PR2; softmax is skipped by CrossEntropy's
- * fused backward). The CE loss grad (6 elements) clones softmax.out's template. */
+ * fused backward, the loss boundary: float p - y, ONE conversion into the BFP
+ * loss grad; every backward op below it is integer). The CE loss grad (6 elements) clones softmax.out's template. */
 static const size_t kDxElems[MODEL_SIZE] = {0,    2048, 2048, 1024, 2048, 2048,
                                             1024, 2048, 2048, 64,   64,   0};
 static const bool kIsGemm[MODEL_SIZE] = {true, false, false, true,  false, false,

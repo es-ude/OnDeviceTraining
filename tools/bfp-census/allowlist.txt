@@ -145,3 +145,26 @@ TensorConversion.c:momentumStoreBfpInPlace bfpScaledSumInPlace __aeabi_uidiv 2
 TensorConversion.c:momentumStoreBfpInPlace bfpScaledSumInPlace __aeabi_uidivmod 1
 TensorConversion.c:paramUpdateBfpInPlace bfpScaledSumInPlace __aeabi_uidiv 2
 TensorConversion.c:paramUpdateBfpInPlace bfpScaledSumInPlace __aeabi_uidivmod 1
+
+# ---- The loss boundary (backward) ----------------------------------------------
+# CrossEntropy's combined Softmax + CE gradient is the float island of a BFP
+# training step: loss-facing dequant of p and y, float p - y, then ONE float -> BFP
+# conversion into the grad wire (its RNG_TAG_LOSS stream fold included). The root
+# documents the boundary; traversal stops at it.
+CrossEntropy.c:crossEntropySoftmaxBackward crossEntropySoftmaxBackward
+
+# ---- MaxPool1d / AvgPool1d dx (the integer kernels) ----------------------------
+# Per call: the covering-window count (span - 1) / stride in the kernel, and the
+# shared window geometry. Per loss group change: the walk's inlined bfpGroupAt
+# recompute. AvgPool's walk also takes the shared window slice per OUTPUT (the
+# FLOAT32 arm's own index math) and, for a NON-power-of-two K only, the mean's
+# roundedDivHalfAwayInt32 per OUTPUT (three call sites after GCC's duplication;
+# HAR's K = 32 folds into the exponent and never reaches them).
+MaxPool1d.c:maxPool1dBackwardKernelBfpRaw maxPool1dBackwardKernelBfpRaw __aeabi_uidiv 1
+MaxPool1d.c:maxPool1dBackwardKernelBfpRaw maxPool1dBackwardBfpWalk __aeabi_uidiv 1
+MaxPool1d.c:maxPool1dBackwardKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
+AvgPool1d.c:avgPool1dBackwardKernelBfpRaw avgPool1dBackwardKernelBfpRaw __aeabi_uidiv 1
+AvgPool1d.c:avgPool1dBackwardKernelBfpRaw avgPool1dBackwardBfpWalk __aeabi_uidiv 1
+AvgPool1d.c:avgPool1dBackwardKernelBfpRaw avgPool1dBackwardBfpWalk __aeabi_uidivmod 3
+AvgPool1d.c:avgPool1dBackwardKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
+AvgPool1d.c:avgPool1dBackwardKernelBfpRaw windowSlice1dAt __aeabi_ldivmod 2

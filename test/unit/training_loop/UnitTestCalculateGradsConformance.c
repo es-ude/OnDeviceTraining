@@ -310,14 +310,15 @@ static void buildGroupedBfp(zooFixture_t *f) {
     mseLabel(f, 2);
 }
 
-/* n = 1 under CE: top = -1 < deepest = 0 (remat D20), LOSS_BACKWARD and no BACKWARD. */
+/* n = 1 under CE: the Softmax alone (CE requires the last Softmax), top = -1,
+ * nothing trains: forward and loss only. */
 static void buildSingleLayerCe(zooFixture_t *f) {
     beginZoo(f);
-    f->model[0] = makeLinear(4, 3, false, 0);
+    f->model[0] = makeSoftmax();
     f->n = 1;
     f->loss = defaultLossConfig(CROSS_ENTROPY);
     f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
-    f->y = makeOneHot(3, 1);
+    f->y = makeOneHot(4, 1);
 }
 
 /* CE with only the last Linear trainable: deepest 2 = top. */
@@ -333,8 +334,9 @@ static void buildCeLastLinearOnly(zooFixture_t *f) {
     f->y = makeOneHot(3, 0);
 }
 
-/* CE over a model whose last layer is not a Softmax: the positional rule
- * still skips layer n - 1's backward, exactly as the old driver did. */
+/* CE over a model whose last layer is not a Softmax: CE's backward is the
+ * combined Softmax + CE gradient, so the skipped last layer must be the
+ * Softmax; this topology dies (testCeWithoutATrailingSoftmaxDies). */
 static void buildCeWithoutSoftmax(zooFixture_t *f) {
     beginZoo(f);
     f->model[0] = makeLinear(4, 3, false, 0);
@@ -954,8 +956,14 @@ void testBatchNormConforms(void) {
     assertNullPathMatchesTheReference(buildBatchNorm);
 }
 
-void testCeWithoutATrailingSoftmaxConforms(void) {
-    assertNullPathMatchesTheReference(buildCeWithoutSoftmax);
+static void runCeWithoutSoftmax(void) {
+    zooFixture_t f;
+    buildCeWithoutSoftmax(&f);
+    freeTrainingStats(runOnce(&f, NULL));
+}
+
+void testCeWithoutATrailingSoftmaxDies(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "so the model must end in a SOFTMAX layer", runCeWithoutSoftmax());
 }
 
 void testConvTransposedConforms(void) {
@@ -1539,14 +1547,6 @@ void testCeLastLinearOnlyMatchesTheReferenceOnHeap(void) {
     assertRowMatchesTheReference(buildCeLastLinearOnly, REMAT_HEAP);
 }
 
-void testCeWithoutSoftmaxMatchesTheReferenceOnArena(void) {
-    assertRowMatchesTheReference(buildCeWithoutSoftmax, REMAT_ARENA);
-}
-
-void testCeWithoutSoftmaxMatchesTheReferenceOnHeap(void) {
-    assertRowMatchesTheReference(buildCeWithoutSoftmax, REMAT_HEAP);
-}
-
 void testBatchNormMatchesTheReferenceOnArena(void) {
     assertRowMatchesTheReference(buildBatchNorm, REMAT_ARENA);
 }
@@ -1792,7 +1792,7 @@ static void buildBfpOutput(zooFixture_t *f) {
     mseLabel(f, 8);
 }
 
-#define ZOO_FIXTURES 21
+#define ZOO_FIXTURES 20
 static const zooEntry_t g_zoo[ZOO_FIXTURES] = {
     {"mlp", buildMlp},
     {"har-cnn", buildHarCnn},
@@ -1809,7 +1809,6 @@ static const zooEntry_t g_zoo[ZOO_FIXTURES] = {
     {"single-layer-ce", buildSingleLayerCe},
     {"ce-last-linear-only", buildCeLastLinearOnly},
     {"batchnorm", buildBatchNorm},
-    {"ce-without-softmax", buildCeWithoutSoftmax},
     {"sym-output", buildSymOutput},
     {"bfp-output", buildBfpOutput},
     {"conv-transposed", buildConvTransposedTrainable},
@@ -2216,7 +2215,7 @@ static void buildMlpWithATrackedBatchNorm(zooFixture_t *f) {
  * the run then recomputes only the Linear below it. Left out: single-layer
  * cross entropy (no window: its own death test) and the zoo's BatchNorm1d at
  * layer 0 (any run would recompute it: the death tests). */
-#define RECOMPUTE_ENTRIES 25
+#define RECOMPUTE_ENTRIES 24
 static const recomputeEntry_t g_recompute[RECOMPUTE_ENTRIES] = {
     {"mlp", buildMlp, {[3] = true}, -1, true, true},
     {"har-cnn", buildHarCnn, {[3] = true, [7] = true, [12] = true}, -1, true, false},
@@ -2232,7 +2231,6 @@ static const recomputeEntry_t g_recompute[RECOMPUTE_ENTRIES] = {
     {"f1-bfp", buildF1Zoo, {[2] = true}, -1, true, false},
     {"grouped-bfp", buildGroupedBfp, {[2] = true}, -1, true, false},
     {"ce-last-linear-only", buildCeLastLinearOnly, {[4] = true}, -1, true, false},
-    {"ce-without-softmax", buildCeWithoutSoftmax, {false}, -1, true, false},
     {"conv-transposed", buildConvTransposedTrainable, {[4] = true}, -1, true, false},
     {"frozen-conv-transposed", buildFrozenConvTransposed, {[4] = true}, -1, true, false},
     {"adaptive-avgpool", buildAdaptiveAvgPool, {[4] = true}, -1, true, false},
@@ -2661,7 +2659,7 @@ int main(void) {
     RUN_TEST(testSingleLayerUnderCeConforms);
     RUN_TEST(testCeWithOnlyTheLastLinearTrainableConforms);
     RUN_TEST(testBatchNormConforms);
-    RUN_TEST(testCeWithoutATrailingSoftmaxConforms);
+    RUN_TEST(testCeWithoutATrailingSoftmaxDies);
     RUN_TEST(testConvTransposedConforms);
     RUN_TEST(testFrozenConvTransposedAboveDeepestConforms);
     RUN_TEST(testAdaptiveAvgPoolConforms);
@@ -2714,8 +2712,6 @@ int main(void) {
     RUN_TEST(testSingleLayerCeMatchesTheReferenceOnHeap);
     RUN_TEST(testCeLastLinearOnlyMatchesTheReferenceOnArena);
     RUN_TEST(testCeLastLinearOnlyMatchesTheReferenceOnHeap);
-    RUN_TEST(testCeWithoutSoftmaxMatchesTheReferenceOnArena);
-    RUN_TEST(testCeWithoutSoftmaxMatchesTheReferenceOnHeap);
     RUN_TEST(testBatchNormMatchesTheReferenceOnArena);
     RUN_TEST(testBatchNormMatchesTheReferenceOnHeap);
     RUN_TEST(testConvTransposedMatchesTheReferenceOnArena);

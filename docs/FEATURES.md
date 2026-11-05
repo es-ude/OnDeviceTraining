@@ -871,7 +871,11 @@ checkpointing, limitations, literature).
   `kws_mfcc`, `kws_raw` (+ trace harness `trace_c_kws_raw`), `mixed_width_mlp`.
   `train_c_har_classifier_bfp` (epic #410 PR7) runs the HAR model end to end on
   BFP storage + `ARITH_BFP` compute with sweepable weight/wire blocks, widths,
-  rounding and grad/state storage.
+  rounding and grad/state storage. Its `bfp8full_hflt` / `bfp8full_hbfp` configs run the
+  whole training step integer (forward, backward, grad accumulation, mean scale,
+  momentum, update; float only in the float head's loss island, the logged loss value
+  and the input data), behind an init-time FULL gate and the M0+ census
+  `tools/bfp-census/har_train_step_roots.txt --strict`.
 
 ## Known gaps / partial features
 

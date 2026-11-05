@@ -176,3 +176,40 @@ AvgPool1d.c:avgPool1dBackwardKernelBfpRaw windowSlice1dAt __aeabi_ldivmod 2
 Softmax.c:softmaxBackwardKernelBfp softmaxBackwardKernelBfp __aeabi_uidiv 3
 Softmax.c:softmaxBackwardKernelBfp softmaxExpCodesBfp __aeabi_uidiv 2
 Softmax.c:softmaxBackwardKernelBfp bfpIExpQ __aeabi_idiv 1
+
+# ==== The whole training step (har_train_step_roots.txt) =======================
+# The phase sets above keep their entries; these are the step driver's own.
+# ---- The loss VALUE (monitoring, off the gradient path; both heads) ----------
+# CrossEntropy's forward: the float core (log, clamp, the non-finite check and
+# its report, the micro-batch mean) is the island; the dispatch and the
+# dequantizing arm in front of it are walked (the BFP -> FLOAT32 cell is the
+# forward's boundary root above).
+CrossEntropy.c:crossEntropyForward crossEntropyForwardFloat
+# The epoch loop's loss sum and mean (totalLoss += ..., / (float)batches): two
+# fadd (the compiler splits the sum), one ui2f, one fdiv, per batch / per epoch.
+TrainingEpochDefault.c:trainingEpochDefault trainingEpochDefault __aeabi_fadd 2
+TrainingEpochDefault.c:trainingEpochDefault trainingEpochDefault __aeabi_ui2f 1
+TrainingEpochDefault.c:trainingEpochDefault trainingEpochDefault __aeabi_fdiv 1
+# Per epoch: numberOfBatches = datasetSize / batchSize and batchSize % m (the
+# micro-batch divisibility check).
+TrainingEpochDefault.c:trainingEpochDefault trainingEpochDefault __aeabi_uidiv 1
+TrainingEpochDefault.c:trainingEpochDefault trainingEpochDefault __aeabi_uidivmod 1
+# The batch loop's per-sample loss sum and its MEAN (/ (float)batch->size), per
+# batch; batch->size % m per batch.
+TrainingBatchDefault.c:trainingBatchDefault trainingBatchDefault __aeabi_fadd 1
+TrainingBatchDefault.c:trainingBatchDefault trainingBatchDefault __aeabi_ui2f 1
+TrainingBatchDefault.c:trainingBatchDefault trainingBatchDefault __aeabi_fdiv 1
+TrainingBatchDefault.c:trainingBatchDefault trainingBatchDefault __aeabi_uidivmod 1
+
+# ---- RNG keys and the per-call scheduler (index math, no data path) ----------
+# rngFold: the threefry rotation index (round % 3), two per key fold, i.e. per
+# op / per step / per sample -- never per element.
+CalculateGradsSequential.c:calculateGradsSequential rngFold __aeabi_uidivmod 2
+TrainingRng.c:trainingRngStepKey rngFold __aeabi_uidivmod 2
+TrainingRng.c:trainingRngUpdateKey rngFold __aeabi_uidivmod 2
+TrainingRng.c:trainingCallForIndex rngFold __aeabi_uidivmod 2
+# The remat wire table, built per calculate-grads call (the ephemeral HEAP
+# scheduler): a BFP wire's elements % groupSize check and its group count, once
+# per WIRE per call.
+CalculateGradsSequential.c:calculateGradsSequential setWireFacts __aeabi_uidivmod 1
+CalculateGradsSequential.c:calculateGradsSequential writeWireConfig __aeabi_uidivmod 1

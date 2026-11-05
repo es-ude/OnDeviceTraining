@@ -980,9 +980,14 @@ jobs:
             build/examples_memprofile/examples/har_classifier/train_c_har_classifier_finetune
           EPOCHS=1 SEED=1 BFP_HEAD=bfp BFP_WEIGHT_BLOCK=32 BFP_WIRE_BLOCK=16 BFP_MANTISSA_BITS=6 BFP_EXPONENT_BITS=8 LOG_PATH=/tmp/wm_bfp.json \
             build/examples_memprofile/examples/har_classifier/train_c_har_classifier_bfp
+          # bfp8full, both heads: the full-integer training path behind the FULL gate.
+          for head in float bfp; do
+            EPOCHS=1 SEED=1 BFP_HEAD=$head BFP_WEIGHT_BLOCK=channel BFP_WIRE_BLOCK=16 BFP_MANTISSA_BITS=8 BFP_EXPONENT_BITS=8 BFP_GRADS=1 BFP_STATE=1 LOG_PATH=/tmp/wm_bfp8full_$head.json \
+              build/examples_memprofile/examples/har_classifier/train_c_har_classifier_bfp
+          done
 
       - name: Check stack watermarks (report-only)
-        run: uv run examples/_shared/check_stack_watermark.py --platform linux /tmp/wm_float.json /tmp/wm_sym8.json /tmp/wm_adamw.json /tmp/wm_finetune.json /tmp/wm_bfp.json
+        run: uv run examples/_shared/check_stack_watermark.py --platform linux /tmp/wm_float.json /tmp/wm_sym8.json /tmp/wm_adamw.json /tmp/wm_finetune.json /tmp/wm_bfp.json /tmp/wm_bfp8full_float.json /tmp/wm_bfp8full_bfp.json
 
   python-test:
     needs: gate

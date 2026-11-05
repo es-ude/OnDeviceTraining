@@ -34,6 +34,10 @@
  *   - grads / momentum: FLOAT32 by default; BFP_GRADS=1 / BFP_STATE=1 opt
  *     into per-tensor BFP storage (grouped BFP grads are rejected upstream).
  *   - optimizer: SGD-M via optimizerStep; updateMath FLOAT32 (#310).
+ *   - the full-integer path (native math, BFP wires, BFP_GRADS=1 BFP_STATE=1;
+ *     the bfp8full configs): the FULL gate checks at init that every layer
+ *     and the SGD step declare the integer kernels (fullGateLayers /
+ *     fullGateOptimizer below).
  *
  * Knobs: BFP_HEAD (required) BFP_MANTISSA_BITS BFP_EXPONENT_BITS
  * BFP_WEIGHT_BLOCK BFP_WIRE_BLOCK BFP_MATH BFP_GRADS BFP_STATE BFP_ROUNDING
@@ -49,6 +53,7 @@
 #include <time.h>
 
 #include "ArithmeticType.h"
+#include "AvgPool1d.h"
 #include "CalculateGradsSequential.h"
 #include "Common.h"
 #include "Conv1d.h"
@@ -64,16 +69,21 @@
 #include "LinearApi.h"
 #include "LossFunction.h"
 #include "LrScheduler.h"
+#include "MaxPool1d.h"
 #include "NPYLoaderApi.h"
 #include "Optimizer.h"
 #include "Pool1dApi.h"
 #include "QuantLayerApi.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
+#include "QuantizationLayer.h"
 #include "RNG.h"
+#include "Relu.h"
 #include "ReluApi.h"
 #include "Rounding.h"
+#include "Sgd.h"
 #include "SgdApi.h"
+#include "Softmax.h"
 #include "SoftmaxApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -541,6 +551,147 @@ static int stateGate(optimizer_t *optim) {
     fprintf(stdout, "STATE GATE PASS: momentum=%s (8 checks)\n",
             g_cfg.bfpState ? "BFP per-tensor" : "FLOAT32");
     return 0;
+}
+
+/* FULL gate: the integer training path (native math, BFP wires, BFP_GRADS=1,
+ * BFP_STATE=1 -- the bfp8full configs) is integer only if every layer DECLARES it:
+ * the kernels dispatch on these config fields, and a slot left FLOAT32 (or a
+ * GEMM grad under the fixed-scale mode, which keeps the float bridge) would run
+ * a float kernel silently. Checked at init on the built model and optimizer,
+ * next to the PARAM/GRAD/STATE gates (storage) and before the first-step WIRE
+ * gate (wire shapes): the input layer is the Quantization boundary; every body
+ * slot is ARITH_BFP on BFP wires except the head's, which BFP_HEAD decides
+ * (float: FLOAT32 Softmax + p - y, FLOAT32 p, BFP loss-grad wire); the SGD step
+ * takes its integer ops (lr and momentum encoded, no weight decay). */
+static bool fullIntegerPath(void) {
+    return g_inLayer && g_cfg.bfpGrads && g_cfg.bfpState;
+}
+
+typedef struct fullGateCtx {
+    int count;
+    int fails;
+} fullGateCtx_t;
+
+static void fullGateExpect(fullGateCtx_t *g, size_t layerIdx, const char *what, bool ok) {
+    if (ok) {
+        g->count++;
+        return;
+    }
+    fprintf(stderr, "FULL GATE FAIL: layer %zu %s\n", layerIdx, what);
+    g->fails++;
+}
+
+static void fullGateMath(fullGateCtx_t *g, size_t layerIdx, const char *slot, arithmetic_t math,
+                         arithmeticType_t expected) {
+    char what[96];
+    snprintf(what, sizeof(what), "%s is arithmetic %d, expected %d", slot, (int)math.type,
+             (int)expected);
+    fullGateExpect(g, layerIdx, what, math.type == expected);
+}
+
+static void fullGateWire(fullGateCtx_t *g, size_t layerIdx, const char *slot,
+                         const quantization_t *q, qtype_t expected) {
+    char what[96];
+    snprintf(what, sizeof(what), "%s is %s, expected %s", slot,
+             q == NULL ? "NULL" : quantTypeToString(q->type), quantTypeToString(expected));
+    fullGateExpect(g, layerIdx, what, q != NULL && q->type == expected);
+}
+
+static int fullGateReport(const fullGateCtx_t *g, const char *what) {
+    if (g->fails != 0) {
+        fprintf(stderr, "FULL GATE FAILED: %s (ok=%d fails=%d)\n", what, g->count, g->fails);
+        return 2;
+    }
+    fprintf(stdout, "FULL GATE PASS: %s, head=%s (%d checks)\n", what,
+            (g_cfg.head == BFP_HEAD_BFP) ? "bfp" : "float", g->count);
+    fflush(stdout);
+    return 0;
+}
+
+/* The layers, right after the model is built (before any data loads). */
+static int fullGateLayers(layer_t **model) {
+    fullGateCtx_t g = {.count = 0, .fails = 0};
+    const arithmeticType_t headMath = (g_cfg.head == BFP_HEAD_BFP) ? ARITH_BFP : ARITH_FLOAT32;
+    const qtype_t headOut = (g_cfg.head == BFP_HEAD_BFP) ? BFP : FLOAT32;
+    fullGateExpect(&g, 0, "is not the input Quantization layer", model[0]->type == QUANTIZATION);
+    if (model[0]->type == QUANTIZATION) {
+        fullGateWire(&g, 0, "outputQ", model[0]->config->quantization->outputQ, BFP);
+    }
+    for (size_t i = 1; i < g_modelSize; i++) {
+        layer_t *l = model[i];
+        switch (l->type) {
+        case CONV1D:
+        case LINEAR: {
+            bool conv = (l->type == CONV1D);
+            conv1dConfig_t *c = conv ? l->config->conv1d : NULL;
+            linearConfig_t *f = conv ? NULL : l->config->linear;
+            fullGateMath(&g, i, "forwardMath", conv ? c->forwardMath : f->forwardMath, ARITH_BFP);
+            fullGateMath(&g, i, "weightGradMath", conv ? c->weightGradMath : f->weightGradMath,
+                         ARITH_BFP);
+            fullGateMath(&g, i, "biasGradMath", conv ? c->biasGradMath : f->biasGradMath,
+                         ARITH_BFP);
+            fullGateMath(&g, i, "propLossMath", conv ? c->propLossMath : f->propLossMath,
+                         ARITH_BFP);
+            fullGateExpect(&g, i, "weightGradAccMode is not OUT_ACC_DYNAMIC_RESCALE",
+                           (conv ? c->weightGradAccMode : f->weightGradAccMode) ==
+                               OUT_ACC_DYNAMIC_RESCALE);
+            fullGateExpect(&g, i, "biasGradAccMode is not OUT_ACC_DYNAMIC_RESCALE",
+                           (conv ? c->biasGradAccMode : f->biasGradAccMode) ==
+                               OUT_ACC_DYNAMIC_RESCALE);
+            fullGateWire(&g, i, "outputQ", conv ? c->outputQ : f->outputQ, BFP);
+            fullGateWire(&g, i, "propLossQ", conv ? c->propLossQ : f->propLossQ, BFP);
+            break;
+        }
+        case RELU:
+            fullGateMath(&g, i, "forwardMath", l->config->relu->forwardMath, ARITH_BFP);
+            fullGateMath(&g, i, "propLossMath", l->config->relu->propLossMath, ARITH_BFP);
+            fullGateWire(&g, i, "outputQ", l->config->relu->outputQ, BFP);
+            fullGateWire(&g, i, "propLossQ", l->config->relu->propLossQ, BFP);
+            break;
+        case MAXPOOL1D:
+            fullGateMath(&g, i, "forwardMath", l->config->maxPool1d->forwardMath, ARITH_BFP);
+            fullGateMath(&g, i, "propLossMath", l->config->maxPool1d->propLossMath, ARITH_BFP);
+            fullGateWire(&g, i, "outputQ", l->config->maxPool1d->outputQ, BFP);
+            fullGateWire(&g, i, "propLossQ", l->config->maxPool1d->propLossQ, BFP);
+            break;
+        case AVGPOOL1D:
+            fullGateMath(&g, i, "forwardMath", l->config->avgPool1d->forwardMath, ARITH_BFP);
+            fullGateMath(&g, i, "propLossMath", l->config->avgPool1d->propLossMath, ARITH_BFP);
+            fullGateWire(&g, i, "outputQ", l->config->avgPool1d->outputQ, BFP);
+            fullGateWire(&g, i, "propLossQ", l->config->avgPool1d->propLossQ, BFP);
+            break;
+        case FLATTEN: /* no config: payload and exponents pass through */
+            break;
+        case SOFTMAX:
+            fullGateExpect(&g, i, "the Softmax is not the last layer", i == g_modelSize - 1);
+            fullGateMath(&g, i, "forwardMath (head)", l->config->softmax->forwardMath, headMath);
+            fullGateMath(&g, i, "propLossMath (head)", l->config->softmax->propLossMath, headMath);
+            fullGateWire(&g, i, "outputQ (head)", l->config->softmax->outputQ, headOut);
+            fullGateWire(&g, i, "propLossQ (loss-grad wire)", l->config->softmax->propLossQ, BFP);
+            break;
+        default:
+            fullGateExpect(&g, i, "has a layer type the integer path does not know", false);
+            break;
+        }
+    }
+    return fullGateReport(&g,
+                          "integer forward + backward (input layer, every layer's math + wires, "
+                          "GEMM grad accumulate mode)");
+}
+
+/* The optimizer, right after its creation: the SGD step takes its integer ops. */
+static int fullGateOptimizer(optimizer_t *optim) {
+    fullGateCtx_t g = {.count = 0, .fails = 0};
+    sgd_t *sgd = (optim->type == SGD_M) ? optim->impl->sgd : NULL;
+    fullGateExpect(&g, g_modelSize, "optimizer is not SGD-M", sgd != NULL);
+    if (sgd != NULL) {
+        fullGateExpect(&g, g_modelSize, "SGD lr has no integer encoding",
+                       sgd->learningRateIntValid);
+        fullGateExpect(&g, g_modelSize, "SGD momentum has no integer encoding",
+                       !sgd->momentumIsZero && sgd->momentumIntValid);
+        fullGateExpect(&g, g_modelSize, "SGD weight decay is nonzero", !sgd->weightDecayIsNonzero);
+    }
+    return fullGateReport(&g, "integer SGD step (lr + momentum encoded, no weight decay)");
 }
 
 typedef struct groupLogInfo {
@@ -1024,6 +1175,9 @@ int main(void) {
     fprintf(stdout, "GATES PASS: weights+bias=BFP m%u/e%u grads=%s (8 param + 8 grad checks)\n",
             g_cfg.mantissaBits, g_cfg.exponentBits, g_cfg.bfpGrads ? "BFP per-tensor" : "FLOAT32");
     fflush(stdout);
+    if (fullIntegerPath() && fullGateLayers(model) != 0) {
+        return 2;
+    }
 
     dataLoader_t *trainLoader = dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
                                                /*shuffle*/ true, /*dropLast*/ true);
@@ -1069,6 +1223,9 @@ int main(void) {
     size_t markAfterOpt = memProfileMark(); /* optstate_b = delta */
 #endif
     if (stateGate(sgd) != 0) {
+        return 2;
+    }
+    if (fullIntegerPath() && fullGateOptimizer(sgd) != 0) {
         return 2;
     }
     g_optim = sgd;

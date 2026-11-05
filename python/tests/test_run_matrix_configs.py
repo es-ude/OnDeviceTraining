@@ -32,6 +32,21 @@ def test_bfp_names_encode_every_knob_and_round_trip():
         assert run_matrix.bfp_config_name(env) == name
 
 
+def test_bfp8full_aliases_pin_the_full_integer_path_with_an_explicit_head():
+    """bfp8full = bfp8 (m8 e8, per-channel weights, ab16, native, sr) + BFP grads
+    + BFP momentum. The head stays an explicit choice: one alias per BFP_HEAD
+    value, no bare `bfp8full`."""
+    assert "bfp8full" not in run_matrix.CONFIGS
+    bfp8 = {"BFP_WEIGHT_BLOCK": "channel", "BFP_WIRE_BLOCK": "16", "BFP_MANTISSA_BITS": "8",
+            "BFP_EXPONENT_BITS": "8", "BFP_MATH": "native", "BFP_GRADS": "1",
+            "BFP_STATE": "1", "BFP_ROUNDING": "sr", "LR_SCHEDULE": "none"}
+    for alias, head in (("bfp8full_hflt", "float"), ("bfp8full_hbfp", "bfp")):
+        binary, env = run_matrix.CONFIGS[alias]
+        assert binary == "train_c_har_classifier_bfp"
+        assert set(env) == set(BFP_KNOBS), alias
+        assert env == {**bfp8, "BFP_HEAD": head}, alias
+
+
 def test_legacy_names_are_untouched():
     for legacy in ("float", "sym8", "sym8det", "sym4g32", "asym6pc", "adamw"):
         assert legacy in run_matrix.CONFIGS

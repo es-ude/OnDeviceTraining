@@ -1,0 +1,46 @@
+# The HAR classifier's WHOLE training step on the integer path (bfp8full:
+# examples/har_classifier/train_c_bfp.c with BFP wires, native math,
+# BFP_GRADS=1, BFP_STATE=1), both model heads: the forward and the backward
+# phase sets, plus the step's own driver -- the epoch and batch loops, the
+# calculate-grads interpreter, the loss value, the mean scale, the optimizer
+# step and the grad reset, and the step / update / call RNG keys. The --strict
+# gate of the full path. Format as in har_forward_roots.txt; `include` pulls a
+# phase file in, a root listed twice is checked once.
+#
+# What stays float (allowlist.txt, each entry scoped to its root):
+#   - the loss island of the float head (BFP_HEAD=float): the FLOAT32 Softmax
+#     forward, float p - y and ONE float -> BFP conversion onto the loss-grad
+#     wire (softmaxForwardKernel, crossEntropySoftmaxBackwardFakeQuant/Float);
+#   - the loss VALUE on both heads (monitoring, off the gradient path): its
+#     float core (crossEntropyForwardFloat) and the loop's loss sums and means;
+#   - the input boundary: the input Quantization layer (float samples -> BFP)
+#     and the loss-facing dequant of p for the loss value.
+# Not in the arm objects, so outside the census: the trainer's dataset (float
+# samples, float one-hot labels the integer p - y reads as 0/1) and the
+# evaluation (argmax on the head output).
+include har_forward_roots.txt
+include har_backward_roots.txt
+#
+# The step's driver, reached by direct calls from trainingRun's epoch loop. The
+# loops are `self` roots: their callees span the non-BFP arms (the walked mean
+# scale reaches the float-grad helper; trainingBatchDefault's m > 1 stacked
+# path, out of line, never runs at HAR's micro-batch 1); the dispatchers they
+# call are their own roots (scaleOptimizerGradientsMean self, the CE roots).
+TrainingEpochDefault.c      trainingEpochDefault      self
+TrainingBatchDefault.c      trainingBatchDefault      self
+# The calculate-grads interpreter (walked): the remat scheduler built per call,
+# its checker, the layer-exec keys; the layers and the loss are reached through
+# vtables (their roots are above).
+CalculateGradsSequential.c  calculateGradsSequential
+# The loss VALUE (CrossEntropy's forward through the loss vtable): the dispatch
+# and its dequantizing arm are walked, the float core is the island.
+CrossEntropy.c              crossEntropyForward
+# The optimizer step entry (its vtable call is Sgd.c:sgdStepM above) and the
+# grad reset (SGD-M's vtable zero).
+Optimizer.c                 optimizerStep
+Optimizer.c                 optimizerZeroGrad
+# The RNG keys of a step: per step, per update, per call (sample).
+TrainingRng.c               trainingRngStepKey
+TrainingRng.c               trainingRngUpdateKey
+TrainingRng.c               trainingRngAdvance
+TrainingRng.c               trainingCallForIndex

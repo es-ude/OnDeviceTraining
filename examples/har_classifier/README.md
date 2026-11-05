@@ -436,6 +436,23 @@ four GEMM math slots to FLOAT32 (the head is `BFP_HEAD`'s) while Relu/pools keep
 — it is the GEMM fake-quant reference curve, not a whole-model fake-quant twin (the pools'
 FLOAT32 arms reject packed wires). `g1` / `g1s1` store grads / momentum as per-tensor BFP.
 
+**The full-integer path (`bfp8full`).** `bfp8full_hflt` and `bfp8full_hbfp` are bfp8 (m8 e8,
+per-channel weights, ab16, native, sr) with `BFP_GRADS=1 BFP_STATE=1`: forward, backward,
+grad accumulation, mean scale, momentum store and parameter update all run the integer BFP
+kernels. There is no bare `bfp8full`: the head stays `BFP_HEAD`'s (one alias per value).
+On this path (native math, BFP wires, `BFP_GRADS=1`, `BFP_STATE=1`, whatever the widths) the
+trainer adds the FULL gate at init: every layer's math slot is `ARITH_BFP`, every wire BFP,
+both GEMM grads under `OUT_ACC_DYNAMIC_RESCALE`, the head as `BFP_HEAD` declares it, and the
+SGD step takes its integer ops (`FULL GATE PASS` twice, or exit 2 before any data loads).
+What stays float: the float head's loss island, the loss value (logging), the input layer's
+float samples and the float one-hot labels. The M0+ census of the whole step is
+`tools/bfp-census/har_train_step_roots.txt` (`arithmetic-bfp.md` §15.8).
+
+```
+uv run examples/har_classifier/run_matrix.py --build-subdir examples \
+    --configs bfp8full_hflt bfp8full_hbfp --seeds 1 2 --epochs 2 --jobs 4
+```
+
 **Resolved shapes** (from the logs' `groups_resolved` / `wires_resolved`):
 
 | weights | wb8 | wb32 | pc | t |

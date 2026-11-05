@@ -112,6 +112,23 @@ def read_pairs(path):
     return out
 
 
+def read_roots(path, stack=()):
+    """Root lines of a roots file, `include <file>` lines expanded in place
+    (relative to the including file); a root line seen before is dropped, so a
+    union of phase files lists each root once."""
+    if path.resolve() in stack:
+        sys.exit(f"census: include cycle at {path}")
+    out, seen = [], set()
+    for parts in read_pairs(path):
+        lines = (read_roots(path.parent / parts[1], stack + (path.resolve(),))
+                 if parts[0] == "include" and len(parts) == 2 else [parts])
+        for line in lines:
+            if tuple(line) not in seen:
+                seen.add(tuple(line))
+                out.append(line)
+    return out
+
+
 def parse_object(objdump, obj):
     """Return {function: [callee symbols]} for one object."""
     text = subprocess.run([objdump, "-dr", str(obj)], capture_output=True, text=True, check=True).stdout
@@ -241,6 +258,7 @@ def main():
     ap.add_argument("--self-test", action="store_true", help="check the symbol classifier and exit")
     ap.add_argument("--roots", default=str(HERE / "har_forward_roots.txt"),
                     help="roots file (default: the HAR forward gate set; "
+                         "har_train_step_roots.txt = the whole HAR training step; "
                          "forward_roots.txt = every BFP forward kernel)")
     ap.add_argument("--allow", default=str(HERE / "allowlist.txt"))
     args = ap.parse_args()
@@ -274,7 +292,7 @@ def main():
     allow = read_allow(Path(args.allow))
 
     rows, strict_fail, stale_all = [], False, []
-    for parts in read_pairs(Path(args.roots)):
+    for parts in read_roots(Path(args.roots)):
         src, name = parts[0], parts[1]
         self_only = parts[2:] == ["self"]
         if parts[2:] and not self_only:

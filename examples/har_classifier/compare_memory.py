@@ -80,6 +80,8 @@ CONFIG_ORDER = [
     "bfp_wb32_ab16_m6_e8_xfq_g0_s0_rsr_lconst_hbfp",
     "bfp_wb32_ab16_m6_e8_xnat_g1_s0_rsr_lconst_hbfp",
     "bfp_wb32_ab16_m6_e8_xnat_g1_s1_rsr_lconst_hbfp",
+    # The full-integer training path, one alias per head (run_matrix._BFP8FULL_CONFIGS).
+    "bfp8full_hflt", "bfp8full_hbfp",
 ]
 
 # Analytic MCU categories, in report order. mcu_total_b is their sum.

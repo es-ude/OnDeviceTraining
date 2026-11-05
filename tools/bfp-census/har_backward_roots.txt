@@ -1,13 +1,13 @@
 # The HAR classifier's integer BFP backward (examples/har_classifier/train_c_bfp.c,
-# BFP wires, native math), grown one path at a time. Today: the Conv1d dx, and the
-# Conv1d weightGrad / biasGrad into BFP grad storage (BFP_GRADS=1).
+# BFP wires, native math), grown one path at a time. Today: the Conv1d and Linear
+# dx, and their weightGrad / biasGrad into BFP grad storage (BFP_GRADS=1).
 #   <source file> <function base name>         walk the root and everything it calls
 #   <source file> <function base name> self    the function's OWN call sites only
 # Same reading as har_forward_roots.txt: the kernels are reached through
 # executeOp's function pointer and the conversion cells through conversionMatrix,
 # so each is its own root; the dispatchers are `self` roots. The one float route
 # a self root cannot see on this path -- staging a FLOAT32-stored loss gradient --
-# is unreachable under BFP wires: every dx wire the Conv1d dx reads is BFP.
+# is unreachable under BFP wires: every dx wire the Conv1d / Linear dx reads is BFP.
 # Not yet here (still float, later steps): every other layer's backward.
 #
 # The funnel (prologue, raw setup, epilogue dispatch) and the conversion entry:
@@ -30,3 +30,11 @@ Conv1d.c            conv1dCalcBiasGradsBfp   self
 Conv1d.c            weightGradKernelBfpRaw
 Conv1d.c            biasGradKernelBfpRaw
 TensorConversion.c  accumulateBfpRawIntoBfpRescale
+# Linear dx / weightGrad / biasGrad: the dispatch (self; it picks the integer grad
+# kernels only for a BFP grad under DYNAMIC_RESCALE, every ARITH_BFP dx is integer),
+# then the kernel adapters (each walks its core: matmulBfpRawTensors, the bias fold
+# and its raw emit). The engine and the re-block are the roots above.
+Linear.c            linearBackward           self
+Linear.c            propLossKernelBfp
+Linear.c            weightGradKernelBfpRaw
+Linear.c            biasGradKernelBfpRaw

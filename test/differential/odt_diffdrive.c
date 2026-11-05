@@ -35,10 +35,11 @@
  *                                    = the BFP target: widths, groupSize)
  *
  * BFP (step 3, spec.arith.type "BFP" or "FLOAT32" over BFP storage):
- *   linear  kernel/dx,weightGrad  linearCalcPropLossBfp / linearCalcWeightGradsBfp
+ *   linear  kernel/dx,weightGrad  linearCalcPropLossBfp (integer BFP_RAW out) /
+ *                            linearCalcWeightGradsBfp
  *                            (+ linearCalcBiasGradsBfp) on the funnel's
  *                            UNPACKED-BFP scratch form (int32 codes under a
- *                            live bfpQConfig_t); raw FLOAT32 out
+ *                            live bfpQConfig_t); raw FLOAT32 out for the grads
  *   linear  kernel/forward   linearForwardBfpRaw, same operand form; integer
  *                            BFP_RAW out, as conv1d below
  *   conv1d  kernel/forward   conv1dKernelBfpRaw, same operand form; the output
@@ -56,7 +57,8 @@
  *                            grads ARE the kernels' raw output); conv1d also
  *                            spec.gradStorage "BFP" (spec.grad, per tensor,
  *                            HALF_AWAY) and spec.calls repeated backwards into
- *                            the same grads (the integer accumulate)
+ *                            the same grads (the integer accumulate); linear
+ *                            the same (section 14)
  *   A BFP operand spec carries the int32 CODES (.npy) plus mantissaBits,
  *   exponentBits, groupSize and the stored exponents; the kernel tier gets
  *   them as scratch, the layer tier as a packed tensor (code-domain pack via
@@ -1136,8 +1138,7 @@ static tensor_t *makeBfpRawWire(size_t ndim, const size_t *dims, const jsonNode_
     const jsonNode_t *o = jsonRequireObject(spec, "output", "spec");
     const char *dtype = jsonRequireString(o, "dtype", "spec.output");
     if (strcmp(dtype, "BFP_RAW") != 0) {
-        failf("spec.output.dtype must be BFP_RAW for a kernel-tier integer forward (got %s)",
-              dtype);
+        failf("spec.output.dtype must be BFP_RAW for a kernel-tier integer kernel (got %s)", dtype);
     }
     size_t n = 1;
     for (size_t i = 0; i < ndim; i++) {
@@ -1278,12 +1279,12 @@ static void runConv1dLayerForward(const runCtx_t *ctx) {
     freeQuantization(outputQ);
 }
 
-/* The grads of a conv1d layer backward: spec.gradStorage "FLOAT32" (default,
+/* The grads of a conv1d / linear layer backward: spec.gradStorage "FLOAT32" (default,
  * zeroed FLOAT32 grads = the kernels' raw output) or "BFP" (spec.grad = the
  * per-tensor BFP grad template {mantissaBits, exponentBits, rounding}; zero
  * codes; HALF_AWAY only -- the driver passes no RNG key, and an SR grad
  * accumulate has no stream). */
-static tensor_t *makeConvGrad(const runCtx_t *ctx, tensor_t *param, bool *bfpGrads) {
+static tensor_t *makeLayerGrad(const runCtx_t *ctx, tensor_t *param, bool *bfpGrads) {
     const char *gradStorage = jsonStringOr(ctx->spec, "gradStorage", "FLOAT32", "spec");
     if (strcmp(gradStorage, "FLOAT32") == 0) {
         *bfpGrads = false;
@@ -1329,9 +1330,9 @@ static void runConv1dLayerBackward(const runCtx_t *ctx) {
     }
 
     bool bfpGrads = false;
-    parameter_t *weights = parameterInit(ops.weight, makeConvGrad(ctx, ops.weight, &bfpGrads));
+    parameter_t *weights = parameterInit(ops.weight, makeLayerGrad(ctx, ops.weight, &bfpGrads));
     parameter_t *bias =
-        ops.bias != NULL ? parameterInit(ops.bias, makeConvGrad(ctx, ops.bias, &bfpGrads)) : NULL;
+        ops.bias != NULL ? parameterInit(ops.bias, makeLayerGrad(ctx, ops.bias, &bfpGrads)) : NULL;
     conv1dConfig_t cfg;
     layerConfig_t layerCfg;
     layer_t layer;
@@ -1590,7 +1591,9 @@ static void runLinearKernelForward(const runCtx_t *ctx) {
 }
 
 /* linear / kernel / dx: linearCalcPropLossSymInt32 (matmulSymInt32Tensors) /
- * linearCalcPropLossBfp: (loss [B, outF], W [outF, inF]) -> raw [B, inF]. */
+ * linearCalcPropLossBfp: (loss [B, outF], W [outF, inF]) -> raw [B, inF]
+ * (BFP: the integer BFP_RAW on the raw geometry spec.output names,
+ * arithmetic-bfp section 14). */
 static void runLinearKernelDx(const runCtx_t *ctx) {
     arithmetic_t arith = parseArithmetic(ctx->spec);
     requireKernelArith(arith, "linear/kernel/dx");
@@ -1598,7 +1601,7 @@ static void runLinearKernelDx(const runCtx_t *ctx) {
     size_t outDims[2] = {ops.input->shape->dimensions[0], ops.input->shape->dimensions[1]};
     tensor_t *out;
     if (arith.type == ARITH_BFP) {
-        out = makeFloatWire(2, outDims);
+        out = makeBfpRawWire(2, outDims, ctx->spec);
         linearCalcPropLossBfp(ops.loss, ops.weight, out);
     } else {
         out = makeRawWire(2, outDims, arith.roundingMode);
@@ -1705,33 +1708,40 @@ static void runLinearLayerForward(const runCtx_t *ctx) {
     freeQuantization(outputQ);
 }
 
-/* linear / layer / {dx, weightGrad}: ONE layerFunctions[LINEAR].backward with
- * every backward math slot = spec.arith, emitting propLoss (OUT_WRITE onto
- * spec.output, the dx wire), weightGrad and biasGrad (the ACC epilogues into
- * FLOAT32 grads -- spec.gradStorage, FLOAT32 only, the production default).
- * The Python side evaluates the output its cell's direction names; the
- * others ride along in result.json. */
+/* linear / layer / {dx, weightGrad}: spec.calls (default 1) times
+ * layerFunctions[LINEAR].backward with every backward math slot = spec.arith,
+ * emitting propLoss (OUT_WRITE onto spec.output, the dx wire) and
+ * accumulating weightGrad and biasGrad into the grads of makeLayerGrad
+ * (FLOAT32 by default; BFP grads under DYNAMIC_RESCALE for both, the integer
+ * accumulate). The Python side evaluates the output its cell's direction
+ * names; the others ride along in result.json. */
 static void runLinearLayerBackward(const runCtx_t *ctx) {
     arithmetic_t arith = parseArithmetic(ctx->spec);
-    const char *gradStorage = jsonStringOr(ctx->spec, "gradStorage", "FLOAT32", "spec");
-    if (strcmp(gradStorage, "FLOAT32") != 0) {
-        failf("spec.gradStorage \"%s\": only FLOAT32 grad storage is implemented", gradStorage);
-    }
     linearOperands_t ops = loadLinearOperands(ctx, true, false, arith.type);
     size_t dxDims[2] = {ops.input->shape->dimensions[0], ops.input->shape->dimensions[1]};
     quantization_t *propLossQ = makeQuantization(jsonRequireObject(ctx->spec, "output", "spec"),
                                                  "spec.output", dxDims[0] * dxDims[1]);
+    size_t calls = jsonSizeOr(ctx->spec, "calls", 1, "spec");
+    if (calls < 1 || calls > 64) {
+        failf("spec.calls must be in [1, 64]");
+    }
 
-    parameter_t *weights = parameterInit(ops.weight, gradInitFloat(ops.weight, NULL));
+    bool bfpGrads = false;
+    parameter_t *weights = parameterInit(ops.weight, makeLayerGrad(ctx, ops.weight, &bfpGrads));
     parameter_t *bias =
-        ops.bias != NULL ? parameterInit(ops.bias, gradInitFloat(ops.bias, NULL)) : NULL;
+        ops.bias != NULL ? parameterInit(ops.bias, makeLayerGrad(ctx, ops.bias, &bfpGrads)) : NULL;
     linearConfig_t cfg;
     layerConfig_t layerCfg;
     layer_t layer;
     wireLinearLayer(&layer, &layerCfg, &cfg, weights, bias, arith, propLossQ, propLossQ);
+    if (bfpGrads) {
+        cfg.biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
+    }
 
     tensor_t *propLoss = makeTensor(2, dxDims, getQLike(propLossQ));
-    layerFunctions[LINEAR].backward(&layer, ops.input, ops.loss, propLoss, NULL);
+    for (size_t c = 0; c < calls; c++) {
+        layerFunctions[LINEAR].backward(&layer, ops.input, ops.loss, propLoss, NULL);
+    }
     addOutput("propLoss", propLoss);
     /* The grads move to the output registry (which frees them); detach them
      * from the parameters so freeParameter releases only the params. */

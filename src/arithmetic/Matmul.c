@@ -780,7 +780,7 @@ void matmulBfpRawTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
         exit(1);
     }
     if (outputTensor->quantization->type != BFP_RAW) {
-        PRINT_ERROR("matmulBfpRawTensors: output must be BFP_RAW (the integer forward raw)");
+        PRINT_ERROR("matmulBfpRawTensors: output must be BFP_RAW (the integer GEMM raw)");
         exit(1);
     }
 

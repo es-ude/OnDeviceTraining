@@ -701,7 +701,9 @@ checkpointing, limitations, literature).
   mode, 2026-11-05), and so are its `weightGrad` / `biasGrad` into BFP grad storage
   under `OUT_ACC_DYNAMIC_RESCALE` (a `BFP_RAW` with a data-derived exponent,
   accumulated by the integer rescale engine, `BFP_RAW_BACKWARD_ACC`, 2026-11-05;
-  FLOAT32 grads and the fixed grid keep the float path). BFP grad and
+  FLOAT32 grads and the fixed grid keep the float path). Linear's `dx`, `weightGrad`
+  and `biasGrad` follow the same contracts on its GEMM walk (`matmulBfpRawTensors`,
+  2026-11-05). BFP grad and
   optimizer-state storage (`gradInit`, `SgdApi`/`AdamWApi` momentum/moment
   cloning, PPCA replay state) is a **per-tensor-only** knob — a grouped BFP
   template is rejected at every one of those call sites ("per-tensor only, #300

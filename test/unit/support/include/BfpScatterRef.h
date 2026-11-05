@@ -2,10 +2,11 @@
 #define ODT_TEST_BFP_SCATTER_REF_H
 
 /*
- * Test-side int64 references for the integer BFP Conv1d dx / weightGrad
- * (test-only). Written from the definition, not from the kernels: each
- * destination enumerates its own contributors (an output-centric walk, while
- * the kernels scatter), sums in int64 and reports whether the sum fits int32.
+ * Test-side int64 references for the integer BFP Conv1d dx / weightGrad /
+ * biasGrad, the Linear backward GEMM and the dx wire re-block (test-only). Written from the
+ * definition, not from the kernels: each destination enumerates its own contributors (an
+ * output-centric walk, while the kernels scatter), sums in int64 and reports whether the sum fits
+ * int32.
  *
  * Definition: every destination row group R (dx: one (batch, conv group);
  * weightGrad: one output channel) has E_top(R) >= every product exponent that
@@ -23,6 +24,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "RNG.h"
 #include "unity.h"
 
 typedef struct bfpRefOperand {
@@ -358,6 +360,146 @@ static inline void bfpRefRawFromRows(const int64_t *sum, const int *eAcc, size_t
             }
             TEST_ASSERT_TRUE(r <= INT32_MAX);
             mant[i] = (int32_t)(sum[i] < 0 ? -r : r);
+        }
+    }
+}
+
+/* Linear backward GEMM, the integer fold of arithmetic-bfp.md section 13
+ * along the Linear walk (output-major, reduction inner, both operands
+ * group-tracked): out[r][c] = sum over i of A(r, i) * B(i, c).
+ *   dx:         A = loss [batch, outF] (r = batch row, i = outF),
+ *               B = W stored [outF, inF]; out [batch, inF], k = outF.
+ *   weightGrad: A = loss^T (r = outF, i = batch), B = x [batch, inF];
+ *               out [outF, inF], k = batch.
+ * E_top of output (r, c) = rowTop(r) + colTop(c): the max exponent over the
+ * line's own elements where the reduction runs along the operand's
+ * physically innermost axis (the dx loss rows), else the operand-wide max
+ * (the dx weight columns and both weightGrad operands). E_acc of a raw target
+ * group (rawGroupSize elements, 0 = whole output) = max E_top over its
+ * outputs + g, g the guard over N = k products. A segment = consecutive
+ * reduction steps with the same (A group, B group), closed early after
+ * INT32_MAX >> (ma + mb - 2) products; its exact int64 partial enters as
+ * partial * 2^-(E_acc - E_a - E_b), half away from zero. mant = the sums,
+ * rawE = E_acc per raw group. */
+typedef enum bfpRefLinDir { BFP_REF_LIN_DX, BFP_REF_LIN_WEIGHT_GRAD } bfpRefLinDir_t;
+
+static inline void bfpRefLinearBackwardRaw(bfpRefLinDir_t dir, size_t batch, size_t inF,
+                                           size_t outF, const bfpRefOperand_t *loss,
+                                           const bfpRefOperand_t *other, size_t rawGroupSize,
+                                           int32_t *mant, int16_t *rawE, bfpRefStats_t *st) {
+    bool dx = dir == BFP_REF_LIN_DX;
+    TEST_ASSERT_TRUE(batch > 0 && outF > 0); /* a reduction with terms */
+    size_t rows = dx ? batch : outF;
+    size_t cols = inF;
+    size_t k = dx ? outF : batch;
+    size_t nOut = rows * cols;
+    size_t gsz = rawGroupSize == 0 ? nOut : rawGroupSize;
+    int g = bfpRefGuard(k, loss->m, other->m);
+    unsigned shift = (unsigned)loss->m + other->m - 2u;
+    int64_t limit = shift >= 31u ? 1 : (int64_t)(INT32_MAX >> shift);
+    int lossAll = bfpRefMaxExp(loss, 0, batch * outF);
+    int colTop = bfpRefMaxExp(other, 0, (dx ? outF : batch) * inF);
+    for (size_t t = 0; gsz > 0 && t < nOut / gsz; t++) {
+        int top = INT_MIN;
+        for (size_t o = t * gsz; o < (t + 1) * gsz; o++) {
+            size_t r = o / cols;
+            int rowTop = dx ? bfpRefMaxExp(loss, r * outF, outF) : lossAll;
+            top = rowTop + colTop > top ? rowTop + colTop : top;
+        }
+        rawE[t] = (int16_t)(top + g);
+    }
+    for (size_t o = 0; o < nOut; o++) {
+        size_t r = o / cols;
+        size_t c = o % cols;
+        int eAcc = rawE[o / gsz];
+        int64_t acc = 0;
+        int64_t partial = 0;
+        int64_t count = 0;
+        size_t curA = SIZE_MAX;
+        size_t curB = SIZE_MAX;
+        int curE = 0;
+        for (size_t i = 0; i < k; i++) {
+            size_t ia = dx ? r * outF + i : i * outF + r;
+            size_t ib = i * inF + c;
+            size_t ga = loss->groupSize == 0 ? 0 : ia / loss->groupSize;
+            size_t gb = other->groupSize == 0 ? 0 : ib / other->groupSize;
+            if (curA != SIZE_MAX && (ga != curA || gb != curB || count == limit)) {
+                acc += bfpRefAlign(partial, eAcc - curE, st);
+                partial = 0;
+                count = 0;
+            }
+            curA = ga;
+            curB = gb;
+            curE = bfpRefExp(loss, ia) + bfpRefExp(other, ib);
+            partial += (int64_t)loss->codes[ia] * (int64_t)other->codes[ib];
+            count++;
+            if (partial > INT32_MAX || partial < INT32_MIN) {
+                st->fitsInt32 = false;
+            }
+        }
+        if (curA != SIZE_MAX) {
+            acc += bfpRefAlign(partial, eAcc - curE, st);
+        }
+        if (acc > INT32_MAX || acc < INT32_MIN) {
+            st->fitsInt32 = false;
+        }
+        int64_t mag = acc < 0 ? -acc : acc;
+        st->absMaxSum = mag > st->absMaxSum ? mag : st->absMaxSum;
+        mant[o] = (int32_t)acc;
+    }
+}
+
+/* Section 13's re-block of a raw (mant, rawE per group of gsz, 0 = all n)
+ * into m-bit codes and biased stored exponents (stored exponent = the
+ * smallest E with absmax <= qMax 2^E, by search, not by bit length); `rs`
+ * NULL = HALF_AWAY, else SR with one draw per element in element order (k
+ * outside [1, 31]: exact or flushed, the draw still consumed). */
+static inline void bfpRefReblockRaw(const int32_t *mant, const int16_t *rawE, size_t n, size_t gsz,
+                                    uint8_t m, uint8_t e, rngStream_t *rs, int32_t *codes,
+                                    uint8_t *stored) {
+    int bias = (1 << (e - 1)) - 1;
+    int cap = (1 << e) - 1;
+    cap = cap > bias + 127 ? bias + 127 : cap;
+    int64_t qMax = ((int64_t)1 << (m - 1)) - 1;
+    int64_t negCap = (int64_t)1 << (m - 1);
+    size_t gs = gsz == 0 ? n : gsz;
+    for (size_t g = 0; g * gs < n; g++) {
+        int64_t absMax = 0;
+        for (size_t i = g * gs; i < (g + 1) * gs; i++) {
+            int64_t a = mant[i] < 0 ? -(int64_t)mant[i] : (int64_t)mant[i];
+            absMax = a > absMax ? a : absMax;
+        }
+        int st = bias;
+        if (absMax != 0) {
+            int s = -31; /* absMax < 2^32: absMax << 31 stays below 2^63 */
+            while (!(s >= 0 ? absMax <= (qMax << s) : (absMax << -s) <= qMax)) {
+                s++;
+            }
+            st = rawE[g] + s + bias;
+            st = st < 0 ? 0 : (st > cap ? cap : st);
+        }
+        stored[g] = (uint8_t)st;
+        int k = st - bias - rawE[g];
+        for (size_t i = g * gs; i < (g + 1) * gs; i++) {
+            uint32_t u = rs != NULL ? rngNextU32(rs) : 0u;
+            bool neg = mant[i] < 0;
+            int64_t mag = neg ? -(int64_t)mant[i] : (int64_t)mant[i];
+            int64_t t;
+            if (k <= 0) {
+                t = -k >= 40 ? (mag != 0 ? INT64_MAX : 0) : mag << -k;
+            } else if (k >= 32) {
+                t = 0;
+            } else {
+                t = mag >> k;
+                int64_t rem = mag & (((int64_t)1 << k) - 1);
+                if (rs != NULL) {
+                    t += (int64_t)(u >> (32 - k)) < rem;
+                } else {
+                    t += rem >= ((int64_t)1 << (k - 1));
+                }
+            }
+            int64_t c = neg ? (t > negCap ? negCap : t) : (t > qMax ? qMax : t);
+            codes[i] = (int32_t)(neg ? -c : c);
         }
     }
 }

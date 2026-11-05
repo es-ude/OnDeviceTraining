@@ -3420,8 +3420,9 @@ void testConv1dBackwardBfpWeightGradMixedExponentsMatchesReference(void) {
  * The dx kernel emits the BFP_RAW (BfpScatterRef.h's bfpRefConv1dDxRaw) and
  * the OUT_WRITE epilogue re-blocks it into the BFP dx wire in integers, by
  * the OP's rounding mode, drawing (SR) from the op's RNG_TAG_OUT stream one
- * draw per element in element order. The re-block reference below is written
- * from docs/conventions/arithmetic-bfp.md section 13 (stored exponent = the
+ * draw per element in element order. The re-block reference
+ * (BfpScatterRef.h's bfpRefReblockRaw) is written from
+ * docs/conventions/arithmetic-bfp.md section 13 (stored exponent = the
  * smallest E with absmax <= qMax 2^E, by search, not by bit length). */
 
 typedef struct dxWireCase {
@@ -3433,59 +3434,6 @@ typedef struct dxWireCase {
 } dxWireCase_t;
 
 #define DX_WIRE_MAX 96
-
-/* Section 13's re-block of one raw (mant, rawE per group of gsz) into m-bit
- * codes and biased stored exponents; `rs` NULL = HALF_AWAY, else SR with one
- * draw per element in element order (k outside [1, 31]: exact or flushed,
- * the draw still consumed). */
-static void dxReblockRef(const int32_t *mant, const int16_t *rawE, size_t n, size_t gsz, uint8_t m,
-                         uint8_t e, rngStream_t *rs, int32_t *codes, uint8_t *stored) {
-    int bias = (1 << (e - 1)) - 1;
-    int cap = (1 << e) - 1;
-    cap = cap > bias + 127 ? bias + 127 : cap;
-    int64_t qMax = ((int64_t)1 << (m - 1)) - 1;
-    int64_t negCap = (int64_t)1 << (m - 1);
-    size_t gs = gsz == 0 ? n : gsz;
-    for (size_t g = 0; g * gs < n; g++) {
-        int64_t absMax = 0;
-        for (size_t i = g * gs; i < (g + 1) * gs; i++) {
-            int64_t a = mant[i] < 0 ? -(int64_t)mant[i] : (int64_t)mant[i];
-            absMax = a > absMax ? a : absMax;
-        }
-        int st = bias;
-        if (absMax != 0) {
-            int s = -31; /* absMax < 2^32: absMax << 31 stays below 2^63 */
-            while (!(s >= 0 ? absMax <= (qMax << s) : (absMax << -s) <= qMax)) {
-                s++;
-            }
-            st = rawE[g] + s + bias;
-            st = st < 0 ? 0 : (st > cap ? cap : st);
-        }
-        stored[g] = (uint8_t)st;
-        int k = st - bias - rawE[g];
-        for (size_t i = g * gs; i < (g + 1) * gs; i++) {
-            uint32_t u = rs != NULL ? rngNextU32(rs) : 0u;
-            bool neg = mant[i] < 0;
-            int64_t mag = neg ? -(int64_t)mant[i] : (int64_t)mant[i];
-            int64_t t;
-            if (k <= 0) {
-                t = -k >= 40 ? (mag != 0 ? INT64_MAX : 0) : mag << -k;
-            } else if (k >= 32) {
-                t = 0;
-            } else {
-                t = mag >> k;
-                int64_t rem = mag & (((int64_t)1 << k) - 1);
-                if (rs != NULL) {
-                    t += (int64_t)(u >> (32 - k)) < rem;
-                } else {
-                    t += rem >= ((int64_t)1 << (k - 1));
-                }
-            }
-            int64_t c = neg ? (t > negCap ? negCap : t) : (t > qMax ? qMax : t);
-            codes[i] = (int32_t)(neg ? -c : c);
-        }
-    }
-}
 
 typedef struct dxWireResult {
     int32_t codes[DX_WIRE_MAX], refCodes[DX_WIRE_MAX];
@@ -3567,8 +3515,8 @@ static void dxRunIntoBfpWire(const dxWireCase_t *c, const int32_t *gyCodes, cons
      * Conv1d's CONV1D_OP_PROP_LOSS, part of the key contract. */
     rngStream_t out = rngOpen(
         rngFold(rngFold(rngFold(exec.key, RNG_TAG_BACKWARD, 0u), RNG_TAG_OP, 3u), RNG_TAG_OUT, 0u));
-    dxReblockRef(rawMant, rawE, r->n, c->wireGroupSize, c->wireM, 8,
-                 opMode == SR_HALF_AWAY ? &out : NULL, r->refCodes, r->refStored);
+    bfpRefReblockRaw(rawMant, rawE, r->n, c->wireGroupSize, c->wireM, 8,
+                     opMode == SR_HALF_AWAY ? &out : NULL, r->refCodes, r->refStored);
 }
 
 static void dxSpreadOperands(uint32_t seed, size_t gyN, size_t gyGroups, size_t wN, size_t wGroups,

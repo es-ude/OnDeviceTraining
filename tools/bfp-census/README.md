@@ -21,8 +21,9 @@ uv run tools/bfp-census/census.py --self-test
 - `har_forward_roots.txt` (default): the HAR classifier's integer forward, the gate set.
   `forward_roots.txt`: every BFP forward kernel, including ops not yet integer (report).
   `har_backward_roots.txt`: the HAR backward paths that are integer so far (today the
-  Conv1d dx and its dx-wire re-block, and the Conv1d weightGrad / biasGrad into BFP
-  grads with their integer accumulate), gated with `--strict` like the forward; a path
+  Conv1d and Linear dx and the dx-wire re-block, and the Conv1d and Linear weightGrad /
+  biasGrad into BFP grads with their integer accumulate), gated with `--strict` like
+  the forward; a path
   joins it when it turns integer.
   Format `<source.c> <function>`: the census follows direct calls from the root, within
   the object and across objects. `<source.c> <function> self`: only the function's own

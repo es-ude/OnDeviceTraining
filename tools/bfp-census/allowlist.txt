@@ -100,3 +100,21 @@ Conv1d.c:biasGradKernelBfpRaw biasGradKernelBfpRaw __aeabi_uidiv 1
 # the scan, i.e. per chunk); the runs inside advance cursors.
 TensorConversion.c:accumulateBfpRawIntoBfpRescale accumulateBfpRawIntoBfpRescale __aeabi_uidiv 2
 TensorConversion.c:accumulateBfpRawIntoBfpRescale accumulateBfpRawIntoBfpRescale __aeabi_uidivmod 1
+
+# ---- Linear dx and weightGrad (propLossKernelBfp / weightGradKernelBfpRaw) ----
+# Both walk matmulBfpRawTensors, the forward's integer GEMM (same entries as
+# Linear.c:linearForwardKernelBfpRaw): three inlined bfpGroupAt recomputes (a, b,
+# and the bias pre-pass -- dead here, the backward passes no bias), each only when
+# an index leaves its group; calcElementIndexByIndices divides once per dimension
+# per MAC, on the FLOAT32 arm too (the shared index math).
+Linear.c:propLossKernelBfp matmulBfpRawTensors __aeabi_uidiv 3
+Linear.c:propLossKernelBfp calcElementIndexByIndices __aeabi_uidiv 1
+Linear.c:weightGradKernelBfpRaw matmulBfpRawTensors __aeabi_uidiv 3
+Linear.c:weightGradKernelBfpRaw calcElementIndexByIndices __aeabi_uidiv 1
+
+# ---- Linear biasGrad into BFP grads (biasGradKernelBfpRaw) --------------------
+# One uidivmod at entry (loss elements / and % features; per call) and one inlined
+# bfpGroupAt recompute (per loss-group change). The E_acc pre-pass and the raw
+# emit run on cursors.
+Linear.c:biasGradKernelBfpRaw linearCalcBiasGradsBfpRaw __aeabi_uidivmod 1
+Linear.c:biasGradKernelBfpRaw linearCalcBiasGradsBfpRaw __aeabi_uidiv 1

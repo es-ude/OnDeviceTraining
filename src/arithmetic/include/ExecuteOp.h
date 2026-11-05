@@ -18,15 +18,16 @@ typedef struct rngKey rngKey_t;
  * int16 exponent per TARGET group, bfpRawQConfig_t; the kernel MUST write
  * every group's exponent) instead of BFP D7's FLOAT32 raw. Each value is an
  * explicit per-op opt-in, so an op never switches raw format by accident
- * (the Linear/Softmax backward adapters share forward kernel code and leave
- * it NONE). Every value is ARITH_BFP only. Raw geometry: a BFP target's
- * {numGroups, groupSize}; a FLOAT32 target has no groups, so the raw is
- * per-tensor ({1,0}, one exponent over the whole output).
+ * (the Softmax backward adapter shares forward kernel code and leaves it
+ * NONE; Linear's set their own backward value). Every value is ARITH_BFP
+ * only. Raw geometry: a BFP target's {numGroups, groupSize}; a FLOAT32
+ * target has no groups, so the raw is per-tensor ({1,0}, one exponent over
+ * the whole output).
  *   BFP_RAW_FORWARD      the integer forward. Also the forward marker: into a
  *                        BFP target, a FLOAT32-stored operand is a wiring
  *                        error (the forward is float-free after the input
  *                        quantization layer), not a staging request.
- *   BFP_RAW_BACKWARD_DX  a backward op writing a dx wire (today: Conv1d dx).
+ *   BFP_RAW_BACKWARD_DX  a backward op writing a dx wire (Conv1d, Linear dx).
  *                        FLOAT32-stored operands keep staging, as in every
  *                        backward op.
  *   Both: OUT_WRITE only. The epilogue is the integer re-block
@@ -34,7 +35,7 @@ typedef struct rngKey rngKey_t;
  *   wire rounds by the OP's mode) or, for a FLOAT32 target, the dequant
  *   ([BFP_RAW][FLOAT32]); any other target dtype fails fast.
  *   BFP_RAW_BACKWARD_ACC a grad op accumulating into BFP grad STORAGE
- *                        (today: Conv1d weightGrad / biasGrad). OUT_ACC_
+ *                        (Conv1d, Linear weightGrad / biasGrad). OUT_ACC_
  *                        DYNAMIC_RESCALE into a BFP target only: the epilogue
  *                        is the integer engine accumulateBfpRawIntoBfpRescale
  *                        (rounds by the grad's own storage mode -- the ACC

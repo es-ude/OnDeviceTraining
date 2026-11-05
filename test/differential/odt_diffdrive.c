@@ -53,7 +53,10 @@
  *                            propLoss onto spec.output (FLOAT32 or BFP wire),
  *                            weightGrad + biasGrad into FLOAT32 grads (the
  *                            ACC epilogue is the exact float add there, so the
- *                            grads ARE the kernels' raw output)
+ *                            grads ARE the kernels' raw output); conv1d also
+ *                            spec.gradStorage "BFP" (spec.grad, per tensor,
+ *                            HALF_AWAY) and spec.calls repeated backwards into
+ *                            the same grads (the integer accumulate)
  *   A BFP operand spec carries the int32 CODES (.npy) plus mantissaBits,
  *   exponentBits, groupSize and the stored exponents; the kernel tier gets
  *   them as scratch, the layer tier as a packed tensor (code-domain pack via
@@ -1275,10 +1278,40 @@ static void runConv1dLayerForward(const runCtx_t *ctx) {
     freeQuantization(outputQ);
 }
 
-/* conv1d / layer / {dx, weightGrad}: ONE layerFunctions[CONV1D].backward
- * emitting propLoss (OUT_WRITE onto spec.output, the dx wire: FLOAT32 raw or
- * a BFP wire), weightGrad and biasGrad (ACC epilogues into zeroed FLOAT32
- * grads = the kernels' raw output). */
+/* The grads of a conv1d layer backward: spec.gradStorage "FLOAT32" (default,
+ * zeroed FLOAT32 grads = the kernels' raw output) or "BFP" (spec.grad = the
+ * per-tensor BFP grad template {mantissaBits, exponentBits, rounding}; zero
+ * codes; HALF_AWAY only -- the driver passes no RNG key, and an SR grad
+ * accumulate has no stream). */
+static tensor_t *makeConvGrad(const runCtx_t *ctx, tensor_t *param, bool *bfpGrads) {
+    const char *gradStorage = jsonStringOr(ctx->spec, "gradStorage", "FLOAT32", "spec");
+    if (strcmp(gradStorage, "FLOAT32") == 0) {
+        *bfpGrads = false;
+        return gradInitFloat(param, NULL);
+    }
+    if (strcmp(gradStorage, "BFP") != 0) {
+        failf("spec.gradStorage \"%s\": FLOAT32 | BFP", gradStorage);
+    }
+    const jsonNode_t *g = jsonRequireObject(ctx->spec, "grad", "spec");
+    bfpSpec_t bs = parseBfpSpec(g, "spec.grad", calcNumberOfElementsByTensor(param));
+    if (bs.numGroups != 1) {
+        failf("spec.grad: BFP grads are per tensor (groupSize 0)");
+    }
+    if (bs.rounding != HALF_AWAY) {
+        failf("spec.grad.rounding: HALF_AWAY only (the driver passes no RNG key)");
+    }
+    quantization_t *q = makeBfpQuantization(&bs);
+    tensor_t *grad = gradInit(param, q, NULL);
+    freeQuantization(q);
+    *bfpGrads = true;
+    return grad;
+}
+
+/* conv1d / layer / {dx, weightGrad}: spec.calls (default 1) times
+ * layerFunctions[CONV1D].backward on the same operands, emitting propLoss
+ * (OUT_WRITE onto spec.output, the dx wire: FLOAT32 raw or a BFP wire) and
+ * accumulating weightGrad and biasGrad into the grads of makeConvGrad (BFP
+ * grads under DYNAMIC_RESCALE for both, the integer accumulate). */
 static void runConv1dLayerBackward(const runCtx_t *ctx) {
     arithmetic_t arith = parseArithmetic(ctx->spec);
     kernel_t kernel;
@@ -1290,23 +1323,29 @@ static void runConv1dLayerBackward(const runCtx_t *ctx) {
     const size_t *in = ops.input->shape->dimensions;
     quantization_t *propLossQ = makeQuantization(jsonRequireObject(ctx->spec, "output", "spec"),
                                                  "spec.output", elemCount3(in[0], in[1], in[2]));
-    const char *gradStorage = jsonStringOr(ctx->spec, "gradStorage", "FLOAT32", "spec");
-    if (strcmp(gradStorage, "FLOAT32") != 0) {
-        failf("spec.gradStorage \"%s\": only FLOAT32 grad storage is implemented", gradStorage);
+    size_t calls = jsonSizeOr(ctx->spec, "calls", 1, "spec");
+    if (calls < 1 || calls > 64) {
+        failf("spec.calls must be in [1, 64]");
     }
 
-    parameter_t *weights = parameterInit(ops.weight, gradInitFloat(ops.weight, NULL));
+    bool bfpGrads = false;
+    parameter_t *weights = parameterInit(ops.weight, makeConvGrad(ctx, ops.weight, &bfpGrads));
     parameter_t *bias =
-        ops.bias != NULL ? parameterInit(ops.bias, gradInitFloat(ops.bias, NULL)) : NULL;
+        ops.bias != NULL ? parameterInit(ops.bias, makeConvGrad(ctx, ops.bias, &bfpGrads)) : NULL;
     conv1dConfig_t cfg;
     layerConfig_t layerCfg;
     layer_t layer;
     wireConv1dLayer(&layer, &layerCfg, &cfg, &kernel, weights, bias, groups, arith, propLossQ,
                     propLossQ);
+    if (bfpGrads) {
+        cfg.biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
+    }
 
     size_t dxDims[3] = {in[0], in[1], in[2]};
     tensor_t *propLoss = makeTensor(3, dxDims, getQLike(propLossQ));
-    layerFunctions[CONV1D].backward(&layer, ops.input, ops.loss, propLoss, NULL);
+    for (size_t c = 0; c < calls; c++) {
+        layerFunctions[CONV1D].backward(&layer, ops.input, ops.loss, propLoss, NULL);
+    }
     addOutput("propLoss", propLoss);
     addOutput("weightGrad", weights->grad);
     weights->grad = NULL;

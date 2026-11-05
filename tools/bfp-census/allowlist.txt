@@ -74,3 +74,29 @@ Conv1d.c:propLossKernelBfp convTranspose1dKernelBfpScatter __aeabi_uidivmod 3
 Conv1d.c:propLossKernelBfp convTranspose1dKernelBfpScatter __aeabi_uidiv 2
 # Shared window geometry via convT1dResolveGeometry (per call).
 Conv1d.c:propLossKernelBfp windowGeometry1dCalc __aeabi_uidiv 3
+
+# ---- Conv1d weightGrad into BFP grads (weightGradKernelBfpRaw) ----------------
+# The shared scatter (weightGradBfpScatter, the C4 loop, unchanged): two uidiv at
+# entry (inChannels / groups, outChannels / groups; per call), one per (batch,
+# output channel) in the E_acc pre-pass (oc / outChPerGroup), two = the inlined
+# bfpGroupAt recomputes (input, loss), one only when an index leaves its group.
+# The kernel's own: gwElems / outChannels (the row length, per call). The raw
+# emit (bfpRawEmitFromRows) runs on cursors and divides nothing.
+Conv1d.c:weightGradKernelBfpRaw weightGradBfpScatter __aeabi_uidiv 5
+Conv1d.c:weightGradKernelBfpRaw weightGradKernelBfpRaw __aeabi_uidiv 1
+# Shared window geometry (per call), tap ranges (per tap, per call) and window
+# slice (per (batch, output channel, output position) -- the FLOAT32 loop's own).
+Conv1d.c:weightGradKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
+Conv1d.c:weightGradKernelBfpRaw windowTapOutputRange1d __aeabi_ldivmod 2
+Conv1d.c:weightGradKernelBfpRaw windowSlice1dAt __aeabi_ldivmod 2
+
+# ---- Conv1d biasGrad into BFP grads (biasGradKernelBfpRaw) --------------------
+# One inlined bfpGroupAt recompute (per loss-group change).
+Conv1d.c:biasGradKernelBfpRaw biasGradKernelBfpRaw __aeabi_uidiv 1
+
+# ---- Integer grad accumulate (the BFP_RAW_BACKWARD_ACC epilogue) --------------
+# Per conversion chunk (256 elements): the scan frontier (chunkEnd - 1) / gsz, and
+# in the scan its start group from / gsz and ring slot g % 257 (once per call of
+# the scan, i.e. per chunk); the runs inside advance cursors.
+TensorConversion.c:accumulateBfpRawIntoBfpRescale accumulateBfpRawIntoBfpRescale __aeabi_uidiv 2
+TensorConversion.c:accumulateBfpRawIntoBfpRescale accumulateBfpRawIntoBfpRescale __aeabi_uidivmod 1

@@ -19,24 +19,36 @@ typedef struct rngKey rngKey_t;
  * every group's exponent) instead of BFP D7's FLOAT32 raw. Each value is an
  * explicit per-op opt-in, so an op never switches raw format by accident
  * (the Linear/Softmax backward adapters share forward kernel code and leave
- * it NONE). Both values are ARITH_BFP + OUT_WRITE only: the epilogue is the
- * integer re-block (conversionMatrix[BFP_RAW][BFP], under the #282 op-
- * rounding swap, so the wire rounds by the OP's mode) or, for a FLOAT32
- * target, the dequant ([BFP_RAW][FLOAT32]). Raw geometry: a BFP target's
+ * it NONE). Every value is ARITH_BFP only. Raw geometry: a BFP target's
  * {numGroups, groupSize}; a FLOAT32 target has no groups, so the raw is
- * per-tensor ({1,0}, one exponent over the whole output). Any other target
- * dtype, any other arithmetic type, or an ACC epilogue fails fast.
+ * per-tensor ({1,0}, one exponent over the whole output).
  *   BFP_RAW_FORWARD      the integer forward. Also the forward marker: into a
  *                        BFP target, a FLOAT32-stored operand is a wiring
  *                        error (the forward is float-free after the input
  *                        quantization layer), not a staging request.
  *   BFP_RAW_BACKWARD_DX  a backward op writing a dx wire (today: Conv1d dx).
  *                        FLOAT32-stored operands keep staging, as in every
- *                        backward op. */
+ *                        backward op.
+ *   Both: OUT_WRITE only. The epilogue is the integer re-block
+ *   (conversionMatrix[BFP_RAW][BFP], under the #282 op-rounding swap, so the
+ *   wire rounds by the OP's mode) or, for a FLOAT32 target, the dequant
+ *   ([BFP_RAW][FLOAT32]); any other target dtype fails fast.
+ *   BFP_RAW_BACKWARD_ACC a grad op accumulating into BFP grad STORAGE
+ *                        (today: Conv1d weightGrad / biasGrad). OUT_ACC_
+ *                        DYNAMIC_RESCALE into a BFP target only: the epilogue
+ *                        is the integer engine accumulateBfpRawIntoBfpRescale
+ *                        (rounds by the grad's own storage mode -- the ACC
+ *                        rule below -- one draw per element in element order
+ *                        from the op's ACC(0) stream). A FLOAT32 grad and the
+ *                        fixed grid (OUT_ACC_FIXED_SCALE) are not this
+ *                        contract: the layer keeps NONE (FLOAT32 raw) there,
+ *                        and either combination here fails fast. FLOAT32-
+ *                        stored operands keep staging. */
 typedef enum bfpRawContract {
     BFP_RAW_NONE = 0,
     BFP_RAW_FORWARD,
     BFP_RAW_BACKWARD_DX,
+    BFP_RAW_BACKWARD_ACC,
 } bfpRawContract_t;
 
 /* The one conversion funnel (PR1b.2 D1, docs/conventions/arithmetic-sym.md). Every op runs:

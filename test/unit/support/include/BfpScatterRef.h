@@ -23,6 +23,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "unity.h"
+
 typedef struct bfpRefOperand {
     const int32_t *codes;
     const uint8_t *exps; /* stored (biased) exponent per group */
@@ -194,10 +196,12 @@ static inline bfpRefStats_t bfpRefConv1dDxRaw(const bfpRefGeom_t *G, const bfpRe
 }
 
 /* gw[oc, icl, k] = sum over b, t with pos = t s + k d - padLeft in [0,
- * length) of x[b, ic, pos] * gy[b, oc, t]. */
-static inline bfpRefStats_t bfpRefConv1dWeightGrad(const bfpRefGeom_t *G, const bfpRefOperand_t *x,
-                                                   const bfpRefOperand_t *gy, float *gw) {
-    bfpRefStats_t st = {.fitsInt32 = true};
+ * length) of x[b, ic, pos] * gy[b, oc, t]: the int64 sum of each element on
+ * its output channel's E_acc (sum[], eAcc[] per element; the float view
+ * bfpRefConv1dWeightGrad below, the BFP_RAW view bfpRefRawFromRows). */
+static inline void bfpRefConv1dWeightGradSums(const bfpRefGeom_t *G, const bfpRefOperand_t *x,
+                                              const bfpRefOperand_t *gy, int64_t *sumOut,
+                                              int *eAccOut, bfpRefStats_t *st) {
     size_t cinG = G->cin / G->groups;
     size_t coutG = G->cout / G->groups;
     size_t maxTaps = 0;
@@ -233,14 +237,129 @@ static inline bfpRefStats_t bfpRefConv1dWeightGrad(const bfpRefGeom_t *G, const 
                         size_t xi = (b * G->cin + ic) * G->length + (size_t)pos;
                         size_t gi = (b * G->cout + oc) * G->outLength + t;
                         int64_t p = (int64_t)x->codes[xi] * (int64_t)gy->codes[gi];
-                        sum += bfpRefAlign(p, eAcc - (bfpRefExp(x, xi) + bfpRefExp(gy, gi)), &st);
+                        sum += bfpRefAlign(p, eAcc - (bfpRefExp(x, xi) + bfpRefExp(gy, gi)), st);
                     }
                 }
-                gw[(oc * cinG + icl) * G->kernelSize + k] = bfpRefFinish(sum, eAcc, &st);
+                size_t idx = (oc * cinG + icl) * G->kernelSize + k;
+                sumOut[idx] = sum;
+                eAccOut[idx] = eAcc;
             }
         }
     }
+}
+
+static inline bfpRefStats_t bfpRefConv1dWeightGrad(const bfpRefGeom_t *G, const bfpRefOperand_t *x,
+                                                   const bfpRefOperand_t *gy, float *gw) {
+    bfpRefStats_t st = {.fitsInt32 = true};
+    size_t n = G->cout * (G->cin / G->groups) * G->kernelSize;
+    int64_t sum[n > 0 ? n : 1];
+    int eAcc[n > 0 ? n : 1];
+    bfpRefConv1dWeightGradSums(G, x, gy, sum, eAcc, &st);
+    for (size_t i = 0; i < n; i++) {
+        gw[i] = bfpRefFinish(sum[i], eAcc[i], &st);
+    }
     return st;
+}
+
+/* bias grad gb[oc] = sum over b (outer), t (inner) of gy[b, oc, t]. Walked in
+ * that order, consecutive codes of one loss group form a segment whose code
+ * sum is exact; each segment sum enters the destination as sum * 2^-(E_acc -
+ * E_group), rounded half away from zero, with E_acc = max over b of the loss
+ * row (b, oc)'s max exponent + g, g the guard of a pure SUM of batch *
+ * outLength codes (the product guard with mb = 1). */
+static inline void bfpRefConv1dBiasGradSums(const bfpRefGeom_t *G, const bfpRefOperand_t *gy,
+                                            int64_t *sumOut, int *eAccOut, bfpRefStats_t *st) {
+    int g = bfpRefGuard(G->batch * G->outLength, gy->m, 1u);
+    for (size_t oc = 0; oc < G->cout; oc++) {
+        int eTop = INT_MIN;
+        for (size_t b = 0; b < G->batch; b++) {
+            int e = bfpRefMaxExp(gy, (b * G->cout + oc) * G->outLength, G->outLength);
+            eTop = e > eTop ? e : eTop;
+        }
+        int eAcc = G->batch > 0 && G->outLength > 0 ? eTop + g : 0;
+        int64_t sum = 0;
+        int64_t seg = 0;
+        size_t segGroup = SIZE_MAX;
+        size_t segIdx = 0;
+        for (size_t b = 0; b < G->batch; b++) {
+            for (size_t t = 0; t < G->outLength; t++) {
+                size_t gi = (b * G->cout + oc) * G->outLength + t;
+                size_t grp = gy->groupSize == 0 ? 0 : gi / gy->groupSize;
+                if (grp != segGroup && segGroup != SIZE_MAX) {
+                    sum += bfpRefAlign(seg, eAcc - bfpRefExp(gy, segIdx), st);
+                    seg = 0;
+                }
+                if (grp != segGroup) {
+                    segGroup = grp;
+                    segIdx = gi;
+                }
+                seg += gy->codes[gi];
+            }
+        }
+        if (segGroup != SIZE_MAX) {
+            sum += bfpRefAlign(seg, eAcc - bfpRefExp(gy, segIdx), st);
+        }
+        if (sum > INT32_MAX || sum < INT32_MIN) {
+            st->fitsInt32 = false;
+        }
+        sumOut[oc] = sum;
+        eAccOut[oc] = eAcc;
+    }
+}
+
+static inline unsigned bfpRefBitLength64(uint64_t v) {
+    unsigned n = 0;
+    while (v != 0) {
+        n++;
+        v >>= 1;
+    }
+    return n;
+}
+
+/* A grad kernel's BFP_RAW (one exponent per raw target group of rawGroupSize
+ * elements, 0 = the whole output), from the DATA: E_t = max over the group's
+ * nonzero sums of E_acc + bitlen(|sum|), minus 31 (every re-gridded mantissa
+ * then fits int32: the top one is shifted left exactly, a lower one is below
+ * 2^30 after a half-away right shift); an all-zero group has nothing to
+ * place (its exponent is left 0). Each sum is re-gridded from its own E_acc
+ * to 2^E_t: exactly to the left, half away from zero to the right (62+
+ * binades leave 0). st->realigned counts the right shifts that dropped a
+ * fraction, st->leftShift is incremented per left-shifted nonzero sum. */
+static inline void bfpRefRawFromRows(const int64_t *sum, const int *eAcc, size_t n,
+                                     size_t rawGroupSize, int32_t *mant, int16_t *rawE,
+                                     bfpRefStats_t *st) {
+    size_t gsz = rawGroupSize == 0 ? n : rawGroupSize;
+    for (size_t t = 0; gsz > 0 && t < n / gsz; t++) {
+        int top = INT_MIN;
+        for (size_t i = t * gsz; i < (t + 1) * gsz; i++) {
+            if (sum[i] != 0) {
+                uint64_t mag = sum[i] < 0 ? 0u - (uint64_t)sum[i] : (uint64_t)sum[i];
+                int e = eAcc[i] + (int)bfpRefBitLength64(mag);
+                top = e > top ? e : top;
+            }
+        }
+        int eT = top == INT_MIN ? 0 : top - 31;
+        rawE[t] = (int16_t)eT;
+        for (size_t i = t * gsz; i < (t + 1) * gsz; i++) {
+            int64_t mag = sum[i] < 0 ? -sum[i] : sum[i];
+            int k = eT - eAcc[i];
+            int64_t r;
+            if (mag == 0) {
+                r = 0;
+            } else if (k <= 0) {
+                TEST_ASSERT_TRUE(-k <= 62);
+                r = mag << -k;
+                st->leftShift += k < 0;
+            } else {
+                r = k >= 62 ? 0 : (mag + ((int64_t)1 << (k - 1))) >> k;
+                if (k >= 62 ? mag != 0 : (r << k) != mag) {
+                    st->realigned++;
+                }
+            }
+            TEST_ASSERT_TRUE(r <= INT32_MAX);
+            mant[i] = (int32_t)(sum[i] < 0 ? -r : r);
+        }
+    }
 }
 
 #endif // ODT_TEST_BFP_SCATTER_REF_H

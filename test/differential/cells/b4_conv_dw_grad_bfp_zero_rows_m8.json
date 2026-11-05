@@ -1,0 +1,81 @@
+{
+  "name": "b4_conv_dw_grad_bfp_zero_rows_m8",
+  "description": "B4 Conv1d weightGrad + biasGrad into per-tensor m8 BFP grads, 2 calls; one loss group per (batch, channel) row, rows of channel 0 and 2 in the zero state (stored = bias, the per-row E_acc bound far above the data): the raw exponent must follow the data.",
+  "family": "bfp_gemm",
+  "op": "conv1d",
+  "direction": "weightGrad",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "geometry": {
+    "kernelSize": 4,
+    "padding": "EXPLICIT",
+    "paddingAmount": 2,
+    "stride": 2,
+    "dilation": 2
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3211,
+    "batch": 2,
+    "cin": 4,
+    "length": 12,
+    "cout": 4,
+    "kernelSize": 4,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 8,
+      "absmax": 2.0,
+      "expSpread": 1
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.25,
+      "expSpread": 0
+    },
+    "bias": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    },
+    "loss": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 5,
+      "absmax": 1e-05,
+      "expSpread": 2,
+      "zeroGroups": [
+        0,
+        2,
+        4,
+        6
+      ]
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED",
+    "biasGrad": {
+      "legA": [
+        "EXACT"
+      ],
+      "legB": "BOUNDED"
+    }
+  },
+  "grad": {
+    "m": 8,
+    "e": 8
+  },
+  "calls": 2
+}

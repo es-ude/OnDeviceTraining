@@ -482,7 +482,8 @@ silent wrong arithmetic, not a crash.
   group than its `groupSize`" argument the product guard uses. All three
   layers' `biasGrad` share this one bound
   (`linearCalcBiasGradsBfp`/`conv1dCalcBiasGradsBfp`/
-  `conv1dTransposedCalcBiasGradsBfp`).
+  `conv1dTransposedCalcBiasGradsBfp`). Into BFP grads Conv1d folds the
+  segment partials in integers instead of `ldexpf` (§14).
 - **`dx` (`propLoss`) reuses the OTHER family's own forward kernel — the D9
   gather adjoint (§6), not a dedicated backward kernel** — except Conv1d.
   Conv1d's `dx` is mathematically a Conv1dTransposed op; its
@@ -1800,7 +1801,8 @@ re-packed with float (per element `fdiv` + `roundf` / float SR, per group
 `frexpf`) — on a core without an FPU that pack alone costs more than the
 integer MACs it follows. This section records the integer replacement for the
 FORWARD path (2026-11-04). The backward keeps D7's FLOAT32 raw, except the
-Conv1d dx (§14, `BFP_RAW_BACKWARD_DX`, 2026-11-05).
+Conv1d dx (§14, `BFP_RAW_BACKWARD_DX`, 2026-11-05) and the Conv1d weightGrad /
+biasGrad into BFP grad storage (§14, `BFP_RAW_BACKWARD_ACC`, 2026-11-05).
 
 **The raw.** `qtype_t BFP_RAW` with `bfpRawQConfig_t {int16_t *exponents;
 numGroups; groupSize}` (`Quantization.h`): int32 mantissas in the tensor data
@@ -1816,7 +1818,15 @@ backward op writing a dx wire (the Conv1d dx, §14). Both are `ARITH_BFP` and
 `OUT_WRITE` only, raw geometry copied from the target (a BFP target's
 `{numGroups, groupSize}`; a FLOAT32 target has no groups, so `{1,0}` — one
 exponent over the whole output); any other target dtype, arithmetic type,
-epilogue or contract value fails fast. The explicit per-op value is the raw
+epilogue or contract value fails fast. The third value,
+`BFP_RAW_BACKWARD_ACC`, is a grad op accumulating into BFP grad STORAGE (the
+Conv1d weightGrad / biasGrad, §14): `ARITH_BFP`, `OUT_ACC_DYNAMIC_RESCALE`
+and a BFP target only (raw on the grad's geometry); the epilogue is the
+integer engine of §15 (`accumulateBfpRawIntoBfpRescale`), which rounds by
+the grad's own storage mode — the ACC rule (#282) — drawing from the op's
+`RNG_TAG_ACC` stream 0. A FLOAT32 grad or the fixed grid
+(`OUT_ACC_FIXED_SCALE`) with this value fails fast; the layer keeps
+`BFP_RAW_NONE` (the FLOAT32 raw) for both. The explicit per-op value is the raw
 contract: the Linear/Softmax backward adapters that share forward kernel
 code never switch raw format by accident, because they leave it
 `BFP_RAW_NONE`. A kernel that is given a `BFP_RAW` MUST write every group's
@@ -2058,7 +2068,8 @@ operand of an integer forward op is BFP-stored. The funnel enforces it: an
 op with `bfpRawOut` writing a BFP target fails fast on a FLOAT32-stored
 operand instead of staging it (`ExecuteOp.c`, the `ARITH_BFP` prologue).
 `bfpRawOut == BFP_RAW_FORWARD` is the forward marker (backward ops leave it
-`BFP_RAW_NONE` or set `BFP_RAW_BACKWARD_DX`, which keeps staging), and the
+`BFP_RAW_NONE` or set `BFP_RAW_BACKWARD_DX` / `BFP_RAW_BACKWARD_ACC`, which
+keep staging), and the
 target dtype is the wire marker, so the rule leaves two cases staging as
 before: FLOAT32 wires (the HAR arm A, `BFP_WIRE_BLOCK=float`: forward targets
 are FLOAT32) and every backward op. Decision 1's per-tensor staging is
@@ -2137,12 +2148,62 @@ summation order and therefore the numbers.
   positions. Where the float path was exact (`|acc| < 2^24`, `k <= 24`) the
   codes are the float re-pack's bit for bit; above `2^24` the integer form
   is the exact one (§7) and native BFP numbers change by design.
-- **weightGrad output (bridge):** the backward still stores FLOAT32 grads,
-  so each weightGrad accumulator becomes `float(acc) · 2^E_acc` in place
-  (`bfpLdexpInt32`; the cast rounds to nearest even above 2^24, §7). An
-  integer gradient store replaces this bridge.
-- **Unchanged:** biasGrad already walks like FLOAT32 (channel outer,
-  batch, position); the Conv1dTransposed forward and its weightGrad keep the
+- **weightGrad output into FLOAT32 grads (bridge), and under the fixed
+  grid:** each weightGrad accumulator becomes `float(acc) · 2^E_acc` in
+  place (`weightGradKernelBfp`, `bfpLdexpInt32`; the cast rounds to nearest
+  even above 2^24, §7), accumulated by the float ACC arms.
+- **Grad raw into BFP grads (2026-11-05, `BFP_RAW_BACKWARD_ACC`):** with a
+  BFP grad under `OUT_ACC_DYNAMIC_RESCALE` (the HAR `BFP_GRADS=1` path) the
+  layer picks `weightGradKernelBfpRaw`, which runs the same scatter
+  (`weightGradBfpScatter`, shared with the bridge kernel) and emits a
+  `BFP_RAW` on the grad's geometry (`bfpRawEmitFromRows`,
+  `BfpKernelSupport.h`); the funnel adds it to the stored grad with §15's
+  integer engine. No 8-bit temporary sits between the two reductions (the
+  in-call sum and the across-call accumulate). The raw exponent comes from
+  the DATA, not from the rows' `E_acc` bounds: per raw group `E_t` = max over
+  its nonzero sums of `E_acc + bitlen(|sum|)`, minus 31. The sum that sets
+  it has `bitlen <= 31` (the guard keeps every sum below `INT32_MAX`), so it
+  moves left by `31 − bitlen <= 30`, exactly; every other left move has a
+  lower top and fits; a right move ends below `2^30`, so the half-away lift
+  cannot reach `2^31`. Only a sum more than 31 binades below its group's top
+  loses bits (HALF_AWAY: at most `½ · 2^E_t`, i.e. `< 2^(m−33)` of the
+  grad's code step when the group's largest sum sets the grid — `2^-25` at
+  m = 8; a documented deterministic rounding before the SR, next to the
+  engine's own `2^-32` SR cutoff and the in-loop product alignment, which
+  is coarser). An all-zero group writes exponent 0 (the engine ignores the exponent
+  of an all-zero raw); zero sums are never shifted. Why not dx's max-`E_acc`
+  rule: `E_acc` is a bound, and an all-zero loss group in the zero state
+  (stored = bias, `E = 0`) or a loose N inflates a row's bound far above its
+  data; under a per-tensor grad that inflated row would re-grid every other
+  row HALF_AWAY to a few bits. Measured on HAR bfp8 `BFP_GRADS=1` (1 epoch,
+  18,000 weightGrad calls): with the max-`E_acc` rule 12.6 % of calls kept
+  fewer than 9 bits at the tensor top (a rounding at or above the 8-bit grad
+  step BEFORE the SR) and 3.6 % of the nonzero sums flushed to 0; the
+  differential cell `b4_conv_dw_grad_bfp_zero_rows_m8` shows 28 of 64 codes
+  differ. The dx raw keeps its rule (HAR dx has one `E_acc` per call; for
+  batch or conv groups > 1 the same change would apply there).
+- **biasGrad:** walks like FLOAT32 (channel outer, batch, position). Into
+  FLOAT32 grads (and under the fixed grid) it keeps its float fold
+  (`biasGradKernelBfp`). Into BFP grads under DYNAMIC_RESCALE,
+  `biasGradKernelBfpRaw` keeps the walk and the segments (consecutive codes
+  of one loss group, an exact int32 partial, `bfpValidateSumHeadroom`) and
+  folds each segment partial into an int32 destination:
+  `sum += bfpAlignPartial(partial, E_acc − E_segment)`, `E_acc` per output
+  channel = max over the batch of the loss row's max exponent + `g`, `g =
+  bfpSumFoldGuardBits(batch · outputLength, m)` (the §13 proof for a pure
+  SUM, `N · 2^(m−1)`): rounding `<= ½ · 2^E_acc` per segment, only for
+  segments more than `−g` binades below the top. Then the same raw emit
+  (rows of one sum).
+- **Grad accumulate: rounding and RNG.** The engine rounds by the grad's
+  STORAGE mode (SR for the HAR grad template, `trainingSideRounding()`), one
+  `rngNextU32` per element in flat grad order (element order of the stored
+  grad, every element on every path) from `rngFold(op key, RNG_TAG_ACC, 0)`
+  — the stream and positions the float rescale walk it replaces drew from.
+  The weightGrad and biasGrad ops have their own op keys. Fresh grads (zero
+  codes, any stored exponent) take the increment's grid; the bound and the
+  grid are re-derived on every micro-batch call; old exponents are published
+  only after their group's last read (§15).
+- **Unchanged:** the Conv1dTransposed forward and its weightGrad keep the
   gather (§6); Linear keeps its GEMM.
 
 ## 15. Integer training primitives: scalar, add-and-round, integer rescale accumulate
@@ -2188,7 +2249,8 @@ never draws `u = 0`, so in practice `F = 1` (a remainder in
 **Integer rescale accumulate** (`accumulateBfpRawIntoBfpRescale`,
 `TensorConversion.c`): BFP target `+=` BFP_RAW increment on the target's
 geometry, the integer replacement of `accumulateTensorIntoBfpRescale` for
-gradient accumulation (wired in by the backward steps). Per target group,
+gradient accumulation (wired in through `BFP_RAW_BACKWARD_ACC`, §13: today
+the Conv1d weightGrad / biasGrad, §14). Per target group,
 `E_o` the old stored exponent minus bias, `E_r` the raw exponent:
 
 1. Working grid (addition bound): `A_o`, `A_r` = actual absmax of the old

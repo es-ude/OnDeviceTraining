@@ -327,6 +327,16 @@ directly (Conv1d); `linear_grid` / `full_scale` (Linear, above); `convert`
   groupSize 9 straddling batches of far-apart loss exponents; per-tensor
   m16 (positive guard). HALF_AWAY only: the driver passes no key, and the SR
   re-block is pinned by the unit tests.
+  `b4_conv_dw_grad_bfp_*` -- Conv1d weightGrad + biasGrad into per-tensor BFP
+  grad STORAGE (spec.gradStorage "BFP", HALF_AWAY), spec.calls backwards
+  accumulating into the same grads: the integer sums (the scatter / the bias
+  segment fold, `bfp_ref.conv1d_bias_int_sums`), the data-derived raw
+  (`bfp_ref.grad_raw_from_rows`, section 14) and the exact accumulate chain
+  (`bfp_ref.accumulate_raw_into_bfp`, section 15 from its documented result)
+  predict codes and the stored exponent exactly; Leg B per call = the raw's
+  roundings + half a code of that call's grid. `..._zero_rows_m8` puts loss
+  rows in the zero state (`zeroGroups`), the case where E_acc bounds would
+  place the raw grid far above the data.
 - `b5_fq_*` -- B5, the fake-quant twin: the layer under `ARITH_FLOAT32`
   with BFP-stored weights / bias / loss (m12, grouped) against the same
   layer with every BFP operand replaced by its exact float32

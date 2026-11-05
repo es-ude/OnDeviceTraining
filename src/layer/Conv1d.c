@@ -560,24 +560,18 @@ void conv1dCalcWeightGradsSymInt32(conv1dConfig_t *cfg, tensor_t *forwardInput, 
         cfg->weights->grad);
 }
 
-/* weightGradKernelFloat's loop with an int32 raw accumulator per gw element.
- * Every product x * gy enters as product * 2^-(E_acc - Ex - Egy)
- * (bfpAlignPartial: exact left shift or half-away right shift), E_acc fixed
- * per output channel before the walk: max over the batch of the input rows'
- * max exponent (the channel's conv group) + the loss row's max exponent,
- * plus the guard of bfpFoldGuardBits over N = batch * (most output
- * positions one tap reaches). So no accumulator can leave int32; every
- * product is its own one-product segment. The accumulators live in rawOut's
- * buffer; at the end each becomes the float acc * 2^E_acc in place -- a
- * bridge while the backward stores FLOAT32 grads. */
-static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                const void *ctx, rngStream_t *rs) {
-    (void)n;
-    (void)auxOut;
-    const conv1dConfig_t *cfg = ctx;
-    tensor_t *forwardInput = ops[0];
-    tensor_t *lossGrad = ops[1];
-
+/* weightGradKernelFloat's loop with an int32 raw accumulator per gw element
+ * (acc, gwElems entries). Every product x * gy enters as product *
+ * 2^-(E_acc - Ex - Egy) (bfpAlignPartial: exact left shift or half-away right
+ * shift), E_acc fixed per output channel before the walk (eAccOf, one entry
+ * per output channel): max over the batch of the input rows' max exponent
+ * (the channel's conv group) + the loss row's max exponent, plus the guard
+ * of bfpFoldGuardBits over N = batch * (most output positions one tap
+ * reaches). So no accumulator can leave int32; every product is its own
+ * one-product segment. Shared by both weightGrad kernels below, which
+ * differ only in what they make of the finished sums. */
+static void weightGradBfpScatter(const conv1dConfig_t *cfg, tensor_t *forwardInput,
+                                 tensor_t *lossGrad, int32_t *acc, size_t gwElems, int *eAccOf) {
     size_t batch = forwardInput->shape->dimensions[0];
     size_t inChannels = forwardInput->shape->dimensions[1];
     size_t inputLength = forwardInput->shape->dimensions[2];
@@ -628,9 +622,10 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     validateBfpQConfigShape(xQC, calcNumberOfElementsByShape(forwardInput->shape));
     validateBfpQConfigShape(gyQC, calcNumberOfElementsByShape(lossGrad->shape));
 
-    size_t gwElems = calcNumberOfElementsByTensor(rawOut);
-    int32_t *acc = (int32_t *)rawOut->data;
-    memset(acc, 0, calcNumberOfBytesForData(rawOut->quantization, gwElems));
+    for (size_t oc = 0; oc < outChannels; oc++) {
+        eAccOf[oc] = 0; /* a channel without products keeps 0 */
+    }
+    memset(acc, 0, gwElems * sizeof(int32_t));
     if (gwElems == 0) {
         return;
     }
@@ -651,11 +646,7 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     int32_t gyExpBias = bfpExponentBias(gyQC);
 
     /* Pre-pass (stack tables sized by the topology): E_acc per output
-     * channel. A channel without products keeps 0. */
-    int eAccOf[outChannels];
-    for (size_t oc = 0; oc < outChannels; oc++) {
-        eAccOf[oc] = 0;
-    }
+     * channel. */
     if (batch > 0 && inputLength > 0 && outputLength > 0) {
         int xMaxOf[batch * groups];
         bfpRowCursor_t xc = {.group = 0, .groupEnd = xQC->groupSize};
@@ -717,15 +708,55 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
             }
         }
     }
+}
 
-    /* Float bridge: each accumulator becomes acc * 2^E_acc in place. */
-    size_t rowLen = inChPerGroup * kernelSize;
+/* FLOAT32 grads and the fixed grid (BFP_RAW_NONE): the scatter's sums become
+ * the float acc * 2^E_acc in place -- the bridge into the FLOAT32 raw. */
+static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                const void *ctx, rngStream_t *rs) {
+    (void)n;
+    (void)auxOut;
+    (void)rs;
+    const conv1dConfig_t *cfg = ctx;
+    size_t outChannels = ops[1]->shape->dimensions[1];
+    int eAccOf[outChannels > 0 ? outChannels : 1];
+    size_t gwElems = calcNumberOfElementsByTensor(rawOut);
+    int32_t *acc = (int32_t *)rawOut->data;
+    weightGradBfpScatter(cfg, ops[0], ops[1], acc, gwElems, eAccOf);
+    if (gwElems == 0) {
+        return;
+    }
+    size_t rowLen = gwElems / outChannels;
     for (size_t oc = 0; oc < outChannels; oc++) {
         for (size_t j = 0; j < rowLen; j++) {
             float v = bfpLdexpInt32(acc[oc * rowLen + j], eAccOf[oc]);
             memcpy(&acc[oc * rowLen + j], &v, sizeof(v));
         }
     }
+}
+
+/* BFP grads under DYNAMIC_RESCALE (BFP_RAW_BACKWARD_ACC): the scatter's sums
+ * become the BFP_RAW on the grad's geometry (bfpRawEmitFromRows: one
+ * exponent per grad group from the data, rows = output channels of cinG * K
+ * sums each), integer only; the funnel accumulates it into the grad. */
+static void weightGradKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                   const void *ctx, rngStream_t *rs) {
+    (void)n;
+    (void)auxOut;
+    (void)rs;
+    if (rawOut->quantization->type != BFP_RAW) {
+        PRINT_ERROR("Conv1d backward (BFP weightGrad): the integer kernel needs a BFP_RAW raw "
+                    "(opSpec_t.bfpRawOut = BFP_RAW_BACKWARD_ACC)");
+        exit(1);
+    }
+    const conv1dConfig_t *cfg = ctx;
+    size_t outChannels = ops[1]->shape->dimensions[1];
+    int eAccOf[outChannels > 0 ? outChannels : 1];
+    size_t gwElems = calcNumberOfElementsByTensor(rawOut);
+    int32_t *acc = (int32_t *)rawOut->data;
+    weightGradBfpScatter(cfg, ops[0], ops[1], acc, gwElems, eAccOf);
+    bfpRawEmitFromRows(acc, gwElems, eAccOf, gwElems > 0 ? gwElems / outChannels : 0,
+                       rawOut->quantization->qConfig, "conv1dCalcWeightGradsBfp");
 }
 
 void conv1dCalcWeightGradsBfp(conv1dConfig_t *cfg, tensor_t *forwardInput, tensor_t *lossGrad,
@@ -752,9 +783,14 @@ void conv1dCalcWeightGradsBfp(conv1dConfig_t *cfg, tensor_t *forwardInput, tenso
                           .roundingMode = cfg->weightGradMath.roundingMode,
                           .mantissaBits = wQC->mantissaBits,
                           .exponentBits = wQC->exponentBits};
+    /* BFP grad storage under DYNAMIC_RESCALE: integer end to end (BFP_RAW
+     * into the integer accumulate engine). FLOAT32 grads and the fixed grid
+     * keep the float bridge. */
+    bool intAcc = cfg->weights->grad->quantization->type == BFP &&
+                  cfg->weightGradAccMode == OUT_ACC_DYNAMIC_RESCALE;
     executeOp(
         &(opSpec_t){
-            .kernel = weightGradKernelBfp,
+            .kernel = intAcc ? weightGradKernelBfpRaw : weightGradKernelBfp,
             .ctx = cfg,
             .inputs = (tensor_t *[]){forwardInput, lossGrad},
             .nInputs = 2,
@@ -763,6 +799,7 @@ void conv1dCalcWeightGradsBfp(conv1dConfig_t *cfg, tensor_t *forwardInput, tenso
             .mode = cfg->weightGradAccMode,
             .bfpStage = {forwardInput->quantization->type == FLOAT32 ? &stage : NULL,
                          lossGrad->quantization->type == FLOAT32 ? &stage : NULL, NULL},
+            .bfpRawOut = intAcc ? BFP_RAW_BACKWARD_ACC : BFP_RAW_NONE,
         },
         cfg->weights->grad);
 }
@@ -916,6 +953,95 @@ static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
     }
 }
 
+/* biasGradKernelBfp's walk and segments with an int32 destination instead
+ * of the float fold (BFP grads under DYNAMIC_RESCALE, BFP_RAW_BACKWARD_ACC):
+ * each same-group segment's exact code sum enters as partial *
+ * 2^-(E_acc - E_segment) (bfpAlignPartial), E_acc per output channel = max
+ * over the batch of the loss row's max exponent + the guard of a pure sum of
+ * batch * outputLength codes (bfpSumFoldGuardBits: the fold proof with the
+ * second factor 1), so no destination can leave int32. Then the BFP_RAW on
+ * the grad's geometry (bfpRawEmitFromRows, rows of one sum). */
+static void biasGradKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                 const void *ctx, rngStream_t *rs) {
+    (void)n;
+    (void)auxOut;
+    (void)rs;
+    const conv1dConfig_t *cfg = ctx;
+    tensor_t *lossGrad = ops[0];
+
+    size_t batch = lossGrad->shape->dimensions[0];
+    size_t outChannels = lossGrad->shape->dimensions[1];
+    size_t outputLength = lossGrad->shape->dimensions[2];
+    size_t biasOutChannels = cfg->bias->param->shape->dimensions[0];
+
+    if (outChannels != biasOutChannels) {
+        PRINT_ERROR("Conv1d backward (biasGrad): lossGrad outChannels (%zu) does not match "
+                    "bias Cout (%zu)",
+                    outChannels, biasOutChannels);
+        exit(1);
+    }
+    if (rawOut->quantization->type != BFP_RAW) {
+        PRINT_ERROR("Conv1d backward (BFP biasGrad): the integer kernel needs a BFP_RAW raw "
+                    "(opSpec_t.bfpRawOut = BFP_RAW_BACKWARD_ACC)");
+        exit(1);
+    }
+
+    bfpQConfig_t *gyQC = lossGrad->quantization->qConfig;
+    validateBfpQConfigShape(gyQC, calcNumberOfElementsByShape(lossGrad->shape));
+    bfpValidateSumHeadroom(gyQC, batch * outputLength, "conv1dCalcBiasGradsBfp");
+
+    int32_t expBias = bfpExponentBias(gyQC);
+    int32_t const *gyArr = (int32_t const *)lossGrad->data;
+    int32_t *acc = (int32_t *)rawOut->data;
+
+    int eAccOf[outChannels > 0 ? outChannels : 1];
+    for (size_t oc = 0; oc < outChannels; oc++) {
+        eAccOf[oc] = 0;
+    }
+    if (batch > 0 && outputLength > 0) {
+        int guard =
+            bfpSumFoldGuardBits(batch * outputLength, gyQC->mantissaBits, "conv1dCalcBiasGradsBfp");
+        bfpRowCursor_t gc = {.group = 0, .groupEnd = gyQC->groupSize};
+        for (size_t b = 0; b < batch; b++) {
+            for (size_t oc = 0; oc < outChannels; oc++) {
+                int e = bfpRowMaxExponent(&gc, gyQC, expBias, (b * outChannels + oc) * outputLength,
+                                          outputLength) +
+                        guard;
+                eAccOf[oc] = (b == 0 || e > eAccOf[oc]) ? e : eAccOf[oc];
+            }
+        }
+    }
+
+    bfpGroupRange_t gyRange = {0};
+    for (size_t oc = 0; oc < outChannels; oc++) {
+        int32_t sum = 0;
+        int32_t partial = 0;
+        size_t currentGroup = 0;
+        for (size_t b = 0; b < batch; b++) {
+            for (size_t outPos = 0; outPos < outputLength; outPos++) {
+                size_t idx = (b * outChannels + oc) * outputLength + outPos;
+                size_t g = bfpGroupAt(&gyRange, gyQC, idx);
+                if (b == 0 && outPos == 0) {
+                    currentGroup = g;
+                } else if (g != currentGroup) {
+                    sum += bfpAlignPartial(
+                        partial, eAccOf[oc] - ((int)gyQC->exponents[currentGroup] - expBias));
+                    partial = 0;
+                    currentGroup = g;
+                }
+                partial += gyArr[idx];
+            }
+        }
+        if (batch > 0 && outputLength > 0) {
+            sum += bfpAlignPartial(partial,
+                                   eAccOf[oc] - ((int)gyQC->exponents[currentGroup] - expBias));
+        }
+        acc[oc] = sum;
+    }
+    bfpRawEmitFromRows(acc, outChannels, eAccOf, 1, rawOut->quantization->qConfig,
+                       "conv1dCalcBiasGradsBfp");
+}
+
 void conv1dCalcBiasGradsBfp(conv1dConfig_t *cfg, tensor_t *lossGrad, const rngKey_t *key) {
     executeOpValidateAccMode(cfg->biasGradAccMode, "Conv1d biasGradAccMode");
     tensor_t *weightTensor = cfg->weights->param;
@@ -937,9 +1063,13 @@ void conv1dCalcBiasGradsBfp(conv1dConfig_t *cfg, tensor_t *lossGrad, const rngKe
                           .roundingMode = cfg->biasGradMath.roundingMode,
                           .mantissaBits = wQC->mantissaBits,
                           .exponentBits = wQC->exponentBits};
+    /* As the weightGrad: integer end to end into BFP grads under
+     * DYNAMIC_RESCALE, the float fold otherwise. */
+    bool intAcc = cfg->bias->grad->quantization->type == BFP &&
+                  cfg->biasGradAccMode == OUT_ACC_DYNAMIC_RESCALE;
     executeOp(
         &(opSpec_t){
-            .kernel = biasGradKernelBfp,
+            .kernel = intAcc ? biasGradKernelBfpRaw : biasGradKernelBfp,
             .ctx = cfg,
             .inputs = (tensor_t *[]){lossGrad},
             .nInputs = 1,
@@ -947,6 +1077,7 @@ void conv1dCalcBiasGradsBfp(conv1dConfig_t *cfg, tensor_t *lossGrad, const rngKe
             .key = key,
             .mode = cfg->biasGradAccMode,
             .bfpStage = {lossGrad->quantization->type == FLOAT32 ? &stage : NULL, NULL, NULL},
+            .bfpRawOut = intAcc ? BFP_RAW_BACKWARD_ACC : BFP_RAW_NONE,
         },
         cfg->bias->grad);
 }

@@ -39,6 +39,14 @@ quantization_t *backwardWireQ(layer_t *layer);
  * fast. There is no default: the config IS the choice. */
 void requireCrossEntropyHead(layer_t *last, const char *what);
 
+/* true iff `last` is a SOFTMAX whose head tuple holds any BFP (an
+ * ARITH_BFP math slot or a BFP outputQ / propLossQ): exactly the heads
+ * requireCrossEntropyHead checks, i.e. the bfp head and the float head onto
+ * a BFP loss-grad wire. Only such a head seeds the backward on its propLossQ
+ * (the remat wire table); every other CrossEntropy seed inherits the model
+ * output's wire, with propLossQ unused, as before the BFP heads existed. */
+bool crossEntropyHeadDeclaresBfp(const layer_t *last);
+
 /* Declared forward compute representation. Flatten and Quantization have no
  * consumed arithmetic (arithmetic-type-split D4 — Quantization is a pure conversion node) ->
  * {ARITH_FLOAT32, HALF_AWAY}, matching arithmeticFromQuantizationOrDefault(NULL). */

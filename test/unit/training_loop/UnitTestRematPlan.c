@@ -28,6 +28,7 @@
 #include "Pool1dApi.h"
 #include "QuantLayerApi.h"
 #include "Quantization.h"
+#include "QuantizationApi.h"
 #include "RNG.h"
 #include "ReluApi.h"
 #include "RematPlan.h"
@@ -36,6 +37,7 @@
 #include "SoftmaxApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
+#include "TensorApi.h"
 #include "unity.h"
 
 void setUp(void) {}
@@ -492,10 +494,11 @@ void testBackwardRangeCrossEntropyChecksTheHeadOnlyWhenABackwardRuns(void) {
     ASSERT_EXITS_WITH(0, ceWithoutSoftmaxAllFrozen());
 }
 
-/* Under CrossEntropy the seed GRAD n IS the Softmax's dx (the combined
- * gradient replaces its backward), so it takes the Softmax's declared dx
- * wire -- propLossQ, type-derived -- not ACT n's: the float head's FLOAT32 p
- * feeds a BFP loss-grad wire. Under MSE the seed still inherits ACT n. */
+/* Under CrossEntropy with a BFP-declaring head the seed GRAD n IS the
+ * Softmax's dx (the combined gradient replaces its backward), so it takes
+ * the Softmax's declared dx wire -- propLossQ, type-derived -- not ACT n's:
+ * the float head's FLOAT32 p feeds a BFP loss-grad wire. Under MSE the seed
+ * still inherits ACT n. */
 void testCrossEntropySeedTakesTheSoftmaxDxWire(void) {
     layer_t *model[2] = {makeLinear(2, 3, false, 0),
                          makeHead(ARITH_FLOAT32, ARITH_FLOAT32, false, true)};
@@ -516,6 +519,53 @@ void testCrossEntropySeedTakesTheSoftmaxDxWire(void) {
     TEST_ASSERT_EQUAL_UINT8(FLOAT32, m->wires[3].dtype);
     rematWireTableFree(m);
     freeModel(model, 2);
+}
+/* The bfp head (integer Softmax, integer p - y) also seeds onto its propLossQ. */
+void testCrossEntropySeedOfTheBfpHeadTakesItsPropLossQ(void) {
+    layer_t *model[2] = {makeLinear(2, 3, false, 0), makeHead(ARITH_BFP, ARITH_BFP, true, true)};
+    inputLike_t in;
+    rematWireTable_t *t =
+        initTable(model, 2, CROSS_ENTROPY, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
+    TEST_ASSERT_EQUAL_UINT8(BFP, t->wires[3].dtype);
+    TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, t->wires[3].inheritFrom);
+    rematWireTableFree(t);
+    freeModel(model, 2);
+}
+
+/* A head with no BFP keeps the rule it always had: the seed inherits ACT n
+ * (p's own wire), and the Softmax's propLossQ stays unused -- a FLOAT32
+ * Softmax with an 8-bit SYM_INT32 propLossQ seeds FLOAT32, a packed SYM
+ * propLossQ does not reach the table at all. */
+static void floatHeadWithUnusedDx(quantization_t *dx) {
+    layerQuant_t lq = {
+        .forwardMath = {.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
+        .propLossMath = {.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
+        .outputQ = &g_floatQ,
+        .propLossQ = dx,
+    };
+    layer_t *model[2] = {makeLinear(2, 3, false, 0), softmaxLayerInit(&lq)};
+    inputLike_t in;
+    rematWireTable_t *t =
+        initTable(model, 2, CROSS_ENTROPY, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
+    TEST_ASSERT_EQUAL_UINT8(REMAT_WIRE_GRAD, t->wires[3].kind);
+    TEST_ASSERT_EQUAL_UINT16(2, t->wires[3].inheritFrom);
+    TEST_ASSERT_EQUAL_UINT8(FLOAT32, t->wires[3].dtype);
+    TEST_ASSERT_EQUAL_size_t(3 * sizeof(float), t->wires[3].bytes);
+    rematWireTableFree(t);
+    freeModel(model, 2);
+}
+
+static void floatHeadWithPackedSymDx(void) {
+    quantization_t *sym4 = quantizationInitSym(4, HALF_AWAY);
+    floatHeadWithUnusedDx(sym4);
+    freeQuantization(sym4);
+}
+
+void testCrossEntropySeedOfANonBfpHeadInheritsActN(void) {
+    quantization_t *sym8 = quantizationInitSymInt32WithBits(HALF_AWAY, 8);
+    floatHeadWithUnusedDx(sym8);
+    freeQuantization(sym8);
+    ASSERT_EXITS_WITH(0, floatHeadWithPackedSymDx());
 }
 
 /* ---- the one BFP wire-grouping rule ---- */
@@ -570,10 +620,9 @@ void testHarTableNumbersWiresInProductionOrder(void) {
         TEST_ASSERT_EQUAL_UINT16(gradIndex[k], t->wires[id].index);
         TEST_ASSERT_EQUAL_UINT16(id, t->gradIdOf[gradIndex[k]]);
     }
-    /* Under CE the seed is the Softmax's dx (its propLossQ, type-derived);
-     * Flatten (layer 9) passes its dx through, so GRAD 9 inherits ACT 9;
-     * every other GRAD has a type-derived template. */
-    TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, t->wires[13].inheritFrom);
+    /* The seed inherits ACT 12; Flatten (layer 9) passes its dx through, so
+     * GRAD 9 inherits ACT 9; every other GRAD has a type-derived template. */
+    TEST_ASSERT_EQUAL_UINT16(12, t->wires[13].inheritFrom);
     TEST_ASSERT_EQUAL_UINT16(9, t->wires[15].inheritFrom);
     TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, t->wires[14].inheritFrom);
     TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, t->wires[16].inheritFrom);
@@ -1023,9 +1072,8 @@ void testBindWritesHarHeadersAndPointsAct0AtTheInput(void) {
         TEST_ASSERT_NULL(rematWireHdr(t, id)->data);
         TEST_ASSERT_EQUAL_INT(FLOAT32, rematWireHdr(t, id)->quantization->type);
     }
-    /* Under CE the seed is type-derived (the Softmax's dx wire): written by
-     * the table bind; the inherited Flatten dx waits for rematWireBind. */
-    assertDims(rematGradHdr(t, 12)->shape, (size_t[]){1, 6}, 2);
+    /* Inherited headers (the seed, Flatten's dx) wait for rematWireBind. */
+    TEST_ASSERT_EQUAL_size_t(0, rematGradHdr(t, 12)->shape->dimensions[0]);
     TEST_ASSERT_EQUAL_size_t(0, rematGradHdr(t, 9)->shape->dimensions[0]);
 
     rematWireTableFree(t);
@@ -4283,6 +4331,8 @@ int main(void) {
     RUN_TEST(testBackwardRangeCrossEntropyHeadIsOneOfTwoDeclaredArms);
     RUN_TEST(testBackwardRangeCrossEntropyChecksTheHeadOnlyWhenABackwardRuns);
     RUN_TEST(testCrossEntropySeedTakesTheSoftmaxDxWire);
+    RUN_TEST(testCrossEntropySeedOfTheBfpHeadTakesItsPropLossQ);
+    RUN_TEST(testCrossEntropySeedOfANonBfpHeadInheritsActN);
     RUN_TEST(testBfpWireGroupingMatchesTheDriverRule);
     RUN_TEST(testBfpWireGroupingExitsNamingTheWireOnAnIndivisibleGroupSize);
     RUN_TEST(testHarTableNumbersWiresInProductionOrder);

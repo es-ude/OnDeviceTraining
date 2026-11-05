@@ -841,7 +841,8 @@ typedef struct ceIntCase {
 
 /* The int64 reference, from the definition: the exact value of p_i - y_i on
  * the grid e_i = min(E_g, 0) (exact for every E_g >= -62), then the data-rule
- * re-grid of BfpScatterRef.h. Exact whenever the kernel is (E_g >= -30). */
+ * re-grid of BfpScatterRef.h. Exact wherever the kernel accepts p (a label
+ * below E_g = -30 must sit on the 2^-30 grid). */
 static void ceIntReference(const ceIntCase_t *c, int32_t *mant, int16_t *rawE) {
     size_t n = c->rows * c->cols;
     int64_t sum[64];
@@ -957,41 +958,52 @@ void testCeIntegerHeadSubtractsOneExactly(void) {
     freeTensor(label);
 }
 
-/* A label whose p group sits below 2^-30 (E_g = -40: every p there under
- * 2^-33): 1.0 cannot share that grid in int32, so the term is placed on 2^-30
- * and p rounds half away there first -- an absolute error of at most 2^-31,
- * 2^-24 of an m 8 code step of the -1 it joins. */
-void testCeIntegerHeadPlacesALabelBelowTwoToMinus30OnThatGrid(void) {
-    int32_t codes[4] = {127, 64, 101, 3};
-    uint8_t st[2] = {120, 87}; /* E = -7, -40 */
-    size_t dims[2] = {1, 4};
-    bfpScratchFixture_t p;
-    bfpScratchInit(&p, 2, dims, codes, st, 2, 2, 8, 8);
-    tensor_t *label = ceFloat2d(1, 4, (float[]){0.f, 0.f, 1.f, 0.f});
-    bfpRawFixture_t raw;
-    bfpRawInit(&raw, 2, dims, 2, 2);
-    tensor_t *ops[1] = {&p.tensor};
-    crossEntropySoftmaxBackwardKernelBfp(ops, 1, &raw.tensor, NULL, label, NULL);
-    double got = ldexp((double)raw.mant[2], raw.exps[1]);
-    double exact = ldexp(101.0, -40) - 1.0;
-    TEST_ASSERT_TRUE(fabs(got - exact) <= ldexp(1.0, -31));
-    /* its non-label neighbour shares the raw group of the -1: half a raw step */
-    TEST_ASSERT_TRUE(bfpValueExactlyEqual(raw.mant[3], raw.exps[1], 3, -40) ||
-                     fabs(ldexp((double)raw.mant[3], raw.exps[1]) - ldexp(3.0, -40)) <=
-                         ldexp(1.0, raw.exps[1] - 1));
+/* A label whose p group sits below 2^-30 (E_g < -30): 1.0 cannot share that
+ * grid in int32, so the term is placed on 2^-30. That is exact only for a p
+ * ON the 2^-30 grid (the code's low -30 - E_g bits are zero) -- every p the
+ * integer Softmax produces (Q30, re-blocked onto a finer group by exact left
+ * shifts). A finer fraction would be lost before the SR re-block, so it
+ * fails fast. */
+static void ceLabelOnFineGrid(uint8_t m, int32_t labelCode, int eG) {
+    int32_t codes[4] = {127, 64, labelCode, 3};
+    uint8_t st[2] = {120, (uint8_t)(eG + 127)};
+    size_t lab[1] = {2};
+    ceIntCase_t c = {1, 4, m, 2, 2, codes, st, lab, 2, 2};
+    ceCheckIntegerRaw(&c);
+}
+static void ceDieLabelCode64AtMinus38(void) { /* 2^-32: the review's case */
+    ceLabelOnFineGrid(8, 64, -38);
+}
+static void ceDieLabelCode101AtMinus40(void) {
+    ceLabelOnFineGrid(8, 101, -40);
+}
+static void ceDieLabelCode127AtMinus37(void) { /* 0.99 of 2^-30 */
+    ceLabelOnFineGrid(8, 127, -37);
+}
+static void ceDieLabelCode3AtMinus31(void) { /* one stray 2^-31 */
+    ceLabelOnFineGrid(8, 3, -31);
+}
+static void ceDieLabelCode1AtMinus70(void) { /* 40 bits below: past any int32 shift */
+    ceLabelOnFineGrid(8, 1, -70);
+}
 
-    /* The rounding onto 2^-30 is half away, not a floor: 127 * 2^-37 is 0.99
-     * of 2^-30, so the term is (1 - 2^30) * 2^-30 exactly. */
-    int32_t near[4] = {127, 64, 127, 3};
-    uint8_t st37[2] = {120, 90}; /* E = -7, -37 */
-    bfpScratchFixture_t q;
-    bfpScratchInit(&q, 2, dims, near, st37, 2, 2, 8, 8);
-    bfpRawFixture_t raw2;
-    bfpRawInit(&raw2, 2, dims, 2, 2);
-    tensor_t *ops2[1] = {&q.tensor};
-    crossEntropySoftmaxBackwardKernelBfp(ops2, 1, &raw2.tensor, NULL, label, NULL);
-    TEST_ASSERT_TRUE(bfpValueExactlyEqual(raw2.mant[2], raw2.exps[1], 1 - ((int64_t)1 << 30), -30));
-    freeTensor(label);
+void testCeIntegerHeadRejectsALabelFinerThanTwoToMinus30(void) {
+    const char *msg = "is not on the 2^-30 grid";
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, ceDieLabelCode64AtMinus38());
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, ceDieLabelCode101AtMinus40());
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, ceDieLabelCode127AtMinus37());
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, ceDieLabelCode3AtMinus31());
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, ceDieLabelCode1AtMinus70());
+}
+
+/* On the 2^-30 grid below E_g = -30 the term is exact (the int64 reference
+ * holds p - 1 on 2^E_g): 126 * 2^-31 = 63 * 2^-30, a zero p at 2^-40, and
+ * m 16's 1024 * 2^-40 = 2^-30. E_g = -30 itself is the plain exact case. */
+void testCeIntegerHeadPlacesALabelOnTheTwoToMinus30GridExactly(void) {
+    ceLabelOnFineGrid(8, 126, -31);
+    ceLabelOnFineGrid(8, 0, -40);
+    ceLabelOnFineGrid(16, 1024, -40);
+    ceLabelOnFineGrid(8, 3, -30);
 }
 
 /* Layer level: the raw re-blocked onto the loss-grad wire by the WIRE's
@@ -1150,7 +1162,8 @@ int main() {
     RUN_TEST(testCrossEntropyBackwardRequantizesTheGradWithItsLossStream);
     RUN_TEST(testCeIntegerHeadRawMatchesTheInt64Reference);
     RUN_TEST(testCeIntegerHeadSubtractsOneExactly);
-    RUN_TEST(testCeIntegerHeadPlacesALabelBelowTwoToMinus30OnThatGrid);
+    RUN_TEST(testCeIntegerHeadRejectsALabelFinerThanTwoToMinus30);
+    RUN_TEST(testCeIntegerHeadPlacesALabelOnTheTwoToMinus30GridExactly);
     RUN_TEST(testCeIntegerHeadReblocksOntoTheLossGradWireByItsMode);
     RUN_TEST(testCeIntegerHeadSrReblockIsUnbiased);
     RUN_TEST(testCeIntegerHeadRejectsAHalfSpecifiedBoundary);

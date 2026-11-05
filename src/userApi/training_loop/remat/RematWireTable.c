@@ -116,10 +116,12 @@ static size_t gradsBelowSeed(size_t deepest, ptrdiff_t top) {
 
 /* Production order: with ACT j at id j and GRADs in the
  * order BACKWARD writes them, every range begins in wire-id order. */
-/* The seed GRAD n: under CrossEntropy it IS the last Softmax's dx (the
+/* The seed GRAD n: under CrossEntropy with a BFP-declaring head
+ * (crossEntropyHeadDeclaresBfp) it IS the last Softmax's dx wire (the
  * combined gradient replaces its backward), so its template is the
- * Softmax's propLossQ, type-derived (deriveFacts); under MSE it inherits ACT
- * n, the model output it is the gradient of. */
+ * Softmax's propLossQ, type-derived (deriveFacts). Every other seed -- MSE,
+ * and CrossEntropy on a FLOAT32 / SYM head, whose propLossQ stays unused --
+ * inherits ACT n, the model output it is the gradient of. */
 static void numberWires(rematWireFact_t *facts, layer_t **model, size_t n, size_t deepest,
                         ptrdiff_t top, bool hasBackward, lossFuncType_t lt) {
     for (size_t j = 0; j <= n; j++) {
@@ -130,9 +132,10 @@ static void numberWires(rematWireFact_t *facts, layer_t **model, size_t n, size_
         return;
     }
     size_t id = n + 1u;
+    bool seedTakesPropLossQ = lt == CROSS_ENTROPY && crossEntropyHeadDeclaresBfp(model[n - 1u]);
     facts[id++] = (rematWireFact_t){.kind = REMAT_WIRE_GRAD,
                                     .index = (uint16_t)n,
-                                    .inheritFrom = lt == CROSS_ENTROPY ? REMAT_NONE : (uint16_t)n};
+                                    .inheritFrom = seedTakesPropLossQ ? REMAT_NONE : (uint16_t)n};
     for (ptrdiff_t l = top; l > (ptrdiff_t)deepest; l--) {
         bool passThrough = model[l]->type == FLATTEN; /* type-derived */
         facts[id++] = (rematWireFact_t){.kind = REMAT_WIRE_GRAD,
@@ -181,7 +184,8 @@ static void deriveFacts(rematWireFact_t *facts, size_t numWires, layer_t **model
     for (size_t id = n + 1u; id < numWires; id++) {
         rematWireFact_t *f = &facts[id];
         const rematWireFact_t *act = &facts[f->index];
-        /* index n is only the CE seed here: the last Softmax's dx wire */
+        /* index n here is only the seed of a BFP-declaring CE head: the
+         * last Softmax's dx wire */
         const quantization_t *tmpl = (f->inheritFrom != REMAT_NONE) ? facts[f->inheritFrom].tmpl
                                      : (f->index == n)              ? backwardWireQ(model[n - 1u])
                                                        : backwardWireQ(model[f->index]);

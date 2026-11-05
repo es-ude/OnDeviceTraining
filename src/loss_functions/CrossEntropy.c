@@ -208,10 +208,12 @@ static bool ceLabelIsOne(const float *y, size_t i) {
 /* The integer term of element i: p's code c on its group grid E_g, minus 1.0
  * at the label. The label's grid is E = clamp(E_g, -30, 0) so that 1.0 =
  * 2^-E is an int32: exact for E_g in [-30, 0] (also when 1.0 is code
- * 2^(m-1), one beyond the m-bit maximum); a p group below 2^-30 rounds its
- * code half away onto 2^-30 first (< 2^-31 absolute, next to a value near
- * -1); E_g > 0 is the zero-code case only (a nonzero code there is p > 1).
- * |term| <= 2^30 + 2^15 < 2^31. */
+ * 2^(m-1), one beyond the m-bit maximum). Below 2^-30 the label's p must lie
+ * ON the 2^-30 grid (c's low -30 - E_g bits zero) -- every p of the integer
+ * Softmax does (Q30, re-blocked onto a finer group by exact left shifts) --
+ * and is shifted there exactly; a finer fraction fails fast instead of
+ * being dropped before the SR re-block. E_g > 0 is the zero-code case only
+ * (a nonzero code there is p > 1). |term| <= 2^30 + 2^15 < 2^31. */
 static inline int32_t ceTermOf(int32_t c, int eG, bool one, size_t i, int *e) {
     if (!one) {
         *e = eG;
@@ -228,8 +230,17 @@ static inline int32_t ceTermOf(int32_t c, int eG, bool one, size_t i, int *e) {
         return -1;
     }
     if (eG < -30) {
+        unsigned k = (unsigned)(-30 - eG);
+        uint32_t mag = c < 0 ? 0u - (uint32_t)c : (uint32_t)c;
+        if (k >= 32u ? mag != 0u : (mag & ((1u << k) - 1u)) != 0u) {
+            PRINT_ERROR("crossEntropySoftmaxBackward: the integer head's p at the label element "
+                        "%zu (code %ld on 2^%d) is not on the 2^-30 grid: p - 1 is exact only "
+                        "there (the integer Softmax's Q30 output always is)",
+                        i, (long)c, eG);
+            exit(1);
+        }
         *e = -30;
-        return bfpShrHalfAway(c, (unsigned)(-30 - eG)) - ((int32_t)1 << 30);
+        return bfpShrHalfAway(c, k) - ((int32_t)1 << 30); /* exact: no dropped bit */
     }
     *e = eG;
     return c - ((int32_t)1 << (unsigned)(-eG));
@@ -351,7 +362,9 @@ static void crossEntropySoftmaxBackwardBfp(tensor_t *softmaxOutput, tensor_t *di
 
 /* The combined Softmax + CrossEntropy gradient p - y: the training loop skips
  * the model's last layer (which must be the Softmax, rematBackwardRange) and
- * seeds the backward with this, on the Softmax's dx wire (its propLossQ).
+ * seeds the backward with this -- on the Softmax's dx wire (its propLossQ)
+ * for a head with any BFP, else on the model output's own wire (the remat
+ * wire table, crossEntropyHeadDeclaresBfp).
  * The model's HEAD -- the Softmax forward plus this gradient -- is declared
  * by the Softmax's config and validated at init (requireCrossEntropyHead,
  * arithmetic-bfp.md section 14); the arm here follows p's dtype:

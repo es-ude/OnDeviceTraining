@@ -144,15 +144,50 @@ static void softmaxExpCodesBfp(const tensor_t *input, bfpShiftRounding_t mode, i
     const size_t n = calcNumberOfElementsByTensor((tensor_t *)input);
 
     /* (1) Max (P6-4): the exact (code, E) compare, strict > keeps the FIRST
-     * max; remember the winner's mantissa and UNBIASED exponent. */
-    int32_t mMax = m[0];
+     * max; remember the winner's mantissa and UNBIASED exponent -- the
+     * alignment grid below. A code of an ALL-ZERO group never decides it
+     * (§13's zero-group rule): such a group stores the zero state (E = 0),
+     * an exponent unrelated to the data, and a 0 there that beats every live
+     * (negative) value would align the live logits onto 2^0. When that
+     * happens the max is 0 on the TOP live group's grid (every live element
+     * then shifts right, as under a live max in that group). All codes zero:
+     * the first element's grid, as before (every aligned value is 0). */
+    int32_t mMax = 0;
     int32_t eMax = (int32_t)qC->exponents[bfpGroupAt(&qRange, qC, 0)] - bias;
-    for (size_t i = 1; i < n; i++) {
-        const int32_t ei = (int32_t)qC->exponents[bfpGroupAt(&qRange, qC, i)] - bias;
-        if (bfpValueGreater(m[i], (int)ei, mMax, (int)eMax)) {
+    bool haveMax = false;
+    bool deadZero = false;
+    int32_t liveTop = INT32_MIN;
+    size_t curGroup = SIZE_MAX;
+    bool curLive = false;
+    for (size_t i = 0; i < n; i++) {
+        const size_t g = bfpGroupAt(&qRange, qC, i);
+        const int32_t ei = (int32_t)qC->exponents[g] - bias;
+        if (g != curGroup) {
+            curGroup = g;
+            size_t start = qC->groupSize == 0 ? 0 : g * qC->groupSize;
+            size_t end = qC->groupSize == 0 ? n : start + qC->groupSize;
+            end = end < n ? end : n;
+            curLive = false;
+            for (size_t j = start; j < end && !curLive; j++) {
+                curLive = m[j] != 0;
+            }
+            if (curLive && ei > liveTop) {
+                liveTop = ei;
+            }
+        }
+        if (!curLive) {
+            deadZero = true;
+            continue;
+        }
+        if (!haveMax || bfpValueGreater(m[i], (int)ei, mMax, (int)eMax)) {
             mMax = m[i];
             eMax = ei;
+            haveMax = true;
         }
+    }
+    if (haveMax && deadZero && mMax < 0) {
+        mMax = 0;
+        eMax = liveTop;
     }
 
     /* (2) Align onto the work-grid-or-coarser common grid (THE lossy site --
@@ -224,24 +259,6 @@ static void softmaxExpCodesBfp(const tensor_t *input, bfpShiftRounding_t mode, i
         }
         /* (4) Integer core (lossy site 3 is the >>z inside). */
         qe[i] = bfpIExpQ(qW, mode, shift);
-    }
-}
-
-/* The backward's recompute (R-S4): steps 1-4, then the float32 step 5 --
- * S_out = A * 2^-28, float sum in index order, per-element divide. */
-static void softmaxValuesBfp(const tensor_t *input, bfpShiftRounding_t mode, float *sOut,
-                             rngStream_t *shift) {
-    const size_t n = calcNumberOfElementsByTensor((tensor_t *)input);
-    int32_t qe[n];
-    softmaxExpCodesBfp(input, mode, qe, shift);
-    float sum = 0.f;
-    for (size_t i = 0; i < n; i++) {
-        const float e = ldexpf((float)qe[i] * BFP_SOFTMAX_A, -28);
-        sOut[i] = e;
-        sum += e;
-    }
-    for (size_t i = 0; i < n; i++) {
-        sOut[i] /= sum;
     }
 }
 
@@ -577,28 +594,48 @@ static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *p
     convertTensor(&propLossFloat, propLoss, convert);
 }
 
-/* BFP epic PR6 Task 5 (P6-6): the native ARITH_BFP softmax backward -- ONE
- * funnel op, OUT_WRITE of dx anchored at propLossQ. The backward
- * differentiates the UNPACKED forward values: it recomputes s from the
- * LOGITS via softmaxValuesBfp with the layer's own knob (the packed forward
- * wire differs from those values by one pack rounding), paying the norms'
- * documented R-N4 per-op recompute cost. dLds dequantizes exactly
- * (code * 2^E); dot and dx are float32 in index order; the raw FLOAT32 out
- * (BFP D7) is packed by the epilogue. The loss-count gate is load-bearing (the
- * #436 OOB class): both walks run x's flat n, and a shorter per-tensor
- * {1, 0} loss passes every grid check while lArr[i] reads outside its
- * scratch. The permuted-shape class does not arise -- the arm is
- * single-row (softmaxBfpRequireSingleRow, #152), so both walks are the one
- * row's flat storage order over count-equal wires. */
+/* The integer VJP of the native ARITH_BFP softmax backward (arithmetic-bfp.md
+ * section 14): ONE funnel op, OUT_WRITE of the BFP_RAW dx
+ * (BFP_RAW_BACKWARD_DX) anchored at propLossQ. The backward differentiates
+ * the UNPACKED forward values: p is recomputed from the LOGITS by the
+ * integer forward (softmaxExpCodesBfp + softmaxNormalizeRaw: Q30 codes,
+ * replaying the forward's shift draws), then dx_i = p_i (g_i - d), d =
+ * sum_j p_j g_j, the linear VJP in the FLOAT32 arm's order:
+ *  - p'_j = p_j >> 15 half away (<= 2^15 + 1): the explicit precision cut
+ *    before the dot's products, |p'_j g_j| <= 2^15 (2^15 + 1) < 2^31.
+ *  - the dot on E_d = E_top - 15 + G, E_top = the max exponent over g's
+ *    NONZERO codes, G = bfpFoldGuardBits(n + 1, 17, m_g): each product
+ *    enters by bfpAlignPartial (left exact, right half away), index order.
+ *  - D_i = g_i aligned to E_d, minus d: the n + 1 terms of G's proof bound
+ *    every |D_i| below INT32_MAX.
+ *  - per raw target group: both factors cut to 15 bits relative to the
+ *    group's max (s_p, s_D = bitlen(max) - 15, half away), so the product
+ *    fits int32 and keeps 15 bits of each factor at the group's top; raw
+ *    exponent E_d + s_D + s_p - 30. An all-zero g (or group) is dx = 0.
+ * Error: at most half a unit of each 15-bit cut, the dot's alignments
+ * (n/2 units of 2^E_d) and p's Q30 rounding -- about 2^-15 of the group's
+ * largest |dx|, below an m <= 15 wire's step (about one step at m = 16).
+ * No float, no division. The loss-count gate is load-bearing (the #436 OOB
+ * class): a shorter per-tensor {1, 0} loss passes every grid check. The arm
+ * is single-row (softmaxBfpRequireSingleRow, #152). */
+#define SOFTMAX_VJP_BITS 15
 static void softmaxBackwardKernelBfp(tensor_t **ops, size_t nOps, tensor_t *rawOut,
                                      tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)nOps;
     (void)auxOut;
+    (void)rs;
     const softmaxKernelCtx_t *kctx = ctx;
     const softmaxConfig_t *cfg = kctx->cfg;
     tensor_t *x = ops[0];
     tensor_t *dLdsT = ops[1];
     size_t n = calcNumberOfElementsByTensor(x);
+    if (rawOut->quantization->type != BFP_RAW) {
+        PRINT_ERROR("Softmax backward BFP: output must be BFP_RAW (opSpec_t.bfpRawOut = "
+                    "BFP_RAW_BACKWARD_DX)");
+        exit(1);
+    }
+    bfpRawQConfig_t *rawQC = rawOut->quantization->qConfig;
+    size_t gsz = bfpRawRequireOutput(rawQC, n, "Softmax backward BFP");
     if (n == 0) {
         return;
     }
@@ -608,23 +645,60 @@ static void softmaxBackwardKernelBfp(tensor_t **ops, size_t nOps, tensor_t *rawO
     bfpRequireElementCount(lQC, calcNumberOfElementsByTensor(dLdsT), n,
                            "Softmax backward BFP (loss)");
 
-    float s[n];
-    softmaxValuesBfp(x, cfg->bfpExpShiftRounding, s, kctx->shift); /* P6-6: R-N4 recompute */
+    int32_t *mant = (int32_t *)rawOut->data;
+    softmaxExpCodesBfp(x, cfg->bfpExpShiftRounding, mant, kctx->shift); /* P6-6: R-N4 recompute */
+    softmaxNormalizeRaw(mant, n);                                       /* p, Q30 */
 
     const int32_t lBias = bfpExponentBias(lQC);
-    bfpGroupRange_t lRange = {0};
-    int32_t const *lArr = (int32_t const *)dLdsT->data;
-    float *out = (float *)rawOut->data;
-    float dot = 0.0f;
-    for (size_t i = 0; i < n; i++) {
-        float dLds =
-            ldexpf((float)lArr[i], (int)lQC->exponents[bfpGroupAt(&lRange, lQC, i)] - lBias);
-        dot += s[i] * dLds;
+    const int32_t *gArr = (const int32_t *)dLdsT->data;
+    int16_t *rawE = rawQC->exponents;
+    bfpRowCursor_t cursor = {.group = 0, .groupEnd = lQC->groupSize};
+    int top = bfpRowMaxExponent(&cursor, lQC, lBias, gArr, 0, n);
+    if (top == BFP_NO_LIVE_EXP) {
+        memset(mant, 0, n * sizeof(int32_t));
+        for (size_t t = 0; t < rawQC->numGroups; t++) {
+            rawE[t] = 0;
+        }
+        return;
     }
+    const int eD = top - SOFTMAX_VJP_BITS +
+                   bfpFoldGuardBits(n + 1, 17, lQC->mantissaBits, 0, "Softmax backward BFP");
+
+    bfpGroupRange_t lRange = {0};
+    int32_t dot = 0;
     for (size_t i = 0; i < n; i++) {
-        float dLds =
-            ldexpf((float)lArr[i], (int)lQC->exponents[bfpGroupAt(&lRange, lQC, i)] - lBias);
-        out[i] = s[i] * (dLds - dot);
+        const int eg = (int)lQC->exponents[bfpGroupAt(&lRange, lQC, i)] - lBias;
+        const int32_t pc = bfpShrHalfAway(mant[i], SOFTMAX_VJP_BITS);
+        dot += bfpAlignPartial(pc * gArr[i], eD - (eg - SOFTMAX_VJP_BITS));
+    }
+
+    size_t t = 0;
+    for (size_t start = 0; start < n; start += gsz, t++) {
+        const size_t end = start + gsz;
+        uint32_t maxP = 0;
+        uint32_t maxD = 0;
+        for (size_t i = start; i < end; i++) {
+            const int eg = (int)lQC->exponents[bfpGroupAt(&lRange, lQC, i)] - lBias;
+            const int32_t d = bfpAlignPartial(gArr[i], eD - eg) - dot;
+            const uint32_t mag = d < 0 ? 0u - (uint32_t)d : (uint32_t)d;
+            maxD = mag > maxD ? mag : maxD;
+            maxP = (uint32_t)mant[i] > maxP ? (uint32_t)mant[i] : maxP;
+        }
+        if (maxP == 0 || maxD == 0) {
+            memset(mant + start, 0, gsz * sizeof(int32_t));
+            rawE[t] = 0;
+            continue;
+        }
+        const unsigned bp = bfpBitLength32(maxP);
+        const unsigned bd = bfpBitLength32(maxD);
+        const unsigned sp = bp > SOFTMAX_VJP_BITS ? bp - SOFTMAX_VJP_BITS : 0u;
+        const unsigned sd = bd > SOFTMAX_VJP_BITS ? bd - SOFTMAX_VJP_BITS : 0u;
+        for (size_t i = start; i < end; i++) {
+            const int eg = (int)lQC->exponents[bfpGroupAt(&lRange, lQC, i)] - lBias;
+            const int32_t d = bfpAlignPartial(gArr[i], eD - eg) - dot;
+            mant[i] = bfpShrHalfAway(mant[i], sp) * bfpShrHalfAway(d, sd);
+        }
+        rawE[t] = (int16_t)(eD + (int)sd + (int)sp - 30);
     }
 }
 
@@ -686,7 +760,8 @@ void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, ten
                         .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, SOFTMAX_OP_PROP_LOSS, &opKey),
                         .mode = OUT_WRITE,
                         .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL,
-                                     loss->quantization->type == FLOAT32 ? &stage : NULL}},
+                                     loss->quantization->type == FLOAT32 ? &stage : NULL},
+                        .bfpRawOut = BFP_RAW_BACKWARD_DX}, /* the integer VJP raw */
             propLoss);
         break;
     }

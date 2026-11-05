@@ -172,10 +172,26 @@ def softmax_exp_codes_bfp(codes, exps, qc, mode):
     E = [exps[_bfp_group_of(i, qc["group_size"])] - bias for i in range(n)]
 
     # (1) Max: the EXACT value compare (rationals), strict > keeps the FIRST max.
-    m_max, e_max = codes[0], E[0]
-    for i in range(1, n):
-        if Fraction(codes[i]) * Fraction(2) ** E[i] > Fraction(m_max) * Fraction(2) ** e_max:
-            m_max, e_max = codes[i], E[i]
+    # A code of an ALL-ZERO group never decides the grid (zero-group rule); if
+    # such a 0 beats every live value, the max is 0 on the top live group's
+    # grid. All codes zero: the first element's grid.
+    gs = qc["group_size"]
+    live_group = {}
+    for i in range(n):
+        live_group.setdefault(_bfp_group_of(i, gs), False)
+        if codes[i] != 0:
+            live_group[_bfp_group_of(i, gs)] = True
+    m_max, e_max, have, dead_zero = 0, E[0], False, False
+    live_tops = [E[i] for i in range(n) if live_group[_bfp_group_of(i, gs)]]
+    for i in range(n):
+        if not live_group[_bfp_group_of(i, gs)]:
+            dead_zero = True
+            continue
+        if not have or (Fraction(codes[i]) * Fraction(2) ** E[i]
+                        > Fraction(m_max) * Fraction(2) ** e_max):
+            m_max, e_max, have = codes[i], E[i], True
+    if have and dead_zero and m_max < 0:
+        m_max, e_max = 0, max(live_tops)
 
     # (2) Align onto the work-or-coarser grid: at most ONE rounded shift per
     # element. The net shift s_i MAY be NEGATIVE (spec amended 2026-09-08,
@@ -230,9 +246,10 @@ def softmax_exp_codes_bfp(codes, exps, qc, mode):
 
 
 def softmax_values_bfp(codes, exps, qc, mode):
-    """softmaxValuesBfp (Softmax.c), the BACKWARD's recompute: steps 1-4, then
-    the float32 step 5 -- (float)qe * 0.3585f, ldexpf(.., -28), sum in index
-    order, per-element divide."""
+    """A float32 cross-check of the integer normalisation (no longer a C
+    mirror: the C backward recomputes p in integers): steps 1-4, then
+    (float)qe * 0.3585f, ldexpf(.., -28), sum in index order, per-element
+    divide."""
     s = []
     total = f32(0.0)
     for qe in softmax_exp_codes_bfp(codes, exps, qc, mode):
@@ -272,17 +289,78 @@ def softmax_float64(vals):
     return (e / e.sum()).tolist()
 
 
-def softmax_backward_bfp(x_codes, x_exps, x_qc, dlds_deq, mode):
-    """softmaxBackwardKernelBfp (Softmax.c, Task 5): recompute s via the
-    forward pipeline from the LOGITS (the backward differentiates the
-    UNpacked forward values -- R-N4), then float32 dot in index order and
-    raw_i = s_i * (dLds_i - dot). Returns (raw floats, dot, s) -- the extra
-    two feed the mutation-killability self-checks."""
-    s = softmax_values_bfp(x_codes, x_exps, x_qc, mode)
-    dot = f32(0.0)
-    for si, d in zip(s, dlds_deq):
-        dot = f32_add(dot, f32_mul(si, d))
-    return [f32_mul(si, f32_sub(d, dot)) for si, d in zip(s, dlds_deq)], dot, s
+VJP_BITS = 15
+
+
+def _shr_half_away(v, k):
+    if k <= 0:
+        return v
+    r = (abs(v) + (1 << (k - 1))) >> k
+    return -r if v < 0 else r
+
+
+def _align(v, k):
+    """bfpAlignPartial: left exact, right half away."""
+    if v == 0:
+        return 0
+    return v << -k if k <= 0 else (0 if k >= 62 else _shr_half_away(v, k))
+
+
+def _fold_guard(n, ma, mb):
+    """bfpFoldGuardBits(n, ma, mb, 0): the smallest g in [-30, 31] with
+    n 2^(ma+mb-2) 2^-g + n + 1 <= INT32_MAX."""
+    total = Fraction(n * 2 ** (ma + mb - 2))
+    room = INT32_MAX - n - 1
+    for g in range(-30, 32):
+        if total / Fraction(2) ** g <= room:
+            return g
+    raise AssertionError("no guard")
+
+
+def softmax_backward_bfp(x_codes, x_exps, x_qc, g_codes, g_exps, g_qc, mode, raw_gs):
+    """softmaxBackwardKernelBfp (Softmax.c): the integer VJP from its
+    definition -- p = the integer forward's Q30 raw recomputed from the LOGITS
+    (R-N4), p' = p >> 15 half away; the dot on E_d = E_top - 15 + G (E_top over
+    g's nonzero codes, G = the guard of n + 1 17 x m_g-bit products), each
+    product aligned (left exact, right half away); D_i = g_i on E_d minus the
+    dot; per raw target group both factors cut to 15 bits (half away), raw
+    exponent E_d + s_D + s_p - 30. Returns (mant, raw exponents, dot)."""
+    p = softmax_forward_raw_bfp(x_codes, x_exps, x_qc, mode)
+    n = len(p)
+    gbias = bfp_bias(g_qc)
+    eg = [g_exps[_bfp_group_of(i, g_qc["group_size"])] - gbias for i in range(n)]
+    gsz = n if raw_gs == 0 else raw_gs
+    live = [eg[i] for i in range(n) if g_codes[i] != 0]
+    if not live:
+        return [0] * n, [0] * (n // gsz), 0
+    ed = max(live) - VJP_BITS + _fold_guard(n + 1, 17, g_qc["mantissa_bits"])
+    dot = sum(_align(_shr_half_away(p[i], VJP_BITS) * g_codes[i], ed - (eg[i] - VJP_BITS))
+              for i in range(n))
+    assert INT32_MIN <= dot <= INT32_MAX
+    mant, raw_e = [0] * n, []
+    for t in range(n // gsz):
+        idx = range(t * gsz, (t + 1) * gsz)
+        d = {i: _align(g_codes[i], ed - eg[i]) - dot for i in idx}
+        assert all(INT32_MIN <= v <= INT32_MAX for v in d.values())
+        mp = max(p[i] for i in idx)
+        md = max(abs(v) for v in d.values())
+        if mp == 0 or md == 0:
+            raw_e.append(0)
+            continue
+        sp = max(0, mp.bit_length() - VJP_BITS)
+        sd = max(0, md.bit_length() - VJP_BITS)
+        for i in idx:
+            mant[i] = _shr_half_away(p[i], sp) * _shr_half_away(d[i], sd)
+            assert INT32_MIN <= mant[i] <= INT32_MAX
+        raw_e.append(ed + sd + sp - 30)
+    return mant, raw_e, dot
+
+
+def pack_raw(mant, raw_e, qc):
+    """The OUT_WRITE epilogue of a BFP_RAW: the section-13 re-block
+    (HALF_AWAY, the fixtures' op rounding)."""
+    return bfp_reblock_raw_half_away_ref(mant, raw_e, qc["group_size"], qc["mantissa_bits"],
+                                         qc["exponent_bits"])
 
 
 def softmax_backward_autograd(x_deq, dlds_deq):
@@ -607,25 +685,29 @@ def main() -> None:
         "BWD-N: dLds is uniform -- the -dot term collapses to dot = c * sum(s) = c and "
         "raw = 0 everywhere (the uniform-lossGrad vacuity)")
     bwd_dlds_deq = [deq(c, BWD_DLDS_EXPS, BWD_DLDS_QC, i) for i, c in enumerate(BWD_DLDS_CODES)]
-    bwd_raw, bwd_dot, bwd_s = softmax_backward_bfp(SM_X_CODES, SM_X_EXPS, SM_X_QC,
-                                                   bwd_dlds_deq, "trunc")
-    assert float(bwd_dot) != 0.0, (
+    bwd_mant, bwd_raw_e, bwd_dot = softmax_backward_bfp(
+        SM_X_CODES, SM_X_EXPS, SM_X_QC, BWD_DLDS_CODES, BWD_DLDS_EXPS, BWD_DLDS_QC, "trunc",
+        OUT_QC["group_size"])
+    assert bwd_dot != 0, (
         "BWD-N: dot == 0 -- the -dot term is vacuous, mutation (a) would survive")
-    bwd_out = pack(bwd_raw, OUT_QC)
+    bwd_out = pack_raw(bwd_mant, bwd_raw_e, OUT_QC)
     bwd_codes, bwd_exps = bwd_out
 
-    # (viii) Mutation-(a) killability: dropping -dot must move the PACKED wire.
-    no_dot_out = pack([f32_mul(si, d) for si, d in zip(bwd_s, bwd_dlds_deq)], OUT_QC)
-    assert no_dot_out != bwd_out, (
+    # (viii) Mutation-(a) killability: dropping -dot must move the PACKED wire
+    # (a dLds whose dot is exactly cancelled: g_i - dot on the dot's grid).
+    p_q30 = softmax_forward_raw_bfp(SM_X_CODES, SM_X_EXPS, SM_X_QC, "trunc")
+    no_dot_raw = [f32_mul(f32(math.ldexp(pi, -30)), d) for pi, d in zip(p_q30, bwd_dlds_deq)]
+    assert pack(no_dot_raw, OUT_QC) != bwd_out, (
         "BWD-N: raw without the -dot term packs to the same wire -- mutation (a) "
         "would survive the gold")
 
-    # (ix) Mutation-(b) killability: recomputing s from dLds instead of x
-    # (softmaxValuesBfp(dLdsT, ...)) must move the PACKED wire.
-    bad_raw, _, _ = softmax_backward_bfp(BWD_DLDS_CODES, BWD_DLDS_EXPS, BWD_DLDS_QC,
-                                         bwd_dlds_deq, "trunc")
-    assert pack(bad_raw, OUT_QC) != bwd_out, (
-        "BWD-N: s recomputed from dLds packs to the same wire -- mutation (b) "
+    # (ix) Mutation-(b) killability: recomputing p from dLds instead of x
+    # must move the PACKED wire.
+    bad_mant, bad_e, _ = softmax_backward_bfp(
+        BWD_DLDS_CODES, BWD_DLDS_EXPS, BWD_DLDS_QC, BWD_DLDS_CODES, BWD_DLDS_EXPS, BWD_DLDS_QC,
+        "trunc", OUT_QC["group_size"])
+    assert pack_raw(bad_mant, bad_e, OUT_QC) != bwd_out, (
+        "BWD-N: p recomputed from dLds packs to the same wire -- mutation (b) "
         "would survive the gold")
 
     # (x) Autograd proximity (float64 torch, shares nothing with the
@@ -648,17 +730,23 @@ def main() -> None:
     assert any(float(d) != float(v) for d, v in zip(st_deq, bwd_st_vals)), (
         "BWD-S: every dLds value is exactly representable at the staging grid -- the "
         "fixture cannot pin the staging rounding")
-    st_raw, st_dot, _ = softmax_backward_bfp(SM_X_CODES, SM_X_EXPS, SM_X_QC, st_deq, "trunc")
-    assert float(st_dot) != 0.0, "BWD-S: dot == 0 -- the -dot term is vacuous"
-    st_out = pack(st_raw, OUT_QC)
+    st_mant, st_raw_e, st_dot = softmax_backward_bfp(SM_X_CODES, SM_X_EXPS, SM_X_QC, st_codes,
+                                                     st_exps, st_qc, "trunc",
+                                                     OUT_QC["group_size"])
+    assert st_dot != 0, "BWD-S: dot == 0 -- the -dot term is vacuous"
+    st_out = pack_raw(st_mant, st_raw_e, OUT_QC)
     st_out_codes, st_out_exps = st_out
 
-    # (xi) Staging non-vacuity: feeding the kernel the EXACT float values
-    # (i.e. skipping the staging quantization) must move the packed wire.
-    unstaged_raw, _, _ = softmax_backward_bfp(SM_X_CODES, SM_X_EXPS, SM_X_QC,
-                                              bwd_st_vals, "trunc")
-    assert pack(unstaged_raw, OUT_QC) != st_out, (
-        "BWD-S: the unstaged floats pack to the same wire -- the fixture cannot pin "
+    # (xi) Staging non-vacuity: the same values staged at m = 16 instead of
+    # the anchor's m = 8 (i.e. without the staging's rounding) must move the
+    # packed wire.
+    fine_qc = {"mantissa_bits": 16, "exponent_bits": OUT_QC["exponent_bits"], "group_size": 0}
+    fine_codes, fine_exps = bfp_quantize_grouped([float(v) for v in bwd_st_vals], 16,
+                                                 OUT_QC["exponent_bits"], 0)
+    un_mant, un_e, _ = softmax_backward_bfp(SM_X_CODES, SM_X_EXPS, SM_X_QC, fine_codes, fine_exps,
+                                            fine_qc, "trunc", OUT_QC["group_size"])
+    assert pack_raw(un_mant, un_e, OUT_QC) != st_out, (
+        "BWD-S: the unstaged values pack to the same wire -- the fixture cannot pin "
         "the staging step; increase the values' distance from the m=8 grid")
 
     # (xii) Cross-fixture guard: the staged gold must differ from BWD-N's, so

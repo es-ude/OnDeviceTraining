@@ -1,8 +1,10 @@
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "ArithmeticType.h"
 #include "BfpRawFixture.h"
+#include "BfpScatterRef.h"
 #include "DeathTest.h"
 #include "KeyedDrawCheck.h"
 #include "LayerExec.h"
@@ -1309,6 +1311,235 @@ void testSoftmaxForwardBfpRequiresBfpOutputQ(void) {
     freeQuantization(floatQ);
 }
 
+/* ---- Zero-group liveness of the max grid (arithmetic-bfp.md section 13) ----
+ * The max compare is value-exact, but the winner's exponent becomes the
+ * alignment grid. An all-zero group stores the zero state (E = 0), an
+ * exponent unrelated to any data: when its 0 is the maximum (every live value
+ * negative) it must not set the grid, or the live logits 6 binades lower
+ * align onto 2^0 and lose every fraction bit. The grid is then the top live
+ * group's (no left shifts). */
+static void smZeroGroupRun(const int32_t *codes, const uint8_t *exps, double *p) {
+    size_t dims[1] = {8};
+    bfpScratchFixture_t in;
+    bfpScratchInit(&in, 1, dims, codes, exps, 2, 4, 8, 8);
+    bfpRawFixture_t raw;
+    bfpRawInit(&raw, 1, dims, 1, 0);
+    softmaxForwardBfpRaw(&in.tensor, BFP_SHIFT_TRUNC, NULL, &raw.tensor);
+    for (size_t i = 0; i < 8; i++) {
+        p[i] = ldexp((double)raw.mant[i], raw.exps[0]);
+    }
+}
+
+void testSoftmaxForwardBfpAZeroGroupDoesNotSetTheMaxGrid(void) {
+    const int32_t codes[8] = {0, 0, 0, 0, -10, -25, -40, -60};
+    const uint8_t exps[2] = {127, 121}; /* zero state E = 0; live E = -6 */
+    double p[8];
+    smZeroGroupRun(codes, exps, p);
+    double x[8], sum = 0.0;
+    for (size_t i = 0; i < 8; i++) {
+        x[i] = i < 4 ? 0.0 : ldexp((double)codes[i], -6);
+        sum += exp(x[i]);
+    }
+    for (size_t i = 0; i < 8; i++) {
+        TEST_ASSERT_TRUE(fabs(exp(x[i]) / sum - p[i]) <= 3e-3);
+    }
+    /* the zero group AFTER the live one: the same values (order-free) */
+    const int32_t swapped[8] = {-10, -25, -40, -60, 0, 0, 0, 0};
+    const uint8_t swappedExps[2] = {121, 127};
+    double q[8];
+    smZeroGroupRun(swapped, swappedExps, q);
+    for (size_t i = 0; i < 4; i++) {
+        TEST_ASSERT_TRUE(p[i + 4] == q[i]);
+        TEST_ASSERT_TRUE(p[i] == q[i + 4]);
+    }
+}
+
+/* ---- Integer VJP of the standalone Softmax backward (arithmetic-bfp.md section 14) ----
+ * dx_i = p_i (g_i - d), d = sum_j p_j g_j, in integers. The reference below
+ * is written from the documented definition in int64: p_i = the integer
+ * forward's raw (Q30, softmaxForwardBfpRaw), p'_i = p_i >> 15 half away; E_top
+ * = the max exponent over g's NONZERO codes; G = the guard of n + 1 terms of
+ * 17-bit x m_g-bit products; E_d = E_top - 15 + G; d = sum of p'_j g_j aligned
+ * from E_gj - 15 to E_d (left exact, right half away); D_i = g_i aligned to E_d
+ * minus d; per raw target group the two factors are reduced to 15 bits (s_p,
+ * s_D = bitlen(group max) - 15, half away) and multiplied; raw exponent =
+ * E_d + s_D + s_p - 30. */
+static int smBitLen(uint64_t v) {
+    int b = 0;
+    while (v != 0) {
+        b++;
+        v >>= 1;
+    }
+    return b;
+}
+
+static int64_t smShrHalfAway(int64_t v, int k) {
+    if (k <= 0) {
+        return v;
+    }
+    int64_t mag = v < 0 ? -v : v;
+    int64_t r = (mag + ((int64_t)1 << (k - 1))) >> k;
+    return v < 0 ? -r : r;
+}
+
+static int64_t smAlign(int64_t v, int k) {
+    if (v == 0) {
+        return 0;
+    }
+    if (k <= 0) {
+        return v * ((int64_t)1 << -k);
+    }
+    return k >= 62 ? 0 : smShrHalfAway(v, k);
+}
+
+static int smGuard(size_t n, unsigned ma, unsigned mb) {
+    double total = ldexp((double)n, (int)(ma + mb - 2u));
+    double room = (double)INT32_MAX - (double)n - 1.0;
+    for (int g = -30; g <= 31; g++) {
+        if (ldexp(total, -g) <= room) {
+            return g;
+        }
+    }
+    return 99;
+}
+
+static void refSoftmaxVjpRaw(const int32_t *pQ30, const int32_t *g, const int *eG, size_t n,
+                             uint8_t mg, size_t rawGroupSize, int32_t *mant, int16_t *rawE) {
+    size_t gsz = rawGroupSize == 0 ? n : rawGroupSize;
+    int top = INT32_MIN;
+    for (size_t i = 0; i < n; i++) {
+        if (g[i] != 0 && eG[i] > top) {
+            top = eG[i];
+        }
+    }
+    if (top == INT32_MIN) {
+        for (size_t i = 0; i < n; i++) {
+            mant[i] = 0;
+        }
+        for (size_t t = 0; t < n / gsz; t++) {
+            rawE[t] = 0;
+        }
+        return;
+    }
+    int eD = top - 15 + smGuard(n + 1, 17, mg);
+    int64_t d = 0;
+    for (size_t i = 0; i < n; i++) {
+        d += smAlign(smShrHalfAway(pQ30[i], 15) * g[i], eD - (eG[i] - 15));
+    }
+    for (size_t t = 0; t < n / gsz; t++) {
+        uint64_t mp = 0, md = 0;
+        for (size_t i = t * gsz; i < (t + 1) * gsz; i++) {
+            int64_t D = smAlign(g[i], eD - eG[i]) - d;
+            TEST_ASSERT_TRUE(D >= INT32_MIN && D <= INT32_MAX);
+            uint64_t a = (uint64_t)(D < 0 ? -D : D);
+            md = a > md ? a : md;
+            mp = (uint64_t)pQ30[i] > mp ? (uint64_t)pQ30[i] : mp;
+        }
+        if (mp == 0 || md == 0) {
+            rawE[t] = 0;
+            for (size_t i = t * gsz; i < (t + 1) * gsz; i++) {
+                mant[i] = 0;
+            }
+            continue;
+        }
+        int sp = smBitLen(mp) > 15 ? smBitLen(mp) - 15 : 0;
+        int sD = smBitLen(md) > 15 ? smBitLen(md) - 15 : 0;
+        rawE[t] = (int16_t)(eD + sD + sp - 30);
+        for (size_t i = t * gsz; i < (t + 1) * gsz; i++) {
+            int64_t D = smAlign(g[i], eD - eG[i]) - d;
+            int64_t prod = smShrHalfAway(pQ30[i], sp) * smShrHalfAway(D, sD);
+            TEST_ASSERT_TRUE(prod >= INT32_MIN && prod <= INT32_MAX);
+            mant[i] = (int32_t)prod;
+        }
+    }
+}
+
+/* Runs softmaxBackward (ARITH_BFP) on x = SM-A's logits and a grouped dLds,
+ * into a propLoss wire of the given geometry (FLOAT32 when pm == 0), and
+ * compares with the reference raw (re-blocked by bfpRefReblockRaw for a BFP
+ * wire, dequantized ldexpf((float)mant, E) for FLOAT32). Also bounds the
+ * values against the float64 VJP of the same p. */
+static void smVjpCase(const int32_t *gCodes, const uint8_t *gExps, size_t gGroups, size_t gGs,
+                      uint8_t mg, uint8_t pm, size_t pGroups, size_t pGs) {
+    tensor_t *in = buildSmBfpAInput();
+    tensor_t *loss = buildSmBfpWireWithCodes(8, mg, 8, gGroups, gGs, gCodes, gExps);
+    quantization_t *anchor = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 4);
+    tensor_t *propLoss;
+    if (pm == 0) {
+        size_t *dims = reserveMemory(sizeof(size_t));
+        dims[0] = 8;
+        size_t *order = reserveMemory(sizeof(size_t));
+        setOrderOfDimsForNewTensor(1, order);
+        shape_t *shape = reserveMemory(sizeof(shape_t));
+        setShape(shape, dims, 1, order);
+        propLoss = initTensor(shape, quantizationInitFloat(), NULL);
+    } else {
+        int32_t zeros[8] = {0};
+        uint8_t zexp[8] = {127, 127, 127, 127, 127, 127, 127, 127};
+        propLoss = buildSmBfpWireWithCodes(8, pm, 8, pGroups, pGs, zeros, zexp);
+    }
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, anchor);
+    layer_t *layer = softmaxLayerInit(&lq);
+    layerFunctions[SOFTMAX].backward(layer, in, loss, propLoss, NULL);
+
+    /* reference */
+    size_t dims[1] = {8};
+    bfpScratchFixture_t xs;
+    bfpScratchInit(&xs, 1, dims, kSmBfpXCodes, kSmBfpXExponents, (size_t)kSmBfpXNumGroups,
+                   (size_t)kSmBfpXGroupSize, (uint8_t)kSmBfpXMantissaBits, 8);
+    bfpRawFixture_t pr;
+    bfpRawInit(&pr, 1, dims, 1, 0);
+    softmaxForwardBfpRaw(&xs.tensor, BFP_SHIFT_TRUNC, NULL, &pr.tensor);
+    TEST_ASSERT_EQUAL_INT16(-30, pr.exps[0]);
+    int eG[8];
+    for (size_t i = 0; i < 8; i++) {
+        eG[i] = (int)gExps[gGs == 0 ? 0 : i / gGs] - 127;
+    }
+    size_t rawGs = pm == 0 ? 0 : pGs;
+    int32_t mant[8];
+    int16_t rawE[8];
+    refSoftmaxVjpRaw(pr.mant, gCodes, eG, 8, mg, rawGs, mant, rawE);
+    double dot = 0.0;
+    for (size_t i = 0; i < 8; i++) {
+        dot += ldexp((double)pr.mant[i], -30) * ldexp((double)gCodes[i], eG[i]);
+    }
+    if (pm == 0) {
+        const float *got = (const float *)propLoss->data;
+        for (size_t i = 0; i < 8; i++) {
+            TEST_ASSERT_EQUAL_FLOAT(ldexpf((float)mant[i], rawE[0]), got[i]);
+            double want = ldexp((double)pr.mant[i], -30) * (ldexp((double)gCodes[i], eG[i]) - dot);
+            TEST_ASSERT_TRUE(fabs(want - (double)got[i]) <= ldexp(1.0, rawE[0] + 17));
+        }
+    } else {
+        int32_t codes[8], refCodes[8];
+        uint8_t refStored[8];
+        bfpRefReblockRaw(mant, rawE, 8, pGs, pm, 8, NULL, refCodes, refStored);
+        unpackSignExtend(propLoss->data, pm, 0, codes, 8);
+        TEST_ASSERT_EQUAL_INT32_ARRAY(refCodes, codes, 8);
+        TEST_ASSERT_EQUAL_UINT8_ARRAY(
+            refStored, ((bfpQConfig_t *)propLoss->quantization->qConfig)->exponents, pGroups);
+    }
+    freeSoftmaxLayer(layer);
+    freeQuantization(anchor);
+    freeTensor(propLoss);
+    freeTensor(loss);
+    freeTensor(in);
+}
+
+void testSoftmaxBackwardBfpIsTheIntegerVjp(void) {
+    const int32_t g8[8] = {40, -25, 60, 10, -80, 33, -5, 90};
+    const uint8_t gExps[2] = {119, 112};    /* two groups 7 binades apart */
+    smVjpCase(g8, gExps, 2, 4, 8, 0, 1, 0); /* into FLOAT32: the {1, 0} raw */
+    smVjpCase(g8, gExps, 2, 4, 8, 8, 2, 4); /* into the grouped m 8 wire */
+    smVjpCase(g8, gExps, 2, 4, 8, 6, 1, 0); /* per-tensor m 6 wire */
+    const int32_t g16[8] = {-32768, 12345, 32767, -1, 0, 20000, -30000, 7};
+    smVjpCase(g16, gExps, 2, 4, 16, 0, 1, 0);  /* m 16: the 15-bit reductions round */
+    smVjpCase(g16, gExps, 2, 4, 16, 16, 4, 2); /* into m 16 groups of 2 */
+    const int32_t z[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    smVjpCase(z, gExps, 2, 4, 8, 0, 1, 0); /* a zero gradient is dx = 0 */
+}
+
 /* ---- BFP epic PR6 Task 5: native ARITH_BFP backward (P6-6) ----
  *
  * ONE funnel op: OUT_WRITE of dx into the propLoss wire, anchored on
@@ -2165,6 +2396,8 @@ int main() {
     RUN_TEST(unitTestSoftmaxForwardBfpRejectsAFloat32Input);
     RUN_TEST(testSoftmaxForwardBfpRequiresBfpOutputQ);
 
+    RUN_TEST(testSoftmaxForwardBfpAZeroGroupDoesNotSetTheMaxGrid);
+    RUN_TEST(testSoftmaxBackwardBfpIsTheIntegerVjp);
     RUN_TEST(unitTestSoftmaxBackwardBfpNative);
     RUN_TEST(unitTestSoftmaxBackwardBfpStagedLoss);
     RUN_TEST(testSoftmaxBackwardBfpRequiresBfpPropLossQ);

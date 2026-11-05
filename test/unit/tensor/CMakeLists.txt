@@ -112,3 +112,19 @@ target_link_libraries(UnitTestBfpIntegerAccumulate PRIVATE
         odt_test_rng_pin
 )
 __register_target_as_unit_test(UnitTestBfpIntegerAccumulate)
+# Integer macro-batch mean scale: bfpScalarFromCount (BfpKernelSupport.h) and
+# scaleBfpTensorByScalarInPlace (TensorConversion).
+add_executable(UnitTestBfpIntegerMeanScale UnitTestBfpIntegerMeanScale.c)
+target_link_libraries(UnitTestBfpIntegerMeanScale PRIVATE
+        unity
+        TensorConversion
+        Tensor
+        Rounding
+        Quantization
+        StorageApi
+        RNG
+        Common
+        m
+        odt_test_death
+)
+__register_target_as_unit_test(UnitTestBfpIntegerMeanScale)

@@ -31,5 +31,7 @@ void crossEntropySoftmaxBackward(tensor_t *softmaxOutput, tensor_t *distribution
  *
  * Caller must check backwardReduction == REDUCTION_MEAN before invoking. */
 float computeMeanScaleCE(size_t totalSamples, tensor_t *modelOutput);
+/* The integer mean divisor totalSamples; computeMeanScaleCE = 1.0f / (float)it. */
+size_t computeMeanDivisorCE(size_t totalSamples, tensor_t *modelOutput);
 
 #endif // CROSSENTROPY_H

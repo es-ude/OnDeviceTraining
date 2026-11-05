@@ -2382,3 +2382,45 @@ the Conv1d weightGrad / biasGrad, §14). Per target group,
 
 Fixed-grid accumulation stays a separate mode (it needs a whole-macro-batch
 bound, not a per-call one) and has no integer twin yet.
+
+### 15.6 Integer macro-batch mean scale
+
+The training loop scales the accumulated gradients by `1/D` exactly once per
+macro-batch — after the last micro-batch's accumulation, before
+`optimizerStep`, never folded into the learning rate (that would change how
+momentum treats its history) — and `optimizerZeroGrad` after the step makes the
+next batch start from zero. `D` comes from the loss family as an INTEGER
+(`computeMeanDivisor`: CE `batch->size`, MSE `batch->size × F`; `batch->size`
+is the batch's actual sample count), and `scaleOptimizerGradientsMean` takes it:
+non-BFP grads keep the float fold with `1.0f / (float)D` (bit-identical to
+`computeMeanScale`), BFP grads take the integer path.
+
+**`bfpScalarFromCount(D)`**: a power of two is exact (`{2^14, −14 − log2 D}`);
+otherwise `q = round(2^(14+L) / D)`, `L = bitlen(D)`, by a 16-step restoring
+division (no divide helper; no ties for a non-power-of-two `D`), relative error
+`<= 2^-15`. `1 <= D < 2^31`, else fail fast.
+
+**`scaleBfpTensorByScalarInPlace(t, s)`**, `s = q · 2^e` in `(0, 1]`: per group
+`A` = absmax code; `A == 0` → zero state (stored = bias). Otherwise `code · q`
+(int32-exact, `< 2^30`) is a raw mantissa on `2^(E+e)`; the fresh exponent is
+the integer exponent rule on `q · A` (the float walker's rule), clamped to
+`[0, cap]`; the emit shift `d = E' − E − e >= 0` (`q · A` has at least 15
+bits). Paths:
+1. Exponent only: `q == 2^14` and `d == 14` — a power-of-two `D` on a tight
+   grid above the floor. Codes untouched, no draws. This is HAR's path
+   (`D = 64`).
+2. Re-emit: everything else (non-power-of-two `D`, a non-tight grid that
+   renormalizes, the exponent floor): `code' = round(code · q / 2^d)` by the
+   config's `roundingMode` through `bfpQrRound` (the whole remainder reaches
+   the rounding, so a code driven below one step at the floor still lifts
+   with its exact probability), one draw per element of the group in element
+   order under SR. The cap is reachable only by the negative code bound at
+   `s ≈ 1`, and clamps.
+
+The draw count depends on the path, which is safe because each parameter's
+scale draws come from its own `(PARAM, p) → (SCALE, 0)` stream that nothing
+else reads. Same window structure as §15's accumulate (one group boundary
+ahead, two fixed 257-slot rings, ≈2.3 KB frame); a chunk of unchanged groups is
+neither unpacked nor packed, so path 1 costs one read of the codes. Power-of-two
+results equal the float `scaleBfpTensorInPlace` (exact there too) wherever the
+float walker does not overflow `mant · 2^E` near the top of the float range.

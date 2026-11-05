@@ -56,7 +56,7 @@ float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
          * trainingBatchDefault consumes the samples. freeSample only
          * releases the sample_t struct; the underlying label tensor is
          * owned by the dataset and remains alive throughout the macro
-         * batch, so labelRef stays valid for computeMeanScale below. */
+         * batch, so labelRef stays valid for computeMeanDivisor below. */
         tensor_t *labelRef = batch->samples[0]->label;
 
         totalLoss += trainingBatchDefault(model, modelSize, lossConfig, batch, calculateGradsFn,
@@ -77,10 +77,13 @@ float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
              * CE ignores this tensor entirely (1/totalSamples, no F term); MSE
              * is the one that reads dims[0] -- see LossFunction.h and
              * docs/conventions/loss.md, "Microbatch shape" (#152 PR3a). */
+            /* The INTEGER divisor (batch->size: the batch's actual sample
+             * count), so a BFP grad's 1/divisor is derived without float;
+             * the float grads get 1.0f / (float)divisor, today's scale. */
             batchView_t labelRefView;
-            float meanScale = lossFunctions[lossConfig.funcType].computeMeanScale(
+            size_t meanDivisor = lossFunctions[lossConfig.funcType].computeMeanDivisor(
                 batch->size, batchViewOf(&labelRefView, labelRef));
-            scaleOptimizerGradients(optimizer, meanScale, updateKey);
+            scaleOptimizerGradientsMean(optimizer, meanDivisor, updateKey);
         }
 
         optimizerStep(optimizer, updateKey);

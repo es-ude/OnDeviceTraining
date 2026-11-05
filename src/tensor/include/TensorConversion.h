@@ -250,6 +250,35 @@ void scaleBfpTensorInPlace(tensor_t *t, float factor, rngStream_t *rs);
  * Direct-call only, not a conversionMatrix cell. */
 void accumulateBfpRawIntoBfpRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs);
 
+/* bfpScalar_t (BfpKernelSupport.h); a declaration may take it incomplete,
+ * callers include BfpKernelSupport.h to build one. */
+struct bfpScalar;
+
+/*! @brief The INTEGER in-place scale of a BFP tensor by a scalar s = q * 2^e
+ * in (0, 1] -- the macro-batch mean scale (s = bfpScalarFromCount(B)); no
+ * float, no division, no int64 (arithmetic-bfp.md §15.6, the integer twin of
+ * scaleBfpTensorInPlace for factors <= 1).
+ *
+ * Per group: A = the absmax code; A == 0 is the zero state (stored = bias),
+ * no draws. Otherwise code * q (exact in int32) is a raw mantissa on the grid
+ * 2^(E + e), and the fresh exponent comes from q * A by the integer exponent
+ * rule (the float walker's rule: smallest exponent with q * A <= qMax on it),
+ * floored at stored 0; the emit shift d = fresh - E - e is >= 0 (q >= 2^14
+ * gives q * A at least 15 bits). A power-of-two s on a group whose grid stays
+ * tight and above the floor (q == 2^14, d == 14) is exact by the exponent
+ * alone: codes are not touched and nothing is drawn. Every other group --
+ * a non-power-of-two s, a renormalizing or floored grid -- re-emits each
+ * code as round(code * q / 2^d) by the config's roundingMode (bfpQrRound:
+ * the remainder carried to the rounding, so a code driven below one step at
+ * the floor still lifts with its exact probability), clamped to the code
+ * range; under SR one draw per element of such a group, in element order.
+ * The cap is unreachable for s <= 1 except through the code bound itself
+ * (clamped). Old exponents stay readable until each group's last element is
+ * consumed (the rescale engines' one-group window, fixed stack).
+ * Fails fast: non-BFP tensor, s outside (0, 1] or not normalized
+ * (2^14 <= q <= 2^15 - 1), SR without a stream. n == 0 -> zero state. */
+void scaleBfpTensorByScalarInPlace(tensor_t *t, struct bfpScalar s, rngStream_t *rs);
+
 /*! @brief BFP_RAW -> BFP: the integer re-block of the funnel's forward raw
  * (int32 mantissas + one UNBIASED int16 exponent per TARGET group) onto the
  * target's grid -- shifts and integer rounding only, no float.

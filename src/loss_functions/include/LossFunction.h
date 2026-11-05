@@ -48,7 +48,7 @@ typedef float (*lossFwdFn_t)(tensor_t *modelOutput, tensor_t *label, reduction_t
  *
  * Writes raw per-element gradient (no batchSize/reduction divisor).
  * Macro-batch scaling is applied at the optimizer step via
- * scaleOptimizerGradients(optimizer, computeMeanScale(...), updateKey) in
+ * scaleOptimizerGradientsMean(optimizer, computeMeanDivisor(...), updateKey) in
  * trainingEpochDefault when backwardReduction == REDUCTION_MEAN.
  *
  * \param modelOutput  Same shape contract as forward.
@@ -76,10 +76,18 @@ typedef void (*lossBwdFn_t)(tensor_t *modelOutput, tensor_t *label, tensor_t *re
  * view, not the model's output tensor. */
 typedef float (*computeMeanScaleFn_t)(size_t totalSamples, tensor_t *modelOutput);
 
+/* The same mean as an INTEGER divisor D (MSE: totalSamples x F, CE:
+ * totalSamples; computeMeanScale = 1.0f / (float)D, bit for bit), same
+ * modelOutput contract. trainingEpochDefault hands it to
+ * scaleOptimizerGradientsMean, whose BFP arm derives 1/D in integer
+ * arithmetic (bfpScalarFromCount) instead of from the float. */
+typedef size_t (*computeMeanDivisorFn_t)(size_t totalSamples, tensor_t *modelOutput);
+
 typedef struct lossFunctions {
     lossFwdFn_t forward;
     lossBwdFn_t backward;
     computeMeanScaleFn_t computeMeanScale;
+    computeMeanDivisorFn_t computeMeanDivisor;
 } lossFunctions_t;
 
 extern lossFunctions_t lossFunctions[];

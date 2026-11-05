@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "ArithmeticType.h"
+#include "BfpKernelSupport.h"
 #include "BorrowedLayer.h"
 #include "DeathTest.h"
 #include "Layer.h"
@@ -1005,6 +1006,137 @@ void testScaleOptimizerGradientsOverNoParametersUnderAKeyDoesNotExit(void) {
     ASSERT_EXITS_WITH_OUTPUT(0, "", scaleNoParametersUnderAKey());
 }
 
+/* ---- scaleOptimizerGradientsMean: the macro-batch mean from the integer divisor ---- */
+
+/* FLOAT32 grads take today's fold with 1.0f / (float)divisor, bit for bit. */
+void testScaleOptimizerGradientsMeanFloatArmIsTheFloatFoldOfOneOverDivisor(void) {
+    layer_t *model[1];
+    parameter_t *w;
+    parameter_t *b;
+    float wInit[6] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
+    float bInit[2] = {7.f, 8.f};
+    optimizer_t *sgd = buildOneLayerOptimWithGrads(model, &w, &b, wInit, bInit);
+
+    scaleOptimizerGradientsMean(sgd, 3, NULL);
+
+    float got[8];
+    memcpy(got, w->grad->data, 6 * sizeof(float));
+    memcpy(got + 6, b->grad->data, 2 * sizeof(float));
+    freeOptim(sgd);
+    freeLinearLayerShellOnly(model[0]);
+    const float factor = 1.0f / (float)3;
+    for (size_t i = 0; i < 8; i++) {
+        float expected = i < 6 ? wInit[i] : bInit[i - 6];
+        expected *= factor;
+        TEST_ASSERT_EQUAL_MEMORY(&expected, &got[i], sizeof(float));
+    }
+}
+
+/* A BFP grad takes the INTEGER scale: each param's codes and exponent equal
+ * scaleBfpTensorByScalarInPlace by bfpScalarFromCount(divisor) on the SCALE
+ * stream of its param index (the stream the float arm used before), for a
+ * non-power-of-two and a power-of-two divisor. */
+void testScaleOptimizerGradientsMeanBfpArmIsTheIntegerScaleOnTheParamsStream(void) {
+    const size_t divisors[2] = {3, 64};
+    for (size_t k = 0; k < 2; k++) {
+        const rngKey_t updateKey = rngKeyFromSeed(SCALE_STREAM_SEED);
+        parameter_t *params[2] = {buildSrBfpGradParam(), buildSrBfpGradParam()};
+        optimizer_t optim = {.type = SGD_M, .parameter = params, .sizeStates = 2};
+
+        scaleOptimizerGradientsMean(&optim, divisors[k], &updateKey);
+
+        for (uint32_t p = 0; p < 2; p++) {
+            rngStream_t s =
+                rngOpen(rngFold(rngFold(updateKey, RNG_TAG_PARAM, p), RNG_TAG_SCALE, 0u));
+            parameter_t *reference = buildSrBfpGradParam();
+            scaleBfpTensorByScalarInPlace(reference->grad, bfpScalarFromCount(divisors[k], "test"),
+                                          &s);
+            TEST_ASSERT_EQUAL_MEMORY_MESSAGE(reference->grad->data, params[p]->grad->data,
+                                             calcBytesPerTensor(reference->grad),
+                                             "the codes are the integer scale's");
+            TEST_ASSERT_EQUAL_UINT8_MESSAGE(
+                ((bfpQConfig_t *)reference->grad->quantization->qConfig)->exponents[0],
+                ((bfpQConfig_t *)params[p]->grad->quantization->qConfig)->exponents[0],
+                "the exponent is the integer scale's");
+            freeParameter(reference);
+        }
+        freeParameter(params[1]);
+        freeParameter(params[0]);
+    }
+}
+
+/* Power-of-two divisor on a BFP grad: the values are exactly grad / divisor. */
+void testScaleOptimizerGradientsMeanBfpPowerOfTwoIsExact(void) {
+    const rngKey_t updateKey = rngKeyFromSeed(7u);
+    parameter_t *params[1] = {buildSrBfpGradParam()};
+    optimizer_t optim = {.type = SGD_M, .parameter = params, .sizeStates = 1};
+    float before[SR_SCALE_ELEMENTS];
+    float after[SR_SCALE_ELEMENTS];
+    dequantGradToFloat(params[0]->grad, before, SR_SCALE_ELEMENTS);
+
+    scaleOptimizerGradientsMean(&optim, 64, &updateKey);
+
+    dequantGradToFloat(params[0]->grad, after, SR_SCALE_ELEMENTS);
+    freeParameter(params[0]);
+    for (size_t i = 0; i < SR_SCALE_ELEMENTS; i++) {
+        TEST_ASSERT_EQUAL_FLOAT(before[i] / 64.0f, after[i]);
+    }
+}
+
+static void scaleMeanByZero(void) {
+    parameter_t *params[1] = {buildSrBfpGradParam()};
+    optimizer_t optim = {.type = SGD_M, .parameter = params, .sizeStates = 1};
+    const rngKey_t updateKey = rngKeyFromSeed(1u);
+    scaleOptimizerGradientsMean(&optim, 0, &updateKey);
+}
+
+/* A mean over zero samples has no factor: fail fast. */
+void testScaleOptimizerGradientsMeanRejectsAZeroDivisor(void) {
+    ASSERT_EXITS_WITH_FAILURE(scaleMeanByZero());
+}
+
+/* Vacuity guard for the wiring: a 16-bit HALF_AWAY grad with many distinct
+ * codes, where the 15-bit 1/7 and the float 1/7 round some code differently.
+ * The mean entry must give the INTEGER result -- and that result differs from
+ * the float walker's, so a float-wired BFP arm cannot pass. */
+static parameter_t *buildWideBfpGradParam(void) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = 256;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    tensor_t *param = initTensor(shape, quantizationInitFloat(), NULL);
+    float values[256];
+    for (size_t i = 0; i < 256; i++) {
+        values[i] = (float)(32767 - 97 * (int)i) * ((i & 1) ? -1.f : 1.f);
+    }
+    tensorFillFromFloatBuffer(param, values, 256);
+    quantization_t *gradQ = quantizationInitBfp(16, 8, HALF_AWAY);
+    tensor_t *grad = gradInit(param, gradQ, NULL);
+    freeQuantization(gradQ);
+    tensorFillFromFloatBuffer(grad, values, 256);
+    return parameterInit(param, grad);
+}
+
+void testScaleOptimizerGradientsMeanBfpArmIsNotTheFloatWalker(void) {
+    parameter_t *params[1] = {buildWideBfpGradParam()};
+    optimizer_t optim = {.type = SGD_M, .parameter = params, .sizeStates = 1};
+    scaleOptimizerGradientsMean(&optim, 7, NULL);
+
+    parameter_t *intRef = buildWideBfpGradParam();
+    scaleBfpTensorByScalarInPlace(intRef->grad, bfpScalarFromCount(7, "test"), NULL);
+    parameter_t *floatRef = buildWideBfpGradParam();
+    scaleBfpTensorInPlace(floatRef->grad, 1.0f / 7.0f, NULL);
+    const size_t bytes = calcBytesPerTensor(intRef->grad);
+    TEST_ASSERT_EQUAL_MEMORY(intRef->grad->data, params[0]->grad->data, bytes);
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(floatRef->grad->data, intRef->grad->data, bytes) == 0,
+                              "the fixture must separate the integer and the float scale");
+    freeParameter(floatRef);
+    freeParameter(intRef);
+    freeParameter(params[0]);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testScaleOptimizerGradients_DoublesGradients);
@@ -1027,5 +1159,10 @@ int main(void) {
 #endif
     RUN_TEST(testScaleOptimizerGradientsOverNoParametersUnderAKeyDoesNotExit);
     RUN_TEST(testMeanScaleOfAnSrBfpGradDrawsFromItsParamsScaleStream);
+    RUN_TEST(testScaleOptimizerGradientsMeanFloatArmIsTheFloatFoldOfOneOverDivisor);
+    RUN_TEST(testScaleOptimizerGradientsMeanBfpArmIsTheIntegerScaleOnTheParamsStream);
+    RUN_TEST(testScaleOptimizerGradientsMeanBfpPowerOfTwoIsExact);
+    RUN_TEST(testScaleOptimizerGradientsMeanRejectsAZeroDivisor);
+    RUN_TEST(testScaleOptimizerGradientsMeanBfpArmIsNotTheFloatWalker);
     return UNITY_END();
 }

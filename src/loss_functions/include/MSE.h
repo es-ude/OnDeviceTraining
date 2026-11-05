@@ -22,5 +22,7 @@ void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result,
  *
  * Caller must check backwardReduction == REDUCTION_MEAN before invoking. */
 float computeMeanScaleMSE(size_t totalSamples, tensor_t *modelOutput);
+/* The integer mean divisor totalSamples * F; computeMeanScaleMSE = 1.0f / (float)it. */
+size_t computeMeanDivisorMSE(size_t totalSamples, tensor_t *modelOutput);
 
 #endif // MSE_H

@@ -266,7 +266,10 @@ Notes on the qualified cells:
   BatchNorm1d: 2 if `affine`, else 0; every other layer and every frozen layer: 0),
   dtype-aware `scaleOptimizerGradients` (O(1) scale fold for SYM_INT32/SYM/ASYM grads;
   O(n) value-domain repack for BFP via `scaleBfpTensorInPlace` — a non-finite factor
-  warns and propagates on every other dtype but hard-fails on BFP), and
+  warns and propagates on every other dtype but hard-fails on BFP), the macro-batch
+  mean `scaleOptimizerGradientsMean(optim, divisor, key)` from the loss family's integer
+  `computeMeanDivisor` (integer-only on BFP grads: `bfpScalarFromCount` +
+  `scaleBfpTensorByScalarInPlace`, a power-of-two divisor is an exponent shift), and
   `optimizerZeroGrad` — shared across both rows. No bias-correction on SGD; AdamW
   has PyTorch-standard bias correction (`bc1`/`bc2`).
 - **Global-norm gradient clipping** (`optimizerClipGradNorm(optim, maxNorm)`, #382,
@@ -519,7 +522,7 @@ checkpointing, limitations, literature).
   than one storage row must be identity-order) — the same `dims[0]` partition as CE's MEAN
   divisor, so the fused gradient is exact per row. Backward emits
   **raw per-element grads**; the mean divisor is deferred to
-  the optimizer via `computeMeanScale` × `scaleOptimizerGradients`. `crossEntropyForward`
+  the optimizer via `computeMeanDivisor` → `scaleOptimizerGradientsMean`. `crossEntropyForward`
   returns NaN (and prints one PRINT_ERROR per process) when any softmax element is
   non-finite; it no longer aborts (`#446`). Both losses fail fast unless the
   model output has rank >= 2 and at least one element and every operand has

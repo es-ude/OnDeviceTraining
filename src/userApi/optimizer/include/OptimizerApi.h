@@ -29,9 +29,23 @@
  * named error before any gradient changes. */
 void scaleOptimizerGradients(optimizer_t *optimizer, float factor, const rngKey_t *updateKey);
 
+/* The macro-batch MEAN scale by 1 / divisor, from the INTEGER divisor (the
+ * loss family's computeMeanDivisor: totalSamples, or totalSamples x F for
+ * MSE). trainingEpochDefault calls it once per macro-batch, after the last
+ * micro-batch's accumulation and before optimizerStep; optimizerZeroGrad
+ * follows the step, so the next batch starts from zero. Non-BFP grads take
+ * scaleOptimizerGradients's fold with 1.0f / (float)divisor -- bit for bit the
+ * float entry with computeMeanScale. A BFP grad takes the integer path:
+ * bfpScalarFromCount(divisor) once per call (exact for a power of two), then
+ * scaleBfpTensorByScalarInPlace on parameter p's SCALE stream (the stream the
+ * float entry draws from); a power-of-two divisor on a tight grid only lowers
+ * the exponents. Fails fast: divisor 0 (or >= 2^31 with a BFP grad), more
+ * than 2^32 parameters under a key, SR BFP grads without a key. */
+void scaleOptimizerGradientsMean(optimizer_t *optimizer, size_t divisor, const rngKey_t *updateKey);
+
 /* #382: global-norm gradient clipping, `torch.nn.utils.clip_grad_norm_`
  * parity. Call-site contract: AFTER grad accumulation and mean-scaling
- * (computeMeanScale -> scaleOptimizerGradients) and BEFORE the optimizer
+ * (computeMeanDivisor -> scaleOptimizerGradientsMean) and BEFORE the optimizer
  * step -- clipping a not-yet-mean-scaled or already-stepped gradient set
  * clips the wrong quantity.
  *

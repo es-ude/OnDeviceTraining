@@ -118,3 +118,11 @@ Linear.c:weightGradKernelBfpRaw calcElementIndexByIndices __aeabi_uidiv 1
 # emit run on cursors.
 Linear.c:biasGradKernelBfpRaw linearCalcBiasGradsBfpRaw __aeabi_uidivmod 1
 Linear.c:biasGradKernelBfpRaw linearCalcBiasGradsBfpRaw __aeabi_uidiv 1
+
+# ---- Integer mean scale of BFP grads (scaleBfpTensorByScalarInPlace) --------
+# Per conversion chunk (256 elements): the scan frontier (chunkEnd - 1) / gsz, and
+# in the scan its start group from / gsz and ring slot g % 257 (once per scan
+# call, i.e. per chunk); the runs inside advance cursors. 1/B itself is a
+# restoring shift-subtract (bfpScalarFromCount), no divide helper.
+TensorConversion.c:scaleBfpTensorByScalarInPlace scaleBfpTensorByScalarInPlace __aeabi_uidiv 2
+TensorConversion.c:scaleBfpTensorByScalarInPlace scaleBfpTensorByScalarInPlace __aeabi_uidivmod 1

@@ -23,7 +23,7 @@ uv run tools/bfp-census/census.py --self-test
   `har_backward_roots.txt`: the HAR backward paths that are integer so far (today the
   Conv1d and Linear dx and the dx-wire re-block, and the Conv1d and Linear weightGrad /
   biasGrad into BFP grads with their integer accumulate, and the macro-batch mean
-  scale of BFP grads), gated with `--strict` like
+  scale of BFP grads, and the SGD momentum store on BFP state), gated with `--strict` like
   the forward; a path
   joins it when it turns integer.
   Format `<source.c> <function>`: the census follows direct calls from the root, within

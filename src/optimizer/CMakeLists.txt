@@ -32,11 +32,15 @@ target_link_libraries(Sgd PRIVATE
         RNG
         DTypes
         Tensor
+        # the integer momentum store on BFP state (momentumStoreBfpInPlace)
+        TensorConversion
+        Quantization
         Arithmetic
         ArithmeticType
         ExecuteOp
         Layer
         Common
+        m # bfpScalarFromFloat (frexpf, roundf) at sgdInit
 )
 
 add_library(AdamW AdamW.c)

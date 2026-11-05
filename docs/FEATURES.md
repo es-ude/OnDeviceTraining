@@ -269,7 +269,11 @@ Notes on the qualified cells:
   warns and propagates on every other dtype but hard-fails on BFP), the macro-batch
   mean `scaleOptimizerGradientsMean(optim, divisor, key)` from the loss family's integer
   `computeMeanDivisor` (integer-only on BFP grads: `bfpScalarFromCount` +
-  `scaleBfpTensorByScalarInPlace`, a power-of-two divisor is an exponent shift), and
+  `scaleBfpTensorByScalarInPlace`, a power-of-two divisor is an exponent shift), the
+  integer SGD momentum store on a BFP state fed by a BFP gradient
+  (`momentumStoreBfpInPlace`: `v = μ·v + g` per group under each operand's own exponent,
+  tail-preserving SR, 15-bit `μ` encoded at `sgdInit`; nonzero weight decay or `μ`
+  outside `(0, 1]` fail fast there; the param update still runs the float funnel), and
   `optimizerZeroGrad` — shared across both rows. No bias-correction on SGD; AdamW
   has PyTorch-standard bias correction (`bc1`/`bc2`).
 - **Global-norm gradient clipping** (`optimizerClipGradNorm(optim, maxNorm)`, #382,

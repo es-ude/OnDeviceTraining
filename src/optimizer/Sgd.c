@@ -5,11 +5,14 @@
 #include <stdlib.h>
 
 #include "ArithmeticType.h"
+#include "BfpKernelSupport.h"
 #include "Common.h"
 #include "ExecuteOp.h"
 #include "OptimizerKeys.h"
+#include "RNG.h"
 #include "Sgd.h"
 #include "Tensor.h"
+#include "TensorConversion.h"
 
 void sgdInit(sgd_t *sgd, float learningRate, float momentumFactor, float weightDecay,
              arithmetic_t updateMath) {
@@ -25,6 +28,17 @@ void sgdInit(sgd_t *sgd, float learningRate, float momentumFactor, float weightD
     sgd->momentumFactor = momentumFactor;
     sgd->weightDecay = weightDecay;
     sgd->updateMath = updateMath;
+    /* Config time (float is allowed here, never in the training-step roots):
+     * the momentum for the integer store on BFP state, encoded once. */
+    sgd->momentumQ = 0;
+    sgd->momentumE = 0;
+    sgd->momentumIntValid = false;
+    if (momentumFactor > 0.0f && momentumFactor <= 1.0f) {
+        const bfpScalar_t mu = bfpScalarFromFloat(momentumFactor, "SGD momentumFactor");
+        sgd->momentumQ = mu.q;
+        sgd->momentumE = mu.e;
+        sgd->momentumIntValid = true;
+    }
 }
 
 typedef struct {
@@ -101,6 +115,37 @@ static void sgdMParamKernel(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t 
  * append, never renumber. */
 enum { SGD_OP_STATE = 0, SGD_OP_PARAM = 1 };
 
+/* The state op when the gradient AND the state are BFP: the integer momentum
+ * store v' = mu * v + g (momentumStoreBfpInPlace; arithmetic-bfp.md §15.7) in
+ * place of the float kernel, the same formula and order (no dampening, no
+ * Nesterov; coupled weight decay is rejected by the caller). Same RNG
+ * contract as the funnel op it replaces: the OUT stream of the state op's
+ * key, one draw per element in element order -- the draw count of the
+ * OUT_WRITE re-pack -- so every other op's stream is untouched. Rounds by
+ * the optimizer's write-back mode (#282). Out of line: its own census root,
+ * integer only. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+static void sgdMomentumStoreBfp(const sgd_t *sgd, tensor_t *state, const tensor_t *grad,
+                                uint32_t paramIndex, roundingMode_t rm, const rngKey_t *updateKey) {
+    if (!sgd->momentumIntValid) {
+        PRINT_ERROR("SGD: the integer momentum store on BFP state needs 0 < momentumFactor "
+                    "<= 1 (the float momentum op is not a fallback for BFP state)");
+        exit(1);
+    }
+    rngKey_t opKey;
+    const rngKey_t *key = optimizerUpdateOpKey(updateKey, paramIndex, SGD_OP_STATE, &opKey);
+    rngStream_t stream;
+    rngStream_t *rs = NULL;
+    if (key != NULL) {
+        stream = rngOpen(rngFold(*key, RNG_TAG_OUT, 0u));
+        rs = &stream;
+    }
+    momentumStoreBfpInPlace(state, grad, (bfpScalar_t){.q = sgd->momentumQ, .e = sgd->momentumE},
+                            rm, rs);
+}
+
 void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
     sgd_t *sgd = optim->impl->sgd;
 
@@ -156,26 +201,37 @@ void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
         parameter_t *p = optim->parameter[i];
         tensor_t *state = optim->states[i]->stateBuffers[0];
 
-        sgdMStateCtx_t sc = {.momentum = sgd->momentumFactor, .weightDecay = sgd->weightDecay};
-        rngKey_t stateKey;
-        executeOp(
-            &(opSpec_t){
-                .kernel = sgdMStateKernel,
-                .ctx = &sc,
-                .inputs = (tensor_t *[]){state, p->grad, p->param},
-                .nInputs = 3,
-                .arithmetic = updateMath,
-                .key = optimizerUpdateOpKey(updateKey, (uint32_t)i, SGD_OP_STATE, &stateKey),
-                .mode = OUT_WRITE,
-                .auxOut = NULL,
-                .writesInPlaceSafe = true,
-                /* Group-quant PR3 Task 4: param is inputs[2] here (state,
-                 * then grad, then param) -- the momentum-state carrier gate
-                 * (PR2) keeps state/grad per-tensor, so param is the only
-                 * operand allowed to be grouped-SYM. */
-                .groupedSymOperandPos = 3,
-            },
-            state);
+        if (state->quantization->type == BFP && p->grad->quantization->type == BFP) {
+            if (sgd->weightDecay != 0.0f) {
+                PRINT_ERROR("SGD: nonzero weightDecay (%g) is not implemented by the integer "
+                            "momentum store on BFP state -- fails fast instead of dropping it",
+                            (double)sgd->weightDecay);
+                exit(1);
+            }
+            sgdMomentumStoreBfp(sgd, state, p->grad, (uint32_t)i, optim->writeBackRounding,
+                                updateKey);
+        } else {
+            sgdMStateCtx_t sc = {.momentum = sgd->momentumFactor, .weightDecay = sgd->weightDecay};
+            rngKey_t stateKey;
+            executeOp(
+                &(opSpec_t){
+                    .kernel = sgdMStateKernel,
+                    .ctx = &sc,
+                    .inputs = (tensor_t *[]){state, p->grad, p->param},
+                    .nInputs = 3,
+                    .arithmetic = updateMath,
+                    .key = optimizerUpdateOpKey(updateKey, (uint32_t)i, SGD_OP_STATE, &stateKey),
+                    .mode = OUT_WRITE,
+                    .auxOut = NULL,
+                    .writesInPlaceSafe = true,
+                    /* Group-quant PR3 Task 4: param is inputs[2] here (state,
+                     * then grad, then param) -- the momentum-state carrier gate
+                     * (PR2) keeps state/grad per-tensor, so param is the only
+                     * operand allowed to be grouped-SYM. */
+                    .groupedSymOperandPos = 3,
+                },
+                state);
+        }
 
         sgdMParamCtx_t pc = {.lr = sgd->learningRate};
         rngKey_t paramKey;

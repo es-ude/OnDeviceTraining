@@ -3020,6 +3020,258 @@ void scaleBfpTensorByScalarInPlace(tensor_t *t, bfpScalar_t s, rngStream_t *rs) 
     }
 }
 
+/* ---- Integer SGD momentum store: v' = mu * v + g (arithmetic-bfp.md §15.7) ----
+ * Contract: TensorConversion.h, momentumStoreBfpInPlace. The accumulate
+ * engine's three passes with the roles of its operands re-cast: the in-place
+ * state contributes the WIDE term v_i * q (up to 30 bits, on 2^(E_v + e)),
+ * the read-only gradient the narrow one (its codes, on 2^E_g). Per group:
+ *   pass 0: A_v, A_g; E_c = max(E_v + e + bitlen(q * A_v), E_g + bitlen(A_g))
+ *           - 30, capped at capE. The term that sets E_c is then exact on the
+ *           grid (shift <= 0), so at most one term carries a tail.
+ *   pass 1: absmax of the exact sums rounded UP to the grid -> the integer
+ *           exponent rule, floored at E_c, D6 clamp (the accumulate engine's
+ *           exactness argument verbatim).
+ *   pass 2: the same exact sum re-gridded and rounded once by the caller's
+ *           mode, one draw per element in element order on every path.
+ * Cap regime: only a gradient can push E_c past capE (E_v <= capE and e <=
+ * -14 keep the state's term below 2^16 on the capped grid), and a gradient
+ * term reaching 2^30 there saturates its element with its own sign, exactly.
+ * Passes 0 and 1 run one group boundary ahead of pass 2 (the window rule),
+ * so the state's exponents stay OLD for every group not yet emitted. */
+static void bfpMomentumScan(const bfpQConfig_t *vqc, const uint8_t *vData, const bfpQConfig_t *gqc,
+                            const uint8_t *gData, bfpScalar_t mu, size_t from, size_t to,
+                            size_t gsz, int cap, int32_t *workE, uint8_t *fresh, int32_t *vm,
+                            int32_t *gm) {
+    const int32_t biasV = bfpExponentBias(vqc);
+    const int32_t biasG = bfpExponentBias(gqc);
+    const int capE = cap - (int)biasV;
+    const uint32_t q = (uint32_t)mu.q; /* >= 0, validated */
+    for (int pass = 0; pass < 2; pass++) {
+        size_t g = from / gsz; /* once per call; runs advance a cursor */
+        size_t gEnd = (g + 1) * gsz;
+        size_t slot = g % ODT_RESCALE_FRESH_WINDOW;
+        uint32_t av = 0;
+        uint32_t ag = 0;
+        size_t pos = from;
+        while (pos < to) {
+            const size_t start = pos & ~(size_t)7;
+            const size_t take =
+                to - start < ODT_CONVERSION_CHUNK_ELEMS ? to - start : ODT_CONVERSION_CHUNK_ELEMS;
+            unpackSignExtendChunk(vData, vqc->mantissaBits, start, take, vm);
+            unpackSignExtendChunk(gData, gqc->mantissaBits, start, take, gm);
+            const size_t segEnd = start + take;
+            while (pos < segEnd) {
+                const size_t runEnd = gEnd < segEnd ? gEnd : segEnd;
+                const int ev = (int)vqc->exponents[g] - (int)biasV + (int)mu.e;
+                const int eg = (int)gqc->exponents[g] - (int)biasG;
+                if (pass == 0) {
+                    for (size_t i = pos; i < runEnd; i++) {
+                        const int32_t v = vm[i - start];
+                        const int32_t c = gm[i - start];
+                        const uint32_t mv = v < 0 ? 0u - (uint32_t)v : (uint32_t)v;
+                        const uint32_t mg = c < 0 ? 0u - (uint32_t)c : (uint32_t)c;
+                        av = mv > av ? mv : av;
+                        ag = mg > ag ? mg : ag;
+                    }
+                    if (runEnd == gEnd) {
+                        const uint32_t avq = av * q; /* <= 2^15 * (2^15 - 1) */
+                        if (avq == 0 && ag == 0) {
+                            workE[slot] = BFP_INT_ACC_ZERO_GROUP;
+                        } else {
+                            const int topV = avq ? ev + (int)bfpBitLength32(avq) : INT32_MIN;
+                            const int topG = ag ? eg + (int)bfpBitLength32(ag) : INT32_MIN;
+                            const int ec = (topV > topG ? topV : topG) - 30;
+                            workE[slot] = ec > capE ? capE : ec;
+                        }
+                        av = 0;
+                        ag = 0;
+                    }
+                } else if (workE[slot] != BFP_INT_ACC_ZERO_GROUP) {
+                    const int ec = workE[slot];
+                    const int kv = ec - ev;
+                    const int kg = ec - eg;
+                    for (size_t i = pos; i < runEnd; i++) {
+                        uint32_t mag;
+                        if (bfpRawTermSaturates(gm[i - start], kg)) {
+                            mag = UINT32_MAX; /* forces the cap, E_d = E_c = capE */
+                        } else {
+                            mag = bfpQrCeilMagnitude(
+                                bfpQrAdd(bfpQrOfTerm(bfpScalarMulMant(vm[i - start], mu), kv),
+                                         bfpQrOfTerm(gm[i - start], kg)));
+                        }
+                        av = mag > av ? mag : av; /* pass 1 reuses av as the sum's absmax */
+                    }
+                    if (runEnd == gEnd) {
+                        if (av == 0) {
+                            workE[slot] = BFP_INT_ACC_ZERO_GROUP; /* exact cancellation */
+                            fresh[slot] = (uint8_t)biasV;
+                        } else {
+                            int stored =
+                                deriveBfpRawStoredExponent(av, ec, vqc->mantissaBits, biasV, cap);
+                            if (stored < ec + (int)biasV) {
+                                stored = ec + (int)biasV; /* E_d >= E_c; ec <= capE */
+                            }
+                            fresh[slot] = (uint8_t)stored;
+                        }
+                        av = 0;
+                    }
+                } else if (runEnd == gEnd) {
+                    fresh[slot] = (uint8_t)biasV; /* zero group: zero state */
+                }
+                if (runEnd == gEnd) {
+                    g++;
+                    gEnd += gsz;
+                    slot = slot + 1 == ODT_RESCALE_FRESH_WINDOW ? 0 : slot + 1;
+                }
+                pos = runEnd;
+            }
+        }
+    }
+}
+
+/* Pass 2 over one run of one group, codes written back into vm: the hot
+ * element loop in its own small frame (the chunk buffers and rings live in
+ * the caller's), see BFP_WALK_NOINLINE. */
+BFP_WALK_NOINLINE void bfpMomentumEmitRun(int32_t *vm, const int32_t *gm, size_t len,
+                                          bfpScalar_t mu, int kv, int kg, unsigned kd,
+                                          roundingMode_t rm, rngStream_t *rs, uint32_t posCap,
+                                          uint32_t negCap) {
+    if (kg <= -15) { /* only here can a gradient code reach 2^30 on the grid */
+        for (size_t i = 0; i < len; i++) {
+            const uint32_t u = rm == SR_HALF_AWAY ? rngNextU32(rs) : 0u;
+            if (bfpRawTermSaturates(gm[i], kg)) {
+                vm[i] = gm[i] < 0 ? -(int32_t)negCap : (int32_t)posCap;
+            } else {
+                vm[i] = bfpAddAndRound(bfpScalarMulMant(vm[i], mu), kv, gm[i], kg, kd, rm, u,
+                                       posCap, negCap);
+            }
+        }
+        return;
+    }
+    for (size_t i = 0; i < len; i++) {
+        const uint32_t u = rm == SR_HALF_AWAY ? rngNextU32(rs) : 0u;
+        vm[i] =
+            bfpAddAndRound(bfpScalarMulMant(vm[i], mu), kv, gm[i], kg, kd, rm, u, posCap, negCap);
+    }
+}
+
+void momentumStoreBfpInPlace(tensor_t *state, const tensor_t *grad, bfpScalar_t mu,
+                             roundingMode_t rm, rngStream_t *rs) {
+    const char *what = "momentumStoreBfpInPlace";
+    if (state->quantization->type != BFP || grad->quantization->type != BFP) {
+        PRINT_ERROR("%s: needs a BFP state and a BFP gradient, got %s and %s", what,
+                    quantTypeToString(state->quantization->type),
+                    quantTypeToString(grad->quantization->type));
+        exit(1);
+    }
+    const size_t n = calcNumberOfElementsByTensor(state);
+    if (calcNumberOfElementsByTensor((tensor_t *)grad) != n) {
+        PRINT_ERROR("%s: element-count mismatch", what);
+        exit(1);
+    }
+    if (grad->data == state->data) {
+        PRINT_ERROR("%s: the gradient must not alias the state", what);
+        exit(1);
+    }
+    bfpQConfig_t *vqc = state->quantization->qConfig;
+    const bfpQConfig_t *gqc = grad->quantization->qConfig;
+    validateBfpQConfigShape(vqc, n);
+    validateBfpQConfigShape((bfpQConfig_t *)gqc, n);
+    if (gqc->numGroups != vqc->numGroups || gqc->groupSize != vqc->groupSize) {
+        PRINT_ERROR("%s: gradient geometry {numGroups=%zu, groupSize=%zu} must equal the "
+                    "state's {%zu, %zu}",
+                    what, gqc->numGroups, gqc->groupSize, vqc->numGroups, vqc->groupSize);
+        exit(1);
+    }
+    if (vqc->mantissaBits > 16 || gqc->mantissaBits > 16) {
+        PRINT_ERROR("%s: mantissa widths %u / %u exceed 16 bits", what, (unsigned)vqc->mantissaBits,
+                    (unsigned)gqc->mantissaBits);
+        exit(1);
+    }
+    /* normalized and in [0, 1]: zero, or q in [2^14, 2^15) with q * 2^e <= 1 */
+    const bool muZero = mu.q == 0 && mu.e == 0;
+    if (!muZero && (mu.q < 16384 || mu.q > 32767 || mu.e > -14 || (mu.e == -14 && mu.q != 16384))) {
+        PRINT_ERROR("%s: scalar {q=%d, e=%d} is not a normalized momentum in [0, 1]", what,
+                    (int)mu.q, (int)mu.e);
+        exit(1);
+    }
+    if (rm != HALF_AWAY && rm != SR_HALF_AWAY) {
+        PRINT_ERROR("%s: rounding mode %d unsupported (HALF_AWAY / SR_HALF_AWAY)", what, (int)rm);
+        exit(1);
+    }
+    if (n == 0) {
+        resetBfpGridToZeroState(vqc); /* R7 */
+        return;
+    }
+    if (rm == SR_HALF_AWAY && rs == NULL) {
+        PRINT_ERROR("%s: SR rounding without a stream", what);
+        exit(1);
+    }
+    const int32_t biasV = bfpExponentBias(vqc);
+    const int32_t biasG = bfpExponentBias(gqc);
+    int cap = (int)((1u << vqc->exponentBits) - 1u);
+    if (cap > (int)biasV + 127) {
+        cap = (int)biasV + 127; /* largest stored exponent with a finite float scale */
+    }
+    const uint8_t m = vqc->mantissaBits;
+    const uint32_t posCap = (1u << (m - 1)) - 1u;
+    const uint32_t negCap = 1u << (m - 1);
+    const size_t gsz = vqc->groupSize == 0 ? n : vqc->groupSize;
+    int32_t workE[ODT_RESCALE_FRESH_WINDOW];
+    uint8_t fresh[ODT_RESCALE_FRESH_WINDOW];
+    int32_t vm[ODT_CONVERSION_CHUNK_ELEMS];
+    int32_t gm[ODT_CONVERSION_CHUNK_ELEMS];
+    size_t scanned = 0;
+    size_t g = 0; /* emit cursor: group, its end, its ring slot -- no division per run */
+    size_t groupEnd = gsz;
+    size_t slot = 0;
+
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        const size_t count =
+            n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        const size_t chunkEnd = off + count;
+        size_t needed = ((chunkEnd - 1) / gsz + 1) * gsz;
+        if (needed > n) {
+            needed = n;
+        }
+        if (scanned < needed) {
+            bfpMomentumScan(vqc, state->data, gqc, grad->data, mu, scanned, needed, gsz, cap, workE,
+                            fresh, vm, gm);
+            scanned = needed;
+        }
+        unpackSignExtendChunk(state->data, m, off, count, vm);
+        unpackSignExtendChunk(grad->data, gqc->mantissaBits, off, count, gm);
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            const size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            const int ec = workE[slot];
+            if (ec == BFP_INT_ACC_ZERO_GROUP) {
+                for (size_t i = idx; i < runEnd; i++) {
+                    if (rm == SR_HALF_AWAY) {
+                        (void)rngNextU32(rs); /* exact zero: the draw is still consumed */
+                    }
+                    vm[i - off] = 0;
+                }
+            } else {
+                /* the state's OLD exponent: unpublished until this group is done */
+                const int ev = (int)vqc->exponents[g] - (int)biasV + (int)mu.e;
+                const int eg = (int)gqc->exponents[g] - (int)biasG;
+                const unsigned kd = (unsigned)((int)fresh[slot] - (int)biasV - ec);
+                bfpMomentumEmitRun(&vm[idx - off], &gm[idx - off], runEnd - idx, mu, ec - ev,
+                                   ec - eg, kd, rm, rs, posCap, negCap);
+            }
+            if (runEnd == groupEnd) {
+                vqc->exponents[g] = fresh[slot]; /* every read of the old grid is done */
+                g++;
+                groupEnd += gsz;
+                slot = slot + 1 == ODT_RESCALE_FRESH_WINDOW ? 0 : slot + 1;
+            }
+            idx = runEnd;
+        }
+        packChunkGuarded(vm, count, state->data, m, off, what);
+    }
+}
+
 /* SYM_INT32 -> SYM_INT32 grad accumulate: reproduces addSymInt32TensorsInplace's
  * Strategy-A semantics (dequant both -> float add -> fresh-absmax requant with
  * the TARGET's roundingMode) directly over the flat int32 mantissa arrays --

@@ -3092,16 +3092,27 @@ static void bfpPuValues(float *p, float *g) {
     g[1] = ldexpf(1.0f, -6); /* pins the gradient grid: code 64 on 2^-12 */
 }
 
+/* The initial momentum: nonzero, so v' = 0.9 v + g differs from g and a
+ * parameter update reading the gradient instead of the stored v' shows.
+ * v_0 = v_1 = 0 keep the two pins above (v'_1 = g_1 exactly); |v'| stays
+ * below |g_1|, so v''s per-tensor grid is the gradient's 2^-12. */
+static void bfpPuStateValues(float *v) {
+    for (size_t i = 0; i < BFP_PU_N; i++) {
+        v[i] = i < 2 ? 0.0f : ldexpf((float)((int)((i * 29u) % 97u) - 48), -14);
+    }
+}
+
 /* One parameter: grouped BFP8 param; gradient BFP8 per-tensor (FLOAT32 when
- * gFloat != NULL); BFP8 zero state when withState (v' = g then); mu = 0.9 or
- * 0 (stateless); write-back mode wb. */
+ * gFloat != NULL); BFP8 state from bfpPuStateValues when withState; mu = 0.9
+ * or 0 (stateless); write-back mode wb. */
 static void bfpPuFixInit(bfpPuFix_t *f, const float *pv, const float *gv, const float *gFloat,
                          bool withState, float lr, float wd, roundingMode_t wb) {
     f->p = buildGroupedBfpParam1D(pv);
     f->g = gFloat != NULL ? buildFloatTensor1D(gFloat, BFP_PU_N) : buildBfpTensor1D(gv, BFP_PU_N);
     f->param = parameterInit(f->p, f->g);
-    float zeros[BFP_PU_N] = {0};
-    f->state = withState ? buildBfpTensor1D(zeros, BFP_PU_N) : NULL;
+    float v0[BFP_PU_N];
+    bfpPuStateValues(v0);
+    f->state = withState ? buildBfpTensor1D(v0, BFP_PU_N) : NULL;
     sgdInit(&f->sgd, lr, withState ? 0.9f : 0.0f, wd,
             (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     f->impl.sgd = &f->sgd;
@@ -3160,6 +3171,17 @@ static void assertSgdRunsTheIntegerParamUpdate(bool withState, roundingMode_t wb
     int32_t expCodes[2];
     unpackSignExtend(bfpPuE.p->data, 8, 0, expCodes, 2);
 
+    /* vacuity of the stored-v' read: the same update from the GRADIENT (what
+     * a param op reading g instead of v' produces) must differ */
+    bool gradReadDiffers = true;
+    if (withState) {
+        bfpPuFixInit(&bfpPuF, pv, gv, NULL, false, BFP_PU_LR_TIE, 0.0f, wb);
+        rngStream_t rsG = sgdOpOutStream(&updateKey, 1u);
+        paramUpdateBfpInPlace(bfpPuF.p, bfpPuF.g, lrEnc, wb, &rsG);
+        gradReadDiffers = !bfpGroupedPayloadEqual(bfpPuF.p, bfpPuE.p);
+        bfpPuFixFree(&bfpPuF);
+    }
+
     bfpPuFixInit(&bfpPuA, pv, gv, NULL, withState, BFP_PU_LR_TIE, 0.0f, wb);
     sgdStepM(&bfpPuA.optim, &updateKey);
     const bool paramIsEngine = bfpGroupedPayloadEqual(bfpPuA.p, bfpPuE.p);
@@ -3177,6 +3199,7 @@ static void assertSgdRunsTheIntegerParamUpdate(bool withState, roundingMode_t wb
     bfpPuFixFree(&bfpPuE);
     bfpPuFixFree(&bfpPuA);
     bfpPuFixFree(&bfpPuF);
+    TEST_ASSERT_TRUE_MESSAGE(gradReadDiffers, "vacuity: v' and g must give different updates");
     TEST_ASSERT_TRUE_MESSAGE(stateIsEngine, "BFP state op must be the integer momentum store");
     TEST_ASSERT_TRUE_MESSAGE(paramIsEngine,
                              "BFP param op must be the integer update on the stored update");

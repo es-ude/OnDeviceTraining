@@ -145,3 +145,19 @@ target_link_libraries(UnitTestBfpIntegerMomentum PRIVATE
         odt_test_rng_pin
 )
 __register_target_as_unit_test(UnitTestBfpIntegerMomentum)
+# Integer SGD parameter update on BFP parameters: paramUpdateBfpInPlace (TensorConversion).
+add_executable(UnitTestBfpIntegerParamUpdate UnitTestBfpIntegerParamUpdate.c)
+target_link_libraries(UnitTestBfpIntegerParamUpdate PRIVATE
+        unity
+        TensorConversion
+        Tensor
+        Rounding
+        Quantization
+        StorageApi
+        RNG
+        Common
+        m
+        odt_test_death
+        odt_test_rng_pin
+)
+__register_target_as_unit_test(UnitTestBfpIntegerParamUpdate)

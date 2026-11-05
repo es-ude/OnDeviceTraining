@@ -44,9 +44,15 @@ Linear.c            biasGradKernelBfpRaw
 OptimizerApi.c      scaleOptimizerGradientsMean   self
 TensorConversion.c  scaleBfpTensorByScalarInPlace
 CrossEntropy.c      computeMeanDivisorCE
-# Integer SGD momentum store (BFP grad AND BFP state, sgdStepM's state op): the helper
-# (self: its own calls -- the per-op key fold and stream open, as executeOp self leaves
-# openPhaseStream's folds unwalked) and the engine (walked). sgdStepM is not a root yet:
-# its param op still runs the float funnel (the parameter update is the next step).
+# Integer SGD step on BFP storage: the step itself (self: its own call sites -- the
+# BFP branches call the two helpers, the other dtypes' arms call executeOp, a self
+# root; both branch tests are bools decided at sgdInit), the momentum store (BFP grad
+# AND BFP state, op 0) and the parameter update (BFP param with that stored state, or
+# with the BFP grad without momentum, op 1): each helper self (its own calls -- the
+# per-op key fold and stream open, as executeOp self leaves openPhaseStream's folds
+# unwalked) and each engine wrapper (walked).
+Sgd.c               sgdStepM                 self
 Sgd.c               sgdMomentumStoreBfp      self
+Sgd.c               sgdParamUpdateBfp        self
 TensorConversion.c  momentumStoreBfpInPlace
+TensorConversion.c  paramUpdateBfpInPlace

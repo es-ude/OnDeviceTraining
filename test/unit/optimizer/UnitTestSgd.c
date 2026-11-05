@@ -3044,6 +3044,268 @@ void testSgdBfpMomentumStoreRejectsWeightDecayAndMomentumAboveOne(void) {
     ASSERT_EXITS_WITH(0, bfpMomentumStepPlain());
 }
 
+/* ---- Integer parameter update on BFP parameters --------------------------
+ * A BFP parameter on a BFP gradient is updated by the integer engine
+ * paramUpdateBfpInPlace, w' = w - lr * u (lr encoded once at sgdInit and at
+ * every sgdSetLr): u is the STORED new momentum when the state is BFP too,
+ * the gradient on the stateless (momentumFactor == 0) path. The stream is the
+ * one the funnel's OUT_WRITE re-pack used: OUT of the param op's key (op 1).
+ * Fixture: a per-channel parameter (4 groups of 16), per-tensor BFP8 gradient
+ * and state, as in the HAR weights. Element 1 separates the integer update
+ * from the float op: lr = 0.75 + 2^-17 is encoded as exactly 0.75 (15 bits),
+ * so w'_1 = 10 - 0.75 * 2 = 8.5 code steps EXACTLY (HALF_AWAY -> 9), while
+ * the float op's 10 - 1.5000153 = 8.49998 rounds to 8. */
+
+#define BFP_PU_N 64
+#define BFP_PU_GROUPS 4
+#define BFP_PU_LR_TIE (0.75f + 0x1p-17f)
+
+typedef struct {
+    tensor_t *p, *g, *state;
+    parameter_t *param;
+    sgd_t sgd;
+    optimImpl_t impl;
+    parameter_t *params[1];
+    tensor_t *stateBuffers[1];
+    states_t st;
+    states_t *stArr[1];
+    optimizer_t optim;
+} bfpPuFix_t;
+
+static tensor_t *buildGroupedBfpParam1D(const float *src) {
+    tensor_t *t = buildFloatTensor1D(src, BFP_PU_N);
+    quantization_t *tq =
+        quantizationInitBfpGrouped(8, 8, HALF_AWAY, BFP_PU_GROUPS, BFP_PU_N / BFP_PU_GROUPS);
+    requantizeTensorInPlace(t, tq);
+    freeQuantization(tq);
+    return t;
+}
+
+static void bfpPuValues(float *p, float *g) {
+    for (size_t i = 0; i < BFP_PU_N; i++) {
+        p[i] = ldexpf(0.5f * sinf(0.37f * (float)i + 0.1f), -(int)(i / 16)); /* exponents differ */
+        g[i] = ldexpf((float)((int)((i * 53u) % 201u) - 100), -14);
+    }
+    p[0] = ldexpf(127.0f, -7); /* pins group 0 on 2^-7: w'_0 = w_0 (g_0 = 0) */
+    g[0] = 0.0f;
+    p[1] = ldexpf(10.0f, -7);
+    g[1] = ldexpf(1.0f, -6); /* pins the gradient grid: code 64 on 2^-12 */
+}
+
+/* One parameter: grouped BFP8 param; gradient BFP8 per-tensor (FLOAT32 when
+ * gFloat != NULL); BFP8 zero state when withState (v' = g then); mu = 0.9 or
+ * 0 (stateless); write-back mode wb. */
+static void bfpPuFixInit(bfpPuFix_t *f, const float *pv, const float *gv, const float *gFloat,
+                         bool withState, float lr, float wd, roundingMode_t wb) {
+    f->p = buildGroupedBfpParam1D(pv);
+    f->g = gFloat != NULL ? buildFloatTensor1D(gFloat, BFP_PU_N) : buildBfpTensor1D(gv, BFP_PU_N);
+    f->param = parameterInit(f->p, f->g);
+    float zeros[BFP_PU_N] = {0};
+    f->state = withState ? buildBfpTensor1D(zeros, BFP_PU_N) : NULL;
+    sgdInit(&f->sgd, lr, withState ? 0.9f : 0.0f, wd,
+            (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    f->impl.sgd = &f->sgd;
+    f->params[0] = f->param;
+    f->stateBuffers[0] = f->state;
+    f->st = (states_t){.stateBuffers = f->stateBuffers, .statesPerParameter = 1};
+    f->stArr[0] = &f->st;
+    f->optim = (optimizer_t){.type = SGD_M,
+                             .impl = &f->impl,
+                             .parameter = f->params,
+                             .states = withState ? f->stArr : NULL,
+                             .sizeStates = 1,
+                             .writeBackRounding = wb};
+}
+
+static void bfpPuFixFree(bfpPuFix_t *f) {
+    if (f->state != NULL) {
+        freeTensor(f->state);
+    }
+    freeParameter(f->param);
+}
+
+static bool bfpGroupedPayloadEqual(const tensor_t *a, const tensor_t *b) {
+    const bfpQConfig_t *qa = a->quantization->qConfig;
+    const bfpQConfig_t *qb = b->quantization->qConfig;
+    return qa->numGroups == qb->numGroups && memcmp(a->data, b->data, bfpPayloadBytes(a)) == 0 &&
+           memcmp(qa->exponents, qb->exponents, qa->numGroups) == 0;
+}
+
+static rngStream_t sgdOpOutStream(const rngKey_t *updateKey, uint32_t op) {
+    rngKey_t opKey;
+    return rngOpen(rngFold(*optimizerUpdateOpKey(updateKey, 0u, op, &opKey), RNG_TAG_OUT, 0u));
+}
+
+static bfpPuFix_t bfpPuA, bfpPuE, bfpPuF;
+
+/* withState: the momentum path (state op 0, then the param op 1 reading the
+ * STORED v'); otherwise the stateless path (param op 1 on the gradient). */
+static void assertSgdRunsTheIntegerParamUpdate(bool withState, roundingMode_t wb) {
+    float pv[BFP_PU_N], gv[BFP_PU_N], deq[BFP_PU_N];
+    bfpPuValues(pv, gv);
+    const rngKey_t updateKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED + 9u);
+    const bfpScalar_t lrEnc = bfpScalarFromFloat(BFP_PU_LR_TIE, "t");
+
+    /* expected: [the momentum engine on op 0's OUT stream, then] the
+     * parameter engine on op 1's OUT stream, reading the stored v' */
+    bfpPuFixInit(&bfpPuE, pv, gv, NULL, withState, BFP_PU_LR_TIE, 0.0f, wb);
+    const tensor_t *update = bfpPuE.g;
+    if (withState) {
+        rngStream_t rs0 = sgdOpOutStream(&updateKey, 0u);
+        momentumStoreBfpInPlace(bfpPuE.state, bfpPuE.g, bfpScalarFromFloat(0.9f, "t"), wb, &rs0);
+        update = bfpPuE.state;
+    }
+    rngStream_t rs1 = sgdOpOutStream(&updateKey, 1u);
+    paramUpdateBfpInPlace(bfpPuE.p, update, lrEnc, wb, &rs1);
+    int32_t expCodes[2];
+    unpackSignExtend(bfpPuE.p->data, 8, 0, expCodes, 2);
+
+    bfpPuFixInit(&bfpPuA, pv, gv, NULL, withState, BFP_PU_LR_TIE, 0.0f, wb);
+    sgdStepM(&bfpPuA.optim, &updateKey);
+    const bool paramIsEngine = bfpGroupedPayloadEqual(bfpPuA.p, bfpPuE.p);
+    const bool stateIsEngine = !withState || bfpPayloadEqual(bfpPuA.state, bfpPuE.state);
+
+    /* vacuity: the float op on the same values (a FLOAT32 gradient holding
+     * the exact update the integer op read), stateless */
+    dequantChunkToFloat((tensor_t *)update, 0, BFP_PU_N, deq);
+    bfpPuFixInit(&bfpPuF, pv, NULL, deq, false, BFP_PU_LR_TIE, 0.0f, wb);
+    sgdStepM(&bfpPuF.optim, &updateKey);
+    int32_t floatCodes[2];
+    unpackSignExtend(bfpPuF.p->data, 8, 0, floatCodes, 2);
+    const uint8_t expGroup0 = ((bfpQConfig_t *)bfpPuE.p->quantization->qConfig)->exponents[0];
+
+    bfpPuFixFree(&bfpPuE);
+    bfpPuFixFree(&bfpPuA);
+    bfpPuFixFree(&bfpPuF);
+    TEST_ASSERT_TRUE_MESSAGE(stateIsEngine, "BFP state op must be the integer momentum store");
+    TEST_ASSERT_TRUE_MESSAGE(paramIsEngine,
+                             "BFP param op must be the integer update on the stored update");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(127 - 7, expGroup0, "group 0 stays on 2^-7");
+    if (wb == HALF_AWAY) {
+        TEST_ASSERT_EQUAL_INT32_MESSAGE(9, expCodes[1], "integer tie lifts");
+        TEST_ASSERT_EQUAL_INT32_MESSAGE(8, floatCodes[1], "vacuity: float op stays below");
+    }
+}
+
+void testSgdBfpMomentumPathRunsTheIntegerParamUpdate(void) {
+    assertSgdRunsTheIntegerParamUpdate(true, HALF_AWAY);
+    assertSgdRunsTheIntegerParamUpdate(true, SR_HALF_AWAY);
+}
+
+void testSgdBfpStatelessPathRunsTheIntegerParamUpdate(void) {
+    assertSgdRunsTheIntegerParamUpdate(false, HALF_AWAY);
+    assertSgdRunsTheIntegerParamUpdate(false, SR_HALF_AWAY);
+}
+
+/* sgdSetLr re-encodes: after setLr(0.75 + 2^-17) on an optimizer created
+ * with lr = 0.25, the integer step uses the new encoding (element 1: 8.5 ->
+ * 9; the stale 0.25 would give 9.5 -> 10). */
+void testSgdSetLrReEncodesTheIntegerLearningRate(void) {
+    float pv[BFP_PU_N], gv[BFP_PU_N];
+    bfpPuValues(pv, gv);
+    const rngKey_t updateKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED + 10u);
+    bfpPuFixInit(&bfpPuE, pv, gv, NULL, false, BFP_PU_LR_TIE, 0.0f, HALF_AWAY);
+    rngStream_t rs1 = sgdOpOutStream(&updateKey, 1u);
+    paramUpdateBfpInPlace(bfpPuE.p, bfpPuE.g, bfpScalarFromFloat(BFP_PU_LR_TIE, "t"), HALF_AWAY,
+                          &rs1);
+    bfpPuFixInit(&bfpPuA, pv, gv, NULL, false, 0.25f, 0.0f, HALF_AWAY);
+    optimizerFunctions[SGD_M].setLr(&bfpPuA.optim, BFP_PU_LR_TIE);
+    sgdStepM(&bfpPuA.optim, &updateKey);
+    int32_t got[2];
+    unpackSignExtend(bfpPuA.p->data, 8, 0, got, 2);
+    const bool same = bfpGroupedPayloadEqual(bfpPuA.p, bfpPuE.p);
+    bfpPuFixFree(&bfpPuE);
+    bfpPuFixFree(&bfpPuA);
+    TEST_ASSERT_TRUE_MESSAGE(same, "the step after setLr must use the re-encoded lr");
+    TEST_ASSERT_EQUAL_INT32(9, got[1]);
+}
+
+/* Not implemented by the integer update, so a fail fast, never a silent
+ * float fallback: coupled weight decay, and a non-finite learning rate. */
+static void bfpStatelessStepWith(float lr, float wd) {
+    float pv[BFP_PU_N], gv[BFP_PU_N];
+    bfpPuValues(pv, gv);
+    const rngKey_t updateKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED);
+    bfpPuFixInit(&bfpPuA, pv, gv, NULL, false, lr, wd, SR_HALF_AWAY);
+    sgdStepM(&bfpPuA.optim, &updateKey);
+}
+static void bfpStatelessStepWithWeightDecay(void) {
+    bfpStatelessStepWith(0.05f, 1e-4f);
+}
+static void bfpStatelessStepWithNanLr(void) {
+    bfpStatelessStepWith(NAN, 0.0f);
+}
+static void bfpStatelessStepPlain(void) {
+    bfpStatelessStepWith(0.05f, 0.0f);
+}
+static void bfpStatelessStepAfterSetLrInf(void) {
+    float pv[BFP_PU_N], gv[BFP_PU_N];
+    bfpPuValues(pv, gv);
+    const rngKey_t updateKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED);
+    bfpPuFixInit(&bfpPuA, pv, gv, NULL, false, 0.05f, 0.0f, SR_HALF_AWAY);
+    optimizerFunctions[SGD_M].setLr(&bfpPuA.optim, INFINITY);
+    sgdStepM(&bfpPuA.optim, &updateKey);
+}
+static void bfpMomentumStepWithNanLr(void) {
+    float pv[BFP_PU_N], gv[BFP_PU_N];
+    bfpPuValues(pv, gv);
+    const rngKey_t updateKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED);
+    bfpPuFixInit(&bfpPuA, pv, gv, NULL, true, NAN, 0.0f, SR_HALF_AWAY);
+    sgdStepM(&bfpPuA.optim, &updateKey);
+}
+
+void testSgdBfpParamUpdateRejectsWeightDecayAndNonFiniteLr(void) {
+    ASSERT_EXITS_WITH_FAILURE(bfpStatelessStepWithWeightDecay());
+    ASSERT_EXITS_WITH_FAILURE(bfpStatelessStepWithNanLr());
+    ASSERT_EXITS_WITH_FAILURE(bfpStatelessStepAfterSetLrInf());
+    ASSERT_EXITS_WITH_FAILURE(bfpMomentumStepWithNanLr());
+    ASSERT_EXITS_WITH(0, bfpStatelessStepPlain());
+}
+
+/* The factory refuses the stateless configuration up front: a BFP weight on
+ * a BFP weight gradient without momentum, with weight decay or a non-finite
+ * learning rate (the bias stays FLOAT32 here). */
+static void createStatelessBfpWith(float lr, float wd) {
+    shape_t *wShape = reserveMemory(sizeof(shape_t));
+    size_t *w2 = reserveMemory(2 * sizeof(size_t));
+    w2[0] = 2;
+    w2[1] = 3;
+    size_t *o2 = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, o2);
+    setShape(wShape, w2, 2, o2);
+    tensor_t *wParam = initTensor(wShape, quantizationInitFloat(), NULL);
+    quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    requantizeTensorInPlace(wParam, bfpQ);
+    parameter_t *weights = parameterInit(wParam, gradInit(wParam, bfpQ, NULL));
+    size_t *bDims = reserveMemory(1 * sizeof(size_t));
+    bDims[0] = 2;
+    size_t *bOrder = reserveMemory(1 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, bOrder);
+    shape_t *bShape = reserveMemory(sizeof(shape_t));
+    setShape(bShape, bDims, 1, bOrder);
+    tensor_t *bParam = initTensor(bShape, quantizationInitFloat(), NULL);
+    parameter_t *bias = parameterInit(bParam, gradInitFloat(bParam, NULL));
+    layer_t *layer = buildBorrowedLinearLayer(weights, bias, quantizationInitFloat());
+    layer_t *model[1] = {layer};
+    (void)sgdMCreateOptim(lr, 0.0f, wd, model, 1, quantizationInitFloat(),
+                          (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+}
+static void createStatelessBfpWithWeightDecay(void) {
+    createStatelessBfpWith(0.1f, 1e-4f);
+}
+static void createStatelessBfpWithNanLr(void) {
+    createStatelessBfpWith(NAN, 0.0f);
+}
+static void createStatelessBfpPlain(void) {
+    createStatelessBfpWith(0.1f, 0.0f);
+}
+
+void testSgdMCreateOptimRejectsAnUnimplementedBfpParamUpdate(void) {
+    ASSERT_EXITS_WITH_FAILURE(createStatelessBfpWithWeightDecay());
+    ASSERT_EXITS_WITH_FAILURE(createStatelessBfpWithNanLr());
+    ASSERT_EXITS_WITH(0, createStatelessBfpPlain());
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testOptimizerSkipsFrozenLayerInCountAndCollection);
@@ -3107,5 +3369,10 @@ int main() {
     RUN_TEST(testSgdBfpGradAndBfpStateRunTheIntegerMomentumStore);
     RUN_TEST(testSgdBfpMomentumStoreRejectsWeightDecayAndMomentumAboveOne);
     RUN_TEST(testSgdMCreateOptimRejectsAnUnimplementedBfpMomentumStore);
+    RUN_TEST(testSgdBfpMomentumPathRunsTheIntegerParamUpdate);
+    RUN_TEST(testSgdBfpStatelessPathRunsTheIntegerParamUpdate);
+    RUN_TEST(testSgdSetLrReEncodesTheIntegerLearningRate);
+    RUN_TEST(testSgdBfpParamUpdateRejectsWeightDecayAndNonFiniteLr);
+    RUN_TEST(testSgdMCreateOptimRejectsAnUnimplementedBfpParamUpdate);
     return UNITY_END();
 }

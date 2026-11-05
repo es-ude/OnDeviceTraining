@@ -179,6 +179,41 @@ void testAvgPool1dLayerInitBorrowingBuildsLayerWithKernel(void) {
     freeQuantization(q);
 }
 
+/* Ruling R1: BFP math (either slot) takes a power-of-two kernel only, at
+ * layer creation; FLOAT32 math keeps any K. */
+static void avgPoolBfpFactoryBody(size_t kSize, bool bfpForward, bool owning) {
+    quantization_t *q = quantizationInitBfp(8, 8, HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    if (!bfpForward) {
+        lq.forwardMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+    }
+    avgPool1dInit_t init = {.kernelSize = kSize, .stride = kSize};
+    layer_t *layer = owning ? avgPool1dLayerInitOwning(&init, &lq) : avgPool1dLayerInit(&init, &lq);
+    if (owning) {
+        freeAvgPool1dLayer(layer);
+    }
+    freeQuantization(q);
+}
+
+void testAvgPool1dLayerInitRejectsANonPowerOfTwoKernelUnderBfpMath(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "avgPool1dLayerInit: BFP math needs a power-of-two kernel size",
+                             avgPoolBfpFactoryBody(3, true, false));
+    ASSERT_EXITS_WITH_OUTPUT(1, "avgPool1dLayerInit: BFP math needs a power-of-two kernel size",
+                             avgPoolBfpFactoryBody(3, false, false));
+    ASSERT_EXITS_WITH_OUTPUT(1, "avgPool1dLayerInit: BFP math needs a power-of-two kernel size",
+                             avgPoolBfpFactoryBody(12, true, true));
+    avgPoolBfpFactoryBody(32, true, true); /* a power of two builds */
+
+    quantization_t *f = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, f);
+    layer_t *layer = avgPool1dLayerInit(&(avgPool1dInit_t){.kernelSize = 3, .stride = 3}, &lq);
+    TEST_ASSERT_EQUAL_UINT(3, layer->config->avgPool1d->kernel->size);
+    freeAvgPool1dLayer(layer);
+    freeQuantization(f);
+}
+
 void testAvgPool1dLayerInitBorrowingStrideDefaultsToKernelSize(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
@@ -514,6 +549,7 @@ int main(void) {
     RUN_TEST(testMaxPool1dLayerInitOwningDeepCopiesTwoQuantizations);
     RUN_TEST(testMaxPool1dLayerInitOwningRepeatedBuildFreeNoLeak);
     RUN_TEST(testAvgPool1dLayerInitBorrowingBuildsLayerWithKernel);
+    RUN_TEST(testAvgPool1dLayerInitRejectsANonPowerOfTwoKernelUnderBfpMath);
     RUN_TEST(testAvgPool1dLayerInitBorrowingStrideDefaultsToKernelSize);
     RUN_TEST(testAvgPool1dLayerInitOwningDeepCopiesTwoQuantizations);
     RUN_TEST(testMaxPool1dArgmaxGrowsOnceAndTracksBatch);

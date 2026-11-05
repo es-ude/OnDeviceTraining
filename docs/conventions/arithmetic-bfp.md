@@ -723,8 +723,8 @@ so MaxPool compares exact `(code, E)` values; argmax/auxOut semantics and the
 −1 empty-window sentinel are unchanged. AvgPool sums int32 partials within
 same-group segments and folds on every group crossing plus the tail. Both
 FORWARDS are integer-only (`BFP_RAW`, §13 "The pool forwards"): the fold is
-an integer shift and the `/K` is an exponent shift for a power-of-two K, else
-one integer division per output. AdaptiveAvgPool still folds in float and
+an integer shift and the `/K` is an exponent shift: BFP math takes a
+power-of-two K only (ruling R1, §14). AdaptiveAvgPool still folds in float and
 divides by each window's own count in the FLOAT32 raw (the SYM `s/K` scale
 fold has no BFP analog: a BFP scale is `2^E`). Forward window sums carry
 `bfpValidateSumHeadroom`; the backwards do NOT, because contributions
@@ -2031,16 +2031,13 @@ emit `BFP_RAW` on the target's geometry.
    `K · 2^(m−1) · 2^−g + (K + 1) <= INT32_MAX` (HAR m = 8, K = 32: `g = −18`).
    One int32 partial per same-group segment (`bfpValidateSumHeadroom` bounds
    each), aligned by `bfpAlignPartial` (left exact, right HALF_AWAY, never SR).
-4. AvgPool mean: a power-of-two K moves `−log2 K` into the raw exponent
-   (exact, no division; HAR's K = 32). Any other K is ONE
-   `roundedDivHalfAwayInt32(acc, K)` per output (`BfpKernelSupport.h`; uint32
-   magnitude and the tie test `rem >= K − rem`, so it is exact over the whole
-   int32 range — the AdaptiveAvgPool SYM arm shares it). Error per output
-   `<= (S/(2K) + 1/2) · 2^E_acc`, `S` = segments folded (the `1/2` only for a
-   non-power-of-two K). `count_include_pad` stays true: the divisor is K.
-   The census counts that division per output (allow-listed); the remaining
+4. AvgPool mean: `−log2 K` moves into the raw exponent (exact, no
+   division; HAR's K = 32). BFP math takes a power-of-two K only (ruling R1,
+   §14: `avgPool1dBfpLog2Divisor` fails fast at the factory and at both
+   integer kernels). Error per output `<= S/(2K) · 2^E_acc`, `S` = segments
+   folded. `count_include_pad` stays true: the divisor is K. The remaining
    division sites of both roots are `bfpGroupAt`'s per-group-change
-   recomputes.
+   recomputes and the window geometry.
 
 **The Linear forward** (`matmulBfpRawTensors`, `Matmul.c`, behind
 `linearForwardBfpRaw`'s transpose dance). `matmulBfpTensors`' walk verbatim —
@@ -2322,14 +2319,20 @@ math) is the loss boundary; `tools/bfp-census/har_backward_roots.txt` gates it.
 - **AvgPool1d dx** (`avgPool1dBackwardKernelBfpRaw`): the FLOAT32 loop (one
   contribution per output, added to every valid window member; padded
   positions are not visited and the divisor stays `K`, as in FLOAT32). The
-  same per-row grid and guard (C terms). A power-of-two `K` folds `−log2 K`
-  into the row's exponent (exact; HAR's K = 32); any other `K` divides the
-  aligned code ONCE per output, `roundedDivHalfAwayInt32`, on the fine raw
-  grid: `|q| <= |code|` keeps the C-term bound, the quotient keeps `31 −
-  log2 C − log2 K` bits, and its half-unit error sits at least `2^(31 − m −
-  log2 C − log2 K)` below the wire's code step. This quotient rounds
-  HALF_AWAY like every in-loop alignment (the C4 rule); the only rounding
-  onto a wire grid is the re-block, SR under SR.
+  same per-row grid and guard (C terms). `−log2 K` folds into the row's
+  exponent (exact; HAR's K = 32), so the mean adds no rounding; the only
+  rounding onto a wire grid is the re-block, SR under SR.
+- **AvgPool1d under BFP math: power-of-two K only (ruling R1, 2026-11-05).**
+  The mean is always an exponent shift. Any other kernel size fails fast
+  (`avgPool1dBfpLog2Divisor`: at `avgPool1dLayerInit` /
+  `avgPool1dLayerInitOwning` when either math slot is `ARITH_BFP`, and again
+  at both integer kernels for a config built without the factory). Padding
+  cannot make an edge divisor differ: the layer is `count_include_pad =
+  true` in every arm (FLOAT32 divides by `K`, SYM folds `s / K`, BFP folds
+  `−log2 K`), padded positions are only skipped in the sum, never counted
+  out of the divisor, so `K` is the divisor of every output. The former
+  non-power-of-two path (one `roundedDivHalfAwayInt32` per output) is gone;
+  the FLOAT32 and SYM arms still take any `K`.
 - **Granularity (both pools).** One `E_acc` per dx row: a loss group more
   than `−g` binades below its row's top rounds on the row's grid even if its
   dx cells form their own wire group (the float scatter kept them exact).

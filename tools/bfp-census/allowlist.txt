@@ -38,11 +38,9 @@ MaxPool1d.c:maxPool1dForwardKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
 MaxPool1d.c:maxPool1dForwardKernelBfpRaw windowSlice1dAt __aeabi_ldivmod 2
 
 # ---- AvgPool1d ---------------------------------------------------------------
-# One bfpGroupAt recompute; the mean for a NON-power-of-two K is one
-# roundedDivHalfAwayInt32 per OUTPUT (both sign branches = 2 sites; HAR's K = 32
-# folds into the raw exponent and skips it); shared window math as above.
+# One bfpGroupAt recompute; shared window math as above. The mean is an
+# exponent shift: BFP math takes a power-of-two K only (ruling R1).
 AvgPool1d.c:avgPool1dForwardKernelBfpRaw avgPool1dForwardKernelBfpRaw __aeabi_uidiv 1
-AvgPool1d.c:avgPool1dForwardKernelBfpRaw avgPool1dForwardKernelBfpRaw __aeabi_uidivmod 2
 AvgPool1d.c:avgPool1dForwardKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
 AvgPool1d.c:avgPool1dForwardKernelBfpRaw windowSlice1dAt __aeabi_ldivmod 2
 
@@ -157,15 +155,13 @@ CrossEntropy.c:crossEntropySoftmaxBackward crossEntropySoftmaxBackward
 # Per call: the covering-window count (span - 1) / stride in the kernel, and the
 # shared window geometry. Per loss group change: the walk's inlined bfpGroupAt
 # recompute. AvgPool's walk also takes the shared window slice per OUTPUT (the
-# FLOAT32 arm's own index math) and, for a NON-power-of-two K only, the mean's
-# roundedDivHalfAwayInt32 per OUTPUT (three call sites after GCC's duplication;
-# HAR's K = 32 folds into the exponent and never reaches them).
+# FLOAT32 arm's own index math); its mean is an exponent shift (power-of-two K
+# only, ruling R1), no division.
 MaxPool1d.c:maxPool1dBackwardKernelBfpRaw maxPool1dBackwardKernelBfpRaw __aeabi_uidiv 1
 MaxPool1d.c:maxPool1dBackwardKernelBfpRaw maxPool1dBackwardBfpWalk __aeabi_uidiv 1
 MaxPool1d.c:maxPool1dBackwardKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
 AvgPool1d.c:avgPool1dBackwardKernelBfpRaw avgPool1dBackwardKernelBfpRaw __aeabi_uidiv 1
 AvgPool1d.c:avgPool1dBackwardKernelBfpRaw avgPool1dBackwardBfpWalk __aeabi_uidiv 1
-AvgPool1d.c:avgPool1dBackwardKernelBfpRaw avgPool1dBackwardBfpWalk __aeabi_uidivmod 3
 AvgPool1d.c:avgPool1dBackwardKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
 AvgPool1d.c:avgPool1dBackwardKernelBfpRaw windowSlice1dAt __aeabi_ldivmod 2
 

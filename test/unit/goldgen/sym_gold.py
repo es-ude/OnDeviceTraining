@@ -2455,14 +2455,6 @@ def _bfp_sum_guard_bits(n_terms, m):
     raise AssertionError("_bfp_sum_guard_bits: window too long for an int32 fold")
 
 
-def _div_half_away(v, d):
-    """v / d rounded half away from zero (d > 0), exact integers."""
-    q, rem = divmod(abs(v), d)
-    if 2 * rem >= d:
-        q += 1
-    return -q if v < 0 else q
-
-
 def avgpool1d_bfp_raw_ref(codes, exps, qc, batch, channels, geom, raw_group_size=0,
                           self_check=True):
     """AvgPool1d integer-only forward (avgPool1dForwardKernelBfpRaw), from the
@@ -2470,10 +2462,10 @@ def avgpool1d_bfp_raw_ref(codes, exps, qc, batch, channels, geom, raw_group_size
     group = max over the input rows its outputs read of the row's group-max
     exponent, + g (the sum guard, K terms); per window one integer partial per
     same-group segment of the visited storage indices, aligned into the
-    accumulator by bfp_align_partial (left exact, right HALF_AWAY); then a
-    power-of-two K moves -log2 K into the raw exponent, any other K is one
-    half-away integer division per output. count_include_pad=True: the
-    divisor is always K. Returns dict(mant, exps) -- mantissas row-major
+    accumulator by bfp_align_partial (left exact, right HALF_AWAY); then
+    -log2 K moves into the raw exponent. BFP math takes a power-of-two K
+    only (ruling R1, arithmetic-bfp section 14): any other K raises.
+    count_include_pad=True: the divisor is always K. Returns dict(mant, exps) -- mantissas row-major
     [batch*channels*out_len], one UNBIASED exponent per raw group.
 
     Self-checks (abort rather than emit a vacuous fixture): >= 1 window
@@ -2487,8 +2479,9 @@ def avgpool1d_bfp_raw_ref(codes, exps, qc, batch, channels, geom, raw_group_size
     out_len = geom["out_len"]
     n_out = batch * channels * out_len
     g = _bfp_sum_guard_bits(k, m)
-    pow2 = k & (k - 1) == 0
-    log2k = k.bit_length() - 1 if pow2 else 0
+    if k & (k - 1) != 0:
+        raise ValueError(f"avgpool1d_bfp_raw_ref: BFP math needs a power-of-two K, got {k}")
+    log2k = k.bit_length() - 1
     gsz = n_out if raw_group_size == 0 else raw_group_size
     assert n_out % gsz == 0
     rows = batch * channels
@@ -2521,7 +2514,7 @@ def avgpool1d_bfp_raw_ref(codes, exps, qc, batch, channels, geom, raw_group_size
             if cur is not None:
                 acc += bfp_align_partial(partial, ea - (exps[cur] - bias))
             assert _INT32_MIN <= acc <= _INT32_MAX, "avgpool1d_bfp_raw_ref: acc left int32"
-            mant.append(acc if pow2 else _div_half_away(acc, k))
+            mant.append(acc)
     out_exps = [e - log2k for e in e_acc]
     if self_check:
         assert crossings >= 1, "avgpool1d_bfp_raw_ref: no window crosses a group boundary"

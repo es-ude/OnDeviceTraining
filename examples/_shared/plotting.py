@@ -222,6 +222,8 @@ _MEM_CONFIG_ORDER = [
     "bfp_wb32_ab16_m6_e8_xfq_g0_s0_rsr_lconst_hbfp",
     "bfp_wb32_ab16_m6_e8_xnat_g1_s0_rsr_lconst_hbfp",
     "bfp_wb32_ab16_m6_e8_xnat_g1_s1_rsr_lconst_hbfp",
+    # The full-integer training path, one alias per head (run_matrix._BFP8FULL_CONFIGS).
+    "bfp8full_hflt", "bfp8full_hbfp",
 ]
 # MUST stay in sync with CATEGORIES in compare_memory.py: the stacked bar labels each
 # bar with the sum of these, so an omission here silently prints a total that

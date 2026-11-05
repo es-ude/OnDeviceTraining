@@ -15,6 +15,7 @@ cmake --build --preset arm_cross_m0plus
 uv run tools/bfp-census/census.py --strict -v                                   # the HAR gate
 uv run tools/bfp-census/census.py --roots tools/bfp-census/forward_roots.txt    # every BFP forward kernel, report
 uv run tools/bfp-census/census.py --strict --roots tools/bfp-census/har_backward_roots.txt  # the integer HAR backward so far
+uv run tools/bfp-census/census.py --strict --roots tools/bfp-census/har_train_step_roots.txt  # the whole HAR training step
 uv run tools/bfp-census/census.py --self-test
 ```
 
@@ -29,6 +30,14 @@ uv run tools/bfp-census/census.py --self-test
   the one allow-listed float island), gated with `--strict` like
   the forward; a path
   joins it when it turns integer.
+  `har_train_step_roots.txt`: the whole training step of the integer path (bfp8full,
+  both heads): `include`s the forward and backward sets and adds the step's driver
+  (epoch and batch loops, the calculate-grads interpreter, the loss value, the
+  optimizer step, the grad reset, the RNG keys); the --strict gate of the full path.
+  Its only float is the loss island of the float head, the loss value (both heads)
+  and the input boundary.
+  `include <file>` (relative to the including file) pulls a roots file in; a root
+  line seen before is dropped, so a union lists each root once.
   Format `<source.c> <function>`: the census follows direct calls from the root, within
   the object and across objects. `<source.c> <function> self`: only the function's own
   call sites count and nothing is followed -- for dispatchers whose callees span every

@@ -2114,7 +2114,7 @@ anchor wire, so its R-N1 input staging is unreachable now. The HAR trainer
 is native; `BFP_MATH=fq` keeps the 12-layer model (its GEMMs run
 `ARITH_FLOAT32`, the rule does not reach them) so it stays the unchanged
 fake-quant reference. The static side is the M0+ census
-(`tools/bfp-census/`, `har_forward_roots.txt --strict`): zero float, double,
+(`tools/bfp-census/`, `har_forward_roots.txt --strict`; the whole step: §15.8): zero float, double,
 libm and int64 calls in the HAR forward kernels, the re-block and the operand
 unpack, and only per-call, per-group-change, per-output and shared-index-math
 divisions, each allow-listed for its one root.
@@ -2303,7 +2303,7 @@ called by the backward cores exactly where the float fold
 After this step the only float of a BFP training step (BFP wires, native
 math) is the float head's loss island, and under the bfp head there is none
 on the gradient path (below); `tools/bfp-census/har_backward_roots.txt`
-gates both.
+gates both (the whole step with the optimizer: §15.8).
 
 - **MaxPool1d dx** (`maxPool1dBackwardKernelBfpRaw`): the FLOAT32 arm's loop
   (rows, outputs, the saved argmax, the `-1` sentinel) and scatter-add. One
@@ -2676,3 +2676,32 @@ out-of-line frame. Differs from the float ops only by the 15-bit `mu` / `lr`
 (relative error `<= 2^-15`) and the exact tails; on HAR bfp8 the float staging
 of the state op (whole tensors on the stack) and of the param op (the BFP state
 as float in `executeOp`'s prologue scratch) is gone.
+
+### 15.8 The whole training step (bfp8full)
+
+With BFP wires, native math, `BFP_GRADS=1` and `BFP_STATE=1` (the HAR configs
+`bfp8full_hflt` / `bfp8full_hbfp`) every phase of a training step runs the
+integer kernels: forward (§13), backward (§14), grad accumulation into BFP
+storage (§15, integer rescale accumulate), the macro-batch mean scale (§15.6),
+momentum store and parameter update (§15.7). What stays float:
+- the float head's loss island (`BFP_HEAD=float`): the FLOAT32 Softmax forward
+  on the dequantized logits, float `p − y`, ONE float → BFP conversion onto the
+  loss-grad wire; the bfp head has none on the gradient path;
+- the loss VALUE on both heads (monitoring): CrossEntropy's float core, the
+  dequant of `p` it reads, the training loop's loss sums and means;
+- the input boundary: the input Quantization layer (float samples → BFP) and the
+  float one-hot labels, which the integer `p − y` reads as 0/1.
+
+The static proof is the M0+ census over the whole step,
+`tools/bfp-census/har_train_step_roots.txt --strict` (the forward and backward
+sets plus the step's driver: epoch and batch loops, the calculate-grads
+interpreter, the loss value, the optimizer step, the grad reset, the RNG keys).
+Its allow-list holds no float outside the three items above; the divisions it
+allows run per call, per group change, per output element (shared index math),
+per wire of the per-call remat table, or per RNG key fold. The run-time side is
+the trainer's FULL gate (`train_c_bfp.c`): on this path it checks at init that
+every layer declares the integer path -- each math slot `ARITH_BFP`, each wire
+BFP, both GEMM grads under `OUT_ACC_DYNAMIC_RESCALE` (the fixed-scale mode keeps
+the float bridge), the head per `BFP_HEAD` -- and that the SGD step takes its
+integer ops; any other value fails at init (exit 2) instead of running a float
+kernel silently.

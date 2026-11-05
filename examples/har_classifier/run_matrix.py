@@ -98,6 +98,19 @@ _BFP_STAGE1 = [
     _bfp(BFP_GRADS="1", BFP_STATE="1"),
 ]
 
+# The full-integer training path (bfp8full): bfp8 (m8 e8, per-channel weights, ab16,
+# native, sr) with BFP grads AND BFP momentum, so the forward, the backward, the
+# gradient accumulation, the mean scaling, the momentum store and the parameter
+# update all run the integer BFP kernels. The trainer derives the same predicate
+# (native math, BFP wires, BFP_GRADS=1, BFP_STATE=1) and checks every layer at
+# init (FULL GATE). The head has no default here either: one alias per BFP_HEAD.
+_BFP8FULL = {"BFP_WEIGHT_BLOCK": "channel", "BFP_MANTISSA_BITS": "8", "BFP_GRADS": "1",
+             "BFP_STATE": "1"}
+_BFP8FULL_CONFIGS = {
+    "bfp8full_hflt": _bfp(**_BFP8FULL, BFP_HEAD="float"),
+    "bfp8full_hbfp": _bfp(**_BFP8FULL, BFP_HEAD="bfp"),
+}
+
 
 # config name -> (binary, extra per-run env). The FLOAT32 binary ignores SYM_BITS;
 # each SYM config is the same binary at a different packed weight width.
@@ -168,6 +181,7 @@ CONFIGS: dict[str, tuple[str, dict[str, str]]] = {
                  {"SYM_BITS": "6", "WEIGHT_DTYPE": "asym", "GROUP_MODE": "size",
                   "GROUP_SIZE": "32"}),
     **{bfp_config_name(env): (binary, env) for binary, env in _BFP_STAGE1},
+    **_BFP8FULL_CONFIGS,
 }
 
 

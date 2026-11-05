@@ -693,7 +693,10 @@ checkpointing, limitations, literature).
   amendment, `docs/conventions/arithmetic-bfp.md` §9) — so a uniform-BFP model
   (`layerQuantInitUniform` over one BFP template) now trains its ENTIRE loop
   natively, no pins required; pinning the backward math slots to `ARITH_FLOAT32`
-  remains available as an explicit fake-quant-backward alternative. BFP grad and
+  remains available as an explicit fake-quant-backward alternative. Conv1d `dx` and
+  `weightGrad` (experiment, 2026-11-05) run the FLOAT32 scatter loop on `int32`
+  accumulators aligned to a precomputed exponent per row group
+  (`docs/conventions/arithmetic-bfp.md` §14). BFP grad and
   optimizer-state storage (`gradInit`, `SgdApi`/`AdamWApi` momentum/moment
   cloning, PPCA replay state) is a **per-tensor-only** knob — a grouped BFP
   template is rejected at every one of those call sites ("per-tensor only, #300

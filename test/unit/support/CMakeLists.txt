@@ -47,3 +47,8 @@ add_executable(UnitTestDeathTest UnitTestDeathTest.c)
 target_link_libraries(UnitTestDeathTest PRIVATE unity odt_test_death Common)
 __register_target_as_unit_test(UnitTestDeathTest)
 set_tests_properties(UnitTestDeathTest PROPERTIES TIMEOUT 60)
+
+# Int64 references of the integer BFP Conv1d dx / weightGrad (BfpScatterRef.h),
+# written from the definition, output-centric. Header-only.
+add_library(odt_test_bfp_scatter_ref INTERFACE)
+target_include_directories(odt_test_bfp_scatter_ref INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)

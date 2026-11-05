@@ -143,6 +143,7 @@ add_elastic_ai_unit_test(
         odt_test_death
         odt_test_layer_builders
         odt_test_keyed_draw
+        odt_test_bfp_scatter_ref
 )
 add_dependencies(UnitTestConv1d generate_expected_conv1d)
 add_dependencies(UnitTestConv1d generate_expected_conv1d_grouped)

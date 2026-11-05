@@ -85,9 +85,9 @@ DOC_GAPS: list[str] = [
     "for several segments fold_walk assumes: Linear -- the reduction index ascending (section "
     "5.3: storage groups are contiguous along the axis the forward reduction walks); Conv1d "
     "forward -- input channel outer, kernel tap inner (the weight's [Cout, Cin/g, K] storage "
-    "order); the gather-formulated ConvT1d forward and the Conv1d dx it serves (section 6) -- "
-    "kernel tap outer, channel inner; conv weightGrad -- '(batch, outputPosition) as the "
-    "reduction' and biasGrad 'b-outer/outPos-inner' (section 5.6, documented). The result is "
+    "order); the gather-formulated ConvT1d forward (section 6) -- kernel tap outer, channel inner; "
+    "Conv1d dx and weightGrad run on integer accumulators (conv1d_scatter_int_backward), whose "
+    "sum is order-free and predicted to the bit; biasGrad 'b-outer/outPos-inner' (section 5.6, documented). The result is "
     "reported (bit-exact or not) and never gates: the walk-order-free bound is the acceptance.",
     "(float)partial rounding mode (section 7): the doc says the int32 -> float conversion "
     "'rounds' above 2^24 without naming the mode. Assumed IEEE round-to-nearest-even (C's "
@@ -921,8 +921,10 @@ def conv1d_walk(
     W[oc, ic', k] (cross-correlation, PyTorch layout). Walk orders: forward
     (ic outer, k inner); weightGrad '(batch, outputPosition) as the reduction'
     and biasGrad 'per-output-channel over (batch, outputPosition)' (section
-    5.6, documented); dx = the gather adjoint (section 6; kernel tap outer,
-    channel inner, DOC_GAPS[2]). Padded taps are never visited."""
+    5.6, documented); dx = the adjoint, kernel tap outer, channel inner. Under
+    ARITH_BFP the dx and weightGrad walks give only the contributor sets of
+    conv1d_scatter_int_backward (an integer sum, order-free). Padded taps are
+    never visited."""
     cin_g = c_in // g.groups
     cout_g = c_out // g.groups
     l_out = g.conv_out_len(length)
@@ -1090,3 +1092,149 @@ def convt1d_walk(
                     ib.append(np.asarray(wb, dtype=np.int64))
         return Walk((batch, c_in, length), ia, ib, cout_g * g.kernel_size, None)
     raise ValueError(direction)
+
+
+# --------------------------------------------------------------------------- #
+# Conv1d dx / weightGrad on integer accumulators (the scatter backward):      #
+# every product enters its destination aligned to a per-row-group E_acc       #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class ScatterIntFold:
+    predicted: np.ndarray  # float64 view of the float32 raw per output element
+    exact: np.ndarray  # float64 exact sum of the same terms
+    bound: np.ndarray  # float64: alignment roundings + the float32 cast, per element
+    e_acc: np.ndarray  # int64 E_acc per output element
+    g: int
+    n_terms: int  # N of the guard
+    n_left: int
+    n_rounded: int
+    sum_abs_max: int
+
+    def stats(self) -> dict:
+        return {
+            "g": self.g,
+            "N": self.n_terms,
+            "E_acc_range": [int(self.e_acc.min()), int(self.e_acc.max())] if self.e_acc.size else [0, 0],
+            "n_left_shifts": self.n_left,
+            "n_rounded_products": self.n_rounded,
+            "sum_abs_max": self.sum_abs_max,
+        }
+
+
+def conv1d_max_tap_overlap(g: ConvGeom) -> int:
+    """Most kernel taps one dx position can receive: taps k, k' land together
+    iff (k - k') * dilation is a multiple of stride, i.e. k * dilation shares
+    a residue mod stride (range clipping only removes taps)."""
+    counts: dict[int, int] = {}
+    for k in range(g.kernel_size):
+        r = (k * g.dilation) % g.stride
+        counts[r] = counts.get(r, 0) + 1
+    return max(counts.values()) if counts else 0
+
+
+def conv1d_scatter_int_backward(
+    batch: int,
+    c_in: int,
+    length: int,
+    c_out: int,
+    g: ConvGeom,
+    direction: str,
+    loss: tuple[np.ndarray, np.ndarray, tuple[int, int, int]],
+    other: tuple[np.ndarray, np.ndarray, tuple[int, int, int]],
+) -> ScatterIntFold:
+    """Conv1d dx (``other`` = weight) or weightGrad (``other`` = input) on
+    int32 accumulators, from the definition:
+
+    1. Row group R of a destination: dx -> (batch, conv group of the input
+       channel); weightGrad -> the output channel.
+    2. E_top(R) >= every contributing product exponent, from row maxima:
+       dx: max over the group's output channels oc of (loss row (b, oc) max +
+       weight row oc max); weightGrad: max over the batch of (loss row (b, oc)
+       max + max over the group's input rows (b, *)).
+    3. N: dx = Cout/groups * (most taps meeting on one position, conv1d_max_
+       tap_overlap); weightGrad = batch * (most output positions one tap
+       reaches). g = fold_guard_bits(N, m_loss, m_other, 0); E_acc = E_top + g.
+    4. Each product p of codes enters as align_partial(p, E_acc - E_p); the
+       destination is the integer sum, then float32(sum) * 2^E_acc.
+    Contributor sets come from conv1d_walk (the integer sum does not depend
+    on their order)."""
+    walk = conv1d_walk(batch, c_in, length, c_out, g, direction, False)
+    lc, ls, lb = loss
+    oc_, os_, ob = other
+    lc = np.asarray(lc, dtype=np.int64).ravel()
+    oc_ = np.asarray(oc_, dtype=np.int64).ravel()
+    l_bias, o_bias = exponent_bias(lb[1]), exponent_bias(ob[1])
+    l_exp = np.asarray(ls, dtype=np.int64)[group_ids(lc.size, lb[2])] - l_bias
+    o_exp = np.asarray(os_, dtype=np.int64)[group_ids(oc_.size, ob[2])] - o_bias
+    cin_g, cout_g = c_in // g.groups, c_out // g.groups
+    l_out = g.conv_out_len(length)
+
+    def lrow(b: int, oc: int) -> int:
+        s = (b * c_out + oc) * l_out
+        return int(l_exp[s:s + l_out].max())
+
+    if direction == "dx":
+        n_terms = cout_g * conv1d_max_tap_overlap(g)
+        k_len = cin_g * g.kernel_size
+        top = {}
+        for b in range(batch):
+            for grp in range(g.groups):
+                top[(b, grp)] = max(
+                    lrow(b, oc) + int(o_exp[oc * k_len:(oc + 1) * k_len].max())
+                    for oc in range(grp * cout_g, (grp + 1) * cout_g)
+                )
+        row_of = [top[(b, ic // cin_g)] for b in range(batch) for ic in range(c_in) for _ in range(length)]
+    elif direction == "weightGrad":
+        reach = [
+            sum(1 for t in range(l_out) if 0 <= t * g.stride + k * g.dilation - g.pad_left < length)
+            for k in range(g.kernel_size)
+        ]
+        n_terms = batch * max(reach)
+        top = {}
+        for oc in range(c_out):
+            grp = oc // cout_g
+            xs = lambda b: (b * c_in + grp * cin_g) * length  # noqa: E731
+            top[oc] = max(lrow(b, oc) + int(o_exp[xs(b):xs(b) + cin_g * length].max()) for b in range(batch))
+        row_of = [top[oc] for oc in range(c_out) for _ in range(cin_g * g.kernel_size)]
+    else:
+        raise ValueError(direction)
+
+    guard = fold_guard_bits(n_terms, lb[0], ob[0], 0)
+    n_out = len(walk.ia)
+    predicted = np.zeros(n_out)
+    exact = np.zeros(n_out)
+    bound = np.zeros(n_out)
+    e_acc = np.zeros(n_out, dtype=np.int64)
+    n_left = n_rounded = sum_max = 0
+    for o in range(n_out):
+        ea = row_of[o] + guard
+        e_acc[o] = ea
+        ia, ib = walk.ia[o], walk.ib[o]
+        total = 0
+        ex = Fraction(0)
+        for i, j in zip(ia.tolist(), ib.tolist()):
+            p = int(lc[i]) * int(oc_[j])
+            ep = int(l_exp[i]) + int(o_exp[j])
+            k = ea - ep
+            q = align_partial(p, k)
+            n_left += k < 0
+            if k > 0 and Fraction(q) * 2 ** k != p:
+                n_rounded += 1
+            total += q
+            if not INT32_MIN <= total <= INT32_MAX:
+                raise ValueError("scatter accumulator leaves int32 -- the guard proof is violated")
+            ex += Fraction(p) * Fraction(2) ** ep
+        sum_max = max(sum_max, abs(total))
+        with np.errstate(over="ignore"):
+            pred = float(np.float32(np.ldexp(np.float32(total), np.int32(ea))))
+        predicted[o] = pred
+        exact[o] = float(ex)
+        # one half unit of 2^E_acc per product, plus the float32 cast of the sum
+        bound[o] = 0.5 * len(ia) * 2.0**ea + abs(pred) * 2.0**-24
+    shape = walk.out_shape
+    return ScatterIntFold(
+        predicted.reshape(shape), exact.reshape(shape), bound.reshape(shape), e_acc.reshape(shape),
+        guard, n_terms, n_left, n_rounded, sum_max,
+    )

@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "BfpScatterRef.h"
 #include "BorrowedLayer.h"
 #include "Conv1d.h"
 #include "Conv1dApi.h"
@@ -13,6 +14,7 @@
 #include "LayerQuant.h"
 #include "QuantizationApi.h"
 #include "RNG.h"
+#include "SlidingWindow1d.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
@@ -2552,8 +2554,8 @@ void testConv1dBackwardBfpBiasGradMatchesGold(void) {
     TEST_ASSERT_EQUAL_MEMORY(kConvBfpBgExpected, captured, sizeof(captured));
 }
 
-/* dx wire: the ARITH_BFP propLoss arm routes the adjoint through the BFP D9
- * GATHER kernel (convTranspose1dKernelBfpGather, bias NULL, outputPadding 0).
+/* dx wire: the ARITH_BFP propLoss arm routes the adjoint through the integer
+ * scatter kernel (convTranspose1dKernelBfpScatter, outputPadding 0).
  * Sentinel prefill pins every element as kernel-written -- including the
  * ADJOINT HOLES (stride 2 x dilation 2 reach only even input positions, so
  * every odd dx position must come back exactly 0.0, goldgen-asserted). */
@@ -3249,6 +3251,169 @@ void testConv1dBiasGradSymSumWideWireExactThenAborts(void) {
                              (void)runConv1dSymBiasGradSum(3, 1, (1 << 30) - 1, 31));
 }
 
+/* ---- Conv1d weightGrad under ARITH_BFP: the integer scatter ----------------
+ * weightGradKernelBfp walks the FLOAT32 weightGrad loop and keeps an int32 raw
+ * accumulator per weight-grad element. References: BfpScatterRef.h (int64,
+ * output-centric, from the definition) and, for the worst case, the exact
+ * value count * 2^(2m-2) * 2^(Ex+Egy). */
+
+static uint32_t c4Lcg(uint32_t *s) {
+    *s = *s * 1664525u + 1013904223u;
+    return *s >> 8;
+}
+
+typedef struct c4WgCase {
+    size_t batch, cin, length, cout, groups, kernelSize, stride, dilation, padding;
+    uint8_t m;
+    size_t xGroupSize, gyGroupSize;
+} c4WgCase_t;
+
+/* Runs conv1dCalcWeightGradsBfp and the reference on the same BFP-stored
+ * operands; `gw` / `ref` hold cout * cin/groups * K floats. */
+static bfpRefStats_t c4RunBfpWeightGrad(const c4WgCase_t *c, const int32_t *xCodes,
+                                        const uint8_t *xExps, const int32_t *gyCodes,
+                                        const uint8_t *gyExps, float *gw, float *ref) {
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernelExplicit(kernel, c->kernelSize, c->padding, c->dilation, c->stride);
+    windowGeometry1d_t geom = windowGeometry1dCalc(c->length, kernel);
+    size_t cinG = c->cin / c->groups;
+    size_t xElems = c->batch * c->cin * c->length;
+    size_t gyElems = c->batch * c->cout * geom.outputLength;
+    size_t wElems = c->cout * cinG * c->kernelSize;
+
+    size_t wDims[] = {c->cout, cinG, c->kernelSize};
+    tensor_t *weightsParam = makeFloatTensor(wDims, 3, NULL);
+    quantization_t *bfpTemplate = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 1, 0);
+    requantizeTensorInPlace(weightsParam, bfpTemplate);
+    freeQuantization(bfpTemplate);
+    parameter_t *weights = parameterInit(weightsParam, gradInitFloat(weightsParam, NULL));
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *conv1d = buildBorrowedConv1dLayerGrouped(weights, NULL, kernel, c->groups, floatQ);
+    conv1d->config->conv1d->weightGradMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    size_t xDims[] = {c->batch, c->cin, c->length};
+    size_t gyDims[] = {c->batch, c->cout, geom.outputLength};
+    tensor_t *x =
+        buildBfpStoredTensor(3, xDims, xCodes, xExps, c->m, 8,
+                             c->xGroupSize == 0 ? 1 : xElems / c->xGroupSize, c->xGroupSize);
+    tensor_t *gy =
+        buildBfpStoredTensor(3, gyDims, gyCodes, gyExps, c->m, 8,
+                             c->gyGroupSize == 0 ? 1 : gyElems / c->gyGroupSize, c->gyGroupSize);
+
+    conv1dCalcWeightGradsBfp(conv1d->config->conv1d, x, gy, NULL);
+    memcpy(gw, conv1d->config->conv1d->weights->grad->data, wElems * sizeof(float));
+
+    freeConv1dLayer(conv1d);
+    freeTensor(gy);
+    freeTensor(x);
+    freeQuantization(floatQ);
+
+    bfpRefGeom_t G = {.batch = c->batch,
+                      .cin = c->cin,
+                      .length = c->length,
+                      .cout = c->cout,
+                      .groups = c->groups,
+                      .kernelSize = c->kernelSize,
+                      .stride = c->stride,
+                      .dilation = c->dilation,
+                      .padLeft = geom.padLeft,
+                      .outLength = geom.outputLength};
+    bfpRefOperand_t xRef = {xCodes, xExps, c->xGroupSize, c->m, 8};
+    bfpRefOperand_t gyRef = {gyCodes, gyExps, c->gyGroupSize, c->m, 8};
+    return bfpRefConv1dWeightGrad(&G, &xRef, &gyRef, ref);
+}
+
+/* Worst case at m = 16: every code -2^15, every product +2^30, and the
+ * centre tap sums batch * outputLength = 12 of them. The guard must
+ * right-shift; without it the int32 accumulator overflows. */
+void testConv1dBackwardBfpWeightGradWorstCaseM16IsExact(void) {
+    c4WgCase_t c = {.batch = 2,
+                    .cin = 2,
+                    .length = 6,
+                    .cout = 2,
+                    .groups = 1,
+                    .kernelSize = 3,
+                    .stride = 1,
+                    .dilation = 1,
+                    .padding = 1,
+                    .m = 16,
+                    .xGroupSize = 0,
+                    .gyGroupSize = 0};
+    int32_t xCodes[24];
+    int32_t gyCodes[24];
+    for (size_t i = 0; i < 24; i++) {
+        xCodes[i] = -32768;
+        gyCodes[i] = -32768;
+    }
+    uint8_t xExps[] = {127 - 4};
+    uint8_t gyExps[] = {127 + 1};
+    float gw[12];
+    float ref[12];
+    bfpRefStats_t st = c4RunBfpWeightGrad(&c, xCodes, xExps, gyCodes, gyExps, gw, ref);
+
+    TEST_ASSERT_TRUE(st.fitsInt32);
+    for (size_t oc = 0; oc < 2; oc++) {
+        for (size_t ic = 0; ic < 2; ic++) {
+            for (size_t k = 0; k < 3; k++) {
+                size_t count = 0;
+                for (size_t t = 0; t < 6; t++) {
+                    long long pos = (long long)(t + k) - 1;
+                    count += 2 * (pos >= 0 && pos < 6);
+                }
+                float expected = ldexpf((float)count, 30 - 4 + 1);
+                size_t idx = (oc * 2 + ic) * 3 + k;
+                TEST_ASSERT_EQUAL_MEMORY(&expected, &gw[idx], sizeof(float));
+                TEST_ASSERT_EQUAL_MEMORY(&expected, &ref[idx], sizeof(float));
+            }
+        }
+    }
+}
+
+/* m = 8, conv groups 2, stride 2, dilation 2, EXPLICIT padding 2 (taps 0
+ * and 2 are partly clipped), grouped operands with a wide exponent spread:
+ * products far below the row top are rounded, products near it are shifted
+ * left. Bit-exact against the int64 reference. */
+void testConv1dBackwardBfpWeightGradMixedExponentsMatchesReference(void) {
+    c4WgCase_t c = {.batch = 2,
+                    .cin = 4,
+                    .length = 10,
+                    .cout = 4,
+                    .groups = 2,
+                    .kernelSize = 3,
+                    .stride = 2,
+                    .dilation = 2,
+                    .padding = 2,
+                    .m = 8,
+                    .xGroupSize = 8,
+                    .gyGroupSize = 5};
+    int32_t xCodes[80];  /* [2, 4, 10] */
+    int32_t gyCodes[40]; /* [2, 4, 5] */
+    uint8_t xExps[10];
+    uint8_t gyExps[8];
+    uint32_t s = 777u;
+    for (size_t i = 0; i < 80; i++) {
+        xCodes[i] = (int32_t)(c4Lcg(&s) % 256u) - 128;
+    }
+    for (size_t i = 0; i < 40; i++) {
+        gyCodes[i] = (int32_t)(c4Lcg(&s) % 256u) - 128;
+    }
+    for (size_t i = 0; i < 10; i++) {
+        xExps[i] = (uint8_t)(127 - 10 + (int)(c4Lcg(&s) % 21u));
+    }
+    for (size_t i = 0; i < 8; i++) {
+        gyExps[i] = (uint8_t)(127 - 8 + (int)(c4Lcg(&s) % 17u));
+    }
+    float gw[24];
+    float ref[24];
+    bfpRefStats_t st = c4RunBfpWeightGrad(&c, xCodes, xExps, gyCodes, gyExps, gw, ref);
+
+    TEST_ASSERT_TRUE(st.fitsInt32);
+    TEST_ASSERT_TRUE(st.rounded > 0);
+    TEST_ASSERT_TRUE(st.leftShift > 0);
+    TEST_ASSERT_EQUAL_MEMORY(ref, gw, sizeof(gw));
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testConv1dWgGuardProvenSafeN511RunsExact);
@@ -3319,6 +3484,8 @@ int main() {
     RUN_TEST(testConv1dBackwardBfpWeightGradFullyClippedTapIsZero);
     RUN_TEST(testConv1dBackwardBfpDxPowerOfTwoBitIdenticalToGroupedSym);
     RUN_TEST(testConv1dBackwardBfpDxConvGroups2MatchesGold);
+    RUN_TEST(testConv1dBackwardBfpWeightGradWorstCaseM16IsExact);
+    RUN_TEST(testConv1dBackwardBfpWeightGradMixedExponentsMatchesReference);
     RUN_TEST(testConv1dCalcWeightGradsBfpRejectsFloat32Weights);
     RUN_TEST(testConv1dCalcBiasGradsBfpRejectsFloat32Weights);
     RUN_TEST(testConv1dCalcWeightGradsBfpRejectsInputChannelMismatch);

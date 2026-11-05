@@ -1,9 +1,12 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "BfpRawFixture.h"
+#include "BfpScatterRef.h"
 #include "ConvTranspose1dKernel.h"
 #include "DeathTest.h"
 #include "QuantizationApi.h"
+#include "SlidingWindow1d.h"
 #include "StorageApi.h"
 #include "SymAccumGuard.h"
 #include "SymGroupedWeight.h"
@@ -1400,6 +1403,282 @@ CT_DTYPE_DEATH(testConvT1dKernelSymGroupedRejectsFloatBias, CT_POISON_BIAS, 2, &
 CT_DTYPE_DEATH(testConvT1dKernelSymGroupedRejectsFloatOutput, CT_POISON_Y, 2, NULL,
                "convTranspose1dKernelSymInt32Grouped: output must be SYM_INT32")
 
+/* ---- Conv1d dx under ARITH_BFP: the integer scatter -----------------------
+ * convTranspose1dKernelBfpScatter walks the FLOAT32 scatter loop and keeps an
+ * int32 raw accumulator per dx element. References: BfpScatterRef.h (int64,
+ * output-centric, from the definition) and, for the worst cases, the exact
+ * value count * 2^(2m-2) * 2^(Egy+Ew). */
+
+static uint32_t ctLcg(uint32_t *s) {
+    *s = *s * 1664525u + 1013904223u;
+    return *s >> 8;
+}
+
+typedef struct ctDxCase {
+    size_t batch, cin, length, cout, groups, kernelSize, stride, dilation, padding;
+    uint8_t m;
+    size_t gyGroupSize, wGroupSize;
+} ctDxCase_t;
+
+/* Runs the kernel and the reference on the same operands; `out` must hold
+ * batch * cin * length floats and is sentinel-prefilled here. */
+static bfpRefStats_t ctRunBfpScatterDx(const ctDxCase_t *c, const int32_t *gyCodes,
+                                       const uint8_t *gyExps, const int32_t *wCodes,
+                                       const uint8_t *wExps, float *out, float *ref) {
+    kernel_t kernel;
+    initKernelExplicit(&kernel, c->kernelSize, c->padding, c->dilation, c->stride);
+    windowGeometry1d_t geom = windowGeometry1dCalc(c->length, &kernel);
+    size_t cinG = c->cin / c->groups;
+    size_t gyElems = c->batch * c->cout * geom.outputLength;
+    size_t wElems = c->cout * cinG * c->kernelSize;
+    size_t gyGroups = c->gyGroupSize == 0 ? 1 : gyElems / c->gyGroupSize;
+    size_t wGroups = c->wGroupSize == 0 ? 1 : wElems / c->wGroupSize;
+
+    size_t gyDims[3] = {c->batch, c->cout, geom.outputLength};
+    size_t wDims[3] = {c->cout, cinG, c->kernelSize};
+    bfpScratchFixture_t gy;
+    bfpScratchFixture_t w;
+    bfpScratchInit(&gy, 3, gyDims, gyCodes, gyExps, gyGroups, c->gyGroupSize, c->m, 8);
+    bfpScratchInit(&w, 3, wDims, wCodes, wExps, wGroups, c->wGroupSize, c->m, 8);
+
+    size_t outElems = c->batch * c->cin * c->length;
+    for (size_t i = 0; i < outElems; i++) {
+        out[i] = 777.0f;
+    }
+    size_t outDims[3] = {c->batch, c->cin, c->length};
+    size_t outOrder[3] = {0, 1, 2};
+    shape_t outShape;
+    setShape(&outShape, outDims, 3, outOrder);
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    tensor_t outTensor;
+    setTensorValues(&outTensor, (uint8_t *)out, &outShape, &outQ, NULL);
+
+    convTranspose1dKernelBfpScatter(&gy.tensor, &w.tensor, &kernel, c->groups, 0, &outTensor);
+
+    bfpRefGeom_t G = {.batch = c->batch,
+                      .cin = c->cin,
+                      .length = c->length,
+                      .cout = c->cout,
+                      .groups = c->groups,
+                      .kernelSize = c->kernelSize,
+                      .stride = c->stride,
+                      .dilation = c->dilation,
+                      .padLeft = geom.padLeft,
+                      .outLength = geom.outputLength};
+    bfpRefOperand_t gyRef = {gyCodes, gyExps, c->gyGroupSize, c->m, 8};
+    bfpRefOperand_t wRef = {wCodes, wExps, c->wGroupSize, c->m, 8};
+    return bfpRefConv1dDx(&G, &gyRef, &wRef, ref);
+}
+
+/* Worst case at m = 16: every code -2^15, so every product is +2^30 and an
+ * interior dx element sums Cout * K = 9 of them (overlapping taps). The guard
+ * must right-shift (g > 0); without it, or with a headroom count that misses
+ * the overlap, the int32 accumulator overflows. */
+void testConvTranspose1dKernelBfpScatterWorstCaseM16IsExact(void) {
+    ctDxCase_t c = {.batch = 2,
+                    .cin = 2,
+                    .length = 6,
+                    .cout = 3,
+                    .groups = 1,
+                    .kernelSize = 3,
+                    .stride = 1,
+                    .dilation = 1,
+                    .padding = 1,
+                    .m = 16,
+                    .gyGroupSize = 0,
+                    .wGroupSize = 0};
+    int32_t gyCodes[36];
+    int32_t wCodes[18];
+    for (size_t i = 0; i < 36; i++) {
+        gyCodes[i] = -32768;
+    }
+    for (size_t i = 0; i < 18; i++) {
+        wCodes[i] = -32768;
+    }
+    uint8_t gyExps[] = {127 + 3};
+    uint8_t wExps[] = {127 - 5};
+    float out[24];
+    float ref[24];
+    bfpRefStats_t st = ctRunBfpScatterDx(&c, gyCodes, gyExps, wCodes, wExps, out, ref);
+
+    TEST_ASSERT_TRUE(st.fitsInt32);
+    TEST_ASSERT_TRUE(st.absMaxSum > 0);
+    for (size_t b = 0; b < 2; b++) {
+        for (size_t ic = 0; ic < 2; ic++) {
+            for (size_t i = 0; i < 6; i++) {
+                size_t count = 0;
+                for (size_t k = 0; k < 3; k++) {
+                    long long t = (long long)i + 1 - (long long)k;
+                    count += 3 * (t >= 0 && t < 6);
+                }
+                float expected = ldexpf((float)count, 30 + 3 - 5);
+                size_t idx = (b * 2 + ic) * 6 + i;
+                TEST_ASSERT_EQUAL_MEMORY(&expected, &out[idx], sizeof(float));
+                TEST_ASSERT_EQUAL_MEMORY(&expected, &ref[idx], sizeof(float));
+            }
+        }
+    }
+}
+
+/* m = 8, conv groups 2, stride 2 (two of the three taps can meet on one dx
+ * element), grouped operands with a 24-binade exponent spread: products far
+ * below the row top are rounded, products near it are shifted left. Bit-exact
+ * against the int64 reference. */
+void testConvTranspose1dKernelBfpScatterMixedExponentsMatchesReference(void) {
+    ctDxCase_t c = {.batch = 2,
+                    .cin = 4,
+                    .length = 9,
+                    .cout = 4,
+                    .groups = 2,
+                    .kernelSize = 3,
+                    .stride = 2,
+                    .dilation = 1,
+                    .padding = 1,
+                    .m = 8,
+                    .gyGroupSize = 4,
+                    .wGroupSize = 6};
+    int32_t gyCodes[40]; /* [2, 4, 5] */
+    int32_t wCodes[24];  /* [4, 2, 3] */
+    uint8_t gyExps[10];
+    uint8_t wExps[4];
+    uint32_t s = 4242u;
+    for (size_t i = 0; i < 40; i++) {
+        gyCodes[i] = (int32_t)(ctLcg(&s) % 256u) - 128;
+    }
+    for (size_t i = 0; i < 24; i++) {
+        wCodes[i] = (int32_t)(ctLcg(&s) % 256u) - 128;
+    }
+    for (size_t i = 0; i < 10; i++) {
+        gyExps[i] = (uint8_t)(127 - 12 + (int)(ctLcg(&s) % 25u));
+    }
+    for (size_t i = 0; i < 4; i++) {
+        wExps[i] = (uint8_t)(127 - 6 + (int)(ctLcg(&s) % 13u));
+    }
+    float out[72];
+    float ref[72];
+    bfpRefStats_t st = ctRunBfpScatterDx(&c, gyCodes, gyExps, wCodes, wExps, out, ref);
+
+    TEST_ASSERT_TRUE(st.fitsInt32);
+    TEST_ASSERT_TRUE(st.rounded > 0);
+    TEST_ASSERT_TRUE(st.leftShift > 0);
+    TEST_ASSERT_EQUAL_MEMORY(ref, out, sizeof(out));
+}
+
+/* Same walk at m = 16 with spread exponents: the guard is positive, so even
+ * the row-top products are rounded. */
+void testConvTranspose1dKernelBfpScatterMixedExponentsM16MatchesReference(void) {
+    ctDxCase_t c = {.batch = 1,
+                    .cin = 4,
+                    .length = 9,
+                    .cout = 4,
+                    .groups = 2,
+                    .kernelSize = 3,
+                    .stride = 2,
+                    .dilation = 1,
+                    .padding = 1,
+                    .m = 16,
+                    .gyGroupSize = 4,
+                    .wGroupSize = 6};
+    int32_t gyCodes[20]; /* [1, 4, 5] */
+    int32_t wCodes[24];
+    uint8_t gyExps[5];
+    uint8_t wExps[4];
+    uint32_t s = 99u;
+    for (size_t i = 0; i < 20; i++) {
+        gyCodes[i] = (int32_t)(ctLcg(&s) % 65536u) - 32768;
+    }
+    for (size_t i = 0; i < 24; i++) {
+        wCodes[i] = (int32_t)(ctLcg(&s) % 65536u) - 32768;
+    }
+    for (size_t i = 0; i < 5; i++) {
+        gyExps[i] = (uint8_t)(127 - 4 + (int)(ctLcg(&s) % 9u));
+    }
+    for (size_t i = 0; i < 4; i++) {
+        wExps[i] = (uint8_t)(127 - 3 + (int)(ctLcg(&s) % 7u));
+    }
+    float out[36];
+    float ref[36];
+    bfpRefStats_t st = ctRunBfpScatterDx(&c, gyCodes, gyExps, wCodes, wExps, out, ref);
+
+    TEST_ASSERT_TRUE(st.fitsInt32);
+    TEST_ASSERT_TRUE(st.rounded > 0);
+    TEST_ASSERT_EQUAL_MEMORY(ref, out, sizeof(out));
+}
+
+/* Taps whose dx position falls outside the output never land: with stride 2
+ * and dilation 2 the odd dx positions get no product and must read exactly 0
+ * (the sentinel prefill shows they were written). */
+void testConvTranspose1dKernelBfpScatterUnreachedPositionsAreZero(void) {
+    ctDxCase_t c = {.batch = 1,
+                    .cin = 1,
+                    .length = 9,
+                    .cout = 2,
+                    .groups = 1,
+                    .kernelSize = 2,
+                    .stride = 2,
+                    .dilation = 2,
+                    .padding = 0,
+                    .m = 8,
+                    .gyGroupSize = 0,
+                    .wGroupSize = 0};
+    int32_t gyCodes[8]; /* [1, 2, 4] */
+    int32_t wCodes[4];
+    for (size_t i = 0; i < 8; i++) {
+        gyCodes[i] = (int32_t)i - 3;
+    }
+    for (size_t i = 0; i < 4; i++) {
+        wCodes[i] = 5 - (int32_t)i;
+    }
+    uint8_t gyExps[] = {127};
+    uint8_t wExps[] = {127};
+    float out[9];
+    float ref[9];
+    bfpRefStats_t st = ctRunBfpScatterDx(&c, gyCodes, gyExps, wCodes, wExps, out, ref);
+
+    TEST_ASSERT_TRUE(st.fitsInt32);
+    TEST_ASSERT_EQUAL_MEMORY(ref, out, sizeof(out));
+    for (size_t i = 1; i < 9; i += 2) {
+        TEST_ASSERT_EQUAL_FLOAT(0.0f, out[i]);
+    }
+}
+
+/* Stride 3 = kernel size: no two taps meet, so the headroom count is
+ * in_channels/groups products, not times K. A guard over the nominal K would
+ * shift one bit more and round the products differently. */
+void testConvTranspose1dKernelBfpScatterHeadroomCountsOnlyMeetingTaps(void) {
+    ctDxCase_t c = {.batch = 1,
+                    .cin = 2,
+                    .length = 9,
+                    .cout = 2,
+                    .groups = 1,
+                    .kernelSize = 3,
+                    .stride = 3,
+                    .dilation = 1,
+                    .padding = 0,
+                    .m = 16,
+                    .gyGroupSize = 0,
+                    .wGroupSize = 0};
+    int32_t gyCodes[6]; /* [1, 2, 3] */
+    int32_t wCodes[12]; /* [2, 2, 3] */
+    uint32_t s = 5u;
+    for (size_t i = 0; i < 6; i++) {
+        gyCodes[i] = (int32_t)(ctLcg(&s) % 65536u) - 32768;
+    }
+    for (size_t i = 0; i < 12; i++) {
+        wCodes[i] = (int32_t)(ctLcg(&s) % 65536u) - 32768;
+    }
+    uint8_t gyExps[] = {127};
+    uint8_t wExps[] = {127};
+    float out[18];
+    float ref[18];
+    bfpRefStats_t st = ctRunBfpScatterDx(&c, gyCodes, gyExps, wCodes, wExps, out, ref);
+
+    TEST_ASSERT_TRUE(st.fitsInt32);
+    TEST_ASSERT_TRUE(st.rounded > 0);
+    TEST_ASSERT_EQUAL_MEMORY(ref, out, sizeof(out));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConvT1dKernelSymRejectsFloatInput);
@@ -1452,5 +1731,10 @@ int main(void) {
     RUN_TEST(testConvTranspose1dKernelBfpGatherHeadroomGuardDies);
     RUN_TEST(testConvTranspose1dKernelBfpGatherRejectsMismatchedGroupShape);
     RUN_TEST(testConvTranspose1dKernelBfpGatherConvGroups2MatchesGold);
+    RUN_TEST(testConvTranspose1dKernelBfpScatterWorstCaseM16IsExact);
+    RUN_TEST(testConvTranspose1dKernelBfpScatterMixedExponentsMatchesReference);
+    RUN_TEST(testConvTranspose1dKernelBfpScatterMixedExponentsM16MatchesReference);
+    RUN_TEST(testConvTranspose1dKernelBfpScatterUnreachedPositionsAreZero);
+    RUN_TEST(testConvTranspose1dKernelBfpScatterHeadroomCountsOnlyMeetingTaps);
     return UNITY_END();
 }

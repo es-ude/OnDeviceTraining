@@ -1,0 +1,64 @@
+{
+  "name": "b4_conv_dx_spread_s2_m8",
+  "description": "B4 Conv1d dx on integer accumulators, EXPLICIT padding 1, stride 2 (two of three taps meet), grouped operands with a +-12 binade exponent spread: products far below the row top are rounded.",
+  "family": "bfp_gemm",
+  "op": "conv1d",
+  "direction": "dx",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "geometry": {
+    "kernelSize": 3,
+    "padding": "EXPLICIT",
+    "paddingAmount": 1,
+    "stride": 2,
+    "groups": 2
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 4401,
+    "batch": 2,
+    "cin": 4,
+    "length": 13,
+    "cout": 4,
+    "kernelSize": 3,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 6,
+      "e": 8,
+      "groupSize": 3,
+      "absmax": 0.25,
+      "expSpread": 6
+    },
+    "bias": {
+      "m": 6,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    },
+    "loss": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 4,
+      "absmax": 1.0,
+      "expSpread": 12
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  }
+}

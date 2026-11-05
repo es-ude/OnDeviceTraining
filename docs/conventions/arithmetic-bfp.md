@@ -460,7 +460,8 @@ silent wrong arithmetic, not a crash.
   orientation-agnostic (per-element group lookup honors `orderOfDimensions`),
   so `linearCalcWeightGradsBfp` is a thin transpose-view wrapper
   (`transposeTensor(loss, 0, 1)` around the same GEMM entry the forward and
-  `dx` both call). Conv1d/Conv1dTransposed instead walk `(outChannel,
+  `dx` both call). Conv1d runs the FLOAT32 weightGrad loop on integer
+  accumulators (§14). Conv1dTransposed instead walks `(outChannel,
   inChannel, kernelTap)` as the OUTER loops and `(batch, outputPosition)` as
   the reduction — each `(oc, ic, k)` cell accumulates its own same-exponent
   `int32` partial across every contributing `(b, outPos)` pair, folding on
@@ -483,10 +484,11 @@ silent wrong arithmetic, not a crash.
   (`linearCalcBiasGradsBfp`/`conv1dCalcBiasGradsBfp`/
   `conv1dTransposedCalcBiasGradsBfp`).
 - **`dx` (`propLoss`) reuses the OTHER family's own forward kernel — the D9
-  gather adjoint (§6), not a dedicated backward kernel.** Conv1d's `dx` is
-  mathematically a Conv1dTransposed op, so its `propLossKernelBfp` funnel
-  adapter dispatches straight to the forward's own
-  `convTranspose1dKernelBfpGather`; Conv1dTransposed's `dx` is mathematically
+  gather adjoint (§6), not a dedicated backward kernel** — except Conv1d.
+  Conv1d's `dx` is mathematically a Conv1dTransposed op; its
+  `propLossKernelBfp` adapter runs `convTranspose1dKernelBfpScatter`, the
+  FLOAT32 ConvT scatter loop on integer accumulators (§14), not the gather.
+  Conv1dTransposed's `dx` is mathematically
   a Conv1d op, so ITS `propLossKernelBfp` dispatches to `conv1dKernelBfp`.
   Linear's `dx` (`linearCalcPropLossBfp`) is
   `matmulBfpTensors(loss, weights, NULL, propLoss)` — the same
@@ -1759,7 +1761,7 @@ in the repository are listed.
 | D6 | Exponent saturation, not abort: the shared exponent clamps to its representable range; at the top mantissas saturate to the grid `[-2^(m-1), qMax]`, at the bottom they flush toward zero. Deliberate deviation from the `#227` abort discipline — saturation is what the `exponentBits` sweep axis measures. Doc aligned to the shipped clamp 2026-10-31 (positive cap `qMax`, negative floor `-2^(m-1)`; clamp code unchanged). | §1, §2; `deriveBfpStoredExponent`, BFP cells of `TensorConversion.c` |
 | D7 | The raw intermediate under `ARITH_BFP` is FLOAT32: kernels MAC mantissa products in `int32` within a block, fold each block partial with an exact `·2^(Ea+Eb)` float multiply, and accumulate in float32 across blocks. No `int64`. **Amended 2026-11-04 (integer-only forward, §13):** a forward op that sets `opSpec_t.bfpRawOut` emits `BFP_RAW` instead (int32 mantissas + one unbiased int16 exponent per TARGET group) and the OUT_WRITE epilogue re-blocks in integers; ops without the flag — every backward op — keep the FLOAT32 raw. | §5.3, §13; every BFP kernel, `ExecuteOp.c`'s BFP arms, `reblockBfpRawTensor` |
 | D8 | Op-local blocking: compute blocking belongs to the op, storage blocking to the tensor. Amended 2026-09-02 (PR3): an already BFP-stored operand is never re-blocked — op-local blocking realizes as the exact fold-segmentation contract (fold whenever either operand's group changes); fresh blocking happens only on the FLOAT32-staging path. | §5.3, §9; GEMM kernels, pools, Relu/Dropout |
-| D9 | Every ConvT1d op under `ARITH_BFP` is gather-formulated (output-centric: each output is a dot product over its contributors), restoring the int32 block-partial contract; the SYM scatter core stays SYM-only. | §6; `convTranspose1dKernelBfpGather`, `convTranspose1dTapsAt` |
+| D9 | Every ConvT1d op under `ARITH_BFP` is gather-formulated (output-centric: each output is a dot product over its contributors), restoring the int32 block-partial contract; the SYM scatter core stays SYM-only. Amended 2026-11-05 (§14, experiment): the Conv1d dx (a ConvT1d op) scatters on integer accumulators instead. | §6, §14; `convTranspose1dKernelBfpGather`, `convTranspose1dTapsAt` |
 | D12 | Sequencing: the epic starts after group-quant PR3; group-quant PR4 (ASYM groups) runs in parallel with a single coordinated ODTS version bump (v5); the group-quant HAR sweep is the vehicle the BFP sweep extends. | `Serialize.c` (v5) |
 | deviations register 5 | Dropout handles mantissas through a float bridge (non-native by decision, D4). | §5.7 "Dropout bridge" |
 | deviations register 6 | ReLU is block-transparent: exponents are kept, the mantissa-utilization drop is accepted. | §5.7 "Packed-domain transparency" |
@@ -2066,3 +2068,43 @@ fake-quant reference. The static side is the M0+ census
 libm and int64 calls in the HAR forward kernels, the re-block and the operand
 unpack, and only per-call, per-group-change, per-output and shared-index-math
 divisions, each allow-listed for its one root.
+
+## 14. Conv1d dx and weightGrad on integer accumulators (scatter, experiment)
+
+Rule: an `ARITH_BFP` kernel runs the same algorithm as its FLOAT32 twin —
+loops, loop order, MAC count, index math. The Conv1d dx (`propLoss`) and
+weightGrad kernels broke it: FLOAT32 scatters, BFP gathered (§5.6, §6). Since
+2026-11-05 they scatter, as an experiment measured on its own; it changes the
+summation order and therefore the numbers.
+
+- **Loops:** `convTranspose1dKernelBfpScatter` is `convTranspose1dKernelFloat32`
+  line for line; `weightGradKernelBfp` (`Conv1d.c`) is `weightGradKernelFloat`
+  line for line, including the memset of the raw.
+- **Accumulator:** one `int32` per destination, in the raw buffer itself.
+  Consecutive products land in different destinations, so every product is
+  its own one-product segment; there is no run to split.
+- **Accumulation exponent, fixed before the walk:** `E_acc = E_top + g` per
+  destination row group. dx: per (batch, conv group), `E_top` = max over the
+  group's loss channels of (loss-row max exponent + weight-row max exponent).
+  weightGrad: per output channel, `E_top` = max over the batch of (loss-row
+  max + max over the conv group's input rows). `E_top` bounds every product
+  exponent that reaches the row (the row-maxima pairing of §13).
+- **Headroom:** `g = bfpFoldGuardBits(N, ma, mb, 0)` (§13), N = the most
+  products one destination can receive from the actual geometry. dx:
+  `Cout/groups` × the most taps that meet on one position (taps k, k' meet
+  when `(k - k') · dilation` is a multiple of stride; with stride 1 that is
+  K). weightGrad: batch × the most output positions one tap reaches. The
+  proof of §13 then bounds every intermediate sum; nothing fails fast except
+  a reduction no `g ≤ 31` can hold. The old segment-headroom refusal
+  (`bfpValidateBlockHeadroom`) no longer applies to these two ops.
+- **Product entry:** `acc += bfpAlignPartial(a · b, E_acc − Ea − Eb)` —
+  exact left shift, or a HALF_AWAY right shift (independent of the op's
+  `roundingMode`, as in the forward fold). Rounding error ≤ ½·2^E_acc per
+  product.
+- **Output (bridge):** the backward still stores FLOAT32 grads, so each
+  accumulator becomes `float(acc) · 2^E_acc` in place (`bfpLdexpInt32`; the
+  cast rounds to nearest even above 2^24, §7). An integer gradient store
+  replaces this bridge.
+- **Unchanged:** biasGrad already walks like FLOAT32 (channel outer,
+  batch, position); the Conv1dTransposed forward and its weightGrad keep the
+  gather (§6); Linear keeps its GEMM.

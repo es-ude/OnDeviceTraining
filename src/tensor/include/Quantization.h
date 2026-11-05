@@ -156,11 +156,13 @@ typedef struct bfpQConfig {
 } bfpQConfig_t;
 
 /* Integer-only BFP: the executeOp funnel's RAW intermediate under ARITH_BFP
- * when an op opts in (opSpec_t.bfpRawOut: the integer forward, and the Conv1d
- * dx) -- int32 mantissas in the tensor data plus ONE exponent per TARGET
- * group, so a BFP kernel folds integer partials and the OUT_WRITE epilogue
- * re-blocks with shifts (conversionMatrix[BFP_RAW][BFP]) or dequantizes into
- * a FLOAT32 target ([BFP_RAW][FLOAT32]). Transient by design: it lives on the funnel's stack
+ * when an op opts in (opSpec_t.bfpRawOut: the integer forward, the Conv1d
+ * dx, the Conv1d weight / bias grads into BFP grads) -- int32 mantissas in
+ * the tensor data plus ONE exponent per TARGET group, so a BFP kernel folds
+ * integer partials and the OUT_WRITE epilogue re-blocks with shifts
+ * (conversionMatrix[BFP_RAW][BFP]) or dequantizes into a FLOAT32 target
+ * ([BFP_RAW][FLOAT32]); the grad ACC epilogue adds it to the stored grad
+ * (accumulateBfpRawIntoBfpRescale). Transient by design: it lives on the funnel's stack
  * for one op, is never storage, never serialized, copied or cloned, and every
  * other dtype switch rejects it.
  * Exponents are UNBIASED (value = mantissa * 2^exponents[g]), unlike the

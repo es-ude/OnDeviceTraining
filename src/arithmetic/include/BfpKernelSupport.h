@@ -514,6 +514,77 @@ static inline size_t bfpRawRequireOutput(bfpRawQConfig_t *rawQC, size_t outElems
     return rawQC->groupSize == 0 ? outElems : rawQC->groupSize;
 }
 
+/*! The raw emit of the integer grad kernels (BFP_RAW_BACKWARD_ACC): `acc`
+ * holds n int32 sums, row by row (rowLen elements per row, each row on its
+ * own E_acc, eAccOfRow[row]); rewritten in place as the BFP_RAW mantissas on
+ * rawQC's geometry (one unbiased exponent per raw target group, which may
+ * straddle rows). The exponent comes from the DATA, not from the rows' E_acc
+ * bounds: E_t = max over the group's nonzero sums of E_acc + bitlen(|sum|),
+ * minus 31. The sum setting it has bitlen <= 31 (the fold guard keeps every
+ * sum below INT32_MAX), so it moves left by 31 - bitlen <= 30, exactly; a
+ * sum moving left elsewhere has a lower top, so it fits too; a sum moving
+ * right ends below its top - E_t < 31 bits, so the half-away lift cannot
+ * reach 2^31. Only a sum more than 31 binades below the group's top loses
+ * bits (half away, < 2^-31 of the group's largest sum). E_acc bounds would
+ * place the grid by the loosest row instead -- an inflated or empty row
+ * (all-zero loss group, stored exponent = bias) re-grids every other row of
+ * the group coarser than the 8-bit grad step before the accumulate's SR. An
+ * all-zero group writes exponent 0 (the accumulate ignores the exponent of
+ * an all-zero raw group). Every group exponent is written; zero sums are
+ * never shifted. Runs of (row, group) are walked with cursors, no division;
+ * one bit length per run. */
+static inline void bfpRawEmitFromRows(int32_t *acc, size_t n, const int *eAccOfRow, size_t rowLen,
+                                      bfpRawQConfig_t *rawQC, const char *what) {
+    size_t gsz = bfpRawRequireOutput(rawQC, n, what);
+    if (n == 0) {
+        return;
+    }
+    int16_t *rawE = rawQC->exponents;
+    for (int pass = 0; pass < 2; pass++) {
+        size_t row = 0;
+        size_t rowEnd = rowLen;
+        size_t t = 0;
+        size_t tEnd = gsz;
+        int top = INT_MIN;
+        size_t i = 0;
+        while (i < n) {
+            size_t runEnd = rowEnd < tEnd ? rowEnd : tEnd;
+            int eRow = eAccOfRow[row];
+            if (pass == 0) {
+                uint32_t mx = 0;
+                for (size_t j = i; j < runEnd; j++) {
+                    uint32_t mag = acc[j] < 0 ? 0u - (uint32_t)acc[j] : (uint32_t)acc[j];
+                    mx = mag > mx ? mag : mx;
+                }
+                if (mx != 0) {
+                    int e = eRow + (int)bfpBitLength32(mx);
+                    top = e > top ? e : top;
+                }
+                if (runEnd == tEnd) {
+                    rawE[t] = (int16_t)(top == INT_MIN ? 0 : top - 31);
+                    top = INT_MIN;
+                }
+            } else {
+                int k = (int)rawE[t] - eRow;
+                for (size_t j = i; j < runEnd; j++) {
+                    if (acc[j] != 0) {
+                        acc[j] = bfpAlignPartial(acc[j], k);
+                    }
+                }
+            }
+            if (runEnd == rowEnd) {
+                row++;
+                rowEnd += rowLen;
+            }
+            if (runEnd == tEnd) {
+                t++;
+                tEnd += gsz;
+            }
+            i = runEnd;
+        }
+    }
+}
+
 /*! The guard of a pure code SUM (AvgPool): the product proof with the second
  * factor bounded by 1 (`mb = 1`: 2^(m+1-2) = 2^(m-1) = max |code|), i.e. the
  * smallest g with K 2^(m-1) 2^-g + (K + 1) <= INT32_MAX. */

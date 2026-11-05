@@ -3315,6 +3315,155 @@ void testExecuteOpBackwardDxRawIntoFloat32TargetDequants(void) {
     TEST_ASSERT_EQUAL_MEMORY(expected, got, sizeof expected);
 }
 
+/* ---- The grad-accumulate raw contract (BFP_RAW_BACKWARD_ACC) -------------
+ * A weight / bias grad kernel emits BFP_RAW on the grad's geometry and the
+ * DYNAMIC_RESCALE epilogue is the integer engine accumulateBfpRawIntoBfpRescale,
+ * rounding by the grad's own storage mode from the op's ACC(0) stream. */
+
+#define ACC_RAW_N 8
+
+/* Old grad {2, 4} at m = 6 (codes, stored exponents) plus a probe raw whose
+ * sums carry fractions on the new grid, so SR draws decide codes. */
+static const int32_t kAccRawOld[ACC_RAW_N] = {20, -6, 3, 0, 1, -31, 0, 7};
+static const uint8_t kAccRawOldE[2] = {120, 117};
+static const int32_t kAccRawMant[ACC_RAW_N] = {524291, -524288, 262144, 786432, 8, -24, 40, 12};
+static const int16_t kAccRawE[2] = {-27, -14};
+
+static void accRawGradTarget(tensor_t *t, shape_t *shape, quantization_t *q, bfpQConfig_t *qc,
+                             uint8_t *exponents, uint8_t *data, roundingMode_t rm) {
+    memcpy(exponents, kAccRawOldE, sizeof kAccRawOldE);
+    *qc = (bfpQConfig_t){.exponents = exponents,
+                         .numGroups = 2,
+                         .groupSize = 4,
+                         .roundingMode = rm,
+                         .mantissaBits = 6,
+                         .exponentBits = 8};
+    buildBfpTarget(t, data, shape, q, qc, kAccRawOld, ACC_RAW_N);
+}
+
+/* One ACC op with a FLOAT32-stored operand (staged: the forward-only ban does
+ * not apply to the grad contract) into `dst`. */
+static void accRawOpBody(bfpRawContract_t contract, outputMode_t mode, const rngKey_t *key,
+                         tensor_t *dst) {
+    tensor_t *in = buildFloat(4, (float[]){100.f, -50.f, 25.f, 0.f});
+    bfpQConfig_t stage = {.exponents = NULL,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    g_rawProbeMant = kAccRawMant;
+    g_rawProbeE = kAccRawE;
+    executeOp(
+        &(opSpec_t){
+            .kernel = writeKnownRawKernel,
+            .inputs = (tensor_t *[]){in},
+            .nInputs = 1,
+            .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
+            .key = key,
+            .mode = mode,
+            .bfpStage = {&stage},
+            .bfpRawOut = contract,
+        },
+        dst);
+    freeTensor(in);
+}
+
+/* The funnel's result equals the engine run directly on a twin target with
+ * the same raw and the stream ACC(0) of the op key, under the grad's SR (the
+ * op's HALF_AWAY does not apply to an ACC epilogue); the probe sees BFP_RAW on
+ * the grad's {2, 4}. Non-vacuous: the KERNEL(0) stream gives other codes. */
+void testExecuteOpBackwardAccRawRunsTheIntegerEngineOnTheAccStream(void) {
+    size_t dims[] = {ACC_RAW_N};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    rngKey_t key = rngKeyFromSeed(FUNNEL_TEST_SEED);
+
+    uint8_t gotE[2];
+    uint8_t gotData[ACC_RAW_N];
+    bfpQConfig_t gotQC;
+    quantization_t gotQ;
+    tensor_t got;
+    accRawGradTarget(&got, &shape, &gotQ, &gotQC, gotE, gotData, SR_HALF_AWAY);
+    g_rawCapQType = -1;
+    accRawOpBody(BFP_RAW_BACKWARD_ACC, OUT_ACC_DYNAMIC_RESCALE, &key, &got);
+    TEST_ASSERT_EQUAL_INT(BFP_RAW, g_rawCapQType);
+    TEST_ASSERT_EQUAL_size_t(2, g_rawCapNumGroups);
+    TEST_ASSERT_EQUAL_size_t(4, g_rawCapGroupSize);
+    TEST_ASSERT_EQUAL_INT(SR_HALF_AWAY, gotQC.roundingMode);
+
+    int32_t rawMant[ACC_RAW_N];
+    int16_t rawE[2];
+    memcpy(rawMant, kAccRawMant, sizeof rawMant);
+    memcpy(rawE, kAccRawE, sizeof rawE);
+    bfpRawQConfig_t rawQC = {.exponents = rawE, .numGroups = 2, .groupSize = 4};
+    quantization_t rawQ;
+    initBfpRawQuantization(&rawQC, &rawQ);
+    tensor_t raw;
+    setTensorValues(&raw, (uint8_t *)rawMant, &shape, &rawQ, NULL);
+
+    int32_t gotCodes[ACC_RAW_N];
+    unpackSignExtend(got.data, 6, 0, gotCodes, ACC_RAW_N);
+    for (int pass = 0; pass < 2; pass++) {
+        uint8_t refE[2];
+        uint8_t refData[ACC_RAW_N];
+        bfpQConfig_t refQC;
+        quantization_t refQ;
+        tensor_t ref;
+        accRawGradTarget(&ref, &shape, &refQ, &refQC, refE, refData, SR_HALF_AWAY);
+        rngStream_t s = rngOpen(rngFold(key, pass == 0 ? RNG_TAG_ACC : RNG_TAG_KERNEL, 0u));
+        accumulateBfpRawIntoBfpRescale(&ref, &raw, &s);
+        int32_t refCodes[ACC_RAW_N];
+        unpackSignExtend(ref.data, 6, 0, refCodes, ACC_RAW_N);
+        if (pass == 0) {
+            TEST_ASSERT_EQUAL_UINT8_ARRAY(refE, gotE, 2);
+            TEST_ASSERT_EQUAL_INT32_ARRAY(refCodes, gotCodes, ACC_RAW_N);
+        } else {
+            TEST_ASSERT_TRUE(memcmp(refCodes, gotCodes, sizeof refCodes) != 0);
+        }
+    }
+}
+
+static void accRawIntoBfpBody(bfpRawContract_t contract, outputMode_t mode) {
+    size_t dims[] = {ACC_RAW_N};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t e[2];
+    uint8_t data[ACC_RAW_N];
+    bfpQConfig_t qc;
+    quantization_t q;
+    tensor_t t;
+    accRawGradTarget(&t, &shape, &q, &qc, e, data, HALF_AWAY);
+    accRawOpBody(contract, mode, NULL, &t);
+}
+
+static void accRawIntoFloatBody(void) {
+    tensor_t *out = buildFloat(ACC_RAW_N, (float[]){0, 0, 0, 0, 0, 0, 0, 0});
+    accRawOpBody(BFP_RAW_BACKWARD_ACC, OUT_ACC_DYNAMIC_RESCALE, NULL, out);
+}
+
+static void accRawFixedBody(void) {
+    accRawIntoBfpBody(BFP_RAW_BACKWARD_ACC, OUT_ACC_FIXED_SCALE);
+}
+
+static void accRawWriteBody(void) {
+    accRawIntoBfpBody(BFP_RAW_BACKWARD_ACC, OUT_WRITE);
+}
+
+/* The grad contract accumulates into BFP storage under DYNAMIC_RESCALE only:
+ * the fixed grid is a separate mode (keeps the FLOAT32 raw), a FLOAT32 grad
+ * keeps the FLOAT32 raw (the layer selects NONE there), OUT_WRITE is the
+ * other contracts' epilogue, and the forward / dx contracts still refuse
+ * an ACC epilogue. */
+void testExecuteOpBackwardAccRawMisuseDies(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "BFP_RAW_BACKWARD_ACC needs OUT_ACC_DYNAMIC_RESCALE",
+                             accRawFixedBody());
+    ASSERT_EXITS_WITH_OUTPUT(1, "BFP_RAW_BACKWARD_ACC needs OUT_ACC_DYNAMIC_RESCALE",
+                             accRawWriteBody());
+    ASSERT_EXITS_WITH_OUTPUT(1, "BFP_RAW_BACKWARD_ACC accumulates into BFP storage only",
+                             accRawIntoFloatBody());
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testProloguePassesMatchingOperandThroughUntouched);
@@ -3385,6 +3534,8 @@ int main(void) {
     RUN_TEST(testExecuteOpBackwardDxRawStagesFloatAndReblocksIntoBfpWire);
     RUN_TEST(testExecuteOpBackwardDxRawIntoFloat32TargetDequants);
     RUN_TEST(testExecuteOpBfpRawBackwardDxWithAccModeDies);
+    RUN_TEST(testExecuteOpBackwardAccRawRunsTheIntegerEngineOnTheAccStream);
+    RUN_TEST(testExecuteOpBackwardAccRawMisuseDies);
     RUN_TEST(testExecuteOpBfpRawOutUnknownContractDies);
     RUN_TEST(testExecuteConvertHandsTheStreamToTheCellOnEveryRoute);
     RUN_TEST(testExecuteOpOpensTheStageAndKernelStreamsFromTheOpKey);

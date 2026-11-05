@@ -148,7 +148,9 @@ def random_bfp_operand(rng: np.random.Generator, shape: tuple, spec: dict) -> Bf
     around the one the exact rule gives for `absmax` (value units), spread
     by +-`expSpread` per group and clamped into the D6 range. `codes:
     "full_scale"` sets every code to +qMax (the headroom / section-7
-    probes); `codes: "alternating"` to +-qMax."""
+    probes); `codes: "alternating"` to +-qMax. `zeroGroups: [g, ...]` puts
+    those groups in the canonical zero state (codes 0, stored = bias), as a
+    pack leaves an all-zero group (e.g. a ReLU-zeroed loss run)."""
     m, e, gs = int(spec["m"]), int(spec["e"]), int(spec.get("groupSize", 0))
     n = int(np.prod(shape))
     q = bfp_ref.qmax(m)
@@ -172,6 +174,12 @@ def random_bfp_operand(rng: np.random.Generator, shape: tuple, spec: dict) -> Bf
     cap = bfp_ref.stored_exponent_cap(e)
     stored = bias + e_center + rng.integers(-spread, spread + 1, size=ng)
     stored = np.clip(stored, 0, cap).astype(np.int64)
+    zero = [int(g) for g in spec.get("zeroGroups", [])]
+    if zero:
+        g_of = bfp_ref.group_ids(n, gs_eff)
+        for g in zero:
+            codes[g_of == g] = 0
+            stored[g] = bias
     return BfpOperand(spec.get("storage", "BFP"), codes.reshape(shape), stored, m, e, gs_eff)
 
 
@@ -853,6 +861,77 @@ def evaluate_scatter_int_output(fx: GemmFixture, direction: str, drv, out_name: 
     return row
 
 
+def evaluate_grad_bfp_output(fx: GemmFixture, drv, out_name: str, grad: dict, calls: int) -> dict:
+    """weightGrad / biasGrad into per-tensor BFP grad storage (section 14
+    "Grad raw" + section 15, HALF_AWAY), accumulated `calls` times from zero
+    codes over the same operands. Leg A: the integer sums (the scatter /
+    the bias segment fold), the data-derived raw (grad_raw_from_rows) and
+    the exact accumulate chain (accumulate_raw_into_bfp) predict codes AND
+    the stored exponent exactly. Leg B: calls * the exact float64 grad
+    within, per call, the raw's roundings (half a unit of 2^E_acc per product
+    / per segment, half a unit of 2^E_t per re-gridded sum) plus half a code
+    of that call's grid."""
+    m, e = int(grad["mantissaBits"]), int(grad["exponentBits"])
+    x = fx.ops["input"].codes.shape
+    loss = fx.ops["loss"]
+    c_out = loss.codes.shape[1]
+    row: dict = {"output": out_name, "n_elements": 0, "headroom": {"ok": True, "kind": "guard"}}
+    if drv.exit != 0:
+        row["legA"] = {"taxonomy": "MISMATCH", "census": None, "mismatch_class": "abort", "seed": None, "scale": {"c": None, "ref": None, "rel": None, "ok": False}, "ref_scale": None}
+        row["legB"] = {"taxonomy": "n/a", "err_max": float("nan"), "bound": float("nan"), "ratio": float("nan")}
+        row["c_scale"] = None
+        row["bfp"] = {"summary": f"grad-bfp: exit {drv.exit}"}
+        return row
+    if out_name == "weightGrad":
+        a, b = gemm_operands(fx, "weightGrad")
+        ref = bfp_ref.conv1d_scatter_int_backward(
+            x[0], x[1], x[2], c_out, fx.geom, "weightGrad", (a.codes, a.stored, a.bits), (b.codes, b.stored, b.bits)
+        )
+        sums, e_acc = ref.sums, [int(v) for v in ref.e_acc.ravel()]
+        per_call_raw = ref.raw_bound.ravel()
+        stats = {"g": ref.g, "N": ref.n_terms, "rounded": ref.n_rounded, "left": ref.n_left}
+        exact, _ = gemm_exact_and_abs(fx, "weightGrad")
+    else:
+        l_out = loss.codes.shape[2]
+        sums, e_acc, n_rounded = bfp_ref.conv1d_bias_int_sums(x[0], c_out, l_out, (loss.codes, loss.stored, loss.bits))
+        per_call_raw = np.array([0.5 * x[0] * l_out * 2.0 ** ea for ea in e_acc])
+        stats = {"rounded_segments": n_rounded}
+        exact, _ = gemm_exact_and_abs(fx, "biasGrad")
+    exact = exact.ravel()
+    mant, exps, n_realigned = bfp_ref.grad_raw_from_rows(sums, e_acc, 0)
+    regrid = np.array([0.5 * 2.0 ** exps[0] if exps[0] > ea else 0.0 for ea in e_acc])
+    codes, stored = [0] * len(sums), [bfp_ref.exponent_bias(e)]
+    bound = np.zeros(len(sums))
+    for _ in range(calls):
+        codes, stored = bfp_ref.accumulate_raw_into_bfp(codes, stored, mant, exps, m, e)
+        bound += per_call_raw + regrid + 0.5 * 2.0 ** (stored[0] - bfp_ref.exponent_bias(e))
+    c_vals, grid = c_output_image(drv.out(out_name))
+    if not grid:
+        raise RuntimeError("harness: a BFP grad cell produced a FLOAT32 grad")
+    c_codes = np.asarray(grid["codes"], dtype=np.int64).ravel()
+    c_stored = np.asarray(grid["stored"], dtype=np.int64)
+    codes = np.asarray(codes, dtype=np.int64)
+    bad_c = np.flatnonzero(c_codes != codes)
+    bad_e = c_stored.size != 1 or int(c_stored[0]) != stored[0]
+    taxonomy = "EXACT" if bad_c.size == 0 and not bad_e else "MISMATCH"
+    row["n_elements"] = int(codes.size)
+    row["legA"] = {
+        "taxonomy": taxonomy,
+        "census": {"taxonomy": taxonomy, "mode": "bfp_grad_acc", "n_elements": int(codes.size), "n_mismatch": int(bad_c.size), "n_tie": 0,
+                   "max_abs_diff": int(np.abs(c_codes - codes).max()) if codes.size else 0, "n_groups": 1, "n_E_differs": int(bad_e),
+                   "worst": [{"index": int(i), "c": int(c_codes[i]), "ref": int(codes[i])} for i in bad_c[:8]] + ([{"c_E": c_stored.tolist(), "ref_E": stored}] if bad_e else [])},
+        "mismatch_class": "none" if taxonomy == "EXACT" else ("E" if bad_e else "code"),
+        "seed": None,
+        "scale": {"c": None, "ref": None, "rel": None, "ok": True},
+        "ref_scale": None,
+    }
+    row["legB"] = elementwise_leg_b(np.abs(c_vals.ravel() - calls * exact), bound)
+    row["legB"]["bound_kind"] = "per call: raw roundings + 0.5*2^E_t re-grid + 0.5*2^E_d store (grad-bfp)"
+    row["c_scale"] = None
+    row["bfp"] = {"summary": f"grad-bfp calls={calls} m={m} E_t={exps[0]} realigned={n_realigned} stored={stored[0]} {stats}", "stats": stats}
+    return row
+
+
 def _is_int_fold(cell: dict) -> bool:
     """The ops whose forward emits the integer BFP_RAW (arithmetic-bfp
     section 13): Conv1d and Linear; the ConvT1d forward still folds in float."""
@@ -999,7 +1078,14 @@ def run_gemm_cell(cell: dict, driver: Path, out_root: Path, k: int, run_driver) 
                 out = {"dtype": "BFP_RAW", "groupSize": raw_gs}
             else:
                 out = {"dtype": "FLOAT32"}
-            spec_path = write_spec(in_dir, cell, tier, operands, out)
+            grad = cell.get("grad")
+            extra = None
+            if grad is not None:
+                if not _is_scatter_int(cell) or cell["direction"] != "weightGrad" or tier != "layer":
+                    raise RuntimeError("harness: BFP grad storage is modelled for the Conv1d integer weightGrad layer tier only")
+                extra = {"gradStorage": "BFP", "calls": int(cell.get("calls", 1)),
+                         "grad": {"mantissaBits": int(grad["m"]), "exponentBits": int(grad["e"]), "groupSize": 0, "rounding": "HALF_AWAY"}}
+            spec_path = write_spec(in_dir, cell, tier, operands, out, extra)
             drv = run_driver(driver, spec_path, in_dir, work / "out")
             direction = cell["direction"]
             out_name = {"forward": "output", "dx": "propLoss", "weightGrad": "weightGrad"}[direction]
@@ -1015,6 +1101,8 @@ def run_gemm_cell(cell: dict, driver: Path, out_root: Path, k: int, run_driver) 
                 layer_out = output_spec(cell) if tier == "layer" else None
                 layer_gs = 0 if (layer_out is None or layer_out["dtype"] == "FLOAT32") else int(layer_out["groupSize"])
                 res = evaluate_int_fold_output(fx, drv, tier, raw_gs if tier == "kernel" else layer_gs, layer_out)
+            elif grad is not None:
+                res = evaluate_grad_bfp_output(fx, drv, "weightGrad", extra["grad"], extra["calls"])
             elif _is_scatter_int(cell):
                 if tier != "layer":
                     raise RuntimeError("harness: the integer scatter is modelled at the layer tier only")
@@ -1027,7 +1115,10 @@ def run_gemm_cell(cell: dict, driver: Path, out_root: Path, k: int, run_driver) 
             row["verdict"] = verdict(row, expect)
             rows.append(row)
             if direction == "weightGrad" and "bias" in fx.ops and (drv.exit == 0 or not res["headroom"]["ok"]):
-                res2 = evaluate_gemm_output(fx, "biasGrad", drv, "biasGrad", k, False)
+                if grad is not None:
+                    res2 = evaluate_grad_bfp_output(fx, drv, "biasGrad", extra["grad"], extra["calls"])
+                else:
+                    res2 = evaluate_gemm_output(fx, "biasGrad", drv, "biasGrad", k, False)
                 r2 = dict(base)
                 r2.update(res2)
                 r2["fixture"] = fixture_info

@@ -1115,6 +1115,8 @@ class ScatterIntFold:
     exps: np.ndarray | None = None  # dx: one unbiased raw exponent per raw target group
     raw_group_size: int = 0
     n_realigned: int = 0  # dx: sums whose re-grid to the raw group's exponent dropped a fraction
+    sums: list | None = None  # weightGrad: the exact int32 destination sums (python ints)
+    raw_bound: np.ndarray | None = None  # weightGrad: alignment roundings only (no float cast)
 
     def stats(self) -> dict:
         return {
@@ -1247,10 +1249,14 @@ def conv1d_scatter_int_backward(
         bound[o] = 0.5 * len(ia) * 2.0**ea + abs(pred) * 2.0**-24
     shape = walk.out_shape
     if direction == "weightGrad":
-        return ScatterIntFold(
+        fold = ScatterIntFold(
             predicted.reshape(shape), exact.reshape(shape), bound.reshape(shape), e_acc.reshape(shape),
             guard, n_terms, n_left, n_rounded, sum_max,
         )
+        fold.sums = list(totals)
+        # one half unit of 2^E_acc per product (no float cast on the BFP_RAW path)
+        fold.raw_bound = np.array([0.5 * len(walk.ia[o]) * 2.0 ** int(e_acc[o]) for o in range(n_out)])
+        return fold
     gsz = n_out if raw_group_size == 0 else raw_group_size
     if n_out % gsz:
         raise ValueError(f"raw groupSize {gsz} does not divide the dx ({n_out})")
@@ -1271,3 +1277,116 @@ def conv1d_scatter_int_backward(
         value.reshape(shape), exact.reshape(shape), bound_dx.reshape(shape), e_acc.reshape(shape),
         guard, n_terms, n_left, n_rounded, sum_max, mant, exps, raw_group_size, n_realigned,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Section 15 / 14: the grad path into BFP storage (BFP_RAW_BACKWARD_ACC)       #
+# --------------------------------------------------------------------------- #
+
+
+def conv1d_bias_int_sums(
+    batch: int, c_out: int, l_out: int, loss: tuple[np.ndarray, np.ndarray, tuple[int, int, int]]
+) -> tuple[list[int], list[int], int]:
+    """Section 14 "Conv1d biasGrad", from the definition: per output channel
+    oc, walk b (outer) and t (inner); consecutive codes of one loss group
+    form a segment whose code sum is exact; each segment sum s enters as
+    align_partial(s, E_acc - E_group), E_acc = max over b of the loss row
+    (b, oc)'s max exponent + g, g = fold_guard_bits(batch * l_out, m, 1, 0)
+    (a pure SUM: the product bound with the second factor 1). Returns
+    (sums, e_acc per channel, n_rounded segments)."""
+    lc, ls, lb = loss
+    lc = np.asarray(lc, dtype=np.int64).ravel()
+    bias = exponent_bias(lb[1])
+    gs = lb[2]
+    gid = group_ids(lc.size, gs)
+    l_exp = np.asarray(ls, dtype=np.int64)[gid] - bias
+    n = batch * l_out
+    g = fold_guard_bits(n, lb[0], 1, 0) if n else 0
+    sums, e_acc, n_rounded = [], [], 0
+    for oc in range(c_out):
+        rows = [(b * c_out + oc) * l_out for b in range(batch)]
+        ea = (max(int(l_exp[s:s + l_out].max()) for s in rows) + g) if n else 0
+        total, seg, seg_g, seg_e = 0, 0, None, 0
+        for s in rows:
+            for i in range(s, s + l_out):
+                if seg_g is not None and int(gid[i]) != seg_g:
+                    q = align_partial(seg, ea - seg_e)
+                    n_rounded += Fraction(q) * Fraction(2) ** (ea - seg_e) != seg
+                    total += q
+                    seg = 0
+                if seg_g is None or int(gid[i]) != seg_g:
+                    seg_g, seg_e = int(gid[i]), int(l_exp[i])
+                seg += int(lc[i])
+        if seg_g is not None:
+            q = align_partial(seg, ea - seg_e)
+            n_rounded += Fraction(q) * Fraction(2) ** (ea - seg_e) != seg
+            total += q
+        if not INT32_MIN <= total <= INT32_MAX:
+            raise ValueError("bias sum leaves int32 -- the guard proof is violated")
+        sums.append(total)
+        e_acc.append(ea)
+    return sums, e_acc, n_rounded
+
+
+def grad_raw_from_rows(sums: list[int], e_acc: list[int], raw_group_size: int) -> tuple[list[int], list[int], int]:
+    """Section 14 "Grad raw": per raw target group (raw_group_size elements,
+    0 = the whole tensor) E_t = max over the group's NONZERO sums of
+    E_acc + bitlen(|sum|), minus 31 (an all-zero group: 0); each sum is
+    re-gridded to 2^E_t with align_partial (exact left, half away right).
+    Returns (mant, exps, n_realigned)."""
+    n = len(sums)
+    gsz = n if raw_group_size == 0 else raw_group_size
+    mant, exps, n_realigned = [0] * n, [], 0
+    for t in range(n // gsz if gsz else 0):
+        idx = range(t * gsz, (t + 1) * gsz)
+        tops = [e_acc[i] + _bitlen(abs(sums[i])) for i in idx if sums[i] != 0]
+        et = max(tops) - 31 if tops else 0
+        exps.append(et)
+        for i in idx:
+            if sums[i] == 0:
+                continue
+            k = et - e_acc[i]
+            mant[i] = align_partial(sums[i], k)
+            if k > 0 and Fraction(mant[i]) * Fraction(2) ** k != sums[i]:
+                n_realigned += 1
+    return mant, exps, n_realigned
+
+
+def accumulate_raw_into_bfp(
+    codes: list[int], stored: list[int], mant: list[int], exps: list[int], mantissa_bits: int, exponent_bits: int
+) -> tuple[list[int], list[int]]:
+    """Section 15, the integer dynamic-rescale grad accumulate, HALF_AWAY, per
+    tensor (one group), from its documented result: the exact sum V_i =
+    code_i 2^E_o + mant_i 2^E_r (rational); E_c = max(E_o + bitlen(A_o),
+    E_r + bitlen(A_r)) - 30 over the nonzero sides, capped at the largest
+    stored exponent - bias; E_d = the smallest E >= E_c with max |V| <= qMax
+    2^E (capped), then clamped to the stored range; codes = V / 2^E_d rounded
+    half away from zero, clamped to [-2^(m-1), qMax]; an all-zero sum is the
+    zero state (stored = bias)."""
+    bias = exponent_bias(exponent_bits)
+    cap = stored_exponent_cap(exponent_bits)
+    cap_e = cap - bias
+    q = qmax(mantissa_bits)
+    floor = code_floor_twos_complement(mantissa_bits)
+    eo, er = int(stored[0]) - bias, int(exps[0])
+    vals = [Fraction(int(c)) * Fraction(2) ** eo + Fraction(int(r)) * Fraction(2) ** er for c, r in zip(codes, mant)]
+    vmax = max((abs(v) for v in vals), default=Fraction(0))
+    if vmax == 0:
+        return [0] * len(codes), [bias]
+    ao, ar = max(abs(int(c)) for c in codes), max(abs(int(r)) for r in mant)
+    tops = ([eo + _bitlen(ao)] if ao else []) + ([er + _bitlen(ar)] if ar else [])
+    ec = min(max(tops) - 30, cap_e)
+    e_d = ec
+    while e_d < cap_e and vmax > q * Fraction(2) ** e_d:
+        e_d += 1
+    e_d = min(max(e_d, -bias), cap_e)
+    out = []
+    for v in vals:
+        x = v / Fraction(2) ** e_d
+        mag = abs(x)
+        t = int(mag)
+        if mag - t >= Fraction(1, 2):
+            t += 1
+        c = -t if x < 0 else t
+        out.append(min(max(c, floor), q))
+    return out, [e_d + bias]

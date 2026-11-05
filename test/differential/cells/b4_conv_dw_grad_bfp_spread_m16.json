@@ -1,0 +1,73 @@
+{
+  "name": "b4_conv_dw_grad_bfp_spread_m16",
+  "description": "B4 Conv1d weightGrad + biasGrad into per-tensor m16 BFP grads, 2 accumulating calls, m16 operands with an exponent spread (the guard right-shifts).",
+  "family": "bfp_gemm",
+  "op": "conv1d",
+  "direction": "weightGrad",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "geometry": {
+    "kernelSize": 3,
+    "padding": "SAME",
+    "groups": 2
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 4402,
+    "batch": 2,
+    "cin": 4,
+    "length": 12,
+    "cout": 4,
+    "kernelSize": 3,
+    "input": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 8,
+      "absmax": 2.0,
+      "expSpread": 8
+    },
+    "weight": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.25,
+      "expSpread": 1
+    },
+    "bias": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    },
+    "loss": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 6,
+      "absmax": 1.0,
+      "expSpread": 8
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED",
+    "biasGrad": {
+      "legA": [
+        "EXACT"
+      ],
+      "legB": "BOUNDED"
+    }
+  },
+  "grad": {
+    "m": 16,
+    "e": 8
+  },
+  "calls": 2
+}

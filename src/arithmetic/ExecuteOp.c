@@ -243,6 +243,12 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
          * construction (initBfpQConfigGrouped), so a re-check would be dead
          * code. FIXED_SCALE carries the per-group exponents and aborts on
          * mantissa overflow; DYNAMIC_RESCALE re-derives them per store. */
+        if (intermediate->quantization->type == BFP_RAW) {
+            /* BFP_RAW_BACKWARD_ACC (validated DYNAMIC_RESCALE before the
+             * kernel): the integer engine, no float. */
+            accumulateBfpRawIntoBfpRescale(target, intermediate, acc0);
+            return;
+        }
         if (intermediate->quantization->type == FLOAT32) {
             if (mode == OUT_ACC_FIXED_SCALE) {
                 accumulateFloatIntoBfpTensorFixedGrid(target, (const float *)intermediate->data, n,
@@ -303,7 +309,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             /* The integer forward into a BFP wire is float-free after the
              * model's input quantization layer: a FLOAT32 operand here is a
              * wiring bug, not a staging request. Arm A (FLOAT32 wires) and
-             * every backward op (BFP_RAW_BACKWARD_DX included) keep staging. */
+             * every backward op (BFP_RAW_BACKWARD_DX / _ACC included) keep staging. */
             if (inputs[i]->quantization->type == FLOAT32 && spec->bfpRawOut == BFP_RAW_FORWARD &&
                 target->quantization->type == BFP) {
                 PRINT_ERROR("executeOp: FLOAT32-stored operand %zu in an integer BFP forward "
@@ -544,7 +550,8 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
      * the VLAs so a misuse dies with a message, not a bad size. */
     bfpRawQConfig_t rawBfpQC = {.exponents = NULL, .numGroups = 0, .groupSize = 0};
     if (spec->bfpRawOut != BFP_RAW_NONE) {
-        if (spec->bfpRawOut != BFP_RAW_FORWARD && spec->bfpRawOut != BFP_RAW_BACKWARD_DX) {
+        if (spec->bfpRawOut != BFP_RAW_FORWARD && spec->bfpRawOut != BFP_RAW_BACKWARD_DX &&
+            spec->bfpRawOut != BFP_RAW_BACKWARD_ACC) {
             PRINT_ERROR("executeOp: unknown bfpRawOut contract %d", (int)spec->bfpRawOut);
             exit(1);
         }
@@ -554,9 +561,25 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
                         (int)arithmetic.type);
             exit(1);
         }
-        if (spec->mode != OUT_WRITE) {
+        if (spec->bfpRawOut == BFP_RAW_BACKWARD_ACC) {
+            /* The grad contract: the integer engine is the DYNAMIC_RESCALE
+             * arm into BFP storage; the fixed grid and FLOAT32 grads keep
+             * the FLOAT32 raw (the layer selects NONE there). */
+            if (spec->mode != OUT_ACC_DYNAMIC_RESCALE) {
+                PRINT_ERROR("executeOp: BFP_RAW_BACKWARD_ACC needs OUT_ACC_DYNAMIC_RESCALE "
+                            "(mode %d) -- the fixed grid keeps the FLOAT32 raw",
+                            (int)spec->mode);
+                exit(1);
+            }
+            if (target->quantization->type != BFP) {
+                PRINT_ERROR("executeOp: BFP_RAW_BACKWARD_ACC accumulates into BFP storage "
+                            "only (target dtype %d) -- a FLOAT32 grad keeps the FLOAT32 raw",
+                            (int)target->quantization->type);
+                exit(1);
+            }
+        } else if (spec->mode != OUT_WRITE) {
             PRINT_ERROR("executeOp: bfpRawOut needs the OUT_WRITE epilogue (mode %d) -- "
-                        "accumulating ops (weight/bias grads) keep the FLOAT32 raw",
+                        "accumulating ops use BFP_RAW_BACKWARD_ACC or the FLOAT32 raw",
                         (int)spec->mode);
             exit(1);
         }

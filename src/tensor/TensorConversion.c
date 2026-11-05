@@ -3020,103 +3020,109 @@ void scaleBfpTensorByScalarInPlace(tensor_t *t, bfpScalar_t s, rngStream_t *rs) 
     }
 }
 
-/* ---- Integer SGD momentum store: v' = mu * v + g (arithmetic-bfp.md §15.7) ----
- * Contract: TensorConversion.h, momentumStoreBfpInPlace. The accumulate
- * engine's three passes with the roles of its operands re-cast: the in-place
- * state contributes the WIDE term v_i * q (up to 30 bits, on 2^(E_v + e)),
- * the read-only gradient the narrow one (its codes, on 2^E_g). Per group:
- *   pass 0: A_v, A_g; E_c = max(E_v + e + bitlen(q * A_v), E_g + bitlen(A_g))
- *           - 30, capped at capE. The term that sets E_c is then exact on the
- *           grid (shift <= 0), so at most one term carries a tail.
+/* ---- Integer scaled sum in place: t' = a * t + b * s (arithmetic-bfp.md §15.7) ----
+ * The engine behind the integer SGD momentum store (a = mu, b = 1) and
+ * parameter update (a = 1, b = -lr); contracts in TensorConversion.h. The
+ * accumulate engine's three passes, each operand under its OWN exponent: the
+ * in-place target contributes t_i * a.q (< 2^30, on 2^(E_t + a.e)), the
+ * read-only source s_i * b.q (< 2^30, on 2^(E_s + b.e)). Per target group:
+ *   pass 0: A_t, A_s; E_c = max(E_t + a.e + bitlen(a.q * A_t),
+ *           E_s + b.e + bitlen(|b.q| * A_s)) - 30, capped at capE. The term
+ *           that sets E_c is then exact on the grid (shift <= 0), so at most
+ *           one term carries a tail.
  *   pass 1: absmax of the exact sums rounded UP to the grid -> the integer
  *           exponent rule, floored at E_c, D6 clamp (the accumulate engine's
  *           exactness argument verbatim).
  *   pass 2: the same exact sum re-gridded and rounded once by the caller's
  *           mode, one draw per element in element order on every path.
- * Cap regime: only a gradient can push E_c past capE (E_v <= capE and e <=
- * -14 keep the state's term below 2^16 on the capped grid), and a gradient
- * term reaching 2^30 there saturates its element with its own sign, exactly.
+ * Cap regime: only the source can push E_c past capE (E_t <= capE and a <= 1,
+ * so a.e <= -14, keep the target's term below 2^16 on the capped grid), and
+ * a source term reaching 2^30 there -- possible only for a left shift, k_s <
+ * 0 -- saturates its element with that term's sign, exactly.
  * Passes 0 and 1 run one group boundary ahead of pass 2 (the window rule),
- * so the state's exponents stay OLD for every group not yet emitted. */
-static void bfpMomentumScan(const bfpQConfig_t *vqc, const uint8_t *vData, const bfpQConfig_t *gqc,
-                            const uint8_t *gData, bfpScalar_t mu, size_t from, size_t to,
-                            size_t gsz, int cap, int32_t *workE, uint8_t *fresh, int32_t *vm,
-                            int32_t *gm) {
-    const int32_t biasV = bfpExponentBias(vqc);
-    const int32_t biasG = bfpExponentBias(gqc);
-    const int capE = cap - (int)biasV;
-    const uint32_t q = (uint32_t)mu.q; /* >= 0, validated */
+ * so the target's exponents stay OLD for every group not yet emitted. */
+static void bfpScaledSumScan(const bfpQConfig_t *tqc, const uint8_t *tData, bfpScalar_t a,
+                             const bfpQConfig_t *sqc, const uint8_t *sData, bfpScalar_t b,
+                             size_t from, size_t to, size_t gsz, int cap, int32_t *workE,
+                             uint8_t *fresh, int32_t *tm, int32_t *sm) {
+    const int32_t biasT = bfpExponentBias(tqc);
+    const int32_t biasS = bfpExponentBias(sqc);
+    const int capE = cap - (int)biasT;
+    const uint32_t qa = (uint32_t)a.q;                                /* >= 0, validated */
+    const uint32_t qb = b.q < 0 ? 0u - (uint32_t)b.q : (uint32_t)b.q; /* |b.q| */
     for (int pass = 0; pass < 2; pass++) {
         size_t g = from / gsz; /* once per call; runs advance a cursor */
         size_t gEnd = (g + 1) * gsz;
         size_t slot = g % ODT_RESCALE_FRESH_WINDOW;
-        uint32_t av = 0;
-        uint32_t ag = 0;
+        uint32_t at = 0;
+        uint32_t as = 0;
         size_t pos = from;
         while (pos < to) {
             const size_t start = pos & ~(size_t)7;
             const size_t take =
                 to - start < ODT_CONVERSION_CHUNK_ELEMS ? to - start : ODT_CONVERSION_CHUNK_ELEMS;
-            unpackSignExtendChunk(vData, vqc->mantissaBits, start, take, vm);
-            unpackSignExtendChunk(gData, gqc->mantissaBits, start, take, gm);
+            unpackSignExtendChunk(tData, tqc->mantissaBits, start, take, tm);
+            unpackSignExtendChunk(sData, sqc->mantissaBits, start, take, sm);
             const size_t segEnd = start + take;
             while (pos < segEnd) {
                 const size_t runEnd = gEnd < segEnd ? gEnd : segEnd;
-                const int ev = (int)vqc->exponents[g] - (int)biasV + (int)mu.e;
-                const int eg = (int)gqc->exponents[g] - (int)biasG;
+                const int et = (int)tqc->exponents[g] - (int)biasT + (int)a.e;
+                const int es = (int)sqc->exponents[g] - (int)biasS + (int)b.e;
                 if (pass == 0) {
                     for (size_t i = pos; i < runEnd; i++) {
-                        const int32_t v = vm[i - start];
-                        const int32_t c = gm[i - start];
-                        const uint32_t mv = v < 0 ? 0u - (uint32_t)v : (uint32_t)v;
-                        const uint32_t mg = c < 0 ? 0u - (uint32_t)c : (uint32_t)c;
-                        av = mv > av ? mv : av;
-                        ag = mg > ag ? mg : ag;
+                        const int32_t x = tm[i - start];
+                        const int32_t y = sm[i - start];
+                        const uint32_t mx = x < 0 ? 0u - (uint32_t)x : (uint32_t)x;
+                        const uint32_t my = y < 0 ? 0u - (uint32_t)y : (uint32_t)y;
+                        at = mx > at ? mx : at;
+                        as = my > as ? my : as;
                     }
                     if (runEnd == gEnd) {
-                        const uint32_t avq = av * q; /* <= 2^15 * (2^15 - 1) */
-                        if (avq == 0 && ag == 0) {
+                        const uint32_t atq = at * qa; /* <= 2^15 * (2^15 - 1) */
+                        const uint32_t asq = as * qb;
+                        if (atq == 0 && asq == 0) {
                             workE[slot] = BFP_INT_ACC_ZERO_GROUP;
                         } else {
-                            const int topV = avq ? ev + (int)bfpBitLength32(avq) : INT32_MIN;
-                            const int topG = ag ? eg + (int)bfpBitLength32(ag) : INT32_MIN;
-                            const int ec = (topV > topG ? topV : topG) - 30;
+                            const int topT = atq ? et + (int)bfpBitLength32(atq) : INT32_MIN;
+                            const int topS = asq ? es + (int)bfpBitLength32(asq) : INT32_MIN;
+                            const int ec = (topT > topS ? topT : topS) - 30;
                             workE[slot] = ec > capE ? capE : ec;
                         }
-                        av = 0;
-                        ag = 0;
+                        at = 0;
+                        as = 0;
                     }
                 } else if (workE[slot] != BFP_INT_ACC_ZERO_GROUP) {
                     const int ec = workE[slot];
-                    const int kv = ec - ev;
-                    const int kg = ec - eg;
+                    const int kt = ec - et;
+                    const int ks = ec - es;
                     for (size_t i = pos; i < runEnd; i++) {
+                        const int32_t ys = bfpScalarMulMant(sm[i - start], b);
                         uint32_t mag;
-                        if (bfpRawTermSaturates(gm[i - start], kg)) {
+                        if (bfpRawTermSaturates(ys, ks)) {
                             mag = UINT32_MAX; /* forces the cap, E_d = E_c = capE */
                         } else {
                             mag = bfpQrCeilMagnitude(
-                                bfpQrAdd(bfpQrOfTerm(bfpScalarMulMant(vm[i - start], mu), kv),
-                                         bfpQrOfTerm(gm[i - start], kg)));
+                                bfpQrAdd(bfpQrOfTerm(bfpScalarMulMant(tm[i - start], a), kt),
+                                         bfpQrOfTerm(ys, ks)));
                         }
-                        av = mag > av ? mag : av; /* pass 1 reuses av as the sum's absmax */
+                        at = mag > at ? mag : at; /* pass 1 reuses at as the sum's absmax */
                     }
                     if (runEnd == gEnd) {
-                        if (av == 0) {
+                        if (at == 0) {
                             workE[slot] = BFP_INT_ACC_ZERO_GROUP; /* exact cancellation */
-                            fresh[slot] = (uint8_t)biasV;
+                            fresh[slot] = (uint8_t)biasT;
                         } else {
                             int stored =
-                                deriveBfpRawStoredExponent(av, ec, vqc->mantissaBits, biasV, cap);
-                            if (stored < ec + (int)biasV) {
-                                stored = ec + (int)biasV; /* E_d >= E_c; ec <= capE */
+                                deriveBfpRawStoredExponent(at, ec, tqc->mantissaBits, biasT, cap);
+                            if (stored < ec + (int)biasT) {
+                                stored = ec + (int)biasT; /* E_d >= E_c; ec <= capE */
                             }
                             fresh[slot] = (uint8_t)stored;
                         }
-                        av = 0;
+                        at = 0;
                     }
                 } else if (runEnd == gEnd) {
-                    fresh[slot] = (uint8_t)biasV; /* zero group: zero state */
+                    fresh[slot] = (uint8_t)biasT; /* zero group: zero state */
                 }
                 if (runEnd == gEnd) {
                     g++;
@@ -3129,70 +3135,84 @@ static void bfpMomentumScan(const bfpQConfig_t *vqc, const uint8_t *vData, const
     }
 }
 
-/* Pass 2 over one run of one group, codes written back into vm: the hot
+/* Pass 2 over one run of one group, codes written back into tm: the hot
  * element loop in its own small frame (the chunk buffers and rings live in
- * the caller's), see BFP_WALK_NOINLINE. */
-BFP_WALK_NOINLINE void bfpMomentumEmitRun(int32_t *vm, const int32_t *gm, size_t len,
-                                          bfpScalar_t mu, int kv, int kg, unsigned kd,
-                                          roundingMode_t rm, rngStream_t *rs, uint32_t posCap,
-                                          uint32_t negCap) {
-    if (kg <= -15) { /* only here can a gradient code reach 2^30 on the grid */
+ * the caller's), see BFP_WALK_NOINLINE. A source term (< 2^30 before the
+ * shift) can reach 2^30 only when shifted left, so the saturation test runs
+ * only for ks < 0. */
+BFP_WALK_NOINLINE void bfpScaledSumEmitRun(int32_t *tm, const int32_t *sm, size_t len,
+                                           bfpScalar_t a, bfpScalar_t b, int kt, int ks,
+                                           unsigned kd, roundingMode_t rm, rngStream_t *rs,
+                                           uint32_t posCap, uint32_t negCap) {
+    if (ks < 0) {
         for (size_t i = 0; i < len; i++) {
             const uint32_t u = rm == SR_HALF_AWAY ? rngNextU32(rs) : 0u;
-            if (bfpRawTermSaturates(gm[i], kg)) {
-                vm[i] = gm[i] < 0 ? -(int32_t)negCap : (int32_t)posCap;
+            const int32_t ys = bfpScalarMulMant(sm[i], b);
+            if (bfpRawTermSaturates(ys, ks)) {
+                tm[i] = ys < 0 ? -(int32_t)negCap : (int32_t)posCap;
             } else {
-                vm[i] = bfpAddAndRound(bfpScalarMulMant(vm[i], mu), kv, gm[i], kg, kd, rm, u,
-                                       posCap, negCap);
+                tm[i] = bfpAddAndRound(bfpScalarMulMant(tm[i], a), kt, ys, ks, kd, rm, u, posCap,
+                                       negCap);
             }
         }
         return;
     }
     for (size_t i = 0; i < len; i++) {
         const uint32_t u = rm == SR_HALF_AWAY ? rngNextU32(rs) : 0u;
-        vm[i] =
-            bfpAddAndRound(bfpScalarMulMant(vm[i], mu), kv, gm[i], kg, kd, rm, u, posCap, negCap);
+        tm[i] = bfpAddAndRound(bfpScalarMulMant(tm[i], a), kt, bfpScalarMulMant(sm[i], b), ks, kd,
+                               rm, u, posCap, negCap);
     }
 }
 
-void momentumStoreBfpInPlace(tensor_t *state, const tensor_t *grad, bfpScalar_t mu,
-                             roundingMode_t rm, rngStream_t *rs) {
-    const char *what = "momentumStoreBfpInPlace";
-    if (state->quantization->type != BFP || grad->quantization->type != BFP) {
-        PRINT_ERROR("%s: needs a BFP state and a BFP gradient, got %s and %s", what,
-                    quantTypeToString(state->quantization->type),
-                    quantTypeToString(grad->quantization->type));
+/* t' = a * t + b * s in place (the block comment above). Fails fast on
+ * everything the engine does not implement: non-BFP operands, element-count
+ * or geometry mismatch, mantissa width > 16, a source sharing the target's
+ * data, `a` not normalized or outside [0, 1], `b` not normalized, a rounding
+ * mode other than HALF_AWAY / SR_HALF_AWAY, SR without a stream. */
+static void bfpScaledSumInPlace(tensor_t *t, bfpScalar_t a, const tensor_t *s, bfpScalar_t b,
+                                roundingMode_t rm, rngStream_t *rs, const char *what) {
+    if (t->quantization->type != BFP || s->quantization->type != BFP) {
+        PRINT_ERROR("%s: needs BFP operands, got %s and %s", what,
+                    quantTypeToString(t->quantization->type),
+                    quantTypeToString(s->quantization->type));
         exit(1);
     }
-    const size_t n = calcNumberOfElementsByTensor(state);
-    if (calcNumberOfElementsByTensor((tensor_t *)grad) != n) {
+    const size_t n = calcNumberOfElementsByTensor(t);
+    if (calcNumberOfElementsByTensor((tensor_t *)s) != n) {
         PRINT_ERROR("%s: element-count mismatch", what);
         exit(1);
     }
-    if (grad->data == state->data) {
-        PRINT_ERROR("%s: the gradient must not alias the state", what);
+    if (s->data == t->data) {
+        PRINT_ERROR("%s: the read-only operand must not alias the updated one", what);
         exit(1);
     }
-    bfpQConfig_t *vqc = state->quantization->qConfig;
-    const bfpQConfig_t *gqc = grad->quantization->qConfig;
-    validateBfpQConfigShape(vqc, n);
-    validateBfpQConfigShape((bfpQConfig_t *)gqc, n);
-    if (gqc->numGroups != vqc->numGroups || gqc->groupSize != vqc->groupSize) {
-        PRINT_ERROR("%s: gradient geometry {numGroups=%zu, groupSize=%zu} must equal the "
-                    "state's {%zu, %zu}",
-                    what, gqc->numGroups, gqc->groupSize, vqc->numGroups, vqc->groupSize);
+    bfpQConfig_t *tqc = t->quantization->qConfig;
+    const bfpQConfig_t *sqc = s->quantization->qConfig;
+    validateBfpQConfigShape(tqc, n);
+    validateBfpQConfigShape((bfpQConfig_t *)sqc, n);
+    if (sqc->numGroups != tqc->numGroups || sqc->groupSize != tqc->groupSize) {
+        PRINT_ERROR("%s: read-only operand geometry {numGroups=%zu, groupSize=%zu} must equal "
+                    "the updated operand's {%zu, %zu}",
+                    what, sqc->numGroups, sqc->groupSize, tqc->numGroups, tqc->groupSize);
         exit(1);
     }
-    if (vqc->mantissaBits > 16 || gqc->mantissaBits > 16) {
-        PRINT_ERROR("%s: mantissa widths %u / %u exceed 16 bits", what, (unsigned)vqc->mantissaBits,
-                    (unsigned)gqc->mantissaBits);
+    if (tqc->mantissaBits > 16 || sqc->mantissaBits > 16) {
+        PRINT_ERROR("%s: mantissa widths %u / %u exceed 16 bits", what, (unsigned)tqc->mantissaBits,
+                    (unsigned)sqc->mantissaBits);
         exit(1);
     }
-    /* normalized and in [0, 1]: zero, or q in [2^14, 2^15) with q * 2^e <= 1 */
-    const bool muZero = mu.q == 0 && mu.e == 0;
-    if (!muZero && (mu.q < 16384 || mu.q > 32767 || mu.e > -14 || (mu.e == -14 && mu.q != 16384))) {
-        PRINT_ERROR("%s: scalar {q=%d, e=%d} is not a normalized momentum in [0, 1]", what,
-                    (int)mu.q, (int)mu.e);
+    /* a normalized and in [0, 1]: zero, or q in [2^14, 2^15) with q * 2^e <= 1 */
+    const bool aZero = a.q == 0 && a.e == 0;
+    if (!aZero && (a.q < 16384 || a.q > 32767 || a.e > -14 || (a.e == -14 && a.q != 16384))) {
+        PRINT_ERROR("%s: scalar {q=%d, e=%d} is not a normalized coefficient in [0, 1]", what,
+                    (int)a.q, (int)a.e);
+        exit(1);
+    }
+    /* b normalized, any sign and exponent: zero, or 2^14 <= |q| <= 2^15 - 1 */
+    const bool bZero = b.q == 0 && b.e == 0;
+    if (!bZero && ((b.q < 16384 && b.q > -16384) || b.q > 32767 || b.q < -32767)) {
+        PRINT_ERROR("%s: scalar {q=%d, e=%d} is not a normalized coefficient", what, (int)b.q,
+                    (int)b.e);
         exit(1);
     }
     if (rm != HALF_AWAY && rm != SR_HALF_AWAY) {
@@ -3200,27 +3220,27 @@ void momentumStoreBfpInPlace(tensor_t *state, const tensor_t *grad, bfpScalar_t 
         exit(1);
     }
     if (n == 0) {
-        resetBfpGridToZeroState(vqc); /* R7 */
+        resetBfpGridToZeroState(tqc); /* R7 */
         return;
     }
     if (rm == SR_HALF_AWAY && rs == NULL) {
         PRINT_ERROR("%s: SR rounding without a stream", what);
         exit(1);
     }
-    const int32_t biasV = bfpExponentBias(vqc);
-    const int32_t biasG = bfpExponentBias(gqc);
-    int cap = (int)((1u << vqc->exponentBits) - 1u);
-    if (cap > (int)biasV + 127) {
-        cap = (int)biasV + 127; /* largest stored exponent with a finite float scale */
+    const int32_t biasT = bfpExponentBias(tqc);
+    const int32_t biasS = bfpExponentBias(sqc);
+    int cap = (int)((1u << tqc->exponentBits) - 1u);
+    if (cap > (int)biasT + 127) {
+        cap = (int)biasT + 127; /* largest stored exponent with a finite float scale */
     }
-    const uint8_t m = vqc->mantissaBits;
+    const uint8_t m = tqc->mantissaBits;
     const uint32_t posCap = (1u << (m - 1)) - 1u;
     const uint32_t negCap = 1u << (m - 1);
-    const size_t gsz = vqc->groupSize == 0 ? n : vqc->groupSize;
+    const size_t gsz = tqc->groupSize == 0 ? n : tqc->groupSize;
     int32_t workE[ODT_RESCALE_FRESH_WINDOW];
     uint8_t fresh[ODT_RESCALE_FRESH_WINDOW];
-    int32_t vm[ODT_CONVERSION_CHUNK_ELEMS];
-    int32_t gm[ODT_CONVERSION_CHUNK_ELEMS];
+    int32_t tm[ODT_CONVERSION_CHUNK_ELEMS];
+    int32_t sm[ODT_CONVERSION_CHUNK_ELEMS];
     size_t scanned = 0;
     size_t g = 0; /* emit cursor: group, its end, its ring slot -- no division per run */
     size_t groupEnd = gsz;
@@ -3235,12 +3255,12 @@ void momentumStoreBfpInPlace(tensor_t *state, const tensor_t *grad, bfpScalar_t 
             needed = n;
         }
         if (scanned < needed) {
-            bfpMomentumScan(vqc, state->data, gqc, grad->data, mu, scanned, needed, gsz, cap, workE,
-                            fresh, vm, gm);
+            bfpScaledSumScan(tqc, t->data, a, sqc, s->data, b, scanned, needed, gsz, cap, workE,
+                             fresh, tm, sm);
             scanned = needed;
         }
-        unpackSignExtendChunk(state->data, m, off, count, vm);
-        unpackSignExtendChunk(grad->data, gqc->mantissaBits, off, count, gm);
+        unpackSignExtendChunk(t->data, m, off, count, tm);
+        unpackSignExtendChunk(s->data, sqc->mantissaBits, off, count, sm);
         size_t idx = off;
         while (idx < chunkEnd) {
             const size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
@@ -3250,26 +3270,32 @@ void momentumStoreBfpInPlace(tensor_t *state, const tensor_t *grad, bfpScalar_t 
                     if (rm == SR_HALF_AWAY) {
                         (void)rngNextU32(rs); /* exact zero: the draw is still consumed */
                     }
-                    vm[i - off] = 0;
+                    tm[i - off] = 0;
                 }
             } else {
-                /* the state's OLD exponent: unpublished until this group is done */
-                const int ev = (int)vqc->exponents[g] - (int)biasV + (int)mu.e;
-                const int eg = (int)gqc->exponents[g] - (int)biasG;
-                const unsigned kd = (unsigned)((int)fresh[slot] - (int)biasV - ec);
-                bfpMomentumEmitRun(&vm[idx - off], &gm[idx - off], runEnd - idx, mu, ec - ev,
-                                   ec - eg, kd, rm, rs, posCap, negCap);
+                /* the target's OLD exponent: unpublished until this group is done */
+                const int et = (int)tqc->exponents[g] - (int)biasT + (int)a.e;
+                const int es = (int)sqc->exponents[g] - (int)biasS + (int)b.e;
+                const unsigned kd = (unsigned)((int)fresh[slot] - (int)biasT - ec);
+                bfpScaledSumEmitRun(&tm[idx - off], &sm[idx - off], runEnd - idx, a, b, ec - et,
+                                    ec - es, kd, rm, rs, posCap, negCap);
             }
             if (runEnd == groupEnd) {
-                vqc->exponents[g] = fresh[slot]; /* every read of the old grid is done */
+                tqc->exponents[g] = fresh[slot]; /* every read of the old grid is done */
                 g++;
                 groupEnd += gsz;
                 slot = slot + 1 == ODT_RESCALE_FRESH_WINDOW ? 0 : slot + 1;
             }
             idx = runEnd;
         }
-        packChunkGuarded(vm, count, state->data, m, off, what);
+        packChunkGuarded(tm, count, t->data, m, off, what);
     }
+}
+
+void momentumStoreBfpInPlace(tensor_t *state, const tensor_t *grad, bfpScalar_t mu,
+                             roundingMode_t rm, rngStream_t *rs) {
+    bfpScaledSumInPlace(state, mu, grad, (bfpScalar_t){.q = 16384, .e = -14}, rm, rs,
+                        "momentumStoreBfpInPlace");
 }
 
 /* SYM_INT32 -> SYM_INT32 grad accumulate: reproduces addSymInt32TensorsInplace's

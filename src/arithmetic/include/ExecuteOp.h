@@ -27,7 +27,9 @@ typedef struct rngKey rngKey_t;
  *                        BFP target, a FLOAT32-stored operand is a wiring
  *                        error (the forward is float-free after the input
  *                        quantization layer), not a staging request.
- *   BFP_RAW_BACKWARD_DX  a backward op writing a dx wire (Conv1d, Linear dx).
+ *   BFP_RAW_BACKWARD_DX  a backward op writing a dx wire (Conv1d, Linear,
+ *                        MaxPool1d, AvgPool1d dx, the Quantization layer's
+ *                        BFP -> BFP dx).
  *                        FLOAT32-stored operands keep staging, as in every
  *                        backward op.
  *   Both: OUT_WRITE only. The epilogue is the integer re-block

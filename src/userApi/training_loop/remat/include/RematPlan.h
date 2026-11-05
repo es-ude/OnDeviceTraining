@@ -119,9 +119,11 @@ rematBfpGroups_t rematBfpWireGrouping(const bfpQConfig_t *tmpl, size_t elements,
                                       size_t index);
 
 /* deepest = deepestTrainableIndex (n = nothing trains); top = n-1, or n-2
- * under CROSS_ENTROPY: the pre-remat driver's positional rule (no Softmax check)
- * in SIGNED arithmetic (n == 1 under CE gives -1). One shared function:
- * the plan uses it on the built model, the checker on the live one. */
+ * under CROSS_ENTROPY in SIGNED arithmetic (n == 1 under CE gives -1). Under
+ * CROSS_ENTROPY the skipped last layer must be the Softmax (CE's backward is
+ * the combined p - y): any other last layer, or an empty model, fails fast.
+ * One shared function: the plan uses it on the built model, the checker on
+ * the live one. */
 void rematBackwardRange(layer_t **model, size_t n, lossFuncType_t lt, size_t *deepest,
                         ptrdiff_t *top);
 

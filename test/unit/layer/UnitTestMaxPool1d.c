@@ -19,6 +19,10 @@
 #include "unity.h"
 
 #include "BfpRawFixture.h"
+#include "BfpScatterRef.h"
+#include "LayerExec.h"
+#include "RNG.h"
+#include "SlidingWindow1d.h"
 
 // Helper: build a MaxPool1d layer manually (no UserAPI in Phase 1).
 // Uses function-local statics for kernel/cfg/layer storage so addresses
@@ -1189,6 +1193,272 @@ void testMaxPool1dBfpRawRejectsANonRawOutputAndBadRawGeometry(void) {
     ASSERT_EXITS_WITH_FAILURE(maxPoolBfpRawIntoFloatRawBody());
     ASSERT_EXITS_WITH_FAILURE(maxPoolBfpRawBadGeometryBody());
 }
+
+/* ---- Integer-only backward at the kernel (arithmetic-bfp.md section 14) ----
+ * maxPool1dBackwardKernelBfpRaw against a reference written from the
+ * definition (BfpScatterRef.h helpers, output-centric): dx row r (one
+ * (batch, channel)) sums, for each dx cell, the loss codes of the outputs
+ * whose argmax is that cell, each aligned to E_acc(r) = (max exponent over
+ * the loss row's NONZERO codes, 0 if none) + g, g = the guard of C terms of
+ * m-bit codes, C = the windows covering one cell; the BFP_RAW is the data
+ * rule over those sums (bfpRefRawFromRows). */
+
+typedef struct mpBwdCase {
+    const int32_t *gy;
+    const uint8_t *gyExps;
+    size_t gyNumGroups, gyGroupSize;
+    uint8_t m;
+    size_t rows, len, k, dilation, stride;
+    paddingType_t padding;
+    size_t rawNumGroups, rawGroupSize;
+} mpBwdCase_t;
+
+static uint32_t mpLcg(uint32_t *s) {
+    *s = *s * 1664525u + 1013904223u;
+    return *s >> 8;
+}
+
+/* One random valid argmax per window (a tap inside the input). */
+static void mpBwdArgmax(const mpBwdCase_t *c, const windowGeometry1d_t *geom, uint32_t seed,
+                        int32_t *argmax) {
+    uint32_t s = seed;
+    for (size_t r = 0; r < c->rows; r++) {
+        for (size_t o = 0; o < geom->outputLength; o++) {
+            windowSlice1d_t sl = windowSlice1dAt(geom, o);
+            TEST_ASSERT_TRUE(sl.validCount > 0);
+            size_t j = mpLcg(&s) % sl.validCount;
+            argmax[r * geom->outputLength + o] = (int32_t)(sl.firstValidInputIdx + j * c->dilation);
+        }
+    }
+}
+
+static bfpRefStats_t refMaxPoolBackwardRaw(const mpBwdCase_t *c, size_t outLen,
+                                           const int32_t *argmax, int32_t *mant, int16_t *rawE) {
+    bfpRefStats_t st = {.fitsInt32 = true};
+    bfpRefOperand_t gy = {c->gy, c->gyExps, c->gyGroupSize, c->m, 8};
+    size_t cover = (c->dilation * (c->k - 1)) / c->stride + 1;
+    int g = bfpRefGuard(cover, c->m, 1);
+    int64_t sum[BFP_RAW_FIXTURE_MAX_OUT];
+    int eAcc[BFP_RAW_FIXTURE_MAX_OUT];
+    for (size_t r = 0; r < c->rows; r++) {
+        int eRow = bfpRefEAcc(bfpRefMaxExp(&gy, r * outLen, outLen), g);
+        for (size_t i = 0; i < c->len; i++) {
+            int64_t s = 0;
+            for (size_t o = 0; o < outLen; o++) {
+                size_t oi = r * outLen + o;
+                if (argmax[oi] == (int32_t)i) {
+                    s += bfpRefAlign(c->gy[oi], eRow - bfpRefExp(&gy, oi), &st);
+                }
+            }
+            sum[r * c->len + i] = s;
+            eAcc[r * c->len + i] = eRow;
+        }
+    }
+    bfpRefRawFromRows(sum, eAcc, c->rows * c->len, c->rawGroupSize, mant, rawE, &st);
+    return st;
+}
+
+static bfpRefStats_t checkMaxPoolBackwardBfpRaw(const mpBwdCase_t *c, uint32_t seed) {
+    kernel_t kern;
+    initKernel(&kern, c->k, c->padding, c->dilation, c->stride);
+    windowGeometry1d_t geom = windowGeometry1dCalc(c->len, &kern);
+    size_t outLen = geom.outputLength;
+    size_t gyDims[3] = {1, c->rows, outLen};
+    size_t dxDims[3] = {1, c->rows, c->len};
+    size_t n = c->rows * c->len;
+    TEST_ASSERT_EQUAL_size_t(
+        c->rows * outLen, c->gyGroupSize == 0 ? c->rows * outLen : c->gyNumGroups * c->gyGroupSize);
+    tensor_t *argmax = makeInt32Tensor(gyDims, 3);
+    mpBwdArgmax(c, &geom, seed, (int32_t *)argmax->data);
+    bfpScratchFixture_t gy;
+    bfpScratchInit(&gy, 3, gyDims, c->gy, c->gyExps, c->gyNumGroups, c->gyGroupSize, c->m, 8);
+    bfpRawFixture_t raw;
+    bfpRawInit(&raw, 3, dxDims, c->rawNumGroups, c->rawGroupSize);
+    maxPool1dConfig_t cfg = {0};
+    cfg.kernel = &kern;
+    cfg.argmaxIndices = argmax;
+    tensor_t *ops[1] = {&gy.tensor};
+
+    maxPool1dBackwardKernelBfpRaw(ops, 1, &raw.tensor, NULL, &cfg, NULL);
+
+    int32_t mant[BFP_RAW_FIXTURE_MAX_OUT];
+    int16_t rawE[BFP_RAW_FIXTURE_MAX_GROUPS];
+    bfpRefStats_t st = refMaxPoolBackwardRaw(c, outLen, (int32_t *)argmax->data, mant, rawE);
+    TEST_ASSERT_TRUE(st.fitsInt32);
+    assertRawEquals(&raw, mant, n, rawE, c->rawNumGroups);
+    freeTensor(argmax);
+    return st;
+}
+
+static void mpRandomCodes(uint32_t seed, int32_t *codes, size_t n, uint8_t m) {
+    uint32_t s = seed;
+    uint32_t span = 1u << m;
+    for (size_t i = 0; i < n; i++) {
+        codes[i] = (int32_t)(mpLcg(&s) % span) - (int32_t)(span / 2); /* -2^(m-1) included */
+    }
+}
+
+/* Overlapping windows (k 3, stride 1: up to 3 winners per cell), SAME padding
+ * and dilation 2 / stride 2, m 8 and m 16, loss groups spread over 21
+ * binades, raw groups of 4 (inside rows), 9 (across rows) and per tensor. */
+void testMaxPool1dBackwardBfpRawMatchesTheIntegerReference(void) {
+    int32_t gy[60];
+    uint8_t exps[12];
+    uint32_t s = 4242u;
+    for (size_t i = 0; i < 12; i++) {
+        exps[i] = (uint8_t)(127 - 10 + (int)(mpLcg(&s) % 21u));
+    }
+    mpRandomCodes(11u, gy, 30, 8);
+    mpBwdCase_t a = {gy, exps, 6, 5, 8, 3, 12, 3, 1, 1, VALID, 9, 4};
+    bfpRefStats_t st = checkMaxPoolBackwardBfpRaw(&a, 1u);
+    TEST_ASSERT_TRUE(st.leftShift > 0);
+    a.rawNumGroups = 4;
+    a.rawGroupSize = 9;
+    checkMaxPoolBackwardBfpRaw(&a, 2u);
+    a.rawNumGroups = 1;
+    a.rawGroupSize = 0;
+    checkMaxPoolBackwardBfpRaw(&a, 3u);
+
+    mpRandomCodes(12u, gy, 36, 8); /* SAME: 3 rows of 12 outputs */
+    mpBwdCase_t same = {gy, exps, 12, 3, 8, 3, 12, 3, 1, 1, SAME, 9, 4};
+    checkMaxPoolBackwardBfpRaw(&same, 4u);
+
+    mpRandomCodes(13u, gy, 16, 16); /* dilation 2, stride 2, m 16: 4 rows of 4 */
+    mpBwdCase_t dil = {gy, exps, 4, 4, 16, 4, 12, 3, 2, 2, VALID, 6, 8};
+    checkMaxPoolBackwardBfpRaw(&dil, 5u);
+}
+
+/* HAR's pool shape (k 2, stride 2: one winner per cell). Row 0's second loss
+ * group sits 30 binades below its first: beyond the guard (g = -23 at m 8),
+ * so the low codes round half away on the row's grid -- the documented
+ * granularity (one E_acc per dx row). Row 2's first loss group is all zero
+ * in the zero state (stored = bias) 30 binades ABOVE its live second group:
+ * it must not set E_acc, so that row stays exact. */
+void testMaxPool1dBackwardBfpRawRowGridAndZeroGroups(void) {
+    int32_t gy[16];
+    mpRandomCodes(21u, gy, 16, 8);
+    for (size_t i = 8; i < 10; i++) {
+        gy[i] = 0;
+    }
+    gy[2] = 1; /* a code the 30-binade gap must round away */
+    uint8_t exps[8] = {130, 100, 127, 126, 127, 97, 125, 125};
+    mpBwdCase_t c = {gy, exps, 8, 2, 8, 4, 8, 2, 1, 2, VALID, 8, 4};
+    bfpRefStats_t st = checkMaxPoolBackwardBfpRaw(&c, 6u);
+    TEST_ASSERT_TRUE_MESSAGE(st.rounded > 0, "the 30-binade row rounds");
+    c.rawNumGroups = 1;
+    c.rawGroupSize = 0;
+    checkMaxPoolBackwardBfpRaw(&c, 7u);
+
+    /* rows 2 and 3 alone: exact (the zero group does not lift E_acc) */
+    mpBwdCase_t z = {gy + 8, exps + 4, 4, 2, 8, 2, 8, 2, 1, 2, VALID, 4, 4};
+    st = checkMaxPoolBackwardBfpRaw(&z, 8u);
+    TEST_ASSERT_EQUAL_size_t(0, st.rounded);
+}
+
+/* Layer level into a BFP dx wire: the integer raw re-blocked by the
+ * funnel's epilogue in integers (BfpScatterRef.h's section-13 re-block), by
+ * the OP's rounding mode; under SR one draw per element in element order
+ * from the op's RNG_TAG_OUT stream (op key = MaxPool1d's
+ * MAXPOOL1D_OP_PROP_LOSS = 1 under RNG_TAG_BACKWARD). */
+static void mpLayerIntoBfpWire(roundingMode_t opMode, uint64_t seed) {
+    size_t gyDims[3] = {1, 3, 10};
+    size_t dxDims[3] = {1, 3, 12};
+    int32_t gy[30];
+    mpRandomCodes(31u, gy, 30, 8);
+    uint8_t exps[6] = {120, 131, 127, 124, 129, 118};
+    tensor_t *lossGrad = buildBfpWireWithCodes(gyDims, 3, 8, 8, 6, 5, gy, exps);
+    tensor_t *dx = buildBfpWireWithCodes(dxDims, 3, 6, 8, 9, 4, NULL, NULL);
+    tensor_t *argmax = makeInt32Tensor(gyDims, 3);
+    quantization_t *wireQ = quantizationInitBfpGrouped(6, 8, HALF_AWAY, 9, 4);
+    kernel_t k;
+    maxPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    maxPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, argmax, 3, VALID, 1, 1, wireQ);
+    cfg.propLossMath.roundingMode = opMode;
+    windowGeometry1d_t geom = windowGeometry1dCalc(12, &k);
+    mpBwdCase_t c = {gy, exps, 6, 5, 8, 3, 12, 3, 1, 1, VALID, 9, 4};
+    mpBwdArgmax(&c, &geom, 77u, (int32_t *)argmax->data);
+
+    layerExec_t exec = {.key = rngKeyFromSeed(seed)};
+    maxPool1dBackward(&layer, NULL, lossGrad, dx, opMode == SR_HALF_AWAY ? &exec : NULL);
+
+    int32_t codes[36];
+    unpackSignExtend(dx->data, 6, 0, codes, 36);
+    int32_t mant[BFP_RAW_FIXTURE_MAX_OUT];
+    int16_t rawE[BFP_RAW_FIXTURE_MAX_GROUPS];
+    bfpRefStats_t st = refMaxPoolBackwardRaw(&c, 10, (int32_t *)argmax->data, mant, rawE);
+    TEST_ASSERT_EQUAL_size_t(0, st.rounded);
+    rngStream_t out = rngOpen(
+        rngFold(rngFold(rngFold(exec.key, RNG_TAG_BACKWARD, 0u), RNG_TAG_OP, 1u), RNG_TAG_OUT, 0u));
+    int32_t refCodes[36];
+    uint8_t refStored[9];
+    bfpRefReblockRaw(mant, rawE, 36, 4, 6, 8, opMode == SR_HALF_AWAY ? &out : NULL, refCodes,
+                     refStored);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(refCodes, codes, 36);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(refStored, ((bfpQConfig_t *)dx->quantization->qConfig)->exponents,
+                                  9);
+    freeQuantization(wireQ);
+    freeTensor(argmax);
+    freeTensor(dx);
+    freeTensor(lossGrad);
+}
+
+void testMaxPool1dBackwardBfpIntoBfpWireReblocksTheIntegerRaw(void) {
+    mpLayerIntoBfpWire(HALF_AWAY, 0u);
+    mpLayerIntoBfpWire(SR_HALF_AWAY, 901u);
+    mpLayerIntoBfpWire(SR_HALF_AWAY, 902u);
+}
+
+/* An argmax inside the input but outside its own window's span would break
+ * the C-term headroom proof (more winners per cell than windows cover it):
+ * a stale argmax, it dies like an out-of-range one. */
+static void mpStaleArgmaxBody(void) {
+    int32_t gy[10];
+    mpRandomCodes(41u, gy, 10, 8);
+    uint8_t exps[2] = {127, 127};
+    kernel_t kern;
+    initKernel(&kern, 2, VALID, 1, 1);
+    size_t gyDims[3] = {1, 1, 10};
+    size_t dxDims[3] = {1, 1, 11};
+    tensor_t *argmax = makeInt32Tensor(gyDims, 3);
+    for (size_t o = 0; o < 10; o++) {
+        ((int32_t *)argmax->data)[o] = (int32_t)o;
+    }
+    ((int32_t *)argmax->data)[9] = 3; /* window 9 spans [9, 10] */
+    bfpScratchFixture_t g;
+    bfpScratchInit(&g, 3, gyDims, gy, exps, 2, 5, 8, 8);
+    bfpRawFixture_t raw;
+    bfpRawInit(&raw, 3, dxDims, 1, 0);
+    maxPool1dConfig_t cfg = {0};
+    cfg.kernel = &kern;
+    cfg.argmaxIndices = argmax;
+    tensor_t *ops[1] = {&g.tensor};
+    maxPool1dBackwardKernelBfpRaw(ops, 1, &raw.tensor, NULL, &cfg, NULL);
+}
+
+static void mpFloatRawBody(void) {
+    int32_t gy[4] = {1, 2, 3, 4};
+    uint8_t exps[1] = {127};
+    kernel_t kern;
+    initKernel(&kern, 2, VALID, 1, 2);
+    size_t gyDims[3] = {1, 1, 4};
+    size_t dxDims[3] = {1, 1, 8};
+    tensor_t *argmax = makeInt32Tensor(gyDims, 3);
+    bfpScratchFixture_t g;
+    bfpScratchInit(&g, 3, gyDims, gy, exps, 1, 0, 8, 8);
+    tensor_t *notRaw = makeFloatTensor(dxDims, 3, NULL);
+    maxPool1dConfig_t cfg = {0};
+    cfg.kernel = &kern;
+    cfg.argmaxIndices = argmax;
+    tensor_t *ops[1] = {&g.tensor};
+    maxPool1dBackwardKernelBfpRaw(ops, 1, notRaw, NULL, &cfg, NULL);
+}
+
+void testMaxPool1dBackwardBfpRawRejectsStaleArgmaxAndAFloatRaw(void) {
+    ASSERT_EXITS_WITH_FAILURE(mpStaleArgmaxBody());
+    ASSERT_EXITS_WITH_FAILURE(mpFloatRawBody());
+}
 /* BFP epic PR4 (R-P4 backward): funnel-routed dx mirroring the ARITH_SYM_INT32
  * arm — gradient flows only to the argmax positions the forward recorded, and
  * an input cell that wins several overlapping windows accumulates. Running the
@@ -2222,6 +2492,10 @@ int main(void) {
     RUN_TEST(testMaxPool1dBfpRawWorstCaseCodesAcrossExponentGaps);
     RUN_TEST(testMaxPool1dBfpRawArgmaxMatchesTheFloatPath);
     RUN_TEST(testMaxPool1dBfpRawRejectsANonRawOutputAndBadRawGeometry);
+    RUN_TEST(testMaxPool1dBackwardBfpRawMatchesTheIntegerReference);
+    RUN_TEST(testMaxPool1dBackwardBfpRawRowGridAndZeroGroups);
+    RUN_TEST(testMaxPool1dBackwardBfpIntoBfpWireReblocksTheIntegerRaw);
+    RUN_TEST(testMaxPool1dBackwardBfpRawRejectsStaleArgmaxAndAFloatRaw);
     RUN_TEST(testMaxPool1dForwardBfpRequiresBfpOutputQ);
     RUN_TEST(testMaxPool1dForwardBfpRejectsMismatchedOutputShapes);
     RUN_TEST(testMaxPool1dBackwardBfpScattersToArgmaxPositions);

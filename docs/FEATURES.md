@@ -714,7 +714,12 @@ checkpointing, limitations, literature).
   accumulated by the integer rescale engine, `BFP_RAW_BACKWARD_ACC`, 2026-11-05;
   FLOAT32 grads and the fixed grid keep the float path). Linear's `dx`, `weightGrad`
   and `biasGrad` follow the same contracts on its GEMM walk (`matmulBfpRawTensors`,
-  2026-11-05). BFP grad and
+  2026-11-05). MaxPool1d / AvgPool1d `dx` and the input Quantization layer's
+  BFP -> BFP `dx` are integer too (`BFP_RAW_BACKWARD_DX`; AvgPool's power-of-two
+  divisor is an exponent shift, any other one integer quotient per output), and
+  the CrossEntropy loss boundary (float `p - y`, ONE conversion into the grad
+  wire) is the only float left in a BFP training step; CrossEntropy requires the
+  model's last layer to be the Softmax it skips (fail fast otherwise). BFP grad and
   optimizer-state storage (`gradInit`, `SgdApi`/`AdamWApi` momentum/moment
   cloning, PPCA replay state) is a **per-tensor-only** knob — a grouped BFP
   template is rejected at every one of those call sites ("per-tensor only, #300

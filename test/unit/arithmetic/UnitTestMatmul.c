@@ -1697,6 +1697,24 @@ void testBfpAlignPartialLeftShiftIsExactAndRightShiftRounds(void) {
     TEST_ASSERT_EQUAL_INT32(0, bfpAlignPartial(INT32_MAX, 40));
 }
 
+/* -k >= 32 is reachable only for a ZERO partial (a group that set nothing
+ * sitting far above E_acc); the headroom proof caps every nonzero one at
+ * -k <= 30. Debug builds (DEBUG_MODE_DEBUG) check that the dropped value is 0;
+ * release builds pay nothing and return 0. */
+static void alignFarLeftNonzero(void) {
+    (void)bfpAlignPartial(5, -40);
+}
+
+void testBfpAlignPartialFarLeftShiftIsZeroAndCheckedInDebug(void) {
+    TEST_ASSERT_EQUAL_INT32(0, bfpAlignPartial(0, -32));
+    TEST_ASSERT_EQUAL_INT32(0, bfpAlignPartial(0, -400));
+#ifdef DEBUG_MODE_DEBUG
+    ASSERT_EXITS_WITH_FAILURE(alignFarLeftNonzero());
+#else
+    alignFarLeftNonzero();
+#endif
+}
+
 /* The static headroom proof in units of 2^E_acc: (N 2^(ma+mb-2) + 2^(mb-1))
  * 2^-g + (N + 1) <= INT32_MAX, g the smallest integer (negative allowed) that
  * satisfies it -- the product bound, not the int32 bound on a partial. */
@@ -3169,6 +3187,7 @@ int main(void) {
     RUN_TEST(testBfpShrHalfAwayRoundsHalfAwayFromZero);
     RUN_TEST(testBfpShrHalfAwayInt32Extremes);
     RUN_TEST(testBfpAlignPartialLeftShiftIsExactAndRightShiftRounds);
+    RUN_TEST(testBfpAlignPartialFarLeftShiftIsZeroAndCheckedInDebug);
     RUN_TEST(testBfpFoldGuardBitsFromTheProductBound);
     RUN_TEST(testBfpFoldGuardBitsIsTheSmallestGThatHolds);
     RUN_TEST(testBfpFoldGuardBitsRejectsAReductionNoShiftCanHold);

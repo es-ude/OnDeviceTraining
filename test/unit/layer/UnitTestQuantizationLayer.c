@@ -20,6 +20,8 @@
 #include "TensorConversion.h"
 #include "unity.h"
 
+#include "BfpScatterRef.h"
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -224,6 +226,105 @@ void testQuantizationBackwardRequantsDyMantissasLikeDirectRequant(void) {
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(expectedMantissas, actualMantissas, 6);
     TEST_ASSERT_EQUAL_FLOAT(expectedScale, actualScale);
+}
+
+/* ---- BFP -> BFP backward: the integer re-block (arithmetic-bfp.md section 14) ----
+ * The input layer's backward is straight-through. Between two BFP grids it is
+ * integer: the loss codes become a BFP_RAW on the TARGET geometry (each code
+ * under its own group's exponent, the raw exponent per target group from the
+ * data, bfpRefRawFromRows), re-blocked by the funnel's epilogue in integers
+ * (bfpRefReblockRaw) by the target template's rounding mode; under SR one
+ * draw per element in element order from the op's RNG_TAG_OUT stream (op key
+ * QUANTIZATION_OP_PROP_LOSS = 0 under RNG_TAG_BACKWARD). */
+
+#define QL_BFP_N 24
+
+static tensor_t *buildBfp2DWithCodes(size_t n, uint8_t m, roundingMode_t rm, size_t numGroups,
+                                     size_t groupSize, const int32_t *codes, const uint8_t *exps) {
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = 1;
+    dims[1] = n;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    quantization_t *q = numGroups > 1 ? quantizationInitBfpGrouped(m, 8, rm, numGroups, groupSize)
+                                      : quantizationInitBfp(m, 8, rm);
+    tensor_t *t = initTensor(shape, q, NULL);
+    if (codes != NULL) {
+        int32_t tmp[QL_BFP_N];
+        memcpy(tmp, codes, n * sizeof(int32_t));
+        byteConversion((uint8_t *)tmp, 32, t->data, m, n);
+        memcpy(((bfpQConfig_t *)q->qConfig)->exponents, exps, numGroups);
+    }
+    return t;
+}
+
+static void qlBfpBackwardCase(size_t srcGroups, size_t srcGroupSize, size_t dstGroups,
+                              size_t dstGroupSize, uint8_t dstM, roundingMode_t rm, uint64_t seed) {
+    int32_t codes[QL_BFP_N];
+    uint8_t exps[QL_BFP_N];
+    uint32_t s = 99u + (uint32_t)seed;
+    for (size_t i = 0; i < QL_BFP_N; i++) {
+        s = s * 1664525u + 1013904223u;
+        codes[i] = (int32_t)((s >> 8) % 256u) - 128;
+    }
+    codes[5] = 0;
+    for (size_t g = 0; g < srcGroups; g++) {
+        s = s * 1664525u + 1013904223u;
+        exps[g] = (uint8_t)(127 - 10 + (int)((s >> 8) % 21u));
+    }
+    tensor_t *loss =
+        buildBfp2DWithCodes(QL_BFP_N, 8, HALF_AWAY, srcGroups, srcGroupSize, codes, exps);
+    tensor_t *propLoss =
+        buildBfp2DWithCodes(QL_BFP_N, dstM, rm, dstGroups, dstGroupSize, NULL, NULL);
+    layer_t qLayer = {.type = QUANTIZATION, .config = NULL};
+    layerExec_t exec = {.key = rngKeyFromSeed(seed)};
+    quantizationBackward(&qLayer, NULL, loss, propLoss, rm == SR_HALF_AWAY ? &exec : NULL);
+
+    int64_t sum[QL_BFP_N];
+    int eAcc[QL_BFP_N];
+    bfpRefOperand_t src = {codes, exps, srcGroupSize, 8, 8};
+    for (size_t i = 0; i < QL_BFP_N; i++) {
+        sum[i] = codes[i];
+        eAcc[i] = bfpRefExp(&src, i);
+    }
+    int32_t mant[QL_BFP_N];
+    int16_t rawE[QL_BFP_N];
+    bfpRefStats_t st = {.fitsInt32 = true};
+    bfpRefRawFromRows(sum, eAcc, QL_BFP_N, dstGroupSize, mant, rawE, &st);
+    TEST_ASSERT_EQUAL_size_t(0, st.realigned);
+    rngStream_t out = rngOpen(
+        rngFold(rngFold(rngFold(exec.key, RNG_TAG_BACKWARD, 0u), RNG_TAG_OP, 0u), RNG_TAG_OUT, 0u));
+    int32_t refCodes[QL_BFP_N];
+    uint8_t refStored[QL_BFP_N];
+    bfpRefReblockRaw(mant, rawE, QL_BFP_N, dstGroupSize, dstM, 8, rm == SR_HALF_AWAY ? &out : NULL,
+                     refCodes, refStored);
+    int32_t got[QL_BFP_N];
+    unpackSignExtend(propLoss->data, dstM, 0, got, QL_BFP_N);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(refCodes, got, QL_BFP_N);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(
+        refStored, ((bfpQConfig_t *)propLoss->quantization->qConfig)->exponents, dstGroups);
+    if (rm == HALF_AWAY) {
+        /* exact regime: the same codes as the float requant cell */
+        tensor_t *viaFloat =
+            buildBfp2DWithCodes(QL_BFP_N, dstM, rm, dstGroups, dstGroupSize, NULL, NULL);
+        requantBfpTensor(loss, viaFloat, NULL);
+        int32_t fl[QL_BFP_N];
+        unpackSignExtend(viaFloat->data, dstM, 0, fl, QL_BFP_N);
+        TEST_ASSERT_EQUAL_INT32_ARRAY(fl, got, QL_BFP_N);
+        freeTensor(viaFloat);
+    }
+    freeTensor(propLoss);
+    freeTensor(loss);
+}
+
+void testQuantizationBackwardBfpToBfpReblocksInIntegers(void) {
+    qlBfpBackwardCase(6, 4, 4, 6, 6, HALF_AWAY, 0u);    /* groups straddle */
+    qlBfpBackwardCase(6, 4, 1, 0, 8, HALF_AWAY, 0u);    /* into per tensor */
+    qlBfpBackwardCase(1, 0, 3, 8, 5, HALF_AWAY, 0u);    /* from per tensor */
+    qlBfpBackwardCase(6, 4, 4, 6, 6, SR_HALF_AWAY, 7u); /* the op's OUT stream */
+    qlBfpBackwardCase(6, 4, 2, 12, 8, SR_HALF_AWAY, 8u);
 }
 
 void testQuantizationCalcOutputShapeIdentityIncludingPermutedOrder(void) {
@@ -440,6 +541,7 @@ int main(void) {
     RUN_TEST(testQuantLayerConvertsAsymToSymInt32MatchesConvertTensor);
     RUN_TEST(testQuantLayerAbortsOnUnpopulatedConversionCell);
     RUN_TEST(testQuantizationBackwardRequantsDyMantissasLikeDirectRequant);
+    RUN_TEST(testQuantizationBackwardBfpToBfpReblocksInIntegers);
     RUN_TEST(testQuantizationCalcOutputShapeIdentityIncludingPermutedOrder);
     RUN_TEST(testLayerFunctionsVtableHasQuantizationRow);
     RUN_TEST(testQuantizationConfigUnionMemberRoundTrip);

@@ -1709,7 +1709,7 @@ void testBfpAlignPartialFarLeftShiftIsZeroAndCheckedInDebug(void) {
     TEST_ASSERT_EQUAL_INT32(0, bfpAlignPartial(0, -32));
     TEST_ASSERT_EQUAL_INT32(0, bfpAlignPartial(0, -400));
 #ifdef DEBUG_MODE_DEBUG
-    ASSERT_EXITS_WITH_FAILURE(alignFarLeftNonzero());
+    ASSERT_EXITS_WITH_OUTPUT(1, "bfpAlignPartial: nonzero partial", alignFarLeftNonzero());
 #else
     alignFarLeftNonzero();
 #endif

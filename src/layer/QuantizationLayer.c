@@ -54,8 +54,10 @@ enum {
  * codes of E_src + bitlen(|code|) - 31, every code shifted onto 2^E_t
  * (left exact; right half away only for a code more than 31 binades below
  * the group's top). The funnel's re-block then rounds onto the propLoss grid
- * by the op's mode. No float. The per-source-group exponent table is the only
- * stack beyond the funnel's raw. */
+ * by the op's mode. No float. The row exponents are read straight from the
+ * loss's biased group bytes (bfpRawEmitFromGroupExponents): no per-group
+ * table, nothing on the stack beyond the funnel's raw, whatever the group
+ * count. */
 static void quantizationBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut,
                                           tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -80,13 +82,10 @@ static void quantizationBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *ra
     }
     const int32_t expBias = bfpExponentBias(qC);
     size_t rowLen = qC->groupSize == 0 ? count : qC->groupSize;
-    int eOfGroup[qC->numGroups];
-    for (size_t g = 0; g < qC->numGroups; g++) {
-        eOfGroup[g] = (int)qC->exponents[g] - expBias;
-    }
     int32_t *mant = (int32_t *)rawOut->data;
     memcpy(mant, loss->data, count * sizeof(int32_t));
-    bfpRawEmitFromRows(mant, count, eOfGroup, rowLen, rawQC, "Quantization backward BFP");
+    bfpRawEmitFromGroupExponents(mant, count, qC->exponents, expBias, rowLen, rawQC,
+                                 "Quantization backward BFP");
 }
 
 void quantizationBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss,

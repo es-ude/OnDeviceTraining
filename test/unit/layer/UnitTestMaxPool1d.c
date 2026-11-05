@@ -1456,8 +1456,10 @@ static void mpFloatRawBody(void) {
 }
 
 void testMaxPool1dBackwardBfpRawRejectsStaleArgmaxAndAFloatRaw(void) {
-    ASSERT_EXITS_WITH_FAILURE(mpStaleArgmaxBody());
-    ASSERT_EXITS_WITH_FAILURE(mpFloatRawBody());
+    ASSERT_EXITS_WITH_OUTPUT(1, "that window's span", mpStaleArgmaxBody());
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "MaxPool1d backward BFP: needs a BFP (unpacked scratch) lossGrad and a BFP_RAW",
+        mpFloatRawBody());
 }
 /* BFP epic PR4 (R-P4 backward): funnel-routed dx mirroring the ARITH_SYM_INT32
  * arm — gradient flows only to the argmax positions the forward recorded, and

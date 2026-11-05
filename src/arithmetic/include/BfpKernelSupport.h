@@ -683,8 +683,9 @@ static inline size_t bfpRawRequireOutput(bfpRawQConfig_t *rawQC, size_t outElems
  * an all-zero raw group). Every group exponent is written; zero sums are
  * never shifted. Runs of (row, group) are walked with cursors, no division;
  * one bit length per run. */
-static inline void bfpRawEmitFromRows(int32_t *acc, size_t n, const int *eAccOfRow, size_t rowLen,
-                                      bfpRawQConfig_t *rawQC, const char *what) {
+static inline void bfpRawEmitCore(int32_t *acc, size_t n, const int *eAccOfRow,
+                                  const uint8_t *biasedExpOfRow, int32_t expBias, size_t rowLen,
+                                  bfpRawQConfig_t *rawQC, const char *what) {
     size_t gsz = bfpRawRequireOutput(rawQC, n, what);
     if (n == 0) {
         return;
@@ -699,7 +700,7 @@ static inline void bfpRawEmitFromRows(int32_t *acc, size_t n, const int *eAccOfR
         size_t i = 0;
         while (i < n) {
             size_t runEnd = rowEnd < tEnd ? rowEnd : tEnd;
-            int eRow = eAccOfRow[row];
+            int eRow = eAccOfRow != NULL ? eAccOfRow[row] : (int)biasedExpOfRow[row] - expBias;
             if (pass == 0) {
                 uint32_t mx = 0;
                 for (size_t j = i; j < runEnd; j++) {
@@ -733,6 +734,21 @@ static inline void bfpRawEmitFromRows(int32_t *acc, size_t n, const int *eAccOfR
             i = runEnd;
         }
     }
+}
+
+static inline void bfpRawEmitFromRows(int32_t *acc, size_t n, const int *eAccOfRow, size_t rowLen,
+                                      bfpRawQConfig_t *rawQC, const char *what) {
+    bfpRawEmitCore(acc, n, eAccOfRow, NULL, 0, rowLen, rawQC, what);
+}
+
+/*! bfpRawEmitFromRows with each row's exponent read from a BFP config's
+ * BIASED group bytes (row r = source group r: E = exps[r] - expBias), so a
+ * caller re-gridding a BFP operand's own groups needs no per-group table on
+ * the stack (the Quantization layer's BFP -> BFP dx). */
+static inline void bfpRawEmitFromGroupExponents(int32_t *acc, size_t n, const uint8_t *exps,
+                                                int32_t expBias, size_t rowLen,
+                                                bfpRawQConfig_t *rawQC, const char *what) {
+    bfpRawEmitCore(acc, n, NULL, exps, expBias, rowLen, rawQC, what);
 }
 
 /*! The guard of a pure code SUM (AvgPool): the product proof with the second

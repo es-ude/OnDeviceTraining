@@ -44,3 +44,32 @@ TrainingRng.c               trainingRngStepKey
 TrainingRng.c               trainingRngUpdateKey
 TrainingRng.c               trainingRngAdvance
 TrainingRng.c               trainingCallForIndex
+#
+# Reached only through a function pointer on every step (the indirect closure
+# below lists every address-taken function of the build and every pointer call
+# these roots make):
+# - the remat HEAP scheduler's row functions (calculateGradsImpl -> rematBegin /
+#   rematNext / rematDone / rematEnd / rematSchedulerDeinit -> s->fns->...), on
+#   the ephemeral scheduler built per call, i.e. per sample on HAR;
+RematHeap.c                 rematHeapBegin
+RematHeap.c                 rematHeapNext
+RematHeap.c                 rematHeapDone
+RematHeap.c                 rematHeapEnd
+RematHeap.c                 rematHeapDeinit
+# - the layers' output-shape functions (layerFunctions[].calcOutputShape), which
+#   the same scheduler's wire table and plan run per call over the whole model;
+QuantizationLayer.c         quantizationCalcOutputShape
+Conv1d.c                    conv1dCalcOutputShape
+Relu.c                      reluCalcOutputShape
+MaxPool1d.c                 maxPool1dCalcOutputShape
+AvgPool1d.c                 avgPool1dCalcOutputShape
+Flatten.c                   flattenCalcOutputShape
+Linear.c                    linearCalcOutputShape
+Softmax.c                   softmaxCalcOutputShape
+# - the loader's batch assembly (dataLoader->getBatch, per batch); the samples
+#   come from the trainer's getSample, outside the objects;
+DataLoaderApi.c             getBatch
+# - the BFP -> FLOAT32 dequant's chunk reader (a pointer the dequant boundary
+#   hands its walker): inside the loss-value island, it stops at itself.
+TensorConversion.c          dequantChunkToFloat
+indirect har_train_step_indirect.txt

@@ -22,6 +22,7 @@ TensorConversion.c  unpackSignExtend
 # Layers, in model order (dispatch wrapper, then kernel):
 Conv1d.c            conv1dForward        self
 Conv1d.c            forwardKernelBfpRaw
+Relu.c              reluForward          self
 Relu.c              reluForwardBfp
 MaxPool1d.c         maxPool1dForward     self
 MaxPool1d.c         maxPool1dForwardKernelBfpRaw

@@ -213,3 +213,17 @@ TrainingRng.c:trainingCallForIndex rngFold __aeabi_uidivmod 2
 # per WIRE per call.
 CalculateGradsSequential.c:calculateGradsSequential setWireFacts __aeabi_uidivmod 1
 CalculateGradsSequential.c:calculateGradsSequential writeWireConfig __aeabi_uidivmod 1
+
+# ---- Reached through a pointer on every step (the indirect closure) ----------
+# The scheduler's per-call wire table also binds wires inside rematHeapNext
+# (s->fns->next): the same once-per-WIRE-per-call group-count check as above.
+RematHeap.c:rematHeapNext writeWireConfig __aeabi_uidivmod 1
+# The output-shape functions the wire table and the plan run per call
+# (layerFunctions[].calcOutputShape): the shared window geometry, the same
+# per-call uidivs the conv / pool forward kernels' entries above allow. Per
+# calculate-grads call, i.e. per SAMPLE with the ephemeral scheduler.
+Conv1d.c:conv1dCalcOutputShape windowGeometry1dCalc __aeabi_uidiv 3
+MaxPool1d.c:maxPool1dCalcOutputShape windowGeometry1dCalc __aeabi_uidiv 3
+AvgPool1d.c:avgPool1dCalcOutputShape windowGeometry1dCalc __aeabi_uidiv 3
+# The BFP -> FLOAT32 dequant's chunk reader: part of that loss-facing boundary.
+TensorConversion.c:dequantChunkToFloat dequantChunkToFloat

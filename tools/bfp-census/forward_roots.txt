@@ -13,6 +13,7 @@ MaxPool1d.c     maxPool1dForwardKernelBfpRaw
 AvgPool1d.c     avgPool1dForwardKernelBfpRaw
 Softmax.c       softmaxForwardKernelBfp
 Softmax.c       softmaxForwardBfpRaw
+Relu.c          reluForward      self
 Relu.c          reluForwardBfp
 LayerNorm.c     layerNormForwardKernelBfp
 Reduce.c        meanOverTrailingAxesBfp

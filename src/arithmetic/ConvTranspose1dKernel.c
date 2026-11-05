@@ -748,8 +748,9 @@ void convTranspose1dKernelBfpScatter(tensor_t const *input, tensor_t const *weig
                     "(unpacked scratch form)");
         exit(1);
     }
-    if (output->quantization->type != FLOAT32) {
-        PRINT_ERROR("convTranspose1dKernelBfpScatter: output must be raw FLOAT32");
+    if (output->quantization->type != BFP_RAW) {
+        PRINT_ERROR("convTranspose1dKernelBfpScatter: output must be BFP_RAW (the dx raw, "
+                    "opSpec_t.bfpRawOut = BFP_RAW_BACKWARD_DX)");
         exit(1);
     }
     if (inChannels % groups != 0 || outChannels % groups != 0) {
@@ -771,6 +772,9 @@ void convTranspose1dKernelBfpScatter(tensor_t const *input, tensor_t const *weig
     validateBfpQConfigShape(wQC, calcNumberOfElementsByShape(weight->shape));
 
     size_t totalOut = batch * outChannels * outputLength;
+    bfpRawQConfig_t *rawQC = output->quantization->qConfig;
+    size_t gsz = bfpRawRequireOutput(rawQC, totalOut, "convTranspose1dKernelBfpScatter");
+    int16_t *rawE = rawQC->exponents;
     int32_t *acc = (int32_t *)output->data;
     for (size_t i = 0; i < totalOut; i++) {
         acc[i] = 0;
@@ -860,14 +864,71 @@ void convTranspose1dKernelBfpScatter(tensor_t const *input, tensor_t const *weig
         }
     }
 
-    /* Float bridge: each accumulator becomes acc * 2^E_acc in place. */
+    /* The raw (BFP_RAW contract: one exponent per TARGET group). A target
+     * group may straddle dx rows of different (batch, conv group), so its
+     * exponent is the max E_acc over the rows it covers, and each sum on a
+     * lower row is re-gridded to it: a HALF_AWAY right shift of the finished
+     * sum (it only shrinks, so the headroom proof above still holds). Rows
+     * and groups advance with cursors, no division. Where every row of a
+     * group shares one E_acc (HAR: micro-batch 1, conv groups 1) the shift
+     * is 0 and the sums pass unchanged. */
+    size_t t = 0;
+    size_t tEnd = gsz;
+    int eT = INT_MIN;
+    size_t cg = 0;
+    size_t cgEnd = outChPerGroup;
     for (size_t b = 0; b < batch; b++) {
+        cg = 0;
+        cgEnd = outChPerGroup;
         for (size_t oc = 0; oc < outChannels; oc++) {
-            int eAcc = eAccOf[b * groups + oc / outChPerGroup];
-            size_t row = (b * outChannels + oc) * outputLength;
-            for (size_t l = 0; l < outputLength; l++) {
-                float v = bfpLdexpInt32(acc[row + l], eAcc);
-                memcpy(&acc[row + l], &v, sizeof(v));
+            if (oc >= cgEnd) {
+                cg++;
+                cgEnd += outChPerGroup;
+            }
+            int eRow = eAccOf[b * groups + cg];
+            size_t rowEnd = (b * outChannels + oc + 1) * outputLength;
+            for (;;) {
+                eT = eRow > eT ? eRow : eT;
+                if (tEnd > rowEnd) {
+                    break; /* the group goes on into the next row */
+                }
+                rawE[t++] = (int16_t)eT;
+                eT = INT_MIN;
+                if (tEnd >= rowEnd) {
+                    tEnd += gsz;
+                    break; /* the next group starts with the next row */
+                }
+                tEnd += gsz;
+            }
+        }
+    }
+
+    t = 0;
+    tEnd = gsz;
+    for (size_t b = 0; b < batch; b++) {
+        cg = 0;
+        cgEnd = outChPerGroup;
+        for (size_t oc = 0; oc < outChannels; oc++) {
+            if (oc >= cgEnd) {
+                cg++;
+                cgEnd += outChPerGroup;
+            }
+            int eRow = eAccOf[b * groups + cg];
+            size_t idx = (b * outChannels + oc) * outputLength;
+            size_t rowEnd = idx + outputLength;
+            while (idx < rowEnd) {
+                if (idx >= tEnd) {
+                    t++;
+                    tEnd += gsz;
+                }
+                size_t runEnd = tEnd < rowEnd ? tEnd : rowEnd;
+                int k = (int)rawE[t] - eRow;
+                if (k != 0) {
+                    for (size_t i = idx; i < runEnd; i++) {
+                        acc[i] = bfpAlignPartial(acc[i], k);
+                    }
+                }
+                idx = runEnd;
             }
         }
     }

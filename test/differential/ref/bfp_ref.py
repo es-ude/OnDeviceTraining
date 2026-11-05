@@ -1102,15 +1102,19 @@ def convt1d_walk(
 
 @dataclass
 class ScatterIntFold:
-    predicted: np.ndarray  # float64 view of the float32 raw per output element
+    predicted: np.ndarray  # weightGrad: float64 view of the float32 raw; dx: mant * 2^E (float64)
     exact: np.ndarray  # float64 exact sum of the same terms
-    bound: np.ndarray  # float64: alignment roundings + the float32 cast, per element
-    e_acc: np.ndarray  # int64 E_acc per output element
+    bound: np.ndarray  # float64 per element: alignment roundings (+ weightGrad's float32 cast, + dx's re-grid)
+    e_acc: np.ndarray  # int64 E_acc per output element (its row group's)
     g: int
     n_terms: int  # N of the guard
     n_left: int
     n_rounded: int
     sum_abs_max: int
+    mant: np.ndarray | None = None  # dx: the BFP_RAW mantissas (int64 view of int32)
+    exps: np.ndarray | None = None  # dx: one unbiased raw exponent per raw target group
+    raw_group_size: int = 0
+    n_realigned: int = 0  # dx: sums whose re-grid to the raw group's exponent dropped a fraction
 
     def stats(self) -> dict:
         return {
@@ -1120,6 +1124,7 @@ class ScatterIntFold:
             "n_left_shifts": self.n_left,
             "n_rounded_products": self.n_rounded,
             "sum_abs_max": self.sum_abs_max,
+            "n_realigned": self.n_realigned,
         }
 
 
@@ -1143,6 +1148,7 @@ def conv1d_scatter_int_backward(
     direction: str,
     loss: tuple[np.ndarray, np.ndarray, tuple[int, int, int]],
     other: tuple[np.ndarray, np.ndarray, tuple[int, int, int]],
+    raw_group_size: int = 0,
 ) -> ScatterIntFold:
     """Conv1d dx (``other`` = weight) or weightGrad (``other`` = input) on
     int32 accumulators, from the definition:
@@ -1157,7 +1163,11 @@ def conv1d_scatter_int_backward(
        tap_overlap); weightGrad = batch * (most output positions one tap
        reaches). g = fold_guard_bits(N, m_loss, m_other, 0); E_acc = E_top + g.
     4. Each product p of codes enters as align_partial(p, E_acc - E_p); the
-       destination is the integer sum, then float32(sum) * 2^E_acc.
+       destination is the integer sum.
+    5. weightGrad: float32(sum) * 2^E_acc. dx: the BFP_RAW on the dx wire's
+       geometry (raw_group_size elements per raw group, 0 = per tensor,
+       section 14): E_t = max E_acc over the group's elements, mant =
+       align_partial(sum, E_t - E_acc) (a HALF_AWAY re-grid, k >= 0).
     Contributor sets come from conv1d_walk (the integer sum does not depend
     on their order)."""
     walk = conv1d_walk(batch, c_in, length, c_out, g, direction, False)
@@ -1208,6 +1218,7 @@ def conv1d_scatter_int_backward(
     bound = np.zeros(n_out)
     e_acc = np.zeros(n_out, dtype=np.int64)
     n_left = n_rounded = sum_max = 0
+    totals = [0] * n_out
     for o in range(n_out):
         ea = row_of[o] + guard
         e_acc[o] = ea
@@ -1227,6 +1238,7 @@ def conv1d_scatter_int_backward(
                 raise ValueError("scatter accumulator leaves int32 -- the guard proof is violated")
             ex += Fraction(p) * Fraction(2) ** ep
         sum_max = max(sum_max, abs(total))
+        totals[o] = total
         with np.errstate(over="ignore"):
             pred = float(np.float32(np.ldexp(np.float32(total), np.int32(ea))))
         predicted[o] = pred
@@ -1234,7 +1246,28 @@ def conv1d_scatter_int_backward(
         # one half unit of 2^E_acc per product, plus the float32 cast of the sum
         bound[o] = 0.5 * len(ia) * 2.0**ea + abs(pred) * 2.0**-24
     shape = walk.out_shape
+    if direction == "weightGrad":
+        return ScatterIntFold(
+            predicted.reshape(shape), exact.reshape(shape), bound.reshape(shape), e_acc.reshape(shape),
+            guard, n_terms, n_left, n_rounded, sum_max,
+        )
+    gsz = n_out if raw_group_size == 0 else raw_group_size
+    if n_out % gsz:
+        raise ValueError(f"raw groupSize {gsz} does not divide the dx ({n_out})")
+    exps = np.array([int(e_acc[t * gsz:(t + 1) * gsz].max()) for t in range(n_out // gsz)], dtype=np.int64)
+    mant = np.zeros(n_out, dtype=np.int64)
+    n_realigned = 0
+    for o in range(n_out):
+        k = int(exps[o // gsz]) - int(e_acc[o])
+        mant[o] = align_partial(totals[o], k)
+        if k > 0 and Fraction(int(mant[o])) * 2**k != totals[o]:
+            n_realigned += 1
+    e_t = exps[group_ids(n_out, gsz)]
+    value = np.array([float(Fraction(int(mant[o])) * Fraction(2) ** int(e_t[o])) for o in range(n_out)])
+    # one half unit of 2^E_acc per product, plus one half unit of 2^E_t for the re-grid
+    bound_dx = np.array([0.5 * len(walk.ia[o]) * 2.0 ** int(e_acc[o]) for o in range(n_out)])
+    bound_dx = bound_dx + np.where(e_t > e_acc, 0.5 * np.exp2(e_t.astype(np.float64)), 0.0)
     return ScatterIntFold(
-        predicted.reshape(shape), exact.reshape(shape), bound.reshape(shape), e_acc.reshape(shape),
-        guard, n_terms, n_left, n_rounded, sum_max,
+        value.reshape(shape), exact.reshape(shape), bound_dx.reshape(shape), e_acc.reshape(shape),
+        guard, n_terms, n_left, n_rounded, sum_max, mant, exps, raw_group_size, n_realigned,
     )

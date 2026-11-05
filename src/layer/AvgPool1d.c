@@ -323,7 +323,7 @@ void avgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
                 .key = layerExecOpKey(exec, RNG_TAG_FORWARD, AVGPOOL1D_OP_FORWARD, &opKey),
                 .mode = OUT_WRITE,
                 .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL, NULL, NULL},
-                .bfpRawOut = true, /* the integer forward raw; the backward keeps FLOAT32 */
+                .bfpRawOut = BFP_RAW_FORWARD, /* the integer forward raw */
             },
             output);
         return;

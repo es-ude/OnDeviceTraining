@@ -303,8 +303,8 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             /* The integer forward into a BFP wire is float-free after the
              * model's input quantization layer: a FLOAT32 operand here is a
              * wiring bug, not a staging request. Arm A (FLOAT32 wires) and
-             * the backward (no bfpRawOut) keep staging. */
-            if (inputs[i]->quantization->type == FLOAT32 && spec->bfpRawOut &&
+             * every backward op (BFP_RAW_BACKWARD_DX included) keep staging. */
+            if (inputs[i]->quantization->type == FLOAT32 && spec->bfpRawOut == BFP_RAW_FORWARD &&
                 target->quantization->type == BFP) {
                 PRINT_ERROR("executeOp: FLOAT32-stored operand %zu in an integer BFP forward "
                             "into a BFP wire -- the forward must see BFP operands only; "
@@ -543,16 +543,20 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
      * backing on the funnel's stack, like stageExponents. Validated before
      * the VLAs so a misuse dies with a message, not a bad size. */
     bfpRawQConfig_t rawBfpQC = {.exponents = NULL, .numGroups = 0, .groupSize = 0};
-    if (spec->bfpRawOut) {
+    if (spec->bfpRawOut != BFP_RAW_NONE) {
+        if (spec->bfpRawOut != BFP_RAW_FORWARD && spec->bfpRawOut != BFP_RAW_BACKWARD_DX) {
+            PRINT_ERROR("executeOp: unknown bfpRawOut contract %d", (int)spec->bfpRawOut);
+            exit(1);
+        }
         if (arithmetic.type != ARITH_BFP) {
-            PRINT_ERROR("executeOp: bfpRawOut is an ARITH_BFP forward contract (arithmetic "
+            PRINT_ERROR("executeOp: bfpRawOut is an ARITH_BFP contract (arithmetic "
                         "dtype %d) -- a fake-quant pin must not set it",
                         (int)arithmetic.type);
             exit(1);
         }
         if (spec->mode != OUT_WRITE) {
             PRINT_ERROR("executeOp: bfpRawOut needs the OUT_WRITE epilogue (mode %d) -- "
-                        "accumulating ops (backward) keep the FLOAT32 raw",
+                        "accumulating ops (weight/bias grads) keep the FLOAT32 raw",
                         (int)spec->mode);
             exit(1);
         }
@@ -595,7 +599,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
         initSymInt32Quantization(&rawQC, &rawQ);
         break;
     case ARITH_BFP:
-        if (spec->bfpRawOut) {
+        if (spec->bfpRawOut != BFP_RAW_NONE) {
             for (size_t g = 0; g < rawBfpQC.numGroups; g++) {
                 rawExponents[g] = 0;
             }

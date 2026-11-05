@@ -451,7 +451,7 @@ void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output,
                         .mode = OUT_WRITE,
                         .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL},
                         /* Forward raw contract: the backward op never sets it. */
-                        .bfpRawOut = true},
+                        .bfpRawOut = BFP_RAW_FORWARD},
             output);
         return;
     }

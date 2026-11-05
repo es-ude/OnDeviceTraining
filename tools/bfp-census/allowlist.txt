@@ -62,3 +62,15 @@ Softmax.c:softmaxForwardKernelBfp bfpIExpQ __aeabi_idiv 1
 # idx / groupSize in the ARITH_SYM_INT32 arm's grouped-ASYM zero-point hoist,
 # once per group, never on the BFP path.
 ExecuteOp.c:executeOp executeOp __aeabi_uidiv 1
+
+# ==== Backward (har_backward_roots.txt) =======================================
+# ---- Conv1d dx (propLossKernelBfp -> convTranspose1dKernelBfpScatter) --------
+# Two uidivmod at entry (inChannels % groups, outChannels % groups; per call,
+# the FLOAT32 kernel has them too); one in the setup's tap-overlap count
+# ((k - k') * dilation % stride, O(K^2) per call); two uidiv = the inlined
+# bfpGroupAt recomputes (loss, weight), one only when an index leaves its group.
+# The raw post-pass (exponent max, re-grid) runs on cursors and divides nothing.
+Conv1d.c:propLossKernelBfp convTranspose1dKernelBfpScatter __aeabi_uidivmod 3
+Conv1d.c:propLossKernelBfp convTranspose1dKernelBfpScatter __aeabi_uidiv 2
+# Shared window geometry via convT1dResolveGeometry (per call).
+Conv1d.c:propLossKernelBfp windowGeometry1dCalc __aeabi_uidiv 3

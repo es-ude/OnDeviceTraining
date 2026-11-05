@@ -12,8 +12,9 @@
  * reaches R (the row maxima of the two operands, paired as the kernel's
  * contributors pair), E_acc = E_top + g with g the int32 headroom guard over
  * N products per destination. Each product enters as product * 2^-(E_acc -
- * E_product), rounded half away from zero; the destination's value is
- * float(sum) * 2^E_acc.
+ * E_product), rounded half away from zero. weightGrad's value is
+ * float(sum) * 2^E_acc; dx is the BFP_RAW of the kernel (one exponent per raw
+ * target group, bfpRefConv1dDxRaw).
  */
 
 #include <limits.h>
@@ -37,6 +38,7 @@ typedef struct bfpRefGeom {
 typedef struct bfpRefStats {
     size_t rounded;    /* products whose alignment dropped a nonzero fraction */
     size_t leftShift;  /* products shifted left (exact) */
+    size_t realigned;  /* dx raw: sums whose re-grid to the raw group's E_t dropped a fraction */
     bool fitsInt32;    /* every destination sum fits int32 */
     int64_t absMaxSum; /* largest |destination sum| */
 } bfpRefStats_t;
@@ -105,10 +107,11 @@ static inline size_t bfpRefMaxTapOverlap(const bfpRefGeom_t *G) {
 }
 
 /* dx[b, ic, i] = sum over oc in group(ic), k with t = (i + padLeft - k d) / s
- * integral in [0, outLength) of gy[b, oc, t] * W[oc, icl, k]. */
-static inline bfpRefStats_t bfpRefConv1dDx(const bfpRefGeom_t *G, const bfpRefOperand_t *gy,
-                                           const bfpRefOperand_t *w, float *dx) {
-    bfpRefStats_t st = {.fitsInt32 = true};
+ * integral in [0, outLength) of gy[b, oc, t] * W[oc, icl, k]: the int64 sum
+ * of each destination on its row group's E_acc (sum[], eAcc[] per element). */
+static inline void bfpRefConv1dDxSums(const bfpRefGeom_t *G, const bfpRefOperand_t *gy,
+                                      const bfpRefOperand_t *w, int64_t *sum, int *eAccOut,
+                                      bfpRefStats_t *st) {
     size_t cinG = G->cin / G->groups;
     size_t coutG = G->cout / G->groups;
     int g = bfpRefGuard(coutG * bfpRefMaxTapOverlap(G), gy->m, w->m);
@@ -125,7 +128,7 @@ static inline bfpRefStats_t bfpRefConv1dDx(const bfpRefGeom_t *G, const bfpRefOp
             }
             int eAcc = eTop + g;
             for (size_t i = 0; i < G->length; i++) {
-                int64_t sum = 0;
+                int64_t acc = 0;
                 for (size_t ocl = 0; ocl < coutG; ocl++) {
                     size_t oc = grp * coutG + ocl;
                     for (size_t k = 0; k < G->kernelSize; k++) {
@@ -141,11 +144,50 @@ static inline bfpRefStats_t bfpRefConv1dDx(const bfpRefGeom_t *G, const bfpRefOp
                         size_t gi = (b * G->cout + oc) * G->outLength + t;
                         size_t wi = (oc * cinG + icl) * G->kernelSize + k;
                         int64_t p = (int64_t)gy->codes[gi] * (int64_t)w->codes[wi];
-                        sum += bfpRefAlign(p, eAcc - (bfpRefExp(gy, gi) + bfpRefExp(w, wi)), &st);
+                        acc += bfpRefAlign(p, eAcc - (bfpRefExp(gy, gi) + bfpRefExp(w, wi)), st);
                     }
                 }
-                dx[(b * G->cin + ic) * G->length + i] = bfpRefFinish(sum, eAcc, &st);
+                size_t idx = (b * G->cin + ic) * G->length + i;
+                if (acc > INT32_MAX || acc < INT32_MIN) {
+                    st->fitsInt32 = false;
+                }
+                int64_t mag = acc < 0 ? -acc : acc;
+                st->absMaxSum = mag > st->absMaxSum ? mag : st->absMaxSum;
+                sum[idx] = acc;
+                eAccOut[idx] = eAcc;
             }
+        }
+    }
+}
+
+/* dx as the BFP_RAW the kernel emits: per raw target group t (rawGroupSize
+ * elements, 0 = the whole output) E_t = the max E_acc over the group's
+ * elements; each sum is re-gridded from its own E_acc to 2^E_t, rounding half
+ * away from zero (a gap of 62+ binades leaves 0). `mant` holds the output's
+ * element count, `rawE` its group count. */
+static inline bfpRefStats_t bfpRefConv1dDxRaw(const bfpRefGeom_t *G, const bfpRefOperand_t *gy,
+                                              const bfpRefOperand_t *w, size_t rawGroupSize,
+                                              int32_t *mant, int16_t *rawE) {
+    bfpRefStats_t st = {.fitsInt32 = true};
+    size_t n = G->batch * G->cin * G->length;
+    int64_t sum[n > 0 ? n : 1];
+    int eAcc[n > 0 ? n : 1];
+    bfpRefConv1dDxSums(G, gy, w, sum, eAcc, &st);
+    size_t gsz = rawGroupSize == 0 ? n : rawGroupSize;
+    for (size_t t = 0; gsz > 0 && t < n / gsz; t++) {
+        int eT = INT_MIN;
+        for (size_t i = t * gsz; i < (t + 1) * gsz; i++) {
+            eT = eAcc[i] > eT ? eAcc[i] : eT;
+        }
+        rawE[t] = (int16_t)eT;
+        for (size_t i = t * gsz; i < (t + 1) * gsz; i++) {
+            int k = eT - eAcc[i];
+            int64_t mag = sum[i] < 0 ? -sum[i] : sum[i];
+            int64_t r = k >= 62 ? 0 : (k == 0 ? mag : (mag + ((int64_t)1 << (k - 1))) >> k);
+            if (k > 0 && (k >= 62 ? mag != 0 : (r << k) != mag)) {
+                st.realigned++;
+            }
+            mant[i] = (int32_t)(sum[i] < 0 ? -r : r);
         }
     }
     return st;

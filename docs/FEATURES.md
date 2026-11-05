@@ -696,7 +696,9 @@ checkpointing, limitations, literature).
   remains available as an explicit fake-quant-backward alternative. Conv1d `dx` and
   `weightGrad` (experiment, 2026-11-05) run the FLOAT32 scatter loop on `int32`
   accumulators aligned to a precomputed exponent per row group
-  (`docs/conventions/arithmetic-bfp.md` §14). BFP grad and
+  (`docs/conventions/arithmetic-bfp.md` §14); Conv1d `dx` is integer end to end
+  (it emits the `BFP_RAW` and the dx wire is the integer re-block, SR by the op's
+  mode, 2026-11-05). BFP grad and
   optimizer-state storage (`gradInit`, `SgdApi`/`AdamWApi` momentum/moment
   cloning, PPCA replay state) is a **per-tensor-only** knob — a grouped BFP
   template is rejected at every one of those call sites ("per-tensor only, #300

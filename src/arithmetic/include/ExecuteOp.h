@@ -14,6 +14,31 @@
 typedef struct rngStream rngStream_t;
 typedef struct rngKey rngKey_t;
 
+/* Which ops emit the integer raw (BFP_RAW: int32 mantissas + one UNBIASED
+ * int16 exponent per TARGET group, bfpRawQConfig_t; the kernel MUST write
+ * every group's exponent) instead of BFP D7's FLOAT32 raw. Each value is an
+ * explicit per-op opt-in, so an op never switches raw format by accident
+ * (the Linear/Softmax backward adapters share forward kernel code and leave
+ * it NONE). Both values are ARITH_BFP + OUT_WRITE only: the epilogue is the
+ * integer re-block (conversionMatrix[BFP_RAW][BFP], under the #282 op-
+ * rounding swap, so the wire rounds by the OP's mode) or, for a FLOAT32
+ * target, the dequant ([BFP_RAW][FLOAT32]). Raw geometry: a BFP target's
+ * {numGroups, groupSize}; a FLOAT32 target has no groups, so the raw is
+ * per-tensor ({1,0}, one exponent over the whole output). Any other target
+ * dtype, any other arithmetic type, or an ACC epilogue fails fast.
+ *   BFP_RAW_FORWARD      the integer forward. Also the forward marker: into a
+ *                        BFP target, a FLOAT32-stored operand is a wiring
+ *                        error (the forward is float-free after the input
+ *                        quantization layer), not a staging request.
+ *   BFP_RAW_BACKWARD_DX  a backward op writing a dx wire (today: Conv1d dx).
+ *                        FLOAT32-stored operands keep staging, as in every
+ *                        backward op. */
+typedef enum bfpRawContract {
+    BFP_RAW_NONE = 0,
+    BFP_RAW_FORWARD,
+    BFP_RAW_BACKWARD_DX,
+} bfpRawContract_t;
+
 /* The one conversion funnel (PR1b.2 D1, docs/conventions/arithmetic-sym.md). Every op runs:
  *   prologue   — operands whose dtype != arithmetic are converted into
  *                transient stack scratch (sources are never mutated)
@@ -145,21 +170,9 @@ typedef struct opSpec {
      * tensor. Borrowed configs carry the source's STORAGE roundingMode;
      * staged configs carry the OP's arithmetic.roundingMode. */
     const bfpQConfig_t *bfpStage[EXECUTE_OP_MAX_INPUTS];
-    /* Integer-only BFP forward, ARITH_BFP only: true = the kernel emits a
-     * BFP_RAW raw (int32 mantissas + one UNBIASED int16 exponent per TARGET
-     * group, bfpRawQConfig_t; the kernel MUST write every group's exponent)
-     * instead of BFP D7's FLOAT32 raw, and the OUT_WRITE epilogue is the
-     * integer re-block (conversionMatrix[BFP_RAW][BFP], under the #282 op-
-     * rounding swap) or, for a FLOAT32 target, the loss-facing dequant
-     * ([BFP_RAW][FLOAT32]). Zero-init (false) keeps the FLOAT32 raw: every
-     * backward op leaves it false, including the Linear/Softmax backward
-     * adapters that share forward kernel code -- the explicit forward raw
-     * contract, so the backward never switches raw format by accident.
-     * Raw geometry: a BFP target's {numGroups, groupSize}; a FLOAT32 target
-     * has no groups, so the raw is per-tensor ({1,0}, one exponent over the
-     * whole output). Any other target dtype, any other arithmetic type, or
-     * an ACC epilogue fails fast. */
-    bool bfpRawOut;
+    /* ARITH_BFP only: the raw-format contract of the op (bfpRawContract_t
+     * above). Zero-init (BFP_RAW_NONE) keeps BFP D7's FLOAT32 raw. */
+    bfpRawContract_t bfpRawOut;
 } opSpec_t;
 
 void executeOp(const opSpec_t *spec, tensor_t *target);

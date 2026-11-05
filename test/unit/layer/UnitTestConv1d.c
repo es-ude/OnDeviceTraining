@@ -11,6 +11,7 @@
 #include "KeyedDrawCheck.h"
 #include "Layer.h"
 #include "LayerCommon.h"
+#include "LayerExec.h"
 #include "LayerQuant.h"
 #include "QuantizationApi.h"
 #include "RNG.h"
@@ -3414,6 +3415,297 @@ void testConv1dBackwardBfpWeightGradMixedExponentsMatchesReference(void) {
     TEST_ASSERT_EQUAL_MEMORY(ref, gw, sizeof(gw));
 }
 
+/* ---- Conv1d dx under ARITH_BFP: integer end to end ---------------------
+ * The dx kernel emits the BFP_RAW (BfpScatterRef.h's bfpRefConv1dDxRaw) and
+ * the OUT_WRITE epilogue re-blocks it into the BFP dx wire in integers, by
+ * the OP's rounding mode, drawing (SR) from the op's RNG_TAG_OUT stream one
+ * draw per element in element order. The re-block reference below is written
+ * from docs/conventions/arithmetic-bfp.md section 13 (stored exponent = the
+ * smallest E with absmax <= qMax 2^E, by search, not by bit length). */
+
+typedef struct dxWireCase {
+    size_t batch, cin, length, cout, groups, kernelSize, stride, dilation, padding;
+    uint8_t m; /* loss and weight mantissa bits */
+    size_t gyGroupSize, wGroupSize;
+    uint8_t wireM;        /* dx wire mantissa bits */
+    size_t wireGroupSize; /* 0 = per tensor */
+} dxWireCase_t;
+
+#define DX_WIRE_MAX 96
+
+/* Section 13's re-block of one raw (mant, rawE per group of gsz) into m-bit
+ * codes and biased stored exponents; `rs` NULL = HALF_AWAY, else SR with one
+ * draw per element in element order (k outside [1, 31]: exact or flushed,
+ * the draw still consumed). */
+static void dxReblockRef(const int32_t *mant, const int16_t *rawE, size_t n, size_t gsz, uint8_t m,
+                         uint8_t e, rngStream_t *rs, int32_t *codes, uint8_t *stored) {
+    int bias = (1 << (e - 1)) - 1;
+    int cap = (1 << e) - 1;
+    cap = cap > bias + 127 ? bias + 127 : cap;
+    int64_t qMax = ((int64_t)1 << (m - 1)) - 1;
+    int64_t negCap = (int64_t)1 << (m - 1);
+    size_t gs = gsz == 0 ? n : gsz;
+    for (size_t g = 0; g * gs < n; g++) {
+        int64_t absMax = 0;
+        for (size_t i = g * gs; i < (g + 1) * gs; i++) {
+            int64_t a = mant[i] < 0 ? -(int64_t)mant[i] : (int64_t)mant[i];
+            absMax = a > absMax ? a : absMax;
+        }
+        int st = bias;
+        if (absMax != 0) {
+            int s = -31; /* absMax < 2^32: absMax << 31 stays below 2^63 */
+            while (!(s >= 0 ? absMax <= (qMax << s) : (absMax << -s) <= qMax)) {
+                s++;
+            }
+            st = rawE[g] + s + bias;
+            st = st < 0 ? 0 : (st > cap ? cap : st);
+        }
+        stored[g] = (uint8_t)st;
+        int k = st - bias - rawE[g];
+        for (size_t i = g * gs; i < (g + 1) * gs; i++) {
+            uint32_t u = rs != NULL ? rngNextU32(rs) : 0u;
+            bool neg = mant[i] < 0;
+            int64_t mag = neg ? -(int64_t)mant[i] : (int64_t)mant[i];
+            int64_t t;
+            if (k <= 0) {
+                t = -k >= 40 ? (mag != 0 ? INT64_MAX : 0) : mag << -k;
+            } else if (k >= 32) {
+                t = 0;
+            } else {
+                t = mag >> k;
+                int64_t rem = mag & (((int64_t)1 << k) - 1);
+                if (rs != NULL) {
+                    t += (int64_t)(u >> (32 - k)) < rem;
+                } else {
+                    t += rem >= ((int64_t)1 << (k - 1));
+                }
+            }
+            int64_t c = neg ? (t > negCap ? negCap : t) : (t > qMax ? qMax : t);
+            codes[i] = (int32_t)(neg ? -c : c);
+        }
+    }
+}
+
+typedef struct dxWireResult {
+    int32_t codes[DX_WIRE_MAX], refCodes[DX_WIRE_MAX];
+    uint8_t stored[DX_WIRE_MAX], refStored[DX_WIRE_MAX];
+    size_t n, numGroups;
+    bfpRefStats_t st;
+    roundingMode_t wireModeAfter;
+} dxWireResult_t;
+
+/* conv1dBackward (frozen: dx only) with BFP-stored loss and weights into a
+ * BFP dx wire whose template rounds HALF_AWAY; the op rounds by `opMode`.
+ * exec keyed by `seed` (the SR stream), NULL for HALF_AWAY. */
+static void dxRunIntoBfpWire(const dxWireCase_t *c, const int32_t *gyCodes, const uint8_t *gyExps,
+                             const int32_t *wCodes, const uint8_t *wExps, roundingMode_t opMode,
+                             uint64_t seed, dxWireResult_t *r) {
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernelExplicit(kernel, c->kernelSize, c->padding, c->dilation, c->stride);
+    windowGeometry1d_t geom = windowGeometry1dCalc(c->length, kernel);
+    size_t cinG = c->cin / c->groups;
+    size_t gyElems = c->batch * c->cout * geom.outputLength;
+    size_t wElems = c->cout * cinG * c->kernelSize;
+    r->n = c->batch * c->cin * c->length;
+    r->numGroups = c->wireGroupSize == 0 ? 1 : r->n / c->wireGroupSize;
+    TEST_ASSERT_TRUE(r->n <= DX_WIRE_MAX);
+
+    size_t wDims[] = {c->cout, cinG, c->kernelSize};
+    tensor_t *weightsParam =
+        buildBfpStoredTensor(3, wDims, wCodes, wExps, c->m, 8,
+                             c->wGroupSize == 0 ? 1 : wElems / c->wGroupSize, c->wGroupSize);
+    parameter_t *weights = parameterInit(weightsParam, NULL);
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *conv1d = buildBorrowedConv1dLayerGrouped(weights, NULL, kernel, c->groups, floatQ);
+    conv1d->config->conv1d->frozen = true;
+    conv1d->config->conv1d->propLossMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = opMode};
+
+    size_t xDims[] = {c->batch, c->cin, c->length};
+    size_t gyDims[] = {c->batch, c->cout, geom.outputLength};
+    tensor_t *gy =
+        buildBfpStoredTensor(3, gyDims, gyCodes, gyExps, c->m, 8,
+                             c->gyGroupSize == 0 ? 1 : gyElems / c->gyGroupSize, c->gyGroupSize);
+    tensor_t *x = makeFloatTensor(xDims, 3, NULL); /* frozen: dx reads only the shape */
+    int32_t zeros[DX_WIRE_MAX] = {0};
+    uint8_t zeroExps[DX_WIRE_MAX] = {0};
+    tensor_t *dx = buildBfpStoredTensor(3, xDims, zeros, zeroExps, c->wireM, 8, r->numGroups,
+                                        c->wireGroupSize);
+
+    layerExec_t exec = {.key = rngKeyFromSeed(seed)};
+    conv1dBackward(conv1d, x, gy, dx, opMode == SR_HALF_AWAY ? &exec : NULL);
+
+    bfpQConfig_t *dxQC = dx->quantization->qConfig;
+    unpackSignExtend(dx->data, c->wireM, 0, r->codes, r->n);
+    memcpy(r->stored, dxQC->exponents, r->numGroups);
+    r->wireModeAfter = dxQC->roundingMode;
+
+    freeConv1dLayer(conv1d);
+    freeTensor(dx);
+    freeTensor(x);
+    freeTensor(gy);
+    freeQuantization(floatQ);
+
+    bfpRefGeom_t G = {.batch = c->batch,
+                      .cin = c->cin,
+                      .length = c->length,
+                      .cout = c->cout,
+                      .groups = c->groups,
+                      .kernelSize = c->kernelSize,
+                      .stride = c->stride,
+                      .dilation = c->dilation,
+                      .padLeft = geom.padLeft,
+                      .outLength = geom.outputLength};
+    bfpRefOperand_t gyRef = {gyCodes, gyExps, c->gyGroupSize, c->m, 8};
+    bfpRefOperand_t wRef = {wCodes, wExps, c->wGroupSize, c->m, 8};
+    int32_t rawMant[DX_WIRE_MAX];
+    int16_t rawE[DX_WIRE_MAX];
+    r->st = bfpRefConv1dDxRaw(&G, &gyRef, &wRef, c->wireGroupSize, rawMant, rawE);
+    /* The op's out stream: rngFold(op key, RNG_TAG_OUT, 0), op key =
+     * rngFold(rngFold(exec key, RNG_TAG_BACKWARD, 0), RNG_TAG_OP, OP(3)) --
+     * Conv1d's CONV1D_OP_PROP_LOSS, part of the key contract. */
+    rngStream_t out = rngOpen(
+        rngFold(rngFold(rngFold(exec.key, RNG_TAG_BACKWARD, 0u), RNG_TAG_OP, 3u), RNG_TAG_OUT, 0u));
+    dxReblockRef(rawMant, rawE, r->n, c->wireGroupSize, c->wireM, 8,
+                 opMode == SR_HALF_AWAY ? &out : NULL, r->refCodes, r->refStored);
+}
+
+static void dxSpreadOperands(uint32_t seed, size_t gyN, size_t gyGroups, size_t wN, size_t wGroups,
+                             uint8_t m, int32_t *gyCodes, uint8_t *gyExps, int32_t *wCodes,
+                             uint8_t *wExps) {
+    uint32_t s = seed;
+    uint32_t span = 1u << m;
+    for (size_t i = 0; i < gyN; i++) {
+        gyCodes[i] = (int32_t)(c4Lcg(&s) % span) - (int32_t)(span / 2);
+    }
+    for (size_t i = 0; i < wN; i++) {
+        wCodes[i] = (int32_t)(c4Lcg(&s) % span) - (int32_t)(span / 2);
+    }
+    for (size_t i = 0; i < gyGroups; i++) {
+        gyExps[i] = (uint8_t)(127 - 12 + (int)(c4Lcg(&s) % 25u));
+    }
+    for (size_t i = 0; i < wGroups; i++) {
+        wExps[i] = (uint8_t)(127 - 6 + (int)(c4Lcg(&s) % 13u));
+    }
+}
+
+/* m = 8 operands, conv groups 2, stride 2, dilation 2, EXPLICIT padding 2,
+ * a 24-binade loss spread, batch 2, into an m = 6 wire: raw groups of 4
+ * (inside rows and across them), 16 (across conv groups and the batch, so
+ * the raw re-grids the lower rows) and per tensor. Codes and stored
+ * exponents exact against the int64 scatter + the section-13 re-block. */
+void testConv1dBackwardBfpDxIntoBfpWireMatchesIntegerReference(void) {
+    static const size_t wireGroupSizes[] = {4, 16, 0};
+    bool anyRealigned = false;
+    for (size_t v = 0; v < 3; v++) {
+        dxWireCase_t c = {.batch = 2,
+                          .cin = 4,
+                          .length = 8,
+                          .cout = 4,
+                          .groups = 2,
+                          .kernelSize = 3,
+                          .stride = 2,
+                          .dilation = 2,
+                          .padding = 2,
+                          .m = 8,
+                          .gyGroupSize = 4,
+                          .wGroupSize = 6,
+                          .wireM = 6,
+                          .wireGroupSize = wireGroupSizes[v]};
+        int32_t gyCodes[32]; /* [2, 4, 4] */
+        int32_t wCodes[24];  /* [4, 2, 3] */
+        uint8_t gyExps[8];
+        uint8_t wExps[4];
+        dxSpreadOperands(31337u, 32, 8, 24, 4, 8, gyCodes, gyExps, wCodes, wExps);
+        dxWireResult_t r;
+        dxRunIntoBfpWire(&c, gyCodes, gyExps, wCodes, wExps, HALF_AWAY, 0, &r);
+
+        TEST_ASSERT_TRUE(r.st.fitsInt32);
+        TEST_ASSERT_TRUE(r.st.rounded > 0);
+        TEST_ASSERT_EQUAL_UINT8_ARRAY(r.refStored, r.stored, r.numGroups);
+        TEST_ASSERT_EQUAL_INT32_ARRAY(r.refCodes, r.codes, r.n);
+        anyRealigned = anyRealigned || r.st.realigned > 0;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(anyRealigned, "no raw group re-grids a lower row");
+}
+
+/* Worst case at m = 16 into an m = 16 wire: every code -2^15, overlapping
+ * taps (stride 1, K = 3), the m16 guard g > 0. Exact against the reference. */
+void testConv1dBackwardBfpDxWorstCaseM16IntoBfpWireIsExact(void) {
+    dxWireCase_t c = {.batch = 2,
+                      .cin = 2,
+                      .length = 6,
+                      .cout = 3,
+                      .groups = 1,
+                      .kernelSize = 3,
+                      .stride = 1,
+                      .dilation = 1,
+                      .padding = 1,
+                      .m = 16,
+                      .gyGroupSize = 0,
+                      .wGroupSize = 0,
+                      .wireM = 16,
+                      .wireGroupSize = 4};
+    int32_t gyCodes[36];
+    int32_t wCodes[18];
+    for (size_t i = 0; i < 36; i++) {
+        gyCodes[i] = -32768;
+    }
+    for (size_t i = 0; i < 18; i++) {
+        wCodes[i] = -32768;
+    }
+    uint8_t gyExps[] = {127 + 3};
+    uint8_t wExps[] = {127 - 5};
+    dxWireResult_t r;
+    dxRunIntoBfpWire(&c, gyCodes, gyExps, wCodes, wExps, HALF_AWAY, 0, &r);
+
+    TEST_ASSERT_TRUE(r.st.fitsInt32);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(r.refStored, r.stored, r.numGroups);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(r.refCodes, r.codes, r.n);
+    /* interior elements: 9 products of 2^30 * 2^-2 = 9 * 2^28 -> m16 code
+     * 9 * 2^11 = 18432 under stored E = 17 */
+    TEST_ASSERT_EQUAL_INT32(18432, r.codes[2]);
+    TEST_ASSERT_EQUAL_UINT8(127 + 17, r.stored[0]);
+}
+
+/* The training-side seam: the dx wire rounds by the OP's mode (SR here),
+ * not by the wire template's (HALF_AWAY, restored afterwards), drawing from
+ * the op's RNG_TAG_OUT stream one draw per element in element order -- the
+ * stream and order of the float re-pack the integer re-block replaced.
+ * Exact against the reference fed the same stream; non-vacuous: SR differs
+ * from HALF_AWAY on this data. */
+void testConv1dBackwardBfpDxIntoBfpWireSrFollowsTheOpModeAndTheOutStream(void) {
+    dxWireCase_t c = {.batch = 2,
+                      .cin = 4,
+                      .length = 8,
+                      .cout = 4,
+                      .groups = 2,
+                      .kernelSize = 3,
+                      .stride = 2,
+                      .dilation = 2,
+                      .padding = 2,
+                      .m = 8,
+                      .gyGroupSize = 4,
+                      .wGroupSize = 6,
+                      .wireM = 6,
+                      .wireGroupSize = 16};
+    int32_t gyCodes[32];
+    int32_t wCodes[24];
+    uint8_t gyExps[8];
+    uint8_t wExps[4];
+    dxSpreadOperands(4711u, 32, 8, 24, 4, 8, gyCodes, gyExps, wCodes, wExps);
+    dxWireResult_t sr;
+    dxRunIntoBfpWire(&c, gyCodes, gyExps, wCodes, wExps, SR_HALF_AWAY, 2026u, &sr);
+    dxWireResult_t ha;
+    dxRunIntoBfpWire(&c, gyCodes, gyExps, wCodes, wExps, HALF_AWAY, 0, &ha);
+
+    TEST_ASSERT_EQUAL_INT(HALF_AWAY, sr.wireModeAfter);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(sr.refStored, sr.stored, sr.numGroups);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(sr.refCodes, sr.codes, sr.n);
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(sr.codes, ha.codes, sizeof(sr.codes)) == 0,
+                              "SR and HALF_AWAY agree: the SR test is vacuous");
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testConv1dWgGuardProvenSafeN511RunsExact);
@@ -3486,6 +3778,9 @@ int main() {
     RUN_TEST(testConv1dBackwardBfpDxConvGroups2MatchesGold);
     RUN_TEST(testConv1dBackwardBfpWeightGradWorstCaseM16IsExact);
     RUN_TEST(testConv1dBackwardBfpWeightGradMixedExponentsMatchesReference);
+    RUN_TEST(testConv1dBackwardBfpDxIntoBfpWireMatchesIntegerReference);
+    RUN_TEST(testConv1dBackwardBfpDxWorstCaseM16IntoBfpWireIsExact);
+    RUN_TEST(testConv1dBackwardBfpDxIntoBfpWireSrFollowsTheOpModeAndTheOutStream);
     RUN_TEST(testConv1dCalcWeightGradsBfpRejectsFloat32Weights);
     RUN_TEST(testConv1dCalcBiasGradsBfpRejectsFloat32Weights);
     RUN_TEST(testConv1dCalcWeightGradsBfpRejectsInputChannelMismatch);

@@ -757,6 +757,63 @@ def evaluate_gemm_output(fx: GemmFixture, direction: str, drv, out_name: str, k:
     return row
 
 
+def _is_scatter_int(cell: dict) -> bool:
+    """Conv1d dx / weightGrad under ARITH_BFP: integer accumulators on the
+    FLOAT32 scatter loop (bfp_ref.conv1d_scatter_int_backward)."""
+    return cell["op"] == "conv1d" and cell["direction"] in ("dx", "weightGrad") and cell["arith"]["type"] == "BFP"
+
+
+def evaluate_scatter_int_output(fx: GemmFixture, direction: str, drv, out_name: str) -> dict:
+    """Leg A: the integer sum is order-free, so the raw FLOAT32 must equal
+    float32(sum) * 2^E_acc bit for bit (EXACT, no fold-order latitude); a
+    completed run where the guard has no g <= 31 or an abort is a MISMATCH.
+    Leg B: float64 exact within one half unit of 2^E_acc per product plus
+    the float32 cast."""
+    a, b = gemm_operands(fx, direction)
+    x = fx.ops["input"].codes.shape
+    c_out = fx.ops["loss"].codes.shape[1]
+    row: dict = {"output": out_name, "n_elements": 0, "headroom": {"ok": True, "kind": "guard"}}
+    try:
+        ref = bfp_ref.conv1d_scatter_int_backward(
+            x[0], x[1], x[2], c_out, fx.geom, direction, (a.codes, a.stored, a.bits), (b.codes, b.stored, b.bits)
+        )
+    except ValueError as exc:
+        ref = None
+        row["headroom"] = {"ok": False, "kind": "guard", "error": str(exc)}
+    if drv.exit != 0 or ref is None:
+        kind = "ABORT" if (drv.exit != 0 and ref is None) else "MISMATCH"
+        row["legA"] = {"taxonomy": kind, "census": None, "mismatch_class": "-" if kind == "ABORT" else ("abort" if ref is not None else "guard"), "seed": None, "scale": {"c": None, "ref": None, "rel": None, "ok": kind == "ABORT"}, "ref_scale": None}
+        row["legB"] = {"taxonomy": "n/a", "err_max": float("nan"), "bound": float("nan"), "ratio": float("nan")}
+        row["c_scale"] = None
+        row["bfp"] = {"summary": f"scatter-int: exit {drv.exit}, guard {'ok' if ref is not None else 'none'}"}
+        return row
+    exact, _ = gemm_exact_and_abs(fx, direction)
+    if not np.allclose(ref.exact, exact, rtol=1e-12, atol=1e-30):
+        raise RuntimeError("harness: the scatter reference's exact sum disagrees with the float64 reference")
+    c_vals, grid = c_output_image(drv.out(out_name))
+    if grid:
+        raise RuntimeError("harness: a conv dx/weightGrad BFP wire output is not modelled for the integer scatter")
+    c_vals = c_vals.reshape(exact.shape)
+    bit = float_bitexact(c_vals, ref.predicted)
+    taxonomy = "EXACT" if bit["n_mismatch"] == 0 else "MISMATCH"
+    row["n_elements"] = int(exact.size)
+    row["legA"] = {
+        "taxonomy": taxonomy,
+        "census": {"taxonomy": taxonomy, "mode": "float32_bits", "n_elements": bit["n_elements"], "n_mismatch": bit["n_mismatch"], "n_tie": 0, "max_abs_diff": bit["max_ulp32"], "worst": bit["worst"]},
+        "mismatch_class": "none" if taxonomy == "EXACT" else "fold",
+        "seed": None,
+        "scale": {"c": None, "ref": None, "rel": None, "ok": True},
+        "ref_scale": None,
+        "scatter_int": ref.stats(),
+    }
+    row["legB"] = elementwise_leg_b(np.abs(c_vals - exact), ref.bound)
+    row["legB"]["bound_kind"] = "0.5*2^E_acc per product + float32 cast (scatter-int)"
+    row["c_scale"] = None
+    st = ref.stats()
+    row["bfp"] = {"summary": f"scatter-int N={st['N']} g={st['g']} E_acc={st['E_acc_range']} left={st['n_left_shifts']} rounded={st['n_rounded_products']} |sum|<={st['sum_abs_max']}", "stats": st}
+    return row
+
+
 def _is_int_fold(cell: dict) -> bool:
     """The ops whose forward emits the integer BFP_RAW (arithmetic-bfp
     section 13): Conv1d and Linear; the ConvT1d forward still folds in float."""
@@ -919,6 +976,8 @@ def run_gemm_cell(cell: dict, driver: Path, out_root: Path, k: int, run_driver) 
                 layer_out = output_spec(cell) if tier == "layer" else None
                 layer_gs = 0 if (layer_out is None or layer_out["dtype"] == "FLOAT32") else int(layer_out["groupSize"])
                 res = evaluate_int_fold_output(fx, drv, tier, raw_gs if tier == "kernel" else layer_gs, layer_out)
+            elif _is_scatter_int(cell):
+                res = evaluate_scatter_int_output(fx, direction, drv, out_name)
             else:
                 res = evaluate_gemm_output(fx, direction, drv, out_name, k, True)
             row = dict(base)

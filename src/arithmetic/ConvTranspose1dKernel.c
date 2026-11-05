@@ -715,3 +715,160 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
         }
     }
 }
+
+/* Taps that can land on one output position: k and k' meet when
+ * (k - k') * dilation is a multiple of stride. Range clipping can only lower
+ * the count, so this bounds every position. */
+static size_t convT1dMaxTapOverlap(size_t kernelSize, size_t stride, size_t dilation) {
+    size_t best = 0;
+    for (size_t k = 0; k < kernelSize; k++) {
+        size_t n = 0;
+        for (size_t j = 0; j < kernelSize; j++) {
+            size_t gap = k > j ? (k - j) * dilation : (j - k) * dilation;
+            n += gap % stride == 0;
+        }
+        best = n > best ? n : best;
+    }
+    return best;
+}
+
+/* Contract in ConvTranspose1dKernel.h. */
+void convTranspose1dKernelBfpScatter(tensor_t const *input, tensor_t const *weight,
+                                     kernel_t const *kernel, size_t groups, size_t outputPadding,
+                                     tensor_t *output) {
+    size_t batch = input->shape->dimensions[0];
+    size_t inChannels = input->shape->dimensions[1];
+    size_t inputLength = input->shape->dimensions[2];
+    size_t outChannels = output->shape->dimensions[1];
+    size_t outputLength = output->shape->dimensions[2];
+    size_t kernelSize = weight->shape->dimensions[2];
+
+    if (input->quantization->type != BFP || weight->quantization->type != BFP) {
+        PRINT_ERROR("convTranspose1dKernelBfpScatter: input and weight must be BFP "
+                    "(unpacked scratch form)");
+        exit(1);
+    }
+    if (output->quantization->type != FLOAT32) {
+        PRINT_ERROR("convTranspose1dKernelBfpScatter: output must be raw FLOAT32");
+        exit(1);
+    }
+    if (inChannels % groups != 0 || outChannels % groups != 0) {
+        PRINT_ERROR("convTranspose1dKernelBfpScatter: groups (%zu) must divide "
+                    "in_channels (%zu) and out_channels (%zu)",
+                    groups, inChannels, outChannels);
+        exit(1);
+    }
+
+    size_t padLeft = convT1dResolveGeometry(kernel, inputLength, outputLength, outputPadding,
+                                            "convTranspose1dKernelBfpScatter");
+
+    size_t inChPerGroup = inChannels / groups;
+    size_t outChPerGroup = outChannels / groups;
+
+    bfpQConfig_t *inQC = input->quantization->qConfig;
+    bfpQConfig_t *wQC = weight->quantization->qConfig;
+    validateBfpQConfigShape(inQC, calcNumberOfElementsByShape(input->shape));
+    validateBfpQConfigShape(wQC, calcNumberOfElementsByShape(weight->shape));
+
+    size_t totalOut = batch * outChannels * outputLength;
+    int32_t *acc = (int32_t *)output->data;
+    for (size_t i = 0; i < totalOut; i++) {
+        acc[i] = 0;
+    }
+    if (totalOut == 0) {
+        return;
+    }
+
+    int guard = bfpFoldGuardBits(
+        inChPerGroup * convT1dMaxTapOverlap(kernelSize, kernel->stride, kernel->dilation),
+        inQC->mantissaBits, wQC->mantissaBits, 0, "convTranspose1dKernelBfpScatter");
+
+    int32_t const *xArr = (int32_t const *)input->data;
+    int32_t const *wArr = (int32_t const *)weight->data;
+    int32_t inExpBias = bfpExponentBias(inQC);
+    int32_t wExpBias = bfpExponentBias(wQC);
+
+    /* Pre-pass (stack tables sized by the topology): E_acc per (batch, conv
+     * group) = max over the group's input channels of input-row max +
+     * weight-row max, plus the guard. A group without products keeps 0. */
+    int eAccOf[batch * groups];
+    for (size_t i = 0; i < batch * groups; i++) {
+        eAccOf[i] = 0;
+    }
+    size_t wRowLen = outChPerGroup * kernelSize;
+    if (inChannels > 0 && inputLength > 0 && wRowLen > 0) {
+        int wRowMax[inChannels];
+        bfpRowCursor_t wc = {.group = 0, .groupEnd = wQC->groupSize};
+        for (size_t ic = 0; ic < inChannels; ic++) {
+            wRowMax[ic] = bfpRowMaxExponent(&wc, wQC, wExpBias, ic * wRowLen, wRowLen);
+        }
+        bfpRowCursor_t xc = {.group = 0, .groupEnd = inQC->groupSize};
+        for (size_t b = 0; b < batch; b++) {
+            for (size_t g = 0; g < groups; g++) {
+                int eTop = INT_MIN;
+                for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                    size_t ic = g * inChPerGroup + icOffset;
+                    int e = bfpRowMaxExponent(&xc, inQC, inExpBias,
+                                              (b * inChannels + ic) * inputLength, inputLength) +
+                            wRowMax[ic];
+                    eTop = e > eTop ? e : eTop;
+                }
+                eAccOf[b * groups + g] = eTop + guard;
+            }
+        }
+    }
+
+    long long padLeftSigned = (long long)padLeft;
+    long long outputLengthSigned = (long long)outputLength;
+    long long dilation = (long long)kernel->dilation;
+    bfpGroupRange_t inRange = {0};
+    bfpGroupRange_t wRange = {0};
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+            int eAcc = eAccOf[b * groups + g];
+
+            for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                size_t ic = inLo + icOffset;
+                for (size_t inPos = 0; inPos < inputLength; inPos++) {
+                    size_t inIdx = (b * inChannels + ic) * inputLength + inPos;
+                    int32_t xv = xArr[inIdx];
+                    int xShift = eAcc - ((int)inQC->exponents[bfpGroupAt(&inRange, inQC, inIdx)] -
+                                         inExpBias);
+                    long long outBase = (long long)(inPos * kernel->stride) - padLeftSigned;
+
+                    for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                        size_t oc = outLo + ocOffset;
+                        for (size_t k = 0; k < kernelSize; k++) {
+                            long long outIdx = outBase + (long long)k * dilation;
+                            if (outIdx < 0 || outIdx >= outputLengthSigned) {
+                                continue;
+                            }
+
+                            size_t wIdx = (ic * outChPerGroup + ocOffset) * kernelSize + k;
+                            int shift =
+                                xShift -
+                                ((int)wQC->exponents[bfpGroupAt(&wRange, wQC, wIdx)] - wExpBias);
+                            acc[(b * outChannels + oc) * outputLength + (size_t)outIdx] +=
+                                bfpAlignPartial(mulInt32s(xv, wArr[wIdx]), shift);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* Float bridge: each accumulator becomes acc * 2^E_acc in place. */
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t oc = 0; oc < outChannels; oc++) {
+            int eAcc = eAccOf[b * groups + oc / outChPerGroup];
+            size_t row = (b * outChannels + oc) * outputLength;
+            for (size_t l = 0; l < outputLength; l++) {
+                float v = bfpLdexpInt32(acc[row + l], eAcc);
+                memcpy(&acc[row + l], &v, sizeof(v));
+            }
+        }
+    }
+}

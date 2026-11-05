@@ -143,4 +143,35 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
                                     tensor_t const *bias, kernel_t const *kernel, size_t groups,
                                     size_t outputPadding, tensor_t *output);
 
+/*! Conv1d dx under ARITH_BFP: the ConvT1d adjoint on the SAME scatter loop as
+ *  convTranspose1dKernelFloat32 (same loops, order, MAC count and index math),
+ *  with an int32 raw accumulator per output element instead of a float.
+ *
+ *  Every product a * b (codes, |product| <= 2^(ma+mb-2)) enters its output
+ *  element as product * 2^-(E_acc - Ea - Eb) (bfpAlignPartial: exact left
+ *  shift, or half away from zero right shift). E_acc is fixed before the walk
+ *  per (batch, conv group): the largest input-row exponent plus weight-row
+ *  exponent over the group's input channels, plus the guard g of
+ *  bfpFoldGuardBits over N = in_channels/groups * (taps that can land on one
+ *  output position: k, k' with (k - k') * dilation a multiple of stride). So
+ *  no accumulator can leave int32 whatever the operands; every product is its
+ *  own one-product segment. The accumulators live in `output`'s buffer; at
+ *  the end each becomes the float acc * 2^E_acc in place. That float output
+ *  is a bridge: the backward still stores FLOAT32 grads.
+ *
+ *  Operands as convTranspose1dKernelBfpGather (unpacked BFP scratch), no bias
+ *  (the Conv1d dx has none); output FLOAT32. Geometry resolves through the
+ *  same helper as the other ConvT kernels.
+ *
+ *  @param input          [batch, in_channels, input_length], BFP scratch
+ *  @param weight         [in_channels, out_channels/groups, kernel_size], BFP scratch
+ *  @param kernel         kernel_t (paddingType VALID or SAME/EXPLICIT adjoint)
+ *  @param groups         must divide in_channels and out_channels
+ *  @param outputPadding  trailing zeros at output end (VALID only); 0 for SAME
+ *  @param output         [batch, out_channels, output_length], FLOAT32, pre-allocated
+ */
+void convTranspose1dKernelBfpScatter(tensor_t const *input, tensor_t const *weight,
+                                     kernel_t const *kernel, size_t groups, size_t outputPadding,
+                                     tensor_t *output);
+
 #endif // ODT_CONV_TRANSPOSE_1D_KERNEL_H

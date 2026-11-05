@@ -143,7 +143,7 @@ Linear (`[B, outF, 1]`; dx `[B, inF, 1]`; weightGrad `[1, outF, inF]`).
 `cells/*.json`, one op configuration each (op, direction, tiers, arithmetic,
 geometry, operand/output widths, fixture, expectation, optional gold name).
 
-The matrix at a glance (148 cells; a cell name's prefix is its family):
+The matrix at a glance (151 cells; a cell name's prefix is its family):
 
 | prefix | what | cells | tiers | operand widths |
 |---|---|---|---|---|
@@ -156,7 +156,7 @@ The matrix at a glance (148 cells; a cell name's prefix is its family):
 | `b1`, `b1x` | FLOAT32 -> BFP pack | 40 | convert | m 2..16, e 2/4/8, per-tensor and grouped |
 | `b2`, `b2s`, `b2x` | BFP forward (Linear, Conv1d, ConvT1d) | 17 | kernel, layer | m 4..16 mixed, per-tensor and grouped |
 | `b3` | BFP forward / dx onto a BFP wire | 5 | kernel, layer | m 8 / 12 |
-| `b4`, `b4x` | BFP native backward (Linear, Conv1d, ConvT1d) | 14 | kernel (Linear), layer | m 6..16 |
+| `b4`, `b4x` | BFP native backward (Linear, Conv1d, ConvT1d) | 16 | kernel (Linear), layer | m 6..16 |
 | `b5` | fake-quant twin: ARITH_FLOAT32 over BFP storage | 9 | layer | m 12, grouped |
 
 The bounds every row relies on are the ones of "Leg B bounds" below plus the
@@ -495,8 +495,12 @@ reported alongside (`ratio_rigorous`) and never needed.
     the m8 B3 conv wire stays EXACT (a one-product perturbation of the raw
     is ~1e-3 of a wire code: a packed output cannot see errors below its
     own resolution, by construction). `convTranspose1dKernelBfpGather`'s
-    tail fold likewise -> every ConvT1d forward row and both Conv1d dx rows
-    MISMATCH. B4 biasGrad: `linearCalcBiasGradsBfp`'s tail fold shift + 1
+    tail fold likewise -> every ConvT1d forward row MISMATCH. Conv1d dx and
+    weightGrad on integer accumulators: `+ 1` on the aligned product in
+    `convTranspose1dKernelBfpScatter` -> exactly the three `b4_conv_dx_*`
+    rows MISMATCH; the same in `weightGradKernelBfp` of `Conv1d.c` -> exactly
+    the four `b4_conv_dw_*` weightGrad rows (biasGrad rows green).
+    B4 biasGrad: `linearCalcBiasGradsBfp`'s tail fold shift + 1
     -> only the biasGrad rows MISMATCH. B4 weightGrad orientation: removing
     the transpose view in `linearCalcWeightGradsBfp` -> the kernel aborts on
     the shape (MISMATCH class `abort`). B1: dropping the `frac == 0.5`
@@ -517,16 +521,11 @@ reported alongside (`ratio_rigorous`) and never needed.
     class `fq`, `b5_fq_lin_dw` weightGrad and biasGrad included.
     B4 backward grad kernels (the Conv1d / ConvT1d grad kernels have no raw
     entry, so only the layer tier sees them): the per-contributor
-    accumulate `partial += mulInt32s(x, gy) + 1` in
-    `weightGradKernelBfp` of `Conv1d.c` -> `b4_conv_dw_*` weightGrad rows
-    (all three cells) MISMATCH class `fold` + EXCESS, biasGrad rows green;
-    the same in `Conv1dTransposed.c` -> both `b4_convt_dw_*` weightGrad rows;
+    accumulate `partial += mulInt32s(x, gy) + 1` in `Conv1dTransposed.c`
+    -> both `b4_convt_dw_*` weightGrad rows (the Conv1d weightGrad is above);
     `partial += gyArr[idx] + 1` in `biasGradKernelBfp` of each file -> the
-    biasGrad rows of the three conv and the two convT cells respectively, the
-    weightGrad rows green. A tail-fold `+ 1.0f` in `Conv1d.c` weightGrad
-    turned only two of the three conv cells red (the `g2_same` cell's last
-    segment sits at a scale far below the accumulator's rounding step), so the
-    per-contributor mutant above is the one the record rests on.
+    biasGrad rows of the four conv and the two convT cells respectively, the
+    weightGrad rows green.
     BFP guard banner: `BFP block partial would overflow int32` -> `BFP partial
     would overflow int32` in `bfpValidateBlockHeadroom` -> both `b2x_*` cells
     on both tiers MISMATCH class `abort_banner`. The sum twin's banner

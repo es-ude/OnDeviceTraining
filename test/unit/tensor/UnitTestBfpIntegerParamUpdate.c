@@ -789,6 +789,39 @@ static void badUpdateDtype(void) {
     paramUpdateBfpInPlace(&fixW.t, &ut, lrOf(0.05f), HALF_AWAY, NULL);
 }
 
+/* Exponent storage overlap: the engine publishes each parameter group's new
+ * exponent once that group is done, so an update whose (per-tensor) exponent
+ * IS the parameter's first exponent byte would see its grid move under it
+ * (params [100, 100] on groups E = [0, 0], update [50, 50], lr 1, HALF_AWAY:
+ * [50, 63.5] instead of [50, 50]). Payload overlap: a one-byte shift. */
+static void badExponentOverlap(void) {
+    const int32_t w[2] = {100, 100};
+    const int32_t u[2] = {50, 50};
+    const uint8_t sw[2] = {127, 127};
+    const uint8_t su[1] = {127};
+    puInit(&fixW, 2, 2, 1, 8, 8, w, sw);
+    puInit(&fixU, 2, 1, 0, 8, 8, u, su);
+    fixU.qc.exponents = fixW.exps;
+    puRun(LR_ONE, HALF_AWAY, NULL);
+}
+static void badPayloadOverlap(void) {
+    setupBad();
+    fixU.t.data = fixW.data + 1;
+    puRun(lrOf(0.05f), HALF_AWAY, NULL);
+}
+/* lr.q = INT32_MIN: the update negates lr before the engine sees it, which
+ * would be signed overflow; the significand is validated first. */
+static void badLrIntMin(void) {
+    setupBad();
+    puRun((bfpScalar_t){.q = INT32_MIN, .e = -14}, HALF_AWAY, NULL);
+}
+
+void testParamUpdateRejectsOverlappingStorageAndAnUnnegatableLr(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "exponents overlap", badExponentOverlap());
+    ASSERT_EXITS_WITH_OUTPUT(1, "payload overlaps", badPayloadOverlap());
+    ASSERT_EXITS_WITH_OUTPUT(1, "paramUpdateBfpInPlace: lr {q=", badLrIntMin());
+}
+
 void testParamUpdateRejectsBadInputs(void) {
     ASSERT_EXITS_WITH_FAILURE(badSrNoStream());
     ASSERT_EXITS_WITH_FAILURE(badLrNotNormalized());
@@ -816,5 +849,6 @@ int main(void) {
     RUN_TEST(testParamUpdateInPlaceKeepsOldExponentsUntilTheGroupIsRead);
     RUN_TEST(testParamUpdateEmptyTensorIsTheZeroState);
     RUN_TEST(testParamUpdateRejectsBadInputs);
+    RUN_TEST(testParamUpdateRejectsOverlappingStorageAndAnUnnegatableLr);
     return UNITY_END();
 }

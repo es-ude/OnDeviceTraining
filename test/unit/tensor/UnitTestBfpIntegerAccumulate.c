@@ -943,6 +943,37 @@ static void engineWrongDtypeBody(void) {
     accumulateBfpRawIntoBfpRescale(&fixA.target, &fixA.target, NULL);
 }
 
+/* The raw increment's storage must not overlap the target's: a payload that
+ * starts inside the target's packed bytes, or raw exponents that sit on the
+ * target's exponent bytes, would be rewritten while still being read. */
+static uint8_t g_accOverlap[64] __attribute__((aligned(4)));
+static void enginePayloadOverlapBody(void) {
+    const int32_t codes[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    const uint8_t stored[1] = {127};
+    const int32_t raw[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    const int16_t rawE[1] = {0};
+    accInit(&fixA, 8, 1, 0, 8, 8, HALF_AWAY, codes, stored, raw, rawE);
+    memcpy(g_accOverlap, fixA.data, 8);
+    memcpy(g_accOverlap + 4, fixA.raw, 8 * sizeof(int32_t));
+    fixA.target.data = g_accOverlap;
+    fixA.inc.data = g_accOverlap + 4;
+    accumulateBfpRawIntoBfpRescale(&fixA.target, &fixA.inc, NULL);
+}
+static void engineExponentOverlapBody(void) {
+    const int32_t codes[2] = {1, 2};
+    const uint8_t stored[2] = {127, 127};
+    const int32_t raw[2] = {1, 2};
+    const int16_t rawE[2] = {0, 0};
+    accInit(&fixA, 2, 2, 1, 8, 8, HALF_AWAY, codes, stored, raw, rawE);
+    fixA.rawQC.exponents = (int16_t *)(void *)fixA.exps;
+    accumulateBfpRawIntoBfpRescale(&fixA.target, &fixA.inc, NULL);
+}
+
+void testEngineRejectsOverlappingStorage(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "payload overlaps", enginePayloadOverlapBody());
+    ASSERT_EXITS_WITH_OUTPUT(1, "exponents overlap", engineExponentOverlapBody());
+}
+
 void testEngineRejectsBadInputs(void) {
     ASSERT_EXITS_WITH_FAILURE(engineAliasBody());
     ASSERT_EXITS_WITH_FAILURE(engineGeometryMismatchBody());
@@ -973,5 +1004,6 @@ int main(void) {
     RUN_TEST(testEngineFreshAccumulatorTakesTheIncrementGrid);
     RUN_TEST(testEngineEmptyTargetIsZeroState);
     RUN_TEST(testEngineRejectsBadInputs);
+    RUN_TEST(testEngineRejectsOverlappingStorage);
     return UNITY_END();
 }

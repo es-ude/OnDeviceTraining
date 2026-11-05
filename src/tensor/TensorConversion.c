@@ -1,6 +1,7 @@
 #define SOURCE_FILE "TENSOR_CONVERSION"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1906,16 +1907,82 @@ typedef struct {
     const tensor_t *tens;
 } incSrc_t;
 
-static void rejectAliasedIncrement(const tensor_t *target, const tensor_t *increment,
-                                   const char *what) {
-    /* Self-aliasing is rejected: the rescale engines rewrite the target's
-     * grid between phase A and phase B, so an aliased increment would be
-     * decoded against the wrong grid mid-stream (PR #324). The funnel epilogue always passes a
-     * distinct intermediate. */
-    if (increment->data == target->data) {
-        PRINT_ERROR("%s: increment must not alias the target", what);
+/* [a, a + aBytes) and [b, b + bBytes) share a byte (uintptr_t compare; an
+ * empty range overlaps nothing). */
+static bool byteRangesOverlap(const void *a, size_t aBytes, const void *b, size_t bBytes) {
+    if (a == NULL || b == NULL || aBytes == 0 || bBytes == 0) {
+        return false;
+    }
+    const uintptr_t a0 = (uintptr_t)a;
+    const uintptr_t b0 = (uintptr_t)b;
+    return a0 < b0 + bBytes && b0 < a0 + aBytes;
+}
+
+/* A tensor's exponent side table: BFP one u8 per group, BFP_RAW one int16
+ * per group; every other dtype has none here. */
+static void exponentStorageOf(const tensor_t *t, const void **base, size_t *bytes) {
+    *base = NULL;
+    *bytes = 0;
+    if (t->quantization->type == BFP) {
+        const bfpQConfig_t *qc = t->quantization->qConfig;
+        *base = qc->exponents;
+        *bytes = qc->numGroups * sizeof(uint8_t);
+    } else if (t->quantization->type == BFP_RAW) {
+        const bfpRawQConfig_t *qc = t->quantization->qConfig;
+        *base = qc->exponents;
+        *bytes = qc->numGroups * sizeof(int16_t);
+    }
+}
+
+/* The in-place engines rewrite the updated tensor's packed payload chunk by
+ * chunk and publish its group exponents as each group finishes, while still
+ * reading the other operand: ANY shared byte between what they write
+ * (payload, exponents) and what they read (the other operand's payload and
+ * exponents) would feed rewritten bytes back in -- not only pointer identity
+ * (a payload one byte in, an exponent array sharing its first byte). Fails
+ * fast naming the two regions. */
+static void rejectOverlappingOperands(const tensor_t *updated, const tensor_t *readOnly,
+                                      const char *role, const char *what) {
+    if (readOnly->data == updated->data) {
+        PRINT_ERROR("%s: the %s must not alias the updated tensor", what, role);
         exit(1);
     }
+    const size_t nU = calcNumberOfElementsByTensor((tensor_t *)updated);
+    const size_t nR = calcNumberOfElementsByTensor((tensor_t *)readOnly);
+    const size_t payU = calcNumberOfBytesForData(updated->quantization, nU);
+    const size_t payR = calcNumberOfBytesForData(readOnly->quantization, nR);
+    const void *expU;
+    const void *expR;
+    size_t expUBytes;
+    size_t expRBytes;
+    exponentStorageOf(updated, &expU, &expUBytes);
+    exponentStorageOf(readOnly, &expR, &expRBytes);
+    const char *clash = NULL;
+    if (byteRangesOverlap(updated->data, payU, readOnly->data, payR)) {
+        clash = "payload overlaps the updated tensor's payload";
+    } else if (byteRangesOverlap(expU, expUBytes, expR, expRBytes)) {
+        clash = "exponents overlap the updated tensor's exponents";
+    } else if (byteRangesOverlap(updated->data, payU, expR, expRBytes)) {
+        clash = "exponents overlap the updated tensor's payload";
+    } else if (byteRangesOverlap(expU, expUBytes, readOnly->data, payR)) {
+        clash = "payload overlaps the updated tensor's exponents";
+    }
+    if (clash != NULL) {
+        PRINT_ERROR("%s: the %s's %s -- the in-place engine would read bytes it already "
+                    "rewrote; the operands need disjoint storage",
+                    what, role, clash);
+        exit(1);
+    }
+}
+
+static void rejectAliasedIncrement(const tensor_t *target, const tensor_t *increment,
+                                   const char *what) {
+    /* The rescale engines rewrite the target's grid between phase A and
+     * phase B (PR #324), and every engine packs the target chunk by chunk:
+     * an increment sharing any byte of the target's storage would be decoded
+     * from rewritten bytes mid-stream. The funnel epilogue always passes a
+     * distinct intermediate. */
+    rejectOverlappingOperands(target, increment, "increment", what);
 }
 
 static void incSrcChunk(const incSrc_t *src, size_t off, size_t count, float *out) {
@@ -3166,11 +3233,22 @@ BFP_WALK_NOINLINE void bfpScaledSumEmitRun(int32_t *tm, const int32_t *sm, size_
     }
 }
 
+/* b normalized, any sign and exponent: zero, or 2^14 <= |q| <= 2^15 - 1 --
+ * in particular |q| <= 2^15 - 1, so -q never overflows. */
+static void requireNormalizedSignedScalar(bfpScalar_t b, const char *what, const char *role) {
+    const bool bZero = b.q == 0 && b.e == 0;
+    if (!bZero && ((b.q < 16384 && b.q > -16384) || b.q > 32767 || b.q < -32767)) {
+        PRINT_ERROR("%s: %s {q=%ld, e=%d} is not a normalized coefficient", what, role, (long)b.q,
+                    (int)b.e);
+        exit(1);
+    }
+}
+
 /* t' = a * t + b * s in place (the block comment above). Fails fast on
  * everything the engine does not implement: non-BFP operands, element-count
- * or geometry mismatch, mantissa width > 16, a source sharing the target's
- * data, `a` not normalized or outside [0, 1], `b` not normalized, a rounding
- * mode other than HALF_AWAY / SR_HALF_AWAY, SR without a stream. */
+ * or geometry mismatch, mantissa width > 16, a source sharing any byte of the
+ * target's payload or exponents, `a` not normalized or outside [0, 1], `b` not normalized, a
+ * rounding mode other than HALF_AWAY / SR_HALF_AWAY, SR without a stream. */
 static void bfpScaledSumInPlace(tensor_t *t, bfpScalar_t a, const tensor_t *s, bfpScalar_t b,
                                 roundingMode_t rm, rngStream_t *rs, const char *what) {
     if (t->quantization->type != BFP || s->quantization->type != BFP) {
@@ -3184,10 +3262,7 @@ static void bfpScaledSumInPlace(tensor_t *t, bfpScalar_t a, const tensor_t *s, b
         PRINT_ERROR("%s: element-count mismatch", what);
         exit(1);
     }
-    if (s->data == t->data) {
-        PRINT_ERROR("%s: the read-only operand must not alias the updated one", what);
-        exit(1);
-    }
+    rejectOverlappingOperands(t, s, "read-only operand", what);
     bfpQConfig_t *tqc = t->quantization->qConfig;
     const bfpQConfig_t *sqc = s->quantization->qConfig;
     validateBfpQConfigShape(tqc, n);
@@ -3216,13 +3291,7 @@ static void bfpScaledSumInPlace(tensor_t *t, bfpScalar_t a, const tensor_t *s, b
                     (int)a.q, (int)a.e);
         exit(1);
     }
-    /* b normalized, any sign and exponent: zero, or 2^14 <= |q| <= 2^15 - 1 */
-    const bool bZero = b.q == 0 && b.e == 0;
-    if (!bZero && ((b.q < 16384 && b.q > -16384) || b.q > 32767 || b.q < -32767)) {
-        PRINT_ERROR("%s: scalar {q=%d, e=%d} is not a normalized coefficient", what, (int)b.q,
-                    (int)b.e);
-        exit(1);
-    }
+    requireNormalizedSignedScalar(b, what, "scalar");
     if (rm != HALF_AWAY && rm != SR_HALF_AWAY) {
         PRINT_ERROR("%s: rounding mode %d unsupported (HALF_AWAY / SR_HALF_AWAY)", what, (int)rm);
         exit(1);
@@ -3308,6 +3377,8 @@ void momentumStoreBfpInPlace(tensor_t *state, const tensor_t *grad, bfpScalar_t 
 
 void paramUpdateBfpInPlace(tensor_t *param, const tensor_t *update, bfpScalar_t lr,
                            roundingMode_t rm, rngStream_t *rs) {
+    /* validated BEFORE the negation: lr.q = INT32_MIN would overflow -lr.q */
+    requireNormalizedSignedScalar(lr, "paramUpdateBfpInPlace", "lr");
     bfpScaledSumInPlace(param, (bfpScalar_t){.q = 16384, .e = -14}, update,
                         (bfpScalar_t){.q = -lr.q, .e = lr.e}, rm, rs, "paramUpdateBfpInPlace");
 }

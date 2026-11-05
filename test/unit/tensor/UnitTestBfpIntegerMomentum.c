@@ -814,6 +814,47 @@ static void badGradDtype(void) {
     momentumStoreBfpInPlace(&fixV.t, &gt, muOf(0.9f), HALF_AWAY, NULL);
 }
 
+/* Storage overlap, not only pointer identity: the engine writes the state's
+ * payload chunk by chunk while still reading the gradient, so a state one
+ * byte into the gradient's payload (512 per-tensor m8 codes, all 64, mu 0.5)
+ * would overwrite not-yet-read gradient codes. Any shared byte of the two
+ * payloads fails fast; directly adjacent payloads are legal. */
+static uint8_t g_overlapBuf[1100];
+
+static void moOverlapSetup(size_t stateOffset) {
+    static int32_t codes[512];
+    for (size_t i = 0; i < 512; i++) {
+        codes[i] = 64;
+    }
+    const uint8_t stored[1] = {127};
+    moInit(&fixG, 512, 1, 0, 8, 8, codes, stored);
+    moInit(&fixV, 512, 1, 0, 8, 8, codes, stored);
+    memcpy(g_overlapBuf, fixG.data, 512);
+    memcpy(g_overlapBuf + stateOffset, fixV.data, 512);
+    fixG.t.data = g_overlapBuf;
+    fixV.t.data = g_overlapBuf + stateOffset;
+}
+static void badPayloadOverlap(void) {
+    moOverlapSetup(1);
+    moRun(muOf(0.5f), HALF_AWAY, NULL);
+}
+static void adjacentPayloads(void) {
+    moOverlapSetup(512);
+    moRun(muOf(0.5f), HALF_AWAY, NULL);
+}
+/* the gradient's exponent byte inside the state's exponent array */
+static void badExponentOverlap(void) {
+    setupBad();
+    fixG.qc.exponents = fixV.exps;
+    moRun(muOf(0.9f), HALF_AWAY, NULL);
+}
+
+void testMomentumRejectsOverlappingStorage(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "payload overlaps", badPayloadOverlap());
+    ASSERT_EXITS_WITH_OUTPUT(1, "exponents overlap", badExponentOverlap());
+    ASSERT_EXITS_WITH(0, adjacentPayloads());
+}
+
 void testMomentumRejectsBadInputs(void) {
     ASSERT_EXITS_WITH_FAILURE(badSrNoStream());
     ASSERT_EXITS_WITH_FAILURE(badMuAboveOne());
@@ -828,6 +869,7 @@ void testMomentumRejectsBadInputs(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMomentumMatchesExactReferenceOnRandomStates);
+    RUN_TEST(testMomentumRejectsOverlappingStorage);
     RUN_TEST(testMomentumPerTensorGradientOnGroupedStateMatchesReference);
     RUN_TEST(testMomentumDeadZonePinned);
     RUN_TEST(testMomentumDeadZoneStatistical);

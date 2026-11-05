@@ -2644,6 +2644,22 @@ reaching `2^30` on the capped grid (only for a left shift) saturates its
 element with that term's sign (for the parameter update: the sign of `−lr ·
 u`). Widths and exponent biases of the two operands may differ.
 
+**Disjoint storage (2026-11-05).** The engine rewrites the target's payload
+chunk by chunk and publishes each target group's new exponent once that group
+is done, while still reading the source: the two operands must share NO byte
+-- neither payload with payload, nor exponent array with exponent array, nor
+one's payload with the other's exponents (`rejectOverlappingOperands`,
+`uintptr_t` range compare; the accumulate engines' `rejectAliasedIncrement`
+uses the same check). Pointer identity alone missed partial overlaps: a state
+one byte into the gradient's payload (512 per-tensor m8 codes of 64, `mu =
+0.5`) overwrote not-yet-read gradient codes, and a per-tensor update whose
+exponent byte was the parameter's first exponent moved the update's grid
+after group 0 (`[100, 100]` on `E = [0, 0]` minus `lr = 1` times `[50, 50]`
+gave `[50, 63.5]`). Both fail fast now; adjacent storage is legal.
+`paramUpdateBfpInPlace` validates `lr`'s significand (normalized, `|q| <=
+2^15 − 1`) BEFORE it negates it, so `lr.q = INT32_MIN` fails fast instead
+of overflowing.
+
 **RNG.** The OUT stream of each op's key, `(PARAM, p) → (OP, k) → (OUT, 0)`
 (state op `k = 0`, param op `k = 1`, on both paths), one draw per element in
 element order on every path (zero group, exact, saturated) -- the stream and

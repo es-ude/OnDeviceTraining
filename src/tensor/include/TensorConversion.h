@@ -221,6 +221,35 @@ void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment,
  * SYM/ASYM scale arms, there is nothing here to propagate it into. */
 void scaleBfpTensorInPlace(tensor_t *t, float factor, rngStream_t *rs);
 
+/*! @brief The INTEGER dynamic-rescale grad accumulate: target (BFP) +=
+ * increment (BFP_RAW, int32 mantissas + one unbiased exponent per TARGET
+ * group), shifts and integer rounding only -- no float, no division, no int64
+ * (arithmetic-bfp.md §15; the integer twin of accumulateTensorIntoBfpRescale).
+ *
+ * Per target group: a working grid 2^E_c from the actual old and raw absmax
+ * (every aligned term below 2^30, so the int32 sum cannot overflow -- the
+ * bound is re-derived on every call); the exact sum in quotient/remainder
+ * form (the bits an alignment drops are carried to the final rounding, so a
+ * small increment is never erased before SR); the fresh exponent from the SUM
+ * (cancellation included) by the integer exponent rule, floored at E_c (a sum
+ * cancelled below the working grid's top m - 1 bits keeps E_c), then the BFP
+ * D6 clamp; ONE rounding per element by the target config's roundingMode
+ * (HALF_AWAY, or SR "lift iff u < frac" on a 32-bit fraction: exact for a
+ * remainder of up to 32 bits, below 2^-32 of a code step the probability is
+ * truncated -- the documented cutoff), clamped to [-2^(m-1), qMax]. Under SR
+ * exactly one draw per element in element order on every path (zero, exact,
+ * saturated). An all-zero sum is the zero state (stored = bias); n == 0
+ * leaves the zero state too (R7). A raw so large that it exceeds the
+ * exponent cap by 2^30 code steps saturates its element exactly.
+ *
+ * In place, alias-safe: the old exponents are published only after the last
+ * read of their group (the bfpRescaleWalk window rule). Fails fast on a
+ * non-BFP target or non-BFP_RAW increment, an element-count or geometry
+ * mismatch (the raw must carry the target's {numGroups, groupSize}), an
+ * increment sharing the target's data pointer, and SR without a stream.
+ * Direct-call only, not a conversionMatrix cell. */
+void accumulateBfpRawIntoBfpRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs);
+
 /*! @brief BFP_RAW -> BFP: the integer re-block of the funnel's forward raw
  * (int32 mantissas + one UNBIASED int16 exponent per TARGET group) onto the
  * target's grid -- shifts and integer rounding only, no float.

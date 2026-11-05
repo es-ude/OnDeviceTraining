@@ -228,6 +228,242 @@ static inline int bfpFoldGuardBits(size_t reductionLen, uint8_t ma, uint8_t mb, 
     return g;
 }
 
+/* ---- Integer training primitives (full-BFP training, arithmetic-bfp.md §15) ----
+ * The integer backward, gradient accumulation and optimizer build on three
+ * pieces: a normalized integer scalar for configuration coefficients, a
+ * quotient/remainder form that carries the bits an alignment drops all the
+ * way to the final rounding, and that final rounding (HALF_AWAY or SR on the
+ * magnitude). No float, no division, no int64 below this line except in
+ * bfpScalarFromFloat, which runs once per configuration value. */
+
+/*! Bit length of v: bfpBitLength32(0) = 0, bfpBitLength32(2^31) = 32. A
+ * binary search instead of __builtin_clz: a core without CLZ (Cortex-M0+)
+ * would call libgcc for it. */
+static inline unsigned bfpBitLength32(uint32_t v) {
+    unsigned n = 0;
+    if (v >> 16) {
+        v >>= 16;
+        n += 16;
+    }
+    if (v >> 8) {
+        v >>= 8;
+        n += 8;
+    }
+    if (v >> 4) {
+        v >>= 4;
+        n += 4;
+    }
+    if (v >> 2) {
+        v >>= 2;
+        n += 2;
+    }
+    if (v >> 1) {
+        v >>= 1;
+        n += 1;
+    }
+    return n + (v != 0);
+}
+
+/*! A configuration scalar (learning rate, momentum, 1/B, ...) as value =
+ * q * 2^e: a normalized significand, 2^14 <= |q| <= 2^15 - 1 (15
+ * significant bits), or q = 0, e = 0 for zero. A floating exponent, not one
+ * global Q15 grid, so a small learning rate keeps all 15 bits. */
+typedef struct bfpScalar {
+    int32_t q;
+    int16_t e;
+} bfpScalar_t;
+
+/*! Encode a float once, at configuration time (float is allowed there, never
+ * in the training-step roots). Significand rounded half away from zero to 15
+ * bits, so the relative error is <= 2^-15; exact for 0, 1 ({2^14, -14}),
+ * every power of two (subnormals included) and every value whose significand
+ * fits 15 bits. A significand that rounds up to 2^15 renormalizes to 2^14
+ * with e + 1. Non-finite values fail fast. */
+static inline bfpScalar_t bfpScalarFromFloat(float x, const char *what) {
+    if (!isfinite(x)) {
+        PRINT_ERROR("%s: non-finite scalar %f has no integer encoding", what, (double)x);
+        exit(1);
+    }
+    if (x == 0.0f) {
+        return (bfpScalar_t){.q = 0, .e = 0};
+    }
+    int ex = 0;
+    const float f = frexpf(x, &ex);            /* |f| in [0.5, 1), x = f * 2^ex */
+    int32_t q = (int32_t)roundf(f * 32768.0f); /* f * 2^15 is exact */
+    if (q == 32768 || q == -32768) {
+        q /= 2;
+        ex += 1;
+    }
+    return (bfpScalar_t){.q = q, .e = (int16_t)(ex - 15)};
+}
+
+/*! mant * s.q as int32, the product's exponent being E_mant + s.e. Exact and
+ * overflow-free for every BFP code (m <= 16, |mant| <= 2^15) against a
+ * normalized scalar (|q| <= 2^15 - 1): |product| <= 2^30 - 2^15. */
+static inline int32_t bfpScalarMulMant(int32_t mant, bfpScalar_t s) {
+    return mant * s.q;
+}
+
+/*! A value on the grid 2^G in quotient/remainder form:
+ *   value / 2^G = q + (frac + t) / 2^32,  t in [0, 1),  sticky = (t != 0).
+ * q is the FLOOR quotient (signed), frac the top 32 bits of the remainder in
+ * [0, 1), sticky whether any remainder bit below those 32 is set. Nothing an
+ * alignment drops is lost before the final rounding: the top 32 bits are kept
+ * exactly and the rest is summarized by sticky. */
+typedef struct bfpQr {
+    int32_t q;
+    uint32_t frac;
+    bool sticky;
+} bfpQr_t;
+
+/*! floor(v / 2^k) for k in [0, 31] without right-shifting a negative value
+ * (implementation-defined in C): ~v >= 0 for v < 0, and
+ * ~(~v >> k) = floor(v / 2^k). */
+static inline int32_t bfpFloorShr(int32_t v, unsigned k) {
+    return v >= 0 ? (int32_t)((uint32_t)v >> k) : (int32_t)~((uint32_t)~v >> k);
+}
+
+/*! The term m * 2^-k on the grid. k > 0 aligns right: the dropped bits go to
+ * frac/sticky, for every k (k >= 64 leaves only the sign extension in frac).
+ * k <= 0 is an exact left shift; the CALLER guarantees |m| * 2^-k < 2^31
+ * (k <= -32 is only legal for m == 0). */
+static inline bfpQr_t bfpQrOfTerm(int32_t m, int k) {
+    bfpQr_t r = {.q = 0, .frac = 0, .sticky = false};
+    if (k <= 0) {
+        if (k > -32) {
+            r.q = (int32_t)((uint32_t)m << (unsigned)(-k));
+        }
+        return r;
+    }
+    const int32_t sign = m < 0 ? -1 : 0;
+    if (k < 32) {
+        r.q = bfpFloorShr(m, (unsigned)k);
+        r.frac = (uint32_t)m << (32u - (unsigned)k);
+    } else if (k == 32) {
+        r.q = sign;
+        r.frac = (uint32_t)m;
+    } else if (k < 64) {
+        const unsigned j = (unsigned)k - 32u; /* frac = bits [j, j + 31] of the sign-extended m */
+        r.q = sign;
+        r.frac = (uint32_t)bfpFloorShr(m, j);
+        r.sticky = ((uint32_t)m & ((1u << j) - 1u)) != 0;
+    } else {
+        r.q = sign;
+        r.frac = (uint32_t)sign;
+        r.sticky = m != 0;
+    }
+    return r;
+}
+
+/*! x + y on the same grid. The CALLER guarantees the sum's floor quotient fits
+ * int32. Exact when at most one operand is sticky (both sticky: frac may be
+ * one unit of 2^-32 low -- the two unknown tails can carry). */
+static inline bfpQr_t bfpQrAdd(bfpQr_t x, bfpQr_t y) {
+    bfpQr_t r;
+    r.frac = x.frac + y.frac;
+    const uint32_t carry = r.frac < x.frac;
+    r.q = (int32_t)((uint32_t)x.q + (uint32_t)y.q + carry);
+    r.sticky = x.sticky || y.sticky;
+    return r;
+}
+
+/*! Re-grid onto the 2^k times coarser grid 2^(G + k), k >= 0, exactly: the
+ * integer bits that fall below the new grid move into frac, frac's low bits
+ * into sticky. Any k (the D6 flush regime reaches far beyond 32). */
+static inline bfpQr_t bfpQrShr(bfpQr_t x, unsigned k) {
+    if (k == 0) {
+        return x;
+    }
+    bfpQr_t r;
+    const int32_t sign = x.q < 0 ? -1 : 0;
+    if (k < 32) {
+        r.q = bfpFloorShr(x.q, k);
+        r.frac = ((uint32_t)x.q << (32u - k)) | (x.frac >> k);
+        r.sticky = x.sticky || (x.frac & ((1u << k) - 1u)) != 0;
+    } else if (k == 32) {
+        r.q = sign;
+        r.frac = (uint32_t)x.q;
+        r.sticky = x.sticky || x.frac != 0;
+    } else if (k < 64) {
+        const unsigned j = k - 32u;
+        r.q = sign;
+        r.frac = (uint32_t)bfpFloorShr(x.q, j);
+        r.sticky = x.sticky || x.frac != 0 || ((uint32_t)x.q & ((1u << j) - 1u)) != 0;
+    } else {
+        r.q = sign;
+        r.frac = (uint32_t)sign;
+        r.sticky = x.sticky || x.frac != 0 || x.q != 0;
+    }
+    return r;
+}
+
+/*! |value| rounded UP to the grid (uint32, <= 2^31): the magnitude the
+ * exponent rule may use. For value >= 0 it is q plus one if any remainder is
+ * left; for value < 0 it is -q (|value| = -q - f, f in [0, 1)). The CALLER
+ * guarantees q < INT32_MAX when value > 0 has a remainder. */
+static inline uint32_t bfpQrCeilMagnitude(bfpQr_t x) {
+    if (x.q < 0) {
+        return 0u - (uint32_t)x.q;
+    }
+    return (uint32_t)x.q + (uint32_t)(x.frac != 0 || x.sticky);
+}
+
+/*! The final rounding onto the grid, on the MAGNITUDE (the sign is applied
+ * after, so SR(-x) = -SR(x) for the same draw, the Rounding.h law), clamped
+ * to [-negCap, posCap]. With |value| = M + (F + t) / 2^32, t in [0, 1):
+ *   HALF_AWAY: lift iff F >= 2^31 (an exact half lifts; t cannot reach the
+ *              next half);
+ *   SR:        lift iff u < F, u = the draw -- the shipped "lift iff u <
+ *              frac" law on a 32-bit grid. For a remainder of k <= 32 bits
+ *              F is the whole remainder, so this is EXACT and makes the same
+ *              decision as reblockBfpRawTensor's (u >> (32 - k)) < rem from
+ *              the same draw. Beyond 32 bits the probability is truncated to
+ *              F / 2^32: low by less than 2^-32, and a magnitude remainder
+ *              below 2^-32 of a grid step never lifts -- the documented
+ *              cutoff of the one-draw-per-element rule (arithmetic-bfp.md
+ *              §15).
+ * A negative value converts to magnitude form exactly, using sticky:
+ * |q + f| = (-q - 1) + (1 - f), and floor((1 - f) 2^32) is ~frac when a tail
+ * below frac exists, else 2^32 - frac. `u` is ignored under HALF_AWAY. */
+static inline int32_t bfpQrRound(bfpQr_t x, roundingMode_t rm, uint32_t u, uint32_t posCap,
+                                 uint32_t negCap) {
+    const bool neg = x.q < 0;
+    uint32_t mag;
+    uint32_t f;
+    if (!neg) {
+        mag = (uint32_t)x.q;
+        f = x.frac;
+    } else if (x.frac == 0 && !x.sticky) {
+        mag = 0u - (uint32_t)x.q;
+        f = 0;
+    } else {
+        mag = ~(uint32_t)x.q; /* -q - 1 */
+        f = x.sticky ? ~x.frac : 0u - x.frac;
+    }
+    const bool lift = rm == SR_HALF_AWAY ? u < f : f >= 0x80000000u;
+    const uint32_t cap = neg ? negCap : posCap;
+    uint32_t t = mag > cap ? cap : mag + (uint32_t)lift;
+    if (t > cap) {
+        t = cap;
+    }
+    return neg ? (int32_t)(0u - t) : (int32_t)t;
+}
+
+/*! The integer add-and-round: a * 2^-ka + b * 2^-kb summed EXACTLY on a
+ * working grid (quotient/remainder: the dropped bits of both alignments are
+ * kept), then re-gridded kd >= 0 steps coarser and rounded ONCE (bfpQrRound).
+ * The CALLER picks the working grid so that both aligned terms stay below
+ * 2^30 in magnitude (then the sum fits int32) and so that at most one term
+ * drops more than 32 bits -- true whenever the larger term sits within two
+ * bits of 2^30 on the grid, as the accumulate engine's E_c rule guarantees.
+ * Draws nothing itself: under SR the caller passes u, one draw per element. */
+static inline int32_t bfpAddAndRound(int32_t a, int ka, int32_t b, int kb, unsigned kd,
+                                     roundingMode_t rm, uint32_t u, uint32_t posCap,
+                                     uint32_t negCap) {
+    const bfpQr_t s = bfpQrAdd(bfpQrOfTerm(a, ka), bfpQrOfTerm(b, kb));
+    return bfpQrRound(bfpQrShr(s, kd), rm, u, posCap, negCap);
+}
+
 /*! Cursor for the integer-fold exponent pre-pass (Conv1d, AvgPool): the groups of `qC` that the
  * flat run [start, start + count) intersects, for runs visited in increasing `start` order (groups
  * are contiguous, so no division is needed). */

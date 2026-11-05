@@ -94,3 +94,21 @@ target_link_libraries(UnitTestTensorBool PRIVATE
         StorageApi
 )
 __register_target_as_unit_test(UnitTestTensorBool)
+# Integer training primitives (BfpKernelSupport.h, header-only) and the
+# integer rescale accumulate engine (TensorConversion): own target, so the
+# TensorConversion test file does not grow further.
+add_executable(UnitTestBfpIntegerAccumulate UnitTestBfpIntegerAccumulate.c)
+target_link_libraries(UnitTestBfpIntegerAccumulate PRIVATE
+        unity
+        TensorConversion
+        Tensor
+        Rounding
+        Quantization
+        StorageApi
+        RNG
+        Common
+        m
+        odt_test_death
+        odt_test_rng_pin
+)
+__register_target_as_unit_test(UnitTestBfpIntegerAccumulate)

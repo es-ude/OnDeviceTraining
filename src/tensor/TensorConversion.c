@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "BfpKernelSupport.h"
 #include "Common.h"
 #include "DTypes.h"
 #include "MinMax.h"
@@ -1589,49 +1590,22 @@ void requantBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t
 
 /* ---- Integer-only BFP forward: BFP_RAW -> BFP re-block, BFP_RAW -> FLOAT32 ---- */
 
-/* bitLength(0) = 0, bitLength(2^31) = 32. A binary search instead of
- * __builtin_clz: a core without CLZ (Cortex-M0+) would call libgcc for it. */
-static unsigned bitLength(uint32_t v) {
-    unsigned n = 0;
-    if (v >> 16) {
-        v >>= 16;
-        n += 16;
-    }
-    if (v >> 8) {
-        v >>= 8;
-        n += 8;
-    }
-    if (v >> 4) {
-        v >>= 4;
-        n += 4;
-    }
-    if (v >> 2) {
-        v >>= 2;
-        n += 2;
-    }
-    if (v >> 1) {
-        v >>= 1;
-        n += 1;
-    }
-    return n + (v != 0);
-}
-
 /* deriveBfpStoredExponent's rule in integer form: the smallest E with
  * absMax <= qMax * 2^E for a uint32 absmax under the raw exponent rawE. With
- * b = bitLength(absMax), s = b - (m - 1) gives absMax < 2^(m-1) * 2^s; since
+ * b = bfpBitLength32(absMax), s = b - (m - 1) gives absMax < 2^(m-1) * 2^s; since
  * qMax = 2^(m-1) - 1 is one below a power of two, the top of each octave
  * (absMax > qMax << s, s >= 1) needs one more; for s <= 0 that never
  * happens. Then the BFP D6 clamp to [0, cap]. *shiftOut = stored - bias -
  * rawE is the right shift (negative: left) from raw mantissa to stored code
  * The emit shift stored - bias - rawE differs from s exactly when a clamp
  * fired. */
-static uint8_t deriveBfpRawStoredExponent(uint32_t absMax, int16_t rawE, uint8_t mantissaBits,
+static uint8_t deriveBfpRawStoredExponent(uint32_t absMax, int rawE, uint8_t mantissaBits,
                                           int32_t bias, int cap) {
     if (absMax == 0) {
         return (uint8_t)bias; /* zero state, as the float authority */
     }
     const uint32_t qMax = (1u << (mantissaBits - 1)) - 1u;
-    int s = (int)bitLength(absMax) - (int)(mantissaBits - 1);
+    int s = (int)bfpBitLength32(absMax) - (int)(mantissaBits - 1);
     if (s > 0 && absMax > (qMax << s)) {
         s++;
     }
@@ -2667,6 +2641,246 @@ void scaleBfpTensorInPlace(tensor_t *t, float factor, rngStream_t *rs) {
      * walk itself -- lives in the shared walker. */
     size_t n = calcNumberOfElementsByTensor(t);
     bfpRescaleWalk(t, NULL, factor, n, "scaleBfpTensorInPlace", rs);
+}
+
+/* ---- Integer dynamic-rescale accumulate: BFP += BFP_RAW (arithmetic-bfp.md §15) ----
+ * Contract: TensorConversion.h, accumulateBfpRawIntoBfpRescale. Per target
+ * group g, with E_o = the old stored exponent - bias and E_r = rawE[g]:
+ *   pass 0: A_o, A_r = absmax of the old codes and of the raw mantissas;
+ *           E_c = max(E_o + bitlen(A_o), E_r + bitlen(A_r)) - 30, capped at
+ *           capE (a zero side has no top). Every aligned term is then below
+ *           2^30 on the grid 2^E_c, so their sum fits int32 -- the addition
+ *           bound, re-established on every call from the actual data.
+ *   pass 1: the sum per element on 2^E_c in quotient/remainder form (exact:
+ *           the term that sets E_c drops at most 2 bits, so at most one term
+ *           is sticky), rounded UP to the grid; the group absmax of those
+ *           gives the exponent by the integer rule, max'ed with E_c. Since
+ *           qMax * 2^E is a grid multiple for E >= E_c, the rounded-up
+ *           magnitude decides exactly like the exact sum would: E_d is the
+ *           exact rule's exponent of the true sum, floored at E_c, then the
+ *           D6 clamp. An all-zero sum (both sides zero, or exact
+ *           cancellation) is the zero state.
+ *   pass 2: per element the same exact sum, re-gridded E_d - E_c >= 0 steps
+ *           and rounded once by the target's mode (bfpQrRound), one draw per
+ *           element in element order under SR on every path; the fresh
+ *           exponent is published after the group's last element is read.
+ * Cap regime: E_c is capped at capE (= the largest stored exponent - bias),
+ * so E_d = E_c. The old term stays below 2^15 there (E_o <= capE), so a raw
+ * term at or beyond 2^30 on the grid -- the only one that could overflow --
+ * saturates the element with the raw's sign, exactly: |sum| > 2^30 - 2^15.
+ * Passes 0 and 1 run one group boundary ahead of pass 2, the window rule of
+ * bfpRescaleWalk (#421 U6), so qc->exponents keeps the OLD grid for every
+ * group pass 2 has not finished, and the per-group state lives in two fixed
+ * rings of ODT_RESCALE_FRESH_WINDOW slots. */
+#define BFP_INT_ACC_ZERO_GROUP INT32_MIN /* workE marker: every sum of the group is 0 */
+
+/* The raw term's left shift onto the working grid reaches 2^30 -- possible
+ * only in the cap regime (outside it, E_c >= E_r + bitlen(A_r) - 30). */
+static inline bool bfpRawTermSaturates(int32_t r, int kr) {
+    if (kr >= 0 || r == 0) {
+        return false;
+    }
+    const unsigned l = (unsigned)(-kr);
+    if (l >= 30u) {
+        return true;
+    }
+    const uint32_t mag = r < 0 ? 0u - (uint32_t)r : (uint32_t)r;
+    return mag >= (1u << (30u - l));
+}
+
+/* Passes 0 and 1 over [from, to): whole groups only (both ends are group
+ * boundaries or n), reads only. Reads restart at the 8-aligned offset below
+ * `from` (the unpack's byte-alignment contract); re-read elements are never
+ * re-absorbed. `mant` is the caller's chunk buffer (ODT_CONVERSION_CHUNK_ELEMS
+ * entries), borrowed: the scan runs before the emit unpacks into it. */
+static void bfpIntAccScan(const bfpQConfig_t *qc, const uint8_t *data, const int32_t *raw,
+                          const int16_t *rawE, size_t from, size_t to, size_t gsz, int cap,
+                          int32_t *workE, uint8_t *fresh, int32_t *mant) {
+    const int32_t bias = bfpExponentBias(qc);
+    const int capE = cap - (int)bias;
+    for (int pass = 0; pass < 2; pass++) {
+        size_t g = from / gsz; /* once per call; runs advance a cursor */
+        size_t gEnd = (g + 1) * gsz;
+        size_t slot = g % ODT_RESCALE_FRESH_WINDOW;
+        uint32_t ao = 0;
+        uint32_t ar = 0;
+        size_t pos = from;
+        while (pos < to) {
+            const size_t start = pos & ~(size_t)7;
+            const size_t take =
+                to - start < ODT_CONVERSION_CHUNK_ELEMS ? to - start : ODT_CONVERSION_CHUNK_ELEMS;
+            unpackSignExtendChunk(data, qc->mantissaBits, start, take, mant);
+            const size_t segEnd = start + take;
+            while (pos < segEnd) {
+                const size_t runEnd = gEnd < segEnd ? gEnd : segEnd;
+                const int eo = (int)qc->exponents[g] - (int)bias;
+                if (pass == 0) {
+                    for (size_t i = pos; i < runEnd; i++) {
+                        const int32_t o = mant[i - start];
+                        const uint32_t mo = o < 0 ? 0u - (uint32_t)o : (uint32_t)o;
+                        const uint32_t mr = raw[i] < 0 ? 0u - (uint32_t)raw[i] : (uint32_t)raw[i];
+                        ao = mo > ao ? mo : ao;
+                        ar = mr > ar ? mr : ar;
+                    }
+                    if (runEnd == gEnd) {
+                        if (ao == 0 && ar == 0) {
+                            workE[slot] = BFP_INT_ACC_ZERO_GROUP;
+                        } else {
+                            const int topOld = ao ? eo + (int)bfpBitLength32(ao) : INT32_MIN;
+                            const int topRaw =
+                                ar ? (int)rawE[g] + (int)bfpBitLength32(ar) : INT32_MIN;
+                            int ec = (topOld > topRaw ? topOld : topRaw) - 30;
+                            workE[slot] = ec > capE ? capE : ec;
+                        }
+                        ao = 0;
+                        ar = 0;
+                    }
+                } else if (workE[slot] != BFP_INT_ACC_ZERO_GROUP) {
+                    const int ec = workE[slot];
+                    const int ko = ec - eo;
+                    const int kr = ec - (int)rawE[g];
+                    for (size_t i = pos; i < runEnd; i++) {
+                        uint32_t mag;
+                        if (bfpRawTermSaturates(raw[i], kr)) {
+                            mag = UINT32_MAX; /* forces the cap, E_d = E_c = capE */
+                        } else {
+                            mag = bfpQrCeilMagnitude(bfpQrAdd(bfpQrOfTerm(mant[i - start], ko),
+                                                              bfpQrOfTerm(raw[i], kr)));
+                        }
+                        ao = mag > ao ? mag : ao; /* pass 1 reuses ao as the sum's absmax */
+                    }
+                    if (runEnd == gEnd) {
+                        if (ao == 0) {
+                            workE[slot] = BFP_INT_ACC_ZERO_GROUP; /* exact cancellation */
+                            fresh[slot] = (uint8_t)bias;
+                        } else {
+                            int stored =
+                                deriveBfpRawStoredExponent(ao, ec, qc->mantissaBits, bias, cap);
+                            if (stored < ec + (int)bias) {
+                                stored =
+                                    ec + (int)bias; /* E_d >= E_c; ec <= capE keeps it <= cap */
+                            }
+                            fresh[slot] = (uint8_t)stored;
+                        }
+                        ao = 0;
+                    }
+                } else if (runEnd == gEnd) {
+                    fresh[slot] = (uint8_t)bias; /* zero group: zero state */
+                }
+                if (runEnd == gEnd) {
+                    g++;
+                    gEnd += gsz;
+                    slot = slot + 1 == ODT_RESCALE_FRESH_WINDOW ? 0 : slot + 1;
+                }
+                pos = runEnd;
+            }
+        }
+    }
+}
+
+void accumulateBfpRawIntoBfpRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs) {
+    const char *what = "accumulateBfpRawIntoBfpRescale";
+    if (target->quantization->type != BFP || increment->quantization->type != BFP_RAW) {
+        PRINT_ERROR("%s: needs a BFP target and a BFP_RAW increment, got %s and %s", what,
+                    quantTypeToString(target->quantization->type),
+                    quantTypeToString(increment->quantization->type));
+        exit(1);
+    }
+    const size_t n = calcNumberOfElementsByTensor(target);
+    if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
+        PRINT_ERROR("%s: element-count mismatch", what);
+        exit(1);
+    }
+    rejectAliasedIncrement(target, increment, what);
+    bfpQConfig_t *qc = target->quantization->qConfig;
+    const bfpRawQConfig_t *rawQC = increment->quantization->qConfig;
+    validateBfpQConfigShape(qc, n);
+    validateBfpRawQConfigShape(rawQC, n, what);
+    if (rawQC->numGroups != qc->numGroups || rawQC->groupSize != qc->groupSize) {
+        PRINT_ERROR("%s: raw geometry {numGroups=%zu, groupSize=%zu} must equal the target's "
+                    "{%zu, %zu} (one raw exponent per TARGET group)",
+                    what, rawQC->numGroups, rawQC->groupSize, qc->numGroups, qc->groupSize);
+        exit(1);
+    }
+    if (n == 0) {
+        resetBfpGridToZeroState(qc); /* R7 */
+        return;
+    }
+    const roundingMode_t rm = qc->roundingMode;
+    if (rm == SR_HALF_AWAY && rs == NULL) {
+        PRINT_ERROR("%s: SR rounding without a stream", what);
+        exit(1);
+    }
+    const int32_t *raw = (const int32_t *)increment->data;
+    const int16_t *rawE = rawQC->exponents;
+    const int32_t bias = bfpExponentBias(qc);
+    int cap = (int)((1u << qc->exponentBits) - 1u);
+    if (cap > (int)bias + 127) {
+        cap = (int)bias + 127; /* largest stored exponent with a finite float scale */
+    }
+    const uint8_t m = qc->mantissaBits;
+    const uint32_t posCap = (1u << (m - 1)) - 1u;
+    const uint32_t negCap = 1u << (m - 1);
+    const size_t gsz = qc->groupSize == 0 ? n : qc->groupSize;
+    int32_t workE[ODT_RESCALE_FRESH_WINDOW];
+    uint8_t fresh[ODT_RESCALE_FRESH_WINDOW];
+    int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
+    int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
+    size_t scanned = 0;
+    size_t g = 0; /* emit cursor: group, its end, its ring slot -- no division per run */
+    size_t groupEnd = gsz;
+    size_t slot = 0;
+
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        const size_t count =
+            n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        const size_t chunkEnd = off + count;
+        size_t needed = ((chunkEnd - 1) / gsz + 1) * gsz;
+        if (needed > n) {
+            needed = n;
+        }
+        if (scanned < needed) {
+            bfpIntAccScan(qc, target->data, raw, rawE, scanned, needed, gsz, cap, workE, fresh,
+                          mant);
+            scanned = needed;
+        }
+        unpackSignExtendChunk(target->data, m, off, count, mant);
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            const size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            const int ec = workE[slot];
+            const uint8_t freshStored = fresh[slot];
+            if (ec == BFP_INT_ACC_ZERO_GROUP) {
+                for (size_t i = idx; i < runEnd; i++) {
+                    if (rm == SR_HALF_AWAY) {
+                        (void)rngNextU32(rs); /* exact zero: the draw is still consumed */
+                    }
+                    codes[i - off] = 0;
+                }
+            } else {
+                const int ko = ec - ((int)qc->exponents[g] - (int)bias); /* OLD, unpublished */
+                const int kr = ec - (int)rawE[g];
+                const unsigned kd = (unsigned)((int)freshStored - (int)bias - ec);
+                for (size_t i = idx; i < runEnd; i++) {
+                    const uint32_t u = rm == SR_HALF_AWAY ? rngNextU32(rs) : 0u;
+                    if (bfpRawTermSaturates(raw[i], kr)) {
+                        codes[i - off] = raw[i] < 0 ? -(int32_t)negCap : (int32_t)posCap;
+                    } else {
+                        codes[i - off] = bfpAddAndRound(mant[i - off], ko, raw[i], kr, kd, rm, u,
+                                                        posCap, negCap);
+                    }
+                }
+            }
+            if (runEnd == groupEnd) {
+                qc->exponents[g] = freshStored; /* every read of the old grid is done */
+                g++;
+                groupEnd += gsz;
+                slot = slot + 1 == ODT_RESCALE_FRESH_WINDOW ? 0 : slot + 1;
+            }
+            idx = runEnd;
+        }
+        packChunkGuarded(codes, count, target->data, m, off, what);
+    }
 }
 
 /* SYM_INT32 -> SYM_INT32 grad accumulate: reproduces addSymInt32TensorsInplace's

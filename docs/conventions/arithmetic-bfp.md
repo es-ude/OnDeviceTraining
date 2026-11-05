@@ -2108,3 +2108,84 @@ summation order and therefore the numbers.
 - **Unchanged:** biasGrad already walks like FLOAT32 (channel outer,
   batch, position); the Conv1dTransposed forward and its weightGrad keep the
   gather (§6); Linear keeps its GEMM.
+
+## 15. Integer training primitives: scalar, add-and-round, integer rescale accumulate
+
+The integer backward, gradient accumulation and optimizer (full-BFP training)
+build on three primitives. They are added first, unused by any layer; the
+rows below are the contract later steps rely on.
+
+**Scalar** (`bfpScalar_t {int32_t q; int16_t e;}`, `BfpKernelSupport.h`):
+value `q · 2^e` with a normalized significand `2^14 <= |q| <= 2^15 − 1`, or
+`{0, 0}`. A floating exponent, not one global Q15 grid, so a small learning
+rate keeps all 15 bits. `bfpScalarFromFloat` encodes once at configuration
+time (`frexpf`, significand rounded half away from zero, a round-up to
+`2^15` renormalizes; relative error `<= 2^-15`; exact for 0, 1, every power
+of two including subnormals; non-finite fails fast). `bfpScalarMulMant`:
+a 16-bit code times `q` is `<= 2^30 − 2^15` in magnitude, exact in `int32`.
+
+**Quotient/remainder form** (`bfpQr_t {q, frac, sticky}`): a value on a grid
+`2^G` as `q + (frac + t)/2^32`, `q` the floor quotient, `frac` the top 32
+bits of the remainder, `sticky = (t != 0)`. `bfpQrOfTerm` aligns a term
+(right shifts keep every dropped bit in `frac`/`sticky`, at any distance;
+left shifts are exact, the caller bounds them), `bfpQrAdd` adds two (exact
+when at most one is sticky), `bfpQrShr` re-grids coarser by any distance,
+exactly. Floors use `~(~v >> k)` for negative `v`, never a signed right
+shift.
+
+**Rounding** (`bfpQrRound`, `bfpAddAndRound`): on the magnitude, sign after
+(SR odd per draw, the `Rounding.h` law); a negative value converts exactly
+via `sticky` (`floor((1 − f)·2^32)` is `~frac` with a tail, `2^32 − frac`
+without). With `F` = the magnitude remainder's top 32 bits: HALF_AWAY lifts
+iff `F >= 2^31`; SR lifts iff `u < F` (one draw). For a remainder of at most
+32 bits this is exact and draw-for-draw the decision of `reblockBfpRawTensor`
+(`(u >> (32 − k)) < rem` ⇔ `u < rem · 2^(32 − k)`). **Cutoff:** beyond 32
+remainder bits the probability is truncated to `F/2^32` — low by less than
+`2^-32` — so a magnitude remainder below `2^-32` of a code step never lifts.
+That is the price of exactly one draw per element; an exact probability
+would need more random words. Unlike the re-block's `k >= 32` flush, nothing
+above the cutoff is lost, at any exponent gap. Note: the xorshift32 backend
+never draws `u = 0`, so in practice `F = 1` (a remainder in
+`[2^-32, 2^-31)`) does not lift either — the effective resolution is
+`2^-31`, a property of the RNG backend shared by every integer SR site.
+
+**Integer rescale accumulate** (`accumulateBfpRawIntoBfpRescale`,
+`TensorConversion.c`): BFP target `+=` BFP_RAW increment on the target's
+geometry, the integer replacement of `accumulateTensorIntoBfpRescale` for
+gradient accumulation (wired in by the backward steps). Per target group,
+`E_o` the old stored exponent minus bias, `E_r` the raw exponent:
+
+1. Working grid (addition bound): `A_o`, `A_r` = actual absmax of the old
+   codes and raw mantissas; `E_c = max(E_o + bitlen A_o, E_r + bitlen A_r) − 30`
+   (a zero side has no top). Every aligned term is then `< 2^30` on `2^E_c`,
+   so the `int32` sum cannot overflow; the bound is re-derived from the data
+   on every call (independent of the number of micro-batches). A fresh
+   accumulator (all old codes zero) never lets its stored exponent dominate.
+   The term that sets `E_c` drops at most 2 bits, so at most one term is
+   sticky and the sum is exact.
+2. Exponent from the SUM: the per-element sum rounded UP to `2^E_c`, group
+   absmax, the integer exponent rule (§13), floored at `E_c`, D6 clamp. As
+   `qMax · 2^E` is a grid multiple for `E >= E_c`, this is the exact rule's
+   exponent of the true sum, floored at `E_c`: cancellation down to
+   `~31 − m` binades below the operands gets its exact fresh exponent, a
+   sum cancelled further keeps `E_c` (codes below `2^(m−1)`, still SR-rounded
+   unbiased). An all-zero sum (zero sides or exact cancellation) is the zero
+   state; `n == 0` too (R7).
+3. Emit: the same exact sum re-gridded `E_d − E_c >= 0` steps (any
+   distance: the D6 flush regime SRs values far below the smallest step with
+   their probability), rounded once by the target config's `roundingMode`,
+   clamped to `[−2^(m−1), qMax]`; one draw per element in element order on
+   every path (zero, exact, saturated) under SR.
+4. Cap regime: `E_c` is capped at the largest storable exponent. The old
+   term then stays `<= 2^15` on the grid, so a raw term reaching `2^30`
+   there — the only one that could overflow — saturates its element with the
+   raw's sign, exactly (`|sum| > 2^30 − 2^15`); neighbours compute exactly.
+5. In place: passes 1–2 run one group boundary ahead of the emit (the #421 U6
+   window), the old exponent stays in the config until the group's last
+   element is read, per-group state lives in two fixed rings of
+   `ODT_RESCALE_FRESH_WINDOW` slots (≈1.3 KB). Three reads of the data per
+   call (absmax, sum absmax, emit); no float, no division in the element
+   loops, no `int64`.
+
+Fixed-grid accumulation stays a separate mode (it needs a whole-macro-batch
+bound, not a per-call one) and has no integer twin yet.

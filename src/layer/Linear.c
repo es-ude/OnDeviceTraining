@@ -185,7 +185,7 @@ void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output,
                              (bias != NULL && bias->quantization->type == FLOAT32) ? &stage : NULL},
                 /* Forward raw contract: only this arm emits BFP_RAW; the
                  * backward adapters (matmulBfpTensors) never set it. */
-                .bfpRawOut = true,
+                .bfpRawOut = BFP_RAW_FORWARD,
             },
             output);
         return;

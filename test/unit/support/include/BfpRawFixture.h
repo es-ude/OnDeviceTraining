@@ -2,7 +2,8 @@
 #define ODT_TEST_BFP_RAW_FIXTURE_H
 
 /*
- * Stack fixtures for the integer-only BFP forward kernels (test-only).
+ * Stack fixtures for the integer-only BFP kernels (test-only): the forward
+ * and the Conv1d dx scatter.
  *
  * A kernel under ARITH_BFP sees its operands in the funnel's UNPACKED scratch
  * form (int32 codes under a live bfpQConfig_t) and, when the op opts in

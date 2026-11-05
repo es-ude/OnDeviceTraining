@@ -437,7 +437,7 @@ void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
                 .mode = OUT_WRITE,
                 .auxOut = cfg->argmaxIndices,
                 .bfpStage = {input->quantization->type == FLOAT32 ? &stage : NULL, NULL, NULL},
-                .bfpRawOut = true, /* the integer forward raw; the backward keeps FLOAT32 */
+                .bfpRawOut = BFP_RAW_FORWARD, /* the integer forward raw */
             },
             output);
         return;

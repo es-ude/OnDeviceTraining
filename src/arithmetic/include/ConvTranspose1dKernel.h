@@ -108,9 +108,11 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
 
 /*! BFP epic PR2 (Task 5, D9): output-centric (gather) ConvT1d forward under
  *  ARITH_BFP -- every output element is a dot product over its contributors
- *  (convTranspose1dTapsAt), restoring the int32 block-partial contract the
- *  scatter formulation cannot offer (consecutive scatter products land in
- *  DIFFERENT output elements); the SYM scatter cores above are untouched.
+ *  (convTranspose1dTapsAt), giving the int32 block-partial contract
+ *  (same-exponent segments) that a scatter cannot (consecutive scatter
+ *  products land in DIFFERENT output elements; the Conv1d dx scatter below
+ *  aligns every product on its own instead); the SYM scatter cores above
+ *  are untouched.
  *
  *  Same operand contract as matmulBfpTensors / conv1dKernelBfp: input/weight/
  *  bias arrive in the funnel's UNPACKED-BFP scratch form (->data int32
@@ -155,20 +157,30 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
  *  bfpFoldGuardBits over N = in_channels/groups * (taps that can land on one
  *  output position: k, k' with (k - k') * dilation a multiple of stride). So
  *  no accumulator can leave int32 whatever the operands; every product is its
- *  own one-product segment. The accumulators live in `output`'s buffer; at
- *  the end each becomes the float acc * 2^E_acc in place. That float output
- *  is a bridge: the backward still stores FLOAT32 grads.
+ *  own one-product segment. The accumulators live in `output`'s buffer.
+ *
+ *  Output: the BFP_RAW (opSpec_t.bfpRawOut = BFP_RAW_BACKWARD_DX) on the dx
+ *  wire's geometry. Each raw target group's exponent is the max E_acc over
+ *  the output rows it covers (a group may straddle channels, conv groups and
+ *  the batch); a sum on a row with a lower E_acc is re-gridded to it by ONE
+ *  HALF_AWAY right shift of the finished sum (bfpAlignPartial; a shift only
+ *  shrinks, so the headroom proof holds). Error per element <= N/2 units of
+ *  its row's 2^E_acc plus 1/2 unit of the group's 2^E_t. Every group's
+ *  exponent is written, the empty output included. Integer only: rows and
+ *  groups advance with cursors, no division. The epilogue re-blocks the raw
+ *  into the BFP dx wire by the op's rounding mode (arithmetic-bfp.md §14).
  *
  *  Operands as convTranspose1dKernelBfpGather (unpacked BFP scratch), no bias
- *  (the Conv1d dx has none); output FLOAT32. Geometry resolves through the
- *  same helper as the other ConvT kernels.
+ *  (the Conv1d dx has none). Geometry resolves through the same helper as
+ *  the other ConvT kernels.
  *
  *  @param input          [batch, in_channels, input_length], BFP scratch
  *  @param weight         [in_channels, out_channels/groups, kernel_size], BFP scratch
  *  @param kernel         kernel_t (paddingType VALID or SAME/EXPLICIT adjoint)
  *  @param groups         must divide in_channels and out_channels
  *  @param outputPadding  trailing zeros at output end (VALID only); 0 for SAME
- *  @param output         [batch, out_channels, output_length], FLOAT32, pre-allocated
+ *  @param output         [batch, out_channels, output_length], BFP_RAW with a
+ *                        valid bfpRawQConfig_t, pre-allocated
  */
 void convTranspose1dKernelBfpScatter(tensor_t const *input, tensor_t const *weight,
                                      kernel_t const *kernel, size_t groups, size_t outputPadding,

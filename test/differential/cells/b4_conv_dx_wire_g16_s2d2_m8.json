@@ -1,0 +1,64 @@
+{
+  "name": "b4_conv_dx_wire_g16_s2d2_m8",
+  "description": "B4 Conv1d dx into a BFP wire (m6, groupSize 16): stride 2, dilation 2, EXPLICIT padding 2, convGroups 2, batch 2, a +-12 binade loss spread; raw groups straddle rows, conv groups and the batch (section 14 re-grid), then the section-13 re-block.",
+  "family": "bfp_gemm",
+  "op": "conv1d",
+  "direction": "dx",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "geometry": {
+    "kernelSize": 3,
+    "padding": "EXPLICIT",
+    "paddingAmount": 2,
+    "stride": 2,
+    "dilation": 2,
+    "groups": 2
+  },
+  "output": {
+    "dtype": "BFP",
+    "m": 6,
+    "e": 8,
+    "groupSize": 16
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 5501,
+    "batch": 2,
+    "cin": 4,
+    "length": 12,
+    "cout": 4,
+    "kernelSize": 3,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 6,
+      "absmax": 0.25,
+      "expSpread": 6
+    },
+    "loss": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 4,
+      "absmax": 1.0,
+      "expSpread": 12
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  }
+}

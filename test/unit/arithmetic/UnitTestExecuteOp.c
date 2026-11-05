@@ -2960,7 +2960,7 @@ void testExecuteOpBfpRawOutReblocksOnTargetGeometry(void) {
             .nInputs = 1,
             .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
             .mode = OUT_WRITE,
-            .bfpRawOut = true,
+            .bfpRawOut = BFP_RAW_FORWARD,
         },
         &dst);
 
@@ -3012,7 +3012,7 @@ void testExecuteOpBfpRawOutFloat32TargetDequantsPerTensorRaw(void) {
             .nInputs = 1,
             .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
             .mode = OUT_WRITE,
-            .bfpRawOut = true,
+            .bfpRawOut = BFP_RAW_FORWARD,
         },
         &dst);
 
@@ -3067,7 +3067,7 @@ void testExecuteOpBfpRawOutRoundsByTheOpAndRestoresTheSlot(void) {
             .nInputs = 1,
             .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
             .mode = OUT_WRITE,
-            .bfpRawOut = true,
+            .bfpRawOut = BFP_RAW_FORWARD,
         },
         &dst);
 
@@ -3092,14 +3092,14 @@ void testExecuteOpBfpRawOutUnderFloatArithmeticDies(void) {
                 .nInputs = 1,
                 .arithmetic = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY},
                 .mode = OUT_WRITE,
-                .bfpRawOut = true,
+                .bfpRawOut = BFP_RAW_FORWARD,
             },
             out);
     });
 }
 
-static void bfpRawOutIntoTargetBody(outputMode_t mode, quantization_t *targetQ,
-                                    uint8_t *targetData) {
+static void bfpRawOutIntoTargetBody(bfpRawContract_t contract, outputMode_t mode,
+                                    quantization_t *targetQ, uint8_t *targetData) {
     size_t n = 4;
     size_t dims[] = {4};
     size_t order[] = {0};
@@ -3126,12 +3126,12 @@ static void bfpRawOutIntoTargetBody(outputMode_t mode, quantization_t *targetQ,
             .nInputs = 1,
             .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
             .mode = mode,
-            .bfpRawOut = true,
+            .bfpRawOut = contract,
         },
         &dst);
 }
 
-static void bfpRawOutAccModeBody(void) {
+static void bfpRawOutAccModeBody(bfpRawContract_t contract) {
     uint8_t outExponents[1] = {127};
     bfpQConfig_t outQC = {.exponents = outExponents,
                           .numGroups = 1,
@@ -3142,11 +3142,36 @@ static void bfpRawOutAccModeBody(void) {
     quantization_t outQ;
     initBfpQuantization(&outQC, &outQ);
     uint8_t outData[2] = {0, 0};
-    bfpRawOutIntoTargetBody(OUT_ACC_DYNAMIC_RESCALE, &outQ, outData);
+    bfpRawOutIntoTargetBody(contract, OUT_ACC_DYNAMIC_RESCALE, &outQ, outData);
 }
 
 void testExecuteOpBfpRawOutWithAccModeDies(void) {
-    ASSERT_EXITS_WITH_FAILURE(bfpRawOutAccModeBody());
+    ASSERT_EXITS_WITH_FAILURE(bfpRawOutAccModeBody(BFP_RAW_FORWARD));
+}
+
+/* The dx contract is OUT_WRITE only too: accumulating grads keep the FLOAT32
+ * raw until they get their own contract. */
+void testExecuteOpBfpRawBackwardDxWithAccModeDies(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "bfpRawOut needs the OUT_WRITE epilogue",
+                             bfpRawOutAccModeBody(BFP_RAW_BACKWARD_DX));
+}
+
+static void bfpRawOutUnknownContractBody(void) {
+    uint8_t outExponents[1] = {127};
+    bfpQConfig_t outQC = {.exponents = outExponents,
+                          .numGroups = 1,
+                          .groupSize = 0,
+                          .roundingMode = HALF_AWAY,
+                          .mantissaBits = 4,
+                          .exponentBits = 8};
+    quantization_t outQ;
+    initBfpQuantization(&outQC, &outQ);
+    uint8_t outData[2] = {0, 0};
+    bfpRawOutIntoTargetBody((bfpRawContract_t)7, OUT_WRITE, &outQ, outData);
+}
+
+void testExecuteOpBfpRawOutUnknownContractDies(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "unknown bfpRawOut contract", bfpRawOutUnknownContractBody());
 }
 
 static void bfpRawOutSymInt32TargetBody(void) {
@@ -3155,7 +3180,7 @@ static void bfpRawOutSymInt32TargetBody(void) {
     quantization_t outQ;
     initSymInt32Quantization(&outQC, &outQ);
     int32_t outData[4] = {0, 0, 0, 0};
-    bfpRawOutIntoTargetBody(OUT_WRITE, &outQ, (uint8_t *)outData);
+    bfpRawOutIntoTargetBody(BFP_RAW_FORWARD, OUT_WRITE, &outQ, (uint8_t *)outData);
 }
 
 void testExecuteOpBfpRawOutIntoSymInt32TargetDies(void) {
@@ -3166,9 +3191,9 @@ void testExecuteOpBfpRawOutIntoSymInt32TargetDies(void) {
 
 /* One FLOAT32-stored operand staged per-tensor at m=4 ({100,-50,25,0} ->
  * exponent 131, codes {6,-3,2,0}) under ARITH_BFP, OUT_WRITE into `dst`.
- * bfpRawOut selects the forward contract (BFP_RAW kernel) or the backward
- * one (FLOAT32 raw). */
-static void floatStagedOpBody(bool bfpRawOut, tensor_t *dst) {
+ * `contract` selects the raw: BFP_RAW (the probe kernel) under either raw
+ * contract, the FLOAT32 raw (the operand-capturing kernel) under NONE. */
+static void floatStagedOpBody(bfpRawContract_t contract, tensor_t *dst) {
     tensor_t *in = buildFloat(4, (float[]){100.f, -50.f, 25.f, 0.f});
     bfpQConfig_t stage = {.exponents = NULL,
                           .numGroups = 1,
@@ -3181,13 +3206,13 @@ static void floatStagedOpBody(bool bfpRawOut, tensor_t *dst) {
     g_bfpCapCodes[0] = 0;
     executeOp(
         &(opSpec_t){
-            .kernel = bfpRawOut ? writeKnownRawKernel : captureBfpOperandKernel,
+            .kernel = contract != BFP_RAW_NONE ? writeKnownRawKernel : captureBfpOperandKernel,
             .inputs = (tensor_t *[]){in},
             .nInputs = 1,
             .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
             .mode = OUT_WRITE,
             .bfpStage = {&stage},
-            .bfpRawOut = bfpRawOut,
+            .bfpRawOut = contract,
         },
         dst);
     freeTensor(in);
@@ -3215,7 +3240,7 @@ static void forwardFloatStagingIntoBfpWireBody(void) {
     quantization_t q;
     tensor_t dst;
     bfpWireTarget(&dst, &shape, &q, &qc, exponents, data);
-    floatStagedOpBody(true, &dst);
+    floatStagedOpBody(BFP_RAW_FORWARD, &dst);
 }
 
 /* The integer forward (bfpRawOut) writing a BFP wire must find every operand
@@ -3228,7 +3253,7 @@ void testExecuteOpForwardFloatStagingIntoBfpWireDies(void) {
 /* FLOAT32 wires (the HAR arm A): the forward still stages its float operand. */
 void testExecuteOpForwardFloatStagingIntoFloat32WireStillStages(void) {
     tensor_t *out = buildFloat(4, (float[]){9.f, 9.f, 9.f, 9.f});
-    floatStagedOpBody(true, out);
+    floatStagedOpBody(BFP_RAW_FORWARD, out);
     float got[4];
     memcpy(got, out->data, sizeof got);
     freeTensor(out);
@@ -3236,7 +3261,8 @@ void testExecuteOpForwardFloatStagingIntoFloat32WireStillStages(void) {
     TEST_ASSERT_EQUAL_MEMORY(expected, got, sizeof expected);
 }
 
-/* The backward (no bfpRawOut) keeps staging FLOAT32 operands into BFP wires. */
+/* A backward op without a raw contract keeps staging FLOAT32 operands into
+ * BFP wires. */
 void testExecuteOpBackwardFloatStagingIntoBfpWireStillStages(void) {
     size_t dims[] = {4};
     size_t order[] = {0};
@@ -3247,8 +3273,46 @@ void testExecuteOpBackwardFloatStagingIntoBfpWireStillStages(void) {
     quantization_t q;
     tensor_t dst;
     bfpWireTarget(&dst, &shape, &q, &qc, exponents, data);
-    floatStagedOpBody(false, &dst);
+    floatStagedOpBody(BFP_RAW_NONE, &dst);
     TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){6, -3, 2, 0}), g_bfpCapCodes, 4);
+}
+
+/* The dx contract (Conv1d dx): the kernel gets a BFP_RAW on the wire's
+ * geometry, a FLOAT32-stored operand still stages (the forward-only ban does
+ * not apply), and the epilogue is the integer re-block -- {5,-7,0,3} * 2^-3
+ * at m = 4: absmax 7 fits qMax 7 with s = 0, so stored = -3 + bias = 124 and
+ * the codes pass unchanged. */
+void testExecuteOpBackwardDxRawStagesFloatAndReblocksIntoBfpWire(void) {
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    uint8_t exponents[1] = {9};
+    uint8_t data[2];
+    bfpQConfig_t qc;
+    quantization_t q;
+    tensor_t dst;
+    bfpWireTarget(&dst, &shape, &q, &qc, exponents, data);
+    g_rawCapQType = -1;
+    floatStagedOpBody(BFP_RAW_BACKWARD_DX, &dst);
+    TEST_ASSERT_EQUAL_INT(BFP_RAW, g_rawCapQType);
+    TEST_ASSERT_EQUAL_size_t(1, g_rawCapNumGroups);
+    TEST_ASSERT_EQUAL_UINT8(124, exponents[0]);
+    int32_t mant[4];
+    unpackSignExtend(dst.data, 4, 0, mant, 4);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){5, -7, 0, 3}), mant, 4);
+}
+
+/* Into a FLOAT32 dx target the dx raw is per tensor and dequantized. */
+void testExecuteOpBackwardDxRawIntoFloat32TargetDequants(void) {
+    tensor_t *out = buildFloat(4, (float[]){9.f, 9.f, 9.f, 9.f});
+    g_rawCapNumGroups = 99;
+    floatStagedOpBody(BFP_RAW_BACKWARD_DX, out);
+    float got[4];
+    memcpy(got, out->data, sizeof got);
+    freeTensor(out);
+    TEST_ASSERT_EQUAL_size_t(1, g_rawCapNumGroups);
+    float expected[4] = {0.625f, -0.875f, 0.f, 0.375f};
+    TEST_ASSERT_EQUAL_MEMORY(expected, got, sizeof expected);
 }
 
 int main(void) {
@@ -3318,6 +3382,10 @@ int main(void) {
     RUN_TEST(testExecuteOpForwardFloatStagingIntoBfpWireDies);
     RUN_TEST(testExecuteOpForwardFloatStagingIntoFloat32WireStillStages);
     RUN_TEST(testExecuteOpBackwardFloatStagingIntoBfpWireStillStages);
+    RUN_TEST(testExecuteOpBackwardDxRawStagesFloatAndReblocksIntoBfpWire);
+    RUN_TEST(testExecuteOpBackwardDxRawIntoFloat32TargetDequants);
+    RUN_TEST(testExecuteOpBfpRawBackwardDxWithAccModeDies);
+    RUN_TEST(testExecuteOpBfpRawOutUnknownContractDies);
     RUN_TEST(testExecuteConvertHandsTheStreamToTheCellOnEveryRoute);
     RUN_TEST(testExecuteOpOpensTheStageAndKernelStreamsFromTheOpKey);
     RUN_TEST(testExecuteOpOpensTheOutStreamFromTheOpKey);

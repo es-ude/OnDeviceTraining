@@ -233,7 +233,7 @@ void conv1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const laye
                              (biasTensor != NULL && biasTensor->quantization->type == FLOAT32)
                                  ? &stage
                                  : NULL},
-                .bfpRawOut = true, /* the integer forward raw; backward arms keep FLOAT32 */
+                .bfpRawOut = BFP_RAW_FORWARD, /* the integer forward raw */
             },
             output);
         break;
@@ -983,7 +983,7 @@ static void propLossKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
     }
 }
 
-/* dx on the FLOAT32 scatter loop with integer accumulators
+/* dx on the FLOAT32 scatter loop with integer accumulators into the BFP_RAW
  * (convTranspose1dKernelBfpScatter) -- same {cfg, groupedWeight}
  * ctx wrapper as the other dx adapters, groupedWeight always NULL for BFP
  * (symGroupedWeightOrNull returns NULL for the BFP dtype). */
@@ -1167,6 +1167,10 @@ void conv1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad, 
                      * staged. */
                     .bfpStage = {lossGrad->quantization->type == FLOAT32 ? &stage : NULL, NULL,
                                  NULL},
+                    /* integer dx end to end: the kernel emits the BFP_RAW,
+                     * the epilogue re-blocks it into the dx wire by the op's
+                     * mode (arithmetic-bfp.md §14) */
+                    .bfpRawOut = BFP_RAW_BACKWARD_DX,
                 },
                 propLoss);
             break;

@@ -495,7 +495,8 @@ silent wrong arithmetic, not a crash.
   orientation-agnostic GEMM the forward and `weightGrad` both call, with
   `weights` as the second operand instead of the forward input.
 - **BFP-stored operands entering any backward op go through the EXACT SAME
-  fold contract as the forward (§5.3), never a re-quantize.** Every operand
+  fold contract as the forward (§5.3), never a re-quantize** — except Conv1d
+  `dx` and `weightGrad`, which align every product on its own (§14). Every operand
   is looked up per-element (`bfpGroupOf`); the running `int32` partial folds
   into the `float32` accumulator via a lossless `ldexpf` power-of-two shift
   on ANY group-boundary crossing (either operand) and once more at the tail
@@ -1798,7 +1799,8 @@ D7 made every BFP kernel emit a FLOAT32 raw that the OUT_WRITE epilogue
 re-packed with float (per element `fdiv` + `roundf` / float SR, per group
 `frexpf`) — on a core without an FPU that pack alone costs more than the
 integer MACs it follows. This section records the integer replacement for the
-FORWARD path (2026-11-04). The backward keeps D7's FLOAT32 raw unchanged.
+FORWARD path (2026-11-04). The backward keeps D7's FLOAT32 raw, except the
+Conv1d dx (§14, `BFP_RAW_BACKWARD_DX`, 2026-11-05).
 
 **The raw.** `qtype_t BFP_RAW` with `bfpRawQConfig_t {int16_t *exponents;
 numGroups; groupSize}` (`Quantization.h`): int32 mantissas in the tensor data
@@ -1808,14 +1810,17 @@ exponents plus a fold guard, which exceeds int8). It is transient by design:
 it exists on the funnel's stack for one op, is never storage, never
 serialized, copied or cloned, and every other dtype switch rejects it; the
 enum value is appended last so stored tags stay stable. An op opts in per
-call with `opSpec_t.bfpRawOut` (`ExecuteOp.h`): `ARITH_BFP` and `OUT_WRITE`
-only, raw geometry copied from the target (a BFP target's
+call with `opSpec_t.bfpRawOut` (`ExecuteOp.h`, `bfpRawContract_t`):
+`BFP_RAW_FORWARD` for the integer forward, `BFP_RAW_BACKWARD_DX` for a
+backward op writing a dx wire (the Conv1d dx, §14). Both are `ARITH_BFP` and
+`OUT_WRITE` only, raw geometry copied from the target (a BFP target's
 `{numGroups, groupSize}`; a FLOAT32 target has no groups, so `{1,0}` — one
-exponent over the whole output); any other target dtype, arithmetic type or
-epilogue fails fast. The explicit flag is the "forward raw contract": the
-Linear/Softmax backward adapters that share forward kernel code never switch
-raw format by accident, because they never set it. A kernel that sets it
-MUST write every group's exponent.
+exponent over the whole output); any other target dtype, arithmetic type,
+epilogue or contract value fails fast. The explicit per-op value is the raw
+contract: the Linear/Softmax backward adapters that share forward kernel
+code never switch raw format by accident, because they leave it
+`BFP_RAW_NONE`. A kernel that is given a `BFP_RAW` MUST write every group's
+exponent.
 
 **The re-block** (`conversionMatrix[BFP_RAW][BFP]`, `reblockBfpRawTensor`,
 `TensorConversion.c`), per target group:
@@ -2052,7 +2057,8 @@ first BFP wire, rounded by the wire template's own mode); after it, every
 operand of an integer forward op is BFP-stored. The funnel enforces it: an
 op with `bfpRawOut` writing a BFP target fails fast on a FLOAT32-stored
 operand instead of staging it (`ExecuteOp.c`, the `ARITH_BFP` prologue).
-`bfpRawOut` is the forward marker (every backward op leaves it false), and the
+`bfpRawOut == BFP_RAW_FORWARD` is the forward marker (backward ops leave it
+`BFP_RAW_NONE` or set `BFP_RAW_BACKWARD_DX`, which keeps staging), and the
 target dtype is the wire marker, so the rule leaves two cases staging as
 before: FLOAT32 wires (the HAR arm A, `BFP_WIRE_BLOCK=float`: forward targets
 are FLOAT32) and every backward op. Decision 1's per-tensor staging is
@@ -2101,10 +2107,40 @@ summation order and therefore the numbers.
   exact left shift, or a HALF_AWAY right shift (independent of the op's
   `roundingMode`, as in the forward fold). Rounding error ≤ ½·2^E_acc per
   product.
-- **Output (bridge):** the backward still stores FLOAT32 grads, so each
-  accumulator becomes `float(acc) · 2^E_acc` in place (`bfpLdexpInt32`; the
-  cast rounds to nearest even above 2^24, §7). An integer gradient store
-  replaces this bridge.
+- **dx output: the raw, integer end to end (2026-11-05).** The dx op sets
+  `opSpec_t.bfpRawOut = BFP_RAW_BACKWARD_DX` (§13), so the kernel writes a
+  `BFP_RAW` on the dx wire's geometry. The scatter keeps its per-(batch,
+  conv group) `E_acc`; a post-pass (O(outputs), cursors, no division)
+  replaces the float bridge:
+  - each raw target group's exponent `E_t` = the max `E_acc` over the dx
+    rows it covers (§13 item 2's rule: a group may straddle channels, conv
+    groups and the batch);
+  - a sum on a lower row is re-gridded once: `bfpAlignPartial(acc, E_t −
+    E_acc)`, a HALF_AWAY right shift of the FINISHED sum (it only shrinks;
+    the headroom proof is untouched). Error per element `≤ N/2 · 2^E_acc +
+    ½ · 2^E_t` — never worse than aligning every product to `E_t` directly
+    (`N/2 · 2^E_t`), and without a per-MAC destination-group lookup.
+  At m = 8 the guard is negative (`g ≈ −9…−16`), so every sum carries `−g`
+  zero low bits on its own grid and only gaps beyond `−g` binades round.
+  HAR (micro-batch 1, conv groups 1) has ONE `E_acc` per call: every shift
+  is 0. A FLOAT32 dx target gets the `{1,0}` raw (§13): one `E_t` over the
+  whole dx, then the exact `ldexpf` dequant (arm A, `BFP_WIRE_BLOCK=float`;
+  with batch or conv groups > 1 the lower rows lose low bits there).
+- **dx wire: the integer re-block, by the op's mode.** The OUT_WRITE
+  epilogue is `conversionMatrix[BFP_RAW][BFP]` (§13) under the #282 swap, so
+  it rounds by `propLossMath.roundingMode` — SR for the HAR proof config
+  (training-side seam: dx packs are SR, forward wires HALF_AWAY). Under SR it
+  draws ONE `rngNextU32` per element in element order from the op's
+  `RNG_TAG_OUT` stream (`rngFold(op key, RNG_TAG_OUT, 0)`, op key =
+  `CONV1D_OP_PROP_LOSS` under `RNG_TAG_BACKWARD`) — the stream and position
+  the float re-pack it replaces drew from, so pinned-draw tests keep their
+  positions. Where the float path was exact (`|acc| < 2^24`, `k <= 24`) the
+  codes are the float re-pack's bit for bit; above `2^24` the integer form
+  is the exact one (§7) and native BFP numbers change by design.
+- **weightGrad output (bridge):** the backward still stores FLOAT32 grads,
+  so each weightGrad accumulator becomes `float(acc) · 2^E_acc` in place
+  (`bfpLdexpInt32`; the cast rounds to nearest even above 2^24, §7). An
+  integer gradient store replaces this bridge.
 - **Unchanged:** biasGrad already walks like FLOAT32 (channel outer,
   batch, position); the Conv1dTransposed forward and its weightGrad keep the
   gather (§6); Linear keeps its GEMM.

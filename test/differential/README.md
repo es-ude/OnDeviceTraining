@@ -143,7 +143,7 @@ Linear (`[B, outF, 1]`; dx `[B, inF, 1]`; weightGrad `[1, outF, inF]`).
 `cells/*.json`, one op configuration each (op, direction, tiers, arithmetic,
 geometry, operand/output widths, fixture, expectation, optional gold name).
 
-The matrix at a glance (151 cells; a cell name's prefix is its family):
+The matrix at a glance (154 cells; a cell name's prefix is its family):
 
 | prefix | what | cells | tiers | operand widths |
 |---|---|---|---|---|
@@ -156,7 +156,7 @@ The matrix at a glance (151 cells; a cell name's prefix is its family):
 | `b1`, `b1x` | FLOAT32 -> BFP pack | 40 | convert | m 2..16, e 2/4/8, per-tensor and grouped |
 | `b2`, `b2s`, `b2x` | BFP forward (Linear, Conv1d, ConvT1d) | 17 | kernel, layer | m 4..16 mixed, per-tensor and grouped |
 | `b3` | BFP forward / dx onto a BFP wire | 5 | kernel, layer | m 8 / 12 |
-| `b4`, `b4x` | BFP native backward (Linear, Conv1d, ConvT1d) | 16 | kernel (Linear), layer | m 6..16 |
+| `b4`, `b4x` | BFP native backward (Linear, Conv1d, ConvT1d; Conv1d dx also onto a BFP wire) | 19 | kernel (Linear), layer | m 6..16 |
 | `b5` | fake-quant twin: ARITH_FLOAT32 over BFP storage | 9 | layer | m 12, grouped |
 
 The bounds every row relies on are the ones of "Leg B bounds" below plus the
@@ -317,6 +317,16 @@ directly (Conv1d); `linear_grid` / `full_scale` (Linear, above); `convert`
   stride / dilation / outputPadding, per-tensor and grouped operands. Leg B
   = float64 autograd on the dequantized operands within the fold bound.
   `b4x_lin_dw_abort_sum_m16_b2` is the sum-headroom control (fits).
+  Conv1d dx is integer end to end (arithmetic-bfp.md section 14,
+  `bfp_ref.conv1d_scatter_int_backward` with the dx wire's raw geometry):
+  the predicted `BFP_RAW` (each sum re-gridded to its raw group's max
+  E_acc) is dequantized for a FLOAT32 dx wire (one E_acc over the whole dx)
+  and re-blocked by `bfp_ref.reblock_raw` for a BFP one, both exact.
+  `b4_conv_dx_wire_*` put it onto BFP wires: groupSize 16 straddling rows,
+  conv groups and the batch (stride 2, dilation 2, EXPLICIT padding);
+  groupSize 9 straddling batches of far-apart loss exponents; per-tensor
+  m16 (positive guard). HALF_AWAY only: the driver passes no key, and the SR
+  re-block is pinned by the unit tests.
 - `b5_fq_*` -- B5, the fake-quant twin: the layer under `ARITH_FLOAT32`
   with BFP-stored weights / bias / loss (m12, grouped) against the same
   layer with every BFP operand replaced by its exact float32
@@ -499,7 +509,13 @@ reported alongside (`ratio_rigorous`) and never needed.
     weightGrad on integer accumulators: `+ 1` on the aligned product in
     `convTranspose1dKernelBfpScatter` -> exactly the three `b4_conv_dx_*`
     rows MISMATCH; the same in `weightGradKernelBfp` of `Conv1d.c` -> exactly
-    the four `b4_conv_dw_*` weightGrad rows (biasGrad rows green).
+    the four `b4_conv_dw_*` weightGrad rows (biasGrad rows green). The dx
+    raw (section 14): skipping the re-grid of lower rows -> five of the six
+    `b4_conv_dx*` rows MISMATCH (`b4_conv_dx_pt_valid`, batch rows of one
+    E_acc, stays green as it must); a raw group taking its FIRST row's
+    E_acc instead of the max -> `b4_conv_dx_spread_s2_m8` MISMATCH (in the
+    wire cells every straddling group's first row is its max; the unit
+    test `...RawGroupStraddlingBatchesTakesTheMaxExponent` covers it).
     B4 biasGrad: `linearCalcBiasGradsBfp`'s tail fold shift + 1
     -> only the biasGrad rows MISMATCH. B4 weightGrad orientation: removing
     the transpose view in `linearCalcWeightGradsBfp` -> the kernel aborts on

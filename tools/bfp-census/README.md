@@ -14,11 +14,15 @@ cmake --preset arm_cross_m0plus            # needs arm-none-eabi-gcc on PATH
 cmake --build --preset arm_cross_m0plus
 uv run tools/bfp-census/census.py --strict -v                                   # the HAR gate
 uv run tools/bfp-census/census.py --roots tools/bfp-census/forward_roots.txt    # every BFP forward kernel, report
+uv run tools/bfp-census/census.py --strict --roots tools/bfp-census/har_backward_roots.txt  # the integer HAR backward so far
 uv run tools/bfp-census/census.py --self-test
 ```
 
 - `har_forward_roots.txt` (default): the HAR classifier's integer forward, the gate set.
   `forward_roots.txt`: every BFP forward kernel, including ops not yet integer (report).
+  `har_backward_roots.txt`: the HAR backward paths that are integer so far (today the
+  Conv1d dx and its dx-wire re-block), gated with `--strict` like the forward; a path
+  joins it when it turns integer.
   Format `<source.c> <function>`: the census follows direct calls from the root, within
   the object and across objects. `<source.c> <function> self`: only the function's own
   call sites count and nothing is followed -- for dispatchers whose callees span every

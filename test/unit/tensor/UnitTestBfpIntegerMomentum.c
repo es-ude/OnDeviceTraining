@@ -322,6 +322,84 @@ void testMomentumMatchesExactReferenceOnRandomStates(void) {
     }
 }
 
+/* A per-tensor gradient on a GROUPED state (HAR's per-tensor BFP grads under
+ * per-channel state would look like this): every state group reads the
+ * gradient under its one exponent. The reference sees that exponent
+ * replicated per state group, which is the same value; the engine sees the
+ * per-tensor {1, 0} gradient. Groups straddle the 256-element chunks; the
+ * state exponents spread so some groups sit above and some below the
+ * gradient's, including the cap and floor of a narrow state exponent. */
+static void assertMomentumPerTensorGradMatchesReference(const moGeo_t *geo, const int32_t *v,
+                                                        const uint8_t *vs, const int32_t *g,
+                                                        uint8_t gStored, bfpScalar_t mu,
+                                                        roundingMode_t rm, uint32_t seed) {
+    static int32_t expCodes[MO_MAX_N];
+    static int32_t gotCodes[MO_MAX_N];
+    static int32_t gAfter[MO_MAX_N];
+    static uint8_t expStored[MO_MAX_GROUPS];
+    static uint8_t gsRep[MO_MAX_GROUPS];
+    static uint8_t gDataBefore[sizeof fixG.data];
+    const size_t n = geo->n;
+    memset(gsRep, gStored, geo->numGroups);
+    rngStream_t refStream = rngOpen((rngKey_t){{seed, 23u}});
+    rngStream_t engStream = rngOpen((rngKey_t){{seed, 23u}});
+    refMomentum(v, vs, geo->mv, geo->ev, g, gsRep, geo->eg, n, geo->numGroups, geo->groupSize, mu,
+                rm, &refStream, expCodes, expStored);
+    moInit(&fixV, n, geo->numGroups, geo->groupSize, geo->mv, geo->ev, v, vs);
+    moInit(&fixG, n, 1, 0, geo->mg, geo->eg, g, &gStored);
+    memcpy(gDataBefore, fixG.data, sizeof fixG.data);
+    moRun(mu, rm, rm == SR_HALF_AWAY ? &engStream : NULL);
+    moCodes(&fixV, gotCodes);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expStored, fixV.exps, geo->numGroups);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expCodes, gotCodes, n);
+    TEST_ASSERT_EQUAL_MEMORY(gDataBefore, fixG.data, sizeof fixG.data);
+    TEST_ASSERT_EQUAL_UINT8(gStored, fixG.exps[0]);
+    moCodes(&fixG, gAfter);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(g, gAfter, n);
+    if (rm == SR_HALF_AWAY) {
+        TEST_ASSERT_EQUAL_UINT32(rngNextU32(&refStream), rngNextU32(&engStream));
+    }
+}
+
+void testMomentumPerTensorGradientOnGroupedStateMatchesReference(void) {
+    static int32_t v[MO_MAX_N];
+    static int32_t g[MO_MAX_N];
+    static uint8_t vs[MO_MAX_GROUPS];
+    const moGeo_t geos[] = {
+        {4032, 42, 96, 8, 8, 8, 8}, /* HAR conv3 channel length 96 */
+        {1000, 10, 100, 8, 8, 6, 7},
+        {700, 700, 1, 8, 8, 8, 8},
+        {300, 3, 100, 6, 4, 8, 8},
+    };
+    const float mus[] = {0.9f, 1.0f, 0.5f, 0.0f, 0.6180339f};
+    int distinctGroupEdges = 0;
+    for (size_t c = 0; c < sizeof geos / sizeof geos[0]; c++) {
+        const moGeo_t *geo = &geos[c];
+        const size_t n = geo->n;
+        const size_t gsz = geo->groupSize;
+        const int biasV = (1 << (geo->ev - 1)) - 1;
+        const int biasG = (1 << (geo->eg - 1)) - 1;
+        const int maxV = (1 << geo->ev) - 1 > biasV + 127 ? biasV + 127 : (1 << geo->ev) - 1;
+        const uint8_t gStored = (uint8_t)(biasG - 6);
+        randomGroupCodes(g, n, geo->mg, 1);
+        for (size_t k = 0; k < sizeof mus / sizeof mus[0]; k++) {
+            for (size_t gi = 0; gi < geo->numGroups; gi++) {
+                /* state groups 0..20 binades around the gradient's exponent */
+                const int eV = clampInt(-6 + testRandInt(-10, 10) + biasV, 0, maxV);
+                vs[gi] = (uint8_t)eV;
+                distinctGroupEdges += gi > 0 && vs[gi] != vs[gi - 1];
+                randomGroupCodes(&v[gi * gsz], gsz, geo->mv, testRandInt(0, 9) == 0 ? 0 : 1);
+            }
+            const uint32_t seed = 0x9100u + (uint32_t)((int)c * 37 + (int)k);
+            assertMomentumPerTensorGradMatchesReference(geo, v, vs, g, gStored, muOf(mus[k]),
+                                                        HALF_AWAY, seed);
+            assertMomentumPerTensorGradMatchesReference(geo, v, vs, g, gStored, muOf(mus[k]),
+                                                        SR_HALF_AWAY, seed);
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(distinctGroupEdges > 100, "state exponents must differ by group");
+}
+
 /* ---- dead zone ---------------------------------------------------------
  * mu = 1 makes mu * v exact, so the only rounding is the final SR: v = 64
  * code steps, g = -1/256 of a step (a grad code of -1, eight binades lower).
@@ -750,6 +828,7 @@ void testMomentumRejectsBadInputs(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMomentumMatchesExactReferenceOnRandomStates);
+    RUN_TEST(testMomentumPerTensorGradientOnGroupedStateMatchesReference);
     RUN_TEST(testMomentumDeadZonePinned);
     RUN_TEST(testMomentumDeadZoneStatistical);
     RUN_TEST(testMomentumIsUnbiasedUnderSr);

@@ -540,9 +540,13 @@ static void requireTheFieldsOfThePolicy(const rematPlanSpec_t *spec) {
 }
 
 /* RETAIN_LIST's checks before the counting pass reads the mask. A model whose
- * loss backward runs but no BACKWARD step does (n = 1 under cross entropy, or
- * only the last layer trains) has no REFORWARD window: a dropped ACT n could
- * never be recomputed before LOSS_BACKWARD reads it. */
+ * loss backward runs but no BACKWARD step does has no REFORWARD window: a
+ * dropped ACT n could never be recomputed before LOSS_BACKWARD reads it.
+ * DEFENSIVE since rematBackwardRange validates the CrossEntropy head: that
+ * state needs top < deepest < n, i.e. CE with the last layer (the skipped
+ * Softmax, which has no parameters) as the deepest trainable one -- no
+ * longer reachable (under MSE top = n - 1 >= deepest always). Kept so a
+ * future loss that skips a layer cannot silently drop ACT n. */
 static void requireARetainMaskWithAWindow(const rematPlanSpec_t *spec, const rematWireTable_t *t) {
     if (spec->retain == NULL) {
         PRINT_ERROR("rematPlanBuild: REMAT_PLAN_RETAIN_LIST needs a retain mask, got NULL");

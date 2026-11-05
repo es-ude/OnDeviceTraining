@@ -325,6 +325,10 @@ void testQuantizationBackwardBfpToBfpReblocksInIntegers(void) {
     qlBfpBackwardCase(1, 0, 3, 8, 5, HALF_AWAY, 0u);    /* from per tensor */
     qlBfpBackwardCase(6, 4, 4, 6, 6, SR_HALF_AWAY, 7u); /* the op's OUT stream */
     qlBfpBackwardCase(6, 4, 2, 12, 8, SR_HALF_AWAY, 8u);
+    /* one group per element: the rows ARE the source groups, read straight
+     * from the source's exponent bytes (no per-group table on the stack) */
+    qlBfpBackwardCase(QL_BFP_N, 1, 4, 6, 6, HALF_AWAY, 0u);
+    qlBfpBackwardCase(QL_BFP_N, 1, 1, 0, 8, SR_HALF_AWAY, 9u);
 }
 
 void testQuantizationCalcOutputShapeIdentityIncludingPermutedOrder(void) {

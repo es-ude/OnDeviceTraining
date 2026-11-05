@@ -2208,13 +2208,13 @@ static void buildMlpWithATrackedBatchNorm(zooFixture_t *f) {
     buildMlpWithBatchNorm(f, true, false);
 }
 
-/* Every mask keeps ACT n, unless the backward reads nothing a run could
- * rebuild before LOSS_BACKWARD (ce-without-softmax keeps nothing); HAR keeps
- * ACT 3, ACT 7 and ACT 12; the BFP Softmax keeps its input, so its output is
- * rebuilt for LOSS_BACKWARD. The tracked BatchNorm1d keeps its own output:
- * the run then recomputes only the Linear below it. Left out: single-layer
- * cross entropy (no window: its own death test) and the zoo's BatchNorm1d at
- * layer 0 (any run would recompute it: the death tests). */
+/* Every mask keeps ACT n; HAR keeps ACT 3, ACT 7 and ACT 12; the BFP Softmax
+ * keeps its input, so its output is rebuilt for LOSS_BACKWARD. The tracked
+ * BatchNorm1d keeps its own output: the run then recomputes only the Linear
+ * below it. Left out: the zoo's BatchNorm1d at layer 0 (any run would
+ * recompute it: the death tests). A cross-entropy model without a last
+ * Softmax, or a single-layer one, no longer trains (rematBackwardRange
+ * rejects it), so it has no entry. */
 #define RECOMPUTE_ENTRIES 24
 static const recomputeEntry_t g_recompute[RECOMPUTE_ENTRIES] = {
     {"mlp", buildMlp, {[3] = true}, -1, true, true},

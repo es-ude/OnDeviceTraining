@@ -1138,7 +1138,9 @@ void testAvgPool1dBfpRawZeroGroupDoesNotSetTheAccumulator(void) {
 }
 
 void testAvgPool1dBfpRawRejectsANonRawOutput(void) {
-    ASSERT_EXITS_WITH_FAILURE(avgPoolBfpRawIntoFloatRawBody());
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "AvgPool1d forward BFP: needs a BFP (unpacked scratch) input and a BFP_RAW",
+        avgPoolBfpRawIntoFloatRawBody());
 }
 
 /* ---- Integer-only backward at the kernel (arithmetic-bfp.md section 14) ----
@@ -1387,7 +1389,9 @@ static void apFloatRawBody(void) {
 }
 
 void testAvgPool1dBackwardBfpRawRejectsAFloatRaw(void) {
-    ASSERT_EXITS_WITH_FAILURE(apFloatRawBody());
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "AvgPool1d backward BFP: needs a BFP (unpacked scratch) lossGrad and a BFP_RAW",
+        apFloatRawBody());
 }
 
 /* BFP epic PR4 (R-P4 backward): the dx arm is FUNNEL-ROUTED, mirroring the

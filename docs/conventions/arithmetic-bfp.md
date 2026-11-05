@@ -2336,18 +2336,39 @@ gates both.
   out of the divisor, so `K` is the divisor of every output. The former
   non-power-of-two path (one `roundedDivHalfAwayInt32` per output) is gone;
   the FLOAT32 and SYM arms still take any `K`.
-- **Granularity (both pools).** One `E_acc` per dx row: a loss group more
-  than `−g` binades below its row's top rounds on the row's grid even if its
-  dx cells form their own wire group (the float scatter kept them exact).
-  Measured on HAR (identity, below) it never fires; finer (per raw target
-  group) exponents would need a destination-group lookup per scatter.
-  The row table is one `int` per (batch, channel) on the stack.
+- **Granularity (both pools): the row-grid flush, precisely.** One `E_acc
+  = top_r + g` per dx row `r` (`top_r` the max exponent over the loss row's
+  nonzero codes; `g = bfpSumFoldGuardBits(C, m)`: `−23` at m = 8 and `−15`
+  at m = 16 for `C = 1`, the HAR pools). A loss code `c` of a group at `E_q`,
+  `d = top_r − E_q` binades below the row top, enters with the shift `k = d +
+  g` (AvgPool: on the grid `E_acc + log2 K`, the same `k`):
+  - `d <= −g`: exact (left shift); this is every code on HAR (identity);
+  - `−g < d`: the low `k` bits of `c` are rounded HALF_AWAY on the row grid
+    (error `<= ½ · 2^E_acc` per contribution), deterministically and BEFORE
+    the re-block's SR -- a dead zone for those bits whatever the op's mode;
+  - `d >= m + 1 − g` (32 at m = 8, C = 1): `|c| <= 2^(m−1) < 2^(k−1)`, the
+    contribution flushes to 0.
+  The lost unit is `2^E_acc = 2^(top_r + g)`. A dx wire group whose code
+  step is `2^E_w` with `E_w >= top_r` (any group holding a cell near the row
+  top: its absmax is `~2^(m−1) · 2^top_r`) drops those bits in its own
+  re-block anyway; the deterministic pre-rounding then biases its SR by at
+  most `2^(g − 1)` of a code step (`2^−24` at m = 8). It matters only for a
+  wire group whose cells all come from loss groups more than `−g` binades
+  below the row top (its step is then finer than the lost unit's `2^−g`
+  margin): there the float scatter it replaced was exact. Per-target-group
+  exponents would need a destination-group
+  lookup per scatter (an open follow-up; no algorithm change here).
+  The row table is one `int` per (batch, channel) on the stack. (The former
+  AvgPool non-power-of-two quotient and its row-top-relative margin are gone
+  with ruling R1.)
 - **ReLU dx:** already integer (R-P2, above): the code-domain sign mask, exponents
   carried. **Flatten dx:** payload and exponent copy.
 - **Input layer dx** (`quantizationBackward`): straight-through. Between two
   BFP grids it is integer (`quantizationBackwardKernelBfp`, one funnel op,
-  `BFP_RAW_BACKWARD_DX`): each loss code is a row of its source group, the
-  raw is the data rule on the target geometry (exact unless a code sits more
+  `BFP_RAW_BACKWARD_DX`): each loss code is a row of its source group (the
+  row exponents read straight from the loss's biased group bytes,
+  `bfpRawEmitFromGroupExponents`: no per-group table on the stack), the raw
+  is the data rule on the target geometry (exact unless a code sits more
   than 31 binades below its target group's top), the re-block rounds by the
   target template's mode (the conversion cell's rule) and draws (SR) from the
   op's OUT stream (op key `QUANTIZATION_OP_PROP_LOSS`) instead of the

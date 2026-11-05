@@ -763,6 +763,116 @@ static void matmulBfpLineMaxExponents(const tensor_t *t, size_t reductionAxis, s
     }
 }
 
+/* What the walk of matmulBfpRawTensors reads; the tables are the pre-pass's. */
+typedef struct matmulBfpRawWalk {
+    const tensor_t *aTensor;
+    const tensor_t *bTensor;
+    size_t aNumberOfDims, bNumberOfDims;
+    size_t *aDims;
+    size_t *bDims;
+    size_t aRows, aColumns, bColumns, gsz, segmentLimit;
+    const bfpQConfig_t *aQC;
+    const bfpQConfig_t *bQC;
+    int32_t aExpBias, bExpBias;
+    const int32_t *aArr;
+    const int32_t *bArr;
+    const int32_t *biasArr; /* NULL without bias */
+    const int16_t *biasE;   /* [bColumns] */
+    const int16_t *rawE;    /* E_acc per raw target group */
+    int32_t *mant;
+} matmulBfpRawWalk_t;
+
+/* The MAC walk (BFP_WALK_NOINLINE: no VLA in this frame). */
+BFP_WALK_NOINLINE void matmulBfpRawTensorsWalk(const matmulBfpRawWalk_t *p) {
+    const tensor_t *aTensor = p->aTensor;
+    const tensor_t *bTensor = p->bTensor;
+    size_t aNumberOfDims = p->aNumberOfDims, bNumberOfDims = p->bNumberOfDims;
+    size_t *aDims = p->aDims;
+    size_t *bDims = p->bDims;
+    size_t aRows = p->aRows, aColumns = p->aColumns, bColumns = p->bColumns;
+    size_t gsz = p->gsz, segmentLimit = p->segmentLimit;
+    const bfpQConfig_t *aQC = p->aQC;
+    const bfpQConfig_t *bQC = p->bQC;
+    int32_t aExpBias = p->aExpBias, bExpBias = p->bExpBias;
+    int32_t const *aArr = p->aArr;
+    int32_t const *bArr = p->bArr;
+    int32_t const *biasArr = p->biasArr;
+    const int16_t *biasE = p->biasE;
+    const int16_t *rawE = p->rawE;
+    int32_t *mant = p->mant;
+
+    bfpGroupRange_t aRange = {0};
+    bfpGroupRange_t bRange = {0};
+    size_t targetGroup = 0;
+    size_t targetEnd = gsz;
+    int eAcc = rawE[0];
+
+    size_t resultCounter = 0;
+    for (size_t rowIndex = 0; rowIndex < aRows; rowIndex++) {
+        for (size_t columnIndex = 0; columnIndex < bColumns; columnIndex++) {
+            if (resultCounter >= targetEnd) {
+                targetGroup++;
+                targetEnd += gsz;
+                eAcc = rawE[targetGroup];
+            }
+            /* The bias is one more segment (§13 item 6); the column changes
+             * every output, so it is aligned per output. */
+            int32_t acc = biasArr != NULL
+                              ? bfpAlignPartial(biasArr[columnIndex], eAcc - biasE[columnIndex])
+                              : 0;
+            int32_t partial = 0;
+            size_t segCount = 0;
+            size_t currentAGroup = 0;
+            size_t currentBGroup = 0;
+            for (size_t i = 0; i < aColumns; i++) {
+                size_t aValueIndex;
+                if (aNumberOfDims == 1) {
+                    aValueIndex = i;
+                } else {
+                    size_t aIndices[] = {rowIndex, i};
+                    aValueIndex = calcElementIndexByIndices(aNumberOfDims, aDims, aIndices,
+                                                            aTensor->shape->orderOfDimensions);
+                }
+                size_t bValueIndex;
+                if (bNumberOfDims == 1) {
+                    bValueIndex = i;
+                } else {
+                    size_t bIndices[] = {i, columnIndex};
+                    bValueIndex = calcElementIndexByIndices(bNumberOfDims, bDims, bIndices,
+                                                            bTensor->shape->orderOfDimensions);
+                }
+                size_t aGroup = bfpGroupAt(&aRange, aQC, aValueIndex);
+                size_t bGroup = bfpGroupAt(&bRange, bQC, bValueIndex);
+                if (i == 0) {
+                    currentAGroup = aGroup;
+                    currentBGroup = bGroup;
+                } else if (aGroup != currentAGroup || bGroup != currentBGroup ||
+                           segCount == segmentLimit) {
+                    /* A segment closes on EITHER operand's group change or at
+                     * the int32 limit (run split); its partial is aligned to
+                     * E_acc. */
+                    acc += bfpAlignPartial(partial,
+                                           eAcc - ((int)aQC->exponents[currentAGroup] - aExpBias +
+                                                   (int)bQC->exponents[currentBGroup] - bExpBias));
+                    partial = 0;
+                    segCount = 0;
+                    currentAGroup = aGroup;
+                    currentBGroup = bGroup;
+                }
+                partial += mulInt32s(aArr[aValueIndex], bArr[bValueIndex]);
+                segCount++;
+            }
+            if (aColumns > 0) {
+                acc += bfpAlignPartial(partial,
+                                       eAcc - ((int)aQC->exponents[currentAGroup] - aExpBias +
+                                               (int)bQC->exponents[currentBGroup] - bExpBias));
+            }
+            mant[resultCounter] = acc;
+            resultCounter++;
+        }
+    }
+}
+
 /* Integer-only forward (arithmetic-bfp.md §13): matmulBfpTensors' walk
  * verbatim -- loop order, MAC count, calcElementIndexByIndices, bfpGroupAt on
  * both operands -- with the float fold replaced by the integer fold (see
@@ -893,76 +1003,28 @@ void matmulBfpRawTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
         }
     }
 
-    bfpGroupRange_t aRange = {0};
-    bfpGroupRange_t bRange = {0};
-    size_t targetGroup = 0;
-    size_t targetEnd = gsz;
-    int eAcc = rawE[0];
-
-    size_t resultCounter = 0;
-    for (size_t rowIndex = 0; rowIndex < aRows; rowIndex++) {
-        for (size_t columnIndex = 0; columnIndex < bColumns; columnIndex++) {
-            if (resultCounter >= targetEnd) {
-                targetGroup++;
-                targetEnd += gsz;
-                eAcc = rawE[targetGroup];
-            }
-            /* The bias is one more segment (§13 item 6); the column changes
-             * every output, so it is aligned per output. */
-            int32_t acc = biasArr != NULL
-                              ? bfpAlignPartial(biasArr[columnIndex], eAcc - biasE[columnIndex])
-                              : 0;
-            int32_t partial = 0;
-            size_t segCount = 0;
-            size_t currentAGroup = 0;
-            size_t currentBGroup = 0;
-            for (size_t i = 0; i < aColumns; i++) {
-                size_t aValueIndex;
-                if (aNumberOfDims == 1) {
-                    aValueIndex = i;
-                } else {
-                    size_t aIndices[] = {rowIndex, i};
-                    aValueIndex = calcElementIndexByIndices(aNumberOfDims, aDims, aIndices,
-                                                            aTensor->shape->orderOfDimensions);
-                }
-                size_t bValueIndex;
-                if (bNumberOfDims == 1) {
-                    bValueIndex = i;
-                } else {
-                    size_t bIndices[] = {i, columnIndex};
-                    bValueIndex = calcElementIndexByIndices(bNumberOfDims, bDims, bIndices,
-                                                            bTensor->shape->orderOfDimensions);
-                }
-                size_t aGroup = bfpGroupAt(&aRange, aQC, aValueIndex);
-                size_t bGroup = bfpGroupAt(&bRange, bQC, bValueIndex);
-                if (i == 0) {
-                    currentAGroup = aGroup;
-                    currentBGroup = bGroup;
-                } else if (aGroup != currentAGroup || bGroup != currentBGroup ||
-                           segCount == segmentLimit) {
-                    /* A segment closes on EITHER operand's group change or at
-                     * the int32 limit (run split); its partial is aligned to
-                     * E_acc. */
-                    acc += bfpAlignPartial(partial,
-                                           eAcc - ((int)aQC->exponents[currentAGroup] - aExpBias +
-                                                   (int)bQC->exponents[currentBGroup] - bExpBias));
-                    partial = 0;
-                    segCount = 0;
-                    currentAGroup = aGroup;
-                    currentBGroup = bGroup;
-                }
-                partial += mulInt32s(aArr[aValueIndex], bArr[bValueIndex]);
-                segCount++;
-            }
-            if (aColumns > 0) {
-                acc += bfpAlignPartial(partial,
-                                       eAcc - ((int)aQC->exponents[currentAGroup] - aExpBias +
-                                               (int)bQC->exponents[currentBGroup] - bExpBias));
-            }
-            mant[resultCounter] = acc;
-            resultCounter++;
-        }
-    }
+    matmulBfpRawWalk_t walk = {.aTensor = aTensor,
+                               .bTensor = bTensor,
+                               .aNumberOfDims = aNumberOfDims,
+                               .bNumberOfDims = bNumberOfDims,
+                               .aDims = aDims,
+                               .bDims = bDims,
+                               .aRows = aRows,
+                               .aColumns = aColumns,
+                               .bColumns = bColumns,
+                               .gsz = gsz,
+                               .segmentLimit = segmentLimit,
+                               .aQC = aQC,
+                               .bQC = bQC,
+                               .aExpBias = aExpBias,
+                               .bExpBias = bExpBias,
+                               .aArr = aArr,
+                               .bArr = bArr,
+                               .biasArr = biasArr,
+                               .biasE = biasE,
+                               .rawE = rawE,
+                               .mant = mant};
+    matmulBfpRawTensorsWalk(&walk);
 }
 
 size_t getMatmulInstructionCounter() {

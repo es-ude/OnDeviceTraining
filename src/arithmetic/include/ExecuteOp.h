@@ -18,8 +18,7 @@ typedef struct rngKey rngKey_t;
  * int16 exponent per TARGET group, bfpRawQConfig_t; the kernel MUST write
  * every group's exponent) instead of BFP D7's FLOAT32 raw. Each value is an
  * explicit per-op opt-in, so an op never switches raw format by accident
- * (the Softmax backward adapter shares forward kernel code and leaves it
- * NONE; Linear's set their own backward value). Every value is ARITH_BFP
+ * (each layer's backward sets its own value). Every value is ARITH_BFP
  * only. Raw geometry: a BFP target's {numGroups, groupSize}; a FLOAT32
  * target has no groups, so the raw is per-tensor ({1,0}, one exponent over
  * the whole output).
@@ -28,8 +27,8 @@ typedef struct rngKey rngKey_t;
  *                        error (the forward is float-free after the input
  *                        quantization layer), not a staging request.
  *   BFP_RAW_BACKWARD_DX  a backward op writing a dx wire (Conv1d, Linear,
- *                        MaxPool1d, AvgPool1d dx, the Quantization layer's
- *                        BFP -> BFP dx).
+ *                        MaxPool1d, AvgPool1d, Softmax dx, the Quantization
+ *                        layer's BFP -> BFP dx).
  *                        FLOAT32-stored operands keep staging, as in every
  *                        backward op.
  *   Both: OUT_WRITE only. The epilogue is the integer re-block

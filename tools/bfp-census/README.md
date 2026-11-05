@@ -24,7 +24,8 @@ uv run tools/bfp-census/census.py --self-test
   Conv1d and Linear dx and the dx-wire re-block, and the Conv1d and Linear weightGrad /
   biasGrad into BFP grads with their integer accumulate, and the macro-batch mean
   scale of BFP grads, and the SGD step on BFP storage: momentum store and parameter update; the
-  ReLU, MaxPool1d, AvgPool1d, Flatten and input-layer dx; and the CrossEntropy loss boundary,
+  ReLU, MaxPool1d, AvgPool1d, Flatten, standalone Softmax and input-layer dx; and the
+  CrossEntropy loss boundary,
   the one allow-listed float island), gated with `--strict` like
   the forward; a path
   joins it when it turns integer.

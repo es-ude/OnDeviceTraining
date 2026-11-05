@@ -2358,6 +2358,38 @@ math) is the loss boundary; `tools/bfp-census/har_backward_roots.txt` gates it.
   layer must be the Softmax: any other last layer (or an empty model) fails
   fast, so no layer's backward is dropped silently.
 
+**Standalone Softmax backward: the integer VJP (2026-11-05).** Not on the
+HAR path (CrossEntropy skips the Softmax), implemented for every other loss.
+`dx_i = p_i (g_i − d)`, `d = Σ_j p_j g_j`, in the FLOAT32 arm's order, from
+the LOGITS: `p` is the integer forward's Q30 raw (`softmaxExpCodesBfp` +
+`softmaxNormalizeRaw`, replaying the forward's shift draws), no float
+recompute. Precision is cut explicitly before every multiply:
+- `p'_j = p_j >> 15` half away (`<= 2^15 + 1`), so `|p'_j g_j| < 2^31` for any
+  `m_g <= 16`; the dot runs on `E_d = E_top − 15 + G`, `E_top` the max
+  exponent over `g`'s NONZERO codes, `G = bfpFoldGuardBits(n + 1, 17, m_g)`,
+  each product entering by `bfpAlignPartial` in index order;
+- `D_i = g_i` aligned to `E_d`, minus `d`: the `n + 1` terms of `G`'s proof
+  bound every `|D_i|`;
+- per raw target group (`BFP_RAW_BACKWARD_DX`) both factors are cut to 15
+  bits relative to the group's maximum (`s_p`, `s_D = bitlen(max) − 15`, half
+  away) and multiplied, raw exponent `E_d + s_D + s_p − 30`; an all-zero `g`
+  (or group) is `dx = 0`.
+The error is about `2^-15` of the group's largest `|dx|` (the two cuts, the
+dot's alignments, `p`'s Q30 rounding): below the step of any `m <= 15` wire,
+about one step at m = 16. The re-block rounds by the op's mode (SR under SR,
+the op's OUT stream). On the test fixtures the m = 8 codes equal the former
+float VJP's. Single row only (#152).
+
+**The Softmax max grid and zero groups.** The forward's (and the backward's
+recompute's) max compare is value-exact, but the winner's exponent is the
+alignment grid. A code of an all-zero group never decides it (the zero-group
+rule of §13): when such a group's 0 beats every live (negative) value, the max
+is 0 on the TOP live group's grid -- otherwise the zero state's `E = 0` would
+align live logits many binades lower onto `2^0` (the test fixture: logits
+`−0.16 … −0.94` at `E = −6` lost every fraction bit). HAR's logits are one
+group of 6, which cannot hold an all-zero group next to live codes: HAR is
+unaffected (identity below).
+
 ## 15. Integer training primitives: scalar, add-and-round, integer rescale accumulate
 
 The integer backward, gradient accumulation and optimizer (full-BFP training)

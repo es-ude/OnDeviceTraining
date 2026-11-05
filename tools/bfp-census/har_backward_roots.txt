@@ -55,6 +55,11 @@ AvgPool1d.c         avgPool1dBackward        self
 AvgPool1d.c         avgPool1dBackwardKernelBfpRaw
 # Flatten dx: payload and exponent copy (walked).
 Flatten.c           flattenBackward
+# Standalone Softmax dx (HAR never runs it: CrossEntropy skips the Softmax): the dispatch
+# (self), then the integer VJP kernel (walks the integer forward's exp codes and
+# normalisation it recomputes p with).
+Softmax.c           softmaxBackward          self
+Softmax.c           softmaxBackwardKernelBfp
 # Input layer dx (BFP -> BFP; HAR never runs it, no dx below conv1): dispatch (self;
 # its other dtype pairs convert through executeConvert, not walked), the integer kernel.
 QuantizationLayer.c quantizationBackward     self

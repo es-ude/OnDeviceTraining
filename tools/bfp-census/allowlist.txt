@@ -168,3 +168,11 @@ AvgPool1d.c:avgPool1dBackwardKernelBfpRaw avgPool1dBackwardBfpWalk __aeabi_uidiv
 AvgPool1d.c:avgPool1dBackwardKernelBfpRaw avgPool1dBackwardBfpWalk __aeabi_uidivmod 3
 AvgPool1d.c:avgPool1dBackwardKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
 AvgPool1d.c:avgPool1dBackwardKernelBfpRaw windowSlice1dAt __aeabi_ldivmod 2
+
+# ---- Softmax dx (the integer VJP, softmaxBackwardKernelBfp) --------------------
+# The recompute of p runs the forward's integer exp codes (the forward root's two
+# bfpGroupAt recomputes and bfpIExpQ's one division by ln 2); the VJP's three loops
+# (dot, per-group max, emit) each recompute the loss group on a group change.
+Softmax.c:softmaxBackwardKernelBfp softmaxBackwardKernelBfp __aeabi_uidiv 3
+Softmax.c:softmaxBackwardKernelBfp softmaxExpCodesBfp __aeabi_uidiv 2
+Softmax.c:softmaxBackwardKernelBfp bfpIExpQ __aeabi_idiv 1

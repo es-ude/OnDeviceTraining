@@ -1,5 +1,6 @@
 #define SOURCE_FILE "SGD"
 
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -14,6 +15,22 @@
 #include "Tensor.h"
 #include "TensorConversion.h"
 
+/* Config time: the learning rate and its integer encoding for the integer
+ * parameter update on BFP parameters (non-finite: no encoding, that update
+ * fails fast; the float update ops do not use it). */
+static void sgdSetLearningRate(sgd_t *sgd, float learningRate) {
+    sgd->learningRate = learningRate;
+    sgd->learningRateQ = 0;
+    sgd->learningRateE = 0;
+    sgd->learningRateIntValid = false;
+    if (isfinite(learningRate)) {
+        const bfpScalar_t lr = bfpScalarFromFloat(learningRate, "SGD learningRate");
+        sgd->learningRateQ = lr.q;
+        sgd->learningRateE = lr.e;
+        sgd->learningRateIntValid = true;
+    }
+}
+
 void sgdInit(sgd_t *sgd, float learningRate, float momentumFactor, float weightDecay,
              arithmetic_t updateMath) {
     /* Only ARITH_FLOAT32 update arithmetic is implemented; fail at
@@ -24,10 +41,12 @@ void sgdInit(sgd_t *sgd, float learningRate, float momentumFactor, float weightD
                     "(integer-arithmetic update numerics not yet designed, #310)");
         exit(1);
     }
-    sgd->learningRate = learningRate;
+    sgdSetLearningRate(sgd, learningRate);
     sgd->momentumFactor = momentumFactor;
     sgd->weightDecay = weightDecay;
     sgd->updateMath = updateMath;
+    sgd->momentumIsZero = momentumFactor == 0.0f;
+    sgd->weightDecayIsNonzero = weightDecay != 0.0f;
     /* Config time (float is allowed here, never in the training-step roots):
      * the momentum for the integer store on BFP state, encoded once. */
     sgd->momentumQ = 0;
@@ -115,6 +134,32 @@ static void sgdMParamKernel(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t 
  * append, never renumber. */
 enum { SGD_OP_STATE = 0, SGD_OP_PARAM = 1 };
 
+/* The OUT stream of update op `op` of parameter `paramIndex` -- the stream the
+ * funnel's OUT_WRITE re-pack of that op opens -- or NULL without an update
+ * key. */
+static rngStream_t *sgdOpOutStream(const rngKey_t *updateKey, uint32_t paramIndex, uint32_t op,
+                                   rngStream_t *storage) {
+    rngKey_t opKey;
+    const rngKey_t *key = optimizerUpdateOpKey(updateKey, paramIndex, op, &opKey);
+    if (key == NULL) {
+        return NULL;
+    }
+    *storage = rngOpen(rngFold(*key, RNG_TAG_OUT, 0u));
+    return storage;
+}
+
+/* Cold and out of line: keeps the formatted float of the message out of the
+ * step's own frame (the census reads sgdStepM's own call sites). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline, cold))
+#endif
+static void sgdRejectIntegerWeightDecay(const sgd_t *sgd) {
+    PRINT_ERROR("SGD: nonzero weightDecay (%g) is not implemented by the integer update on "
+                "BFP storage -- fails fast instead of dropping it",
+                (double)sgd->weightDecay);
+    exit(1);
+}
+
 /* The state op when the gradient AND the state are BFP: the integer momentum
  * store v' = mu * v + g (momentumStoreBfpInPlace; arithmetic-bfp.md §15.7) in
  * place of the float kernel, the same formula and order (no dampening, no
@@ -134,16 +179,33 @@ static void sgdMomentumStoreBfp(const sgd_t *sgd, tensor_t *state, const tensor_
                     "<= 1 (the float momentum op is not a fallback for BFP state)");
         exit(1);
     }
-    rngKey_t opKey;
-    const rngKey_t *key = optimizerUpdateOpKey(updateKey, paramIndex, SGD_OP_STATE, &opKey);
     rngStream_t stream;
-    rngStream_t *rs = NULL;
-    if (key != NULL) {
-        stream = rngOpen(rngFold(*key, RNG_TAG_OUT, 0u));
-        rs = &stream;
-    }
     momentumStoreBfpInPlace(state, grad, (bfpScalar_t){.q = sgd->momentumQ, .e = sgd->momentumE},
-                            rm, rs);
+                            rm, sgdOpOutStream(updateKey, paramIndex, SGD_OP_STATE, &stream));
+}
+
+/* The param op when the parameter and its update are BFP: the integer update
+ * param' = param - lr * update (paramUpdateBfpInPlace; arithmetic-bfp.md
+ * §15.7) in place of the float kernel. `update` is the STORED new momentum
+ * (after the state op's own rounding: the float op's order) or, without
+ * momentum, the gradient. Same RNG contract as the funnel op it replaces: the
+ * OUT stream of the param op's key, one draw per element in element order.
+ * Rounds by the optimizer's write-back mode (#282). Out of line: its own
+ * census root, integer only. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+static void sgdParamUpdateBfp(const sgd_t *sgd, tensor_t *param, const tensor_t *update,
+                              uint32_t paramIndex, roundingMode_t rm, const rngKey_t *updateKey) {
+    if (!sgd->learningRateIntValid) {
+        PRINT_ERROR("SGD: the integer parameter update on BFP parameters needs a finite "
+                    "learningRate (the float update op is not a fallback for BFP parameters)");
+        exit(1);
+    }
+    rngStream_t stream;
+    paramUpdateBfpInPlace(param, update,
+                          (bfpScalar_t){.q = sgd->learningRateQ, .e = sgd->learningRateE}, rm,
+                          sgdOpOutStream(updateKey, paramIndex, SGD_OP_PARAM, &stream));
 }
 
 void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
@@ -169,9 +231,18 @@ void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
      * two-op momentum path. Mathematically identical at momentum == 0:
      * state would be exactly grad + wd*param, and param -= lr*state
      * collapses to param -= lr*(grad + wd*param). (#308) */
-    if (sgd->momentumFactor == 0.0f) {
+    if (sgd->momentumIsZero) {
         for (size_t i = 0; i < optim->sizeStates; i++) {
             parameter_t *p = optim->parameter[i];
+            /* BFP parameter on a BFP gradient: the integer update w - lr * g */
+            if (p->param->quantization->type == BFP && p->grad->quantization->type == BFP) {
+                if (sgd->weightDecayIsNonzero) {
+                    sgdRejectIntegerWeightDecay(sgd);
+                }
+                sgdParamUpdateBfp(sgd, p->param, p->grad, (uint32_t)i, optim->writeBackRounding,
+                                  updateKey);
+                continue;
+            }
             sgdUpdateCtx_t ctx = {.lr = sgd->learningRate, .weightDecay = sgd->weightDecay};
             rngKey_t opKey;
             /* #296 Stage 1: all three update kernels are elementwise (read i before
@@ -201,12 +272,13 @@ void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
         parameter_t *p = optim->parameter[i];
         tensor_t *state = optim->states[i]->stateBuffers[0];
 
-        if (state->quantization->type == BFP && p->grad->quantization->type == BFP) {
-            if (sgd->weightDecay != 0.0f) {
-                PRINT_ERROR("SGD: nonzero weightDecay (%g) is not implemented by the integer "
-                            "momentum store on BFP state -- fails fast instead of dropping it",
-                            (double)sgd->weightDecay);
-                exit(1);
+        /* BFP state on a BFP gradient: the integer momentum store, then -- for a
+         * BFP parameter -- the integer parameter update from the STORED v' */
+        const bool integerState =
+            state->quantization->type == BFP && p->grad->quantization->type == BFP;
+        if (integerState) {
+            if (sgd->weightDecayIsNonzero) {
+                sgdRejectIntegerWeightDecay(sgd);
             }
             sgdMomentumStoreBfp(sgd, state, p->grad, (uint32_t)i, optim->writeBackRounding,
                                 updateKey);
@@ -233,6 +305,11 @@ void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
                 state);
         }
 
+        if (integerState && p->param->quantization->type == BFP) {
+            sgdParamUpdateBfp(sgd, p->param, state, (uint32_t)i, optim->writeBackRounding,
+                              updateKey);
+            continue;
+        }
         sgdMParamCtx_t pc = {.lr = sgd->learningRate};
         rngKey_t paramKey;
         executeOp(
@@ -258,5 +335,5 @@ float sgdGetLr(optimizer_t *optimizer) {
 }
 
 void sgdSetLr(optimizer_t *optimizer, float learningRate) {
-    optimizer->impl->sgd->learningRate = learningRate;
+    sgdSetLearningRate(optimizer->impl->sgd, learningRate);
 }

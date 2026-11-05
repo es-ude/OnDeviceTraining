@@ -3025,7 +3025,9 @@ void scaleBfpTensorByScalarInPlace(tensor_t *t, bfpScalar_t s, rngStream_t *rs) 
  * parameter update (a = 1, b = -lr); contracts in TensorConversion.h. The
  * accumulate engine's three passes, each operand under its OWN exponent: the
  * in-place target contributes t_i * a.q (< 2^30, on 2^(E_t + a.e)), the
- * read-only source s_i * b.q (< 2^30, on 2^(E_s + b.e)). Per target group:
+ * read-only source s_i * b.q (< 2^30, on 2^(E_s + b.e)). The source is
+ * per-tensor (its one exponent for every target group, sStep = 0) or in the
+ * target's geometry (sStep = 1). Per target group:
  *   pass 0: A_t, A_s; E_c = max(E_t + a.e + bitlen(a.q * A_t),
  *           E_s + b.e + bitlen(|b.q| * A_s)) - 30, capped at capE. The term
  *           that sets E_c is then exact on the grid (shift <= 0), so at most
@@ -3043,8 +3045,8 @@ void scaleBfpTensorByScalarInPlace(tensor_t *t, bfpScalar_t s, rngStream_t *rs) 
  * so the target's exponents stay OLD for every group not yet emitted. */
 static void bfpScaledSumScan(const bfpQConfig_t *tqc, const uint8_t *tData, bfpScalar_t a,
                              const bfpQConfig_t *sqc, const uint8_t *sData, bfpScalar_t b,
-                             size_t from, size_t to, size_t gsz, int cap, int32_t *workE,
-                             uint8_t *fresh, int32_t *tm, int32_t *sm) {
+                             size_t sStep, size_t from, size_t to, size_t gsz, int cap,
+                             int32_t *workE, uint8_t *fresh, int32_t *tm, int32_t *sm) {
     const int32_t biasT = bfpExponentBias(tqc);
     const int32_t biasS = bfpExponentBias(sqc);
     const int capE = cap - (int)biasT;
@@ -3067,7 +3069,7 @@ static void bfpScaledSumScan(const bfpQConfig_t *tqc, const uint8_t *tData, bfpS
             while (pos < segEnd) {
                 const size_t runEnd = gEnd < segEnd ? gEnd : segEnd;
                 const int et = (int)tqc->exponents[g] - (int)biasT + (int)a.e;
-                const int es = (int)sqc->exponents[g] - (int)biasS + (int)b.e;
+                const int es = (int)sqc->exponents[g * sStep] - (int)biasS + (int)b.e;
                 if (pass == 0) {
                     for (size_t i = pos; i < runEnd; i++) {
                         const int32_t x = tm[i - start];
@@ -3190,11 +3192,17 @@ static void bfpScaledSumInPlace(tensor_t *t, bfpScalar_t a, const tensor_t *s, b
     const bfpQConfig_t *sqc = s->quantization->qConfig;
     validateBfpQConfigShape(tqc, n);
     validateBfpQConfigShape((bfpQConfig_t *)sqc, n);
+    /* the source's exponent of target group g is exponents[g * sStep]: its own
+     * group (same geometry) or its only one (per-tensor) */
+    size_t sStep = 1;
     if (sqc->numGroups != tqc->numGroups || sqc->groupSize != tqc->groupSize) {
-        PRINT_ERROR("%s: read-only operand geometry {numGroups=%zu, groupSize=%zu} must equal "
-                    "the updated operand's {%zu, %zu}",
-                    what, sqc->numGroups, sqc->groupSize, tqc->numGroups, tqc->groupSize);
-        exit(1);
+        if (sqc->numGroups != 1) {
+            PRINT_ERROR("%s: read-only operand geometry {numGroups=%zu, groupSize=%zu} must be "
+                        "per-tensor or equal the updated operand's {%zu, %zu}",
+                        what, sqc->numGroups, sqc->groupSize, tqc->numGroups, tqc->groupSize);
+            exit(1);
+        }
+        sStep = 0;
     }
     if (tqc->mantissaBits > 16 || sqc->mantissaBits > 16) {
         PRINT_ERROR("%s: mantissa widths %u / %u exceed 16 bits", what, (unsigned)tqc->mantissaBits,
@@ -3255,8 +3263,8 @@ static void bfpScaledSumInPlace(tensor_t *t, bfpScalar_t a, const tensor_t *s, b
             needed = n;
         }
         if (scanned < needed) {
-            bfpScaledSumScan(tqc, t->data, a, sqc, s->data, b, scanned, needed, gsz, cap, workE,
-                             fresh, tm, sm);
+            bfpScaledSumScan(tqc, t->data, a, sqc, s->data, b, sStep, scanned, needed, gsz, cap,
+                             workE, fresh, tm, sm);
             scanned = needed;
         }
         unpackSignExtendChunk(t->data, m, off, count, tm);
@@ -3275,7 +3283,7 @@ static void bfpScaledSumInPlace(tensor_t *t, bfpScalar_t a, const tensor_t *s, b
             } else {
                 /* the target's OLD exponent: unpublished until this group is done */
                 const int et = (int)tqc->exponents[g] - (int)biasT + (int)a.e;
-                const int es = (int)sqc->exponents[g] - (int)biasS + (int)b.e;
+                const int es = (int)sqc->exponents[g * sStep] - (int)biasS + (int)b.e;
                 const unsigned kd = (unsigned)((int)fresh[slot] - (int)biasT - ec);
                 bfpScaledSumEmitRun(&tm[idx - off], &sm[idx - off], runEnd - idx, a, b, ec - et,
                                     ec - es, kd, rm, rs, posCap, negCap);
@@ -3296,6 +3304,12 @@ void momentumStoreBfpInPlace(tensor_t *state, const tensor_t *grad, bfpScalar_t 
                              roundingMode_t rm, rngStream_t *rs) {
     bfpScaledSumInPlace(state, mu, grad, (bfpScalar_t){.q = 16384, .e = -14}, rm, rs,
                         "momentumStoreBfpInPlace");
+}
+
+void paramUpdateBfpInPlace(tensor_t *param, const tensor_t *update, bfpScalar_t lr,
+                           roundingMode_t rm, rngStream_t *rs) {
+    bfpScaledSumInPlace(param, (bfpScalar_t){.q = 16384, .e = -14}, update,
+                        (bfpScalar_t){.q = -lr.q, .e = lr.e}, rm, rs, "paramUpdateBfpInPlace");
 }
 
 /* SYM_INT32 -> SYM_INT32 grad accumulate: reproduces addSymInt32TensorsInplace's

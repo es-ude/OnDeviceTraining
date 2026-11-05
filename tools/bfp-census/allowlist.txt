@@ -136,9 +136,12 @@ Linear.c:biasGradKernelBfpRaw linearCalcBiasGradsBfpRaw __aeabi_uidiv 1
 TensorConversion.c:scaleBfpTensorByScalarInPlace scaleBfpTensorByScalarInPlace __aeabi_uidiv 2
 TensorConversion.c:scaleBfpTensorByScalarInPlace scaleBfpTensorByScalarInPlace __aeabi_uidivmod 1
 
-# ---- Integer SGD momentum store on BFP state (momentumStoreBfpInPlace) -------
-# Per conversion chunk (256 elements): the scan frontier (chunkEnd - 1) / gsz, and
-# in the scan its start group from / gsz and ring slot g % 257 (once per scan call,
-# i.e. per chunk); the runs inside advance cursors. The accumulate engine's shape.
-TensorConversion.c:momentumStoreBfpInPlace momentumStoreBfpInPlace __aeabi_uidiv 2
-TensorConversion.c:momentumStoreBfpInPlace momentumStoreBfpInPlace __aeabi_uidivmod 1
+# ---- Integer SGD momentum store and parameter update on BFP storage ----------
+# Both wrappers run the one scaled-sum engine (bfpScaledSumInPlace). Per conversion
+# chunk (256 elements): the scan frontier (chunkEnd - 1) / gsz, and in the scan its
+# start group from / gsz and ring slot g % 257 (once per scan call, i.e. per chunk);
+# the runs inside advance cursors. The accumulate engine's shape.
+TensorConversion.c:momentumStoreBfpInPlace bfpScaledSumInPlace __aeabi_uidiv 2
+TensorConversion.c:momentumStoreBfpInPlace bfpScaledSumInPlace __aeabi_uidivmod 1
+TensorConversion.c:paramUpdateBfpInPlace bfpScaledSumInPlace __aeabi_uidiv 2
+TensorConversion.c:paramUpdateBfpInPlace bfpScaledSumInPlace __aeabi_uidivmod 1

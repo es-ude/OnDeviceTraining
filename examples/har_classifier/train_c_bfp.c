@@ -1015,7 +1015,9 @@ int main(void) {
      * write-back rounding OPTIMIZER-owned (BFP_ROUNDING -> setter below, #279),
      * while grad and momentum state are read/written in their own storage
      * dtype (BFP_GRADS / BFP_STATE). Update arithmetic itself is FLOAT32 via
-     * updateMath. */
+     * updateMath -- except with BFP_GRADS=1 BFP_STATE=1, where both update ops
+     * (momentum store, parameter update) are the integer engines on BFP
+     * storage (docs/conventions/arithmetic-bfp.md §15.7). */
 #ifdef ODT_MEM_PROFILE
     size_t markBeforeOpt = memProfileMark();
 #endif

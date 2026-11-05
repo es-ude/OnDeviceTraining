@@ -305,13 +305,51 @@ void scaleBfpTensorByScalarInPlace(tensor_t *t, struct bfpScalar s, rngStream_t 
  * In place, alias-safe: the state's old exponents are published only after
  * the last read of their group (the rescale engines' one-group window, two
  * fixed rings and two fixed chunk buffers: bounded stack, no VLA). The
- * gradient is read only. Fails fast: non-BFP state or gradient, element-count
- * or {numGroups, groupSize} mismatch (one group cursor serves both), mantissa
- * width > 16, a gradient sharing the state's data, mu not normalized or
- * outside [0, 1], a rounding mode other than HALF_AWAY / SR_HALF_AWAY, SR
- * without a stream. */
+ * gradient is read only; it is per-tensor or in the state's geometry (its
+ * exponent per state group: its own group, or its only one). Fails fast:
+ * non-BFP state or gradient, element-count mismatch, any other gradient
+ * geometry, mantissa width > 16, a gradient sharing the state's data, mu not
+ * normalized or outside [0, 1], a rounding mode other than HALF_AWAY /
+ * SR_HALF_AWAY, SR without a stream. */
 void momentumStoreBfpInPlace(tensor_t *state, const tensor_t *grad, struct bfpScalar mu,
                              roundingMode_t rm, rngStream_t *rs);
+
+/*! @brief The INTEGER SGD parameter update w' = w - lr * u, in place on a BFP
+ * parameter w, from a BFP update u -- the STORED new momentum (after its own
+ * rounding), or the gradient on the stateless path -- and a scalar lr = q *
+ * 2^e (any sign and binade, normalized) -- no float, no division, no int64
+ * (arithmetic-bfp.md §15.7; the integer twin of the float update op param =
+ * param - lr * state). The same engine as momentumStoreBfpInPlace with the
+ * roles swapped: the parameter is the narrow term (its codes on 2^E_w), the
+ * update the wide one (u_i * q, exact in int32, on 2^(E_u + e)).
+ *
+ * Per PARAMETER group (the parameter's own BFP geometry: per-channel weights
+ * keep one exponent per channel), each operand under its OWN exponent; the
+ * update is per-tensor or in the parameter's geometry. Working grid E_c =
+ * max(E_w + bitlen(A_w), E_u + e + bitlen(q * A_u)) - 30, capped at the
+ * parameter's top exponent; the exact difference in quotient/remainder form;
+ * the fresh exponent from the RESULT (cancellation included) by the integer
+ * exponent rule, floored at E_c, then the BFP D6 clamp; ONE rounding per
+ * element by `rm` (the optimizer's write-back mode, #282) with the discarded
+ * tail carried to it -- an update far below one code step still moves the
+ * code with its exact probability (SR "lift iff u < frac" on a 32-bit
+ * fraction; below 2^-32 of a step truncated, the §15 cutoff) -- clamped to
+ * [-2^(m-1), qMax]. Under SR exactly one draw per element in element order
+ * on every path (zero, exact, saturated): the draw count of the float op's
+ * OUT_WRITE re-pack. An update so far above the parameter's exponent cap that
+ * its term reaches 2^30 on the capped grid saturates the element with the
+ * sign of -lr * u. lr = 0 re-grids w exactly; an all-zero result is the zero
+ * state (stored = bias); n == 0 too.
+ *
+ * In place, alias-safe (the parameter's old exponents are published only
+ * after the last read of their group; fixed rings and chunk buffers, no VLA).
+ * The update is read only. Fails fast: non-BFP parameter or update,
+ * element-count mismatch, an update geometry other than per-tensor or the
+ * parameter's, mantissa width > 16, an update sharing the parameter's data, lr
+ * not normalized, a rounding mode other than HALF_AWAY / SR_HALF_AWAY, SR
+ * without a stream. */
+void paramUpdateBfpInPlace(tensor_t *param, const tensor_t *update, struct bfpScalar lr,
+                           roundingMode_t rm, rngStream_t *rs);
 
 /*! @brief BFP_RAW -> BFP: the integer re-block of the funnel's forward raw
  * (int32 mantissas + one UNBIASED int16 exponent per TARGET group) onto the

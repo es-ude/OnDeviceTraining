@@ -16,32 +16,50 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 
-/*! Builds a momentum-state tensor at `param`'s shape but with its OWN
- * quantization (`momentumQuant`, deep-cloned via getQLike) -- decouples the
- * accumulator's dtype from the parameter's storage dtype (#277 Task 2). */
-/* A BFP state on a BFP gradient is the integer momentum store (Sgd.c), which
- * has no weight-decay term and needs 0 < momentumFactor <= 1: refuse such a
- * configuration at creation rather than at the first step (sgdStepM checks
- * again for hand-built optimizers). */
-static void rejectUnimplementedBfpMomentumStore(const optimizer_t *optim, const sgd_t *sgd,
-                                                const quantization_t *momentumQuant) {
-    if (optim->states == NULL || momentumQuant->type != BFP) {
-        return;
-    }
+/* The integer SGD ops on BFP storage (Sgd.c) have no weight-decay term: a BFP
+ * state on a BFP gradient is the integer momentum store (needs 0 <
+ * momentumFactor <= 1), and a BFP parameter whose update is integer -- the
+ * stored BFP momentum on a BFP gradient, or the BFP gradient itself without
+ * momentum -- is the integer parameter update (needs a finite learningRate).
+ * Refuse such a configuration at creation rather than at the first step
+ * (sgdStepM checks again for hand-built optimizers). */
+static void rejectUnimplementedIntegerSgd(const optimizer_t *optim, const sgd_t *sgd,
+                                          const quantization_t *momentumQuant) {
     for (size_t i = 0; i < optim->sizeStates; i++) {
-        if (optim->parameter[i]->grad->quantization->type != BFP) {
+        const parameter_t *p = optim->parameter[i];
+        if (p->grad->quantization->type != BFP) {
             continue;
         }
-        if (sgd->weightDecay != 0.0f || !sgd->momentumIntValid) {
+        const bool paramBfp = p->param->quantization->type == BFP;
+        const bool integerState = optim->states != NULL && momentumQuant->type == BFP;
+        const bool integerParam = paramBfp && (optim->states == NULL || integerState);
+        if (!integerState && !integerParam) {
+            continue;
+        }
+        if (sgd->weightDecay != 0.0f) {
+            PRINT_ERROR("sgdMCreateOptim: the integer SGD update on BFP storage has no "
+                        "weight-decay term (weightDecay = %g must be 0)",
+                        (double)sgd->weightDecay);
+            exit(1);
+        }
+        if (integerState && !sgd->momentumIntValid) {
             PRINT_ERROR("sgdMCreateOptim: BFP momentum on BFP gradients is the integer "
-                        "momentum store, which needs weightDecay == 0 (got %g) and 0 < "
-                        "momentumFactor <= 1 (got %g)",
-                        (double)sgd->weightDecay, (double)sgd->momentumFactor);
+                        "momentum store, which needs 0 < momentumFactor <= 1 (got %g)",
+                        (double)sgd->momentumFactor);
+            exit(1);
+        }
+        if (integerParam && !sgd->learningRateIntValid) {
+            PRINT_ERROR("sgdMCreateOptim: the integer parameter update on BFP parameters "
+                        "needs a finite learningRate (got %g)",
+                        (double)sgd->learningRate);
             exit(1);
         }
     }
 }
 
+/*! Builds a momentum-state tensor at `param`'s shape but with its OWN
+ * quantization (`momentumQuant`, deep-cloned via getQLike) -- decouples the
+ * accumulator's dtype from the parameter's storage dtype (#277 Task 2). */
 static tensor_t *momentumStateInit(tensor_t *param, quantization_t *momentumQuant) {
     /* Group-quant PR2 carrier gate (mirrors gradInit,
      * TensorApi.c): groups are legal ONLY on GEMM-family weight tensors --
@@ -137,6 +155,6 @@ optimizer_t *sgdMCreateOptim(float learningRate, float momentumFactor, float wei
     }
 
     validateOptimizerGradStorage(optim, "sgdMCreateOptim");
-    rejectUnimplementedBfpMomentumStore(optim, sgd, momentumQuant);
+    rejectUnimplementedIntegerSgd(optim, sgd, momentumQuant);
     return optim;
 }

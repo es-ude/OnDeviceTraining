@@ -714,9 +714,11 @@ static void badAlias(void) {
     setupBad();
     momentumStoreBfpInPlace(&fixV.t, &fixV.t, muOf(0.9f), HALF_AWAY, NULL);
 }
+/* a per-tensor gradient on a grouped state is legal (one exponent for all
+ * groups); a gradient grouped differently from the state is not */
 static void badGeometry(void) {
-    moInit(&fixV, 4, 2, 2, 8, 8, badCodes, badStored);
-    moInit(&fixG, 4, 1, 0, 8, 8, badCodes, badStored);
+    moInit(&fixV, 4, 1, 0, 8, 8, badCodes, badStored);
+    moInit(&fixG, 4, 2, 2, 8, 8, badCodes, badStored);
     moRun(muOf(0.9f), HALF_AWAY, NULL);
 }
 static void badCount(void) {

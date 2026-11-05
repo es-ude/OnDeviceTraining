@@ -16,7 +16,7 @@ uv run tools/bfp-census/census.py --strict -v                                   
 uv run tools/bfp-census/census.py --roots tools/bfp-census/forward_roots.txt    # every BFP forward kernel, report
 uv run tools/bfp-census/census.py --strict --roots tools/bfp-census/har_backward_roots.txt  # the integer HAR backward so far
 uv run tools/bfp-census/census.py --strict --roots tools/bfp-census/har_train_step_roots.txt  # the whole HAR training step
-uv run tools/bfp-census/census.py --self-test
+uv run tools/bfp-census/census.py --self-test      # + the step gate's negative controls when built
 ```
 
 - `har_forward_roots.txt` (default): the HAR classifier's integer forward, the gate set.
@@ -33,7 +33,9 @@ uv run tools/bfp-census/census.py --self-test
   `har_train_step_roots.txt`: the whole training step of the integer path (bfp8full,
   both heads): `include`s the forward and backward sets and adds the step's driver
   (epoch and batch loops, the calculate-grads interpreter, the loss value, the
-  optimizer step, the grad reset, the RNG keys); the --strict gate of the full path.
+  optimizer step, the grad reset, the RNG keys) and the targets the step reaches only
+  through a pointer (the remat HEAP scheduler's rows, every HAR layer's
+  `calcOutputShape`, the loader's `getBatch`); the --strict gate of the full path.
   Its only float is the loss island of the float head, the loss value (both heads)
   and the input boundary.
   `include <file>` (relative to the including file) pulls a roots file in; a root
@@ -48,6 +50,21 @@ uv run tools/bfp-census/census.py --self-test
   `<root> <function> <symbol> <count>` allows exactly that many call sites. More sites
   are hits; fewer make the entry stale, so a new division in an allowed function shows.
 - Not followed: calls through function pointers or vtables; list such targets as roots.
+  `har_train_step_roots.txt` is closed over them by its `indirect
+  har_train_step_indirect.txt` line: every function whose address the build takes
+  (an ABS32 relocation: vtable and conversion-cell data, kernel and callback pointers
+  loaded in code) must be covered by a root -- named, or reached by a walk -- or carry
+  an `exclude <src.c> <function> <reason>` line saying why it never runs on the step;
+  and every covered function that calls through a register (`blx`, or a `bx` that is
+  not a return) must carry a `site <src.c> <function> <count> <targets>` line with
+  exactly that count. A new layer type, kernel arm, conversion cell, scheduler row or
+  callback therefore fails `--strict` until it is rooted or excluded; an entry that
+  stops applying is stale. Targets outside the objects (the trainer's `getSample`,
+  `getDatasetSize`, `calculateGradsFn`, a phase hook) show up as `site` lines.
+  `--self-test` with a built `BUILD_DIR` injects forbidden helpers (float, division,
+  int64) into the pointer-only targets (remat HEAP rows, `calcOutputShape`,
+  `reluForward`, `getBatch`), drops a root and adds an undeclared pointer call; the
+  step gate must fail on each, for that reason.
   The dtype dispatchers (`executeOp`, `writeOutConversion`, the layers' `*Forward`
   switches) are `self` roots: a full walk from them reaches every dtype's arm. What a
   self root cannot see -- a float route through a callee -- is, on the BFP-wire forward,

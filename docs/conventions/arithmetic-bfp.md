@@ -2695,10 +2695,15 @@ momentum store and parameter update (§15.7). What stays float:
 The static proof is the M0+ census over the whole step,
 `tools/bfp-census/har_train_step_roots.txt --strict` (the forward and backward
 sets plus the step's driver: epoch and batch loops, the calculate-grads
-interpreter, the loss value, the optimizer step, the grad reset, the RNG keys).
+interpreter, the loss value, the optimizer step, the grad reset, the RNG keys),
+closed over calls through pointers: every address-taken function of the build
+is rooted or excluded with a reason, and every pointer call the roots make is
+declared (`har_train_step_indirect.txt`), so the remat scheduler's rows, the
+layers' `calcOutputShape` and the loader's `getBatch` are checked too.
 Its allow-list holds no float outside the three items above; the divisions it
 allows run per call, per group change, per output element (shared index math),
-per wire of the per-call remat table, or per RNG key fold. The run-time side is
+per wire of the per-call remat table, per layer of the per-call output-shape
+pass (the window geometry), or per RNG key fold. The run-time side is
 the trainer's FULL gate (`train_c_bfp.c`): on this path it checks at init that
 every layer declares the integer path -- each math slot `ARITH_BFP`, each wire
 BFP, both GEMM grads under `OUT_ACC_DYNAMIC_RESCALE` (the fixed-scale mode keeps

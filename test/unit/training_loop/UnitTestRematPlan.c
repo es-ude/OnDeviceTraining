@@ -381,7 +381,7 @@ static void ceWithoutSoftmaxLinear(void) {
     ceRangeOn(model, 1);
 }
 static void ceWithoutSoftmaxRelu(void) {
-    layer_t *model[2] = {makeSoftmax(), makeRelu(&g_floatQ)};
+    layer_t *model[2] = {makeLinear(2, 3, false, 0), makeRelu(&g_floatQ)};
     ceRangeOn(model, 2);
 }
 static void ceEmptyModel(void) {
@@ -399,6 +399,123 @@ void testBackwardRangeCrossEntropyRequiresALastSoftmax(void) {
                              ceWithoutSoftmaxRelu());
     ASSERT_EXITS_WITH_FAILURE(ceEmptyModel());
     ASSERT_EXITS_WITH(0, ceWithSoftmax());
+}
+
+/* ---- the model head under CrossEntropy (ruling R2) ----
+ * The head is the Softmax forward plus CE's combined gradient p - y, declared
+ * by the Softmax's config: (forwardMath, propLossMath, outputQ, propLossQ).
+ * With any BFP in it, exactly two tuples are heads:
+ *   bfp:   BFP, BFP, BFP, BFP                  (integer Softmax, integer p - y)
+ *   float: FLOAT32, FLOAT32, FLOAT32, any wire (float island, ONE conversion
+ *          onto the loss-grad wire = the Softmax's propLossQ).
+ * Everything else -- e.g. a BFP Softmax with a float CE -- fails fast at init,
+ * and only when a backward runs (an eval-only model is not checked). */
+static uint8_t g_headExp[2];
+static bfpQConfig_t g_headQc[2];
+static quantization_t g_headBfp[2];
+
+static quantization_t *headBfpQ(size_t k) {
+    initBfpQConfigInto(8, 8, HALF_AWAY, &g_headExp[k], &g_headQc[k]);
+    g_headBfp[k] = (quantization_t){.type = BFP, .qConfig = &g_headQc[k]};
+    return &g_headBfp[k];
+}
+
+static layer_t *makeHead(arithmeticType_t fwd, arithmeticType_t bwd, bool bfpOut, bool bfpDx) {
+    layerQuant_t lq = {
+        .forwardMath = {.type = fwd, .roundingMode = HALF_AWAY},
+        .propLossMath = {.type = bwd, .roundingMode = HALF_AWAY},
+        .outputQ = bfpOut ? headBfpQ(0) : &g_floatQ,
+        .propLossQ = bfpDx ? headBfpQ(1) : &g_floatQ,
+    };
+    return softmaxLayerInit(&lq);
+}
+
+static void headRangeOn(arithmeticType_t fwd, arithmeticType_t bwd, bool bfpOut, bool bfpDx,
+                        bool frozen) {
+    layer_t *model[2] = {makeLinear(2, 3, frozen, 0), makeHead(fwd, bwd, bfpOut, bfpDx)};
+    size_t deepest;
+    ptrdiff_t top;
+    rematBackwardRange(model, 2, CROSS_ENTROPY, &deepest, &top);
+    freeModel(model, 2);
+}
+
+static void headBfp(void) {
+    headRangeOn(ARITH_BFP, ARITH_BFP, true, true, false);
+}
+static void headFloatIntoBfp(void) {
+    headRangeOn(ARITH_FLOAT32, ARITH_FLOAT32, false, true, false);
+}
+static void headFloat(void) {
+    headRangeOn(ARITH_FLOAT32, ARITH_FLOAT32, false, false, false);
+}
+static void headBfpSoftmaxFloatCe(void) { /* the numerics before the ruling */
+    headRangeOn(ARITH_BFP, ARITH_FLOAT32, true, true, false);
+}
+static void headFloatSoftmaxPackedP(void) { /* float compute, p packed to BFP */
+    headRangeOn(ARITH_FLOAT32, ARITH_FLOAT32, true, true, false);
+}
+static void headIntegerCeFloatP(void) {
+    headRangeOn(ARITH_BFP, ARITH_BFP, false, true, false);
+}
+static void headIntegerCeFloatDx(void) {
+    headRangeOn(ARITH_BFP, ARITH_BFP, true, false, false);
+}
+static void headFloatSoftmaxIntegerCe(void) {
+    headRangeOn(ARITH_FLOAT32, ARITH_BFP, true, true, false);
+}
+static void headMismatchButFrozen(void) {
+    headRangeOn(ARITH_BFP, ARITH_FLOAT32, true, true, true);
+}
+
+void testBackwardRangeCrossEntropyHeadIsOneOfTwoDeclaredArms(void) {
+    ASSERT_EXITS_WITH(0, headBfp());
+    ASSERT_EXITS_WITH(0, headFloatIntoBfp());
+    ASSERT_EXITS_WITH(0, headFloat());
+    const char *msg = "is neither the bfp head";
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, headBfpSoftmaxFloatCe());
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, headFloatSoftmaxPackedP());
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, headIntegerCeFloatP());
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, headIntegerCeFloatDx());
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, headFloatSoftmaxIntegerCe());
+    ASSERT_EXITS_WITH(0, headMismatchButFrozen());
+}
+
+/* M4: with nothing to train no backward runs, so nothing is skipped: a CE
+ * model without a last Softmax (eval only) is not rejected. */
+static void ceWithoutSoftmaxAllFrozen(void) {
+    layer_t *model[2] = {makeLinear(2, 3, true, 0), makeRelu(&g_floatQ)};
+    ceRangeOn(model, 2);
+    freeModel(model, 2);
+}
+
+void testBackwardRangeCrossEntropyChecksTheHeadOnlyWhenABackwardRuns(void) {
+    ASSERT_EXITS_WITH(0, ceWithoutSoftmaxAllFrozen());
+}
+
+/* Under CrossEntropy the seed GRAD n IS the Softmax's dx (the combined
+ * gradient replaces its backward), so it takes the Softmax's declared dx
+ * wire -- propLossQ, type-derived -- not ACT n's: the float head's FLOAT32 p
+ * feeds a BFP loss-grad wire. Under MSE the seed still inherits ACT n. */
+void testCrossEntropySeedTakesTheSoftmaxDxWire(void) {
+    layer_t *model[2] = {makeLinear(2, 3, false, 0),
+                         makeHead(ARITH_FLOAT32, ARITH_FLOAT32, false, true)};
+    inputLike_t in;
+    rematWireTable_t *t =
+        initTable(model, 2, CROSS_ENTROPY, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
+    TEST_ASSERT_EQUAL_size_t(4, t->numWires);
+    TEST_ASSERT_EQUAL_UINT8(FLOAT32, t->wires[2].dtype); /* ACT 2: p */
+    TEST_ASSERT_EQUAL_UINT8(REMAT_WIRE_GRAD, t->wires[3].kind);
+    TEST_ASSERT_EQUAL_UINT16(2, t->wires[3].index);
+    TEST_ASSERT_EQUAL_UINT8(BFP, t->wires[3].dtype);
+    TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, t->wires[3].inheritFrom);
+    TEST_ASSERT_EQUAL_size_t(3, t->wires[3].bytes);
+    rematWireTableFree(t);
+
+    rematWireTable_t *m = initTable(model, 2, MSE, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
+    TEST_ASSERT_EQUAL_UINT16(2, m->wires[3].inheritFrom);
+    TEST_ASSERT_EQUAL_UINT8(FLOAT32, m->wires[3].dtype);
+    rematWireTableFree(m);
+    freeModel(model, 2);
 }
 
 /* ---- the one BFP wire-grouping rule ---- */
@@ -453,9 +570,10 @@ void testHarTableNumbersWiresInProductionOrder(void) {
         TEST_ASSERT_EQUAL_UINT16(gradIndex[k], t->wires[id].index);
         TEST_ASSERT_EQUAL_UINT16(id, t->gradIdOf[gradIndex[k]]);
     }
-    /* The seed inherits ACT 12; Flatten (layer 9) passes its dx through, so
-     * GRAD 9 inherits ACT 9; every other GRAD has a type-derived template. */
-    TEST_ASSERT_EQUAL_UINT16(12, t->wires[13].inheritFrom);
+    /* Under CE the seed is the Softmax's dx (its propLossQ, type-derived);
+     * Flatten (layer 9) passes its dx through, so GRAD 9 inherits ACT 9;
+     * every other GRAD has a type-derived template. */
+    TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, t->wires[13].inheritFrom);
     TEST_ASSERT_EQUAL_UINT16(9, t->wires[15].inheritFrom);
     TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, t->wires[14].inheritFrom);
     TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, t->wires[16].inheritFrom);
@@ -905,8 +1023,9 @@ void testBindWritesHarHeadersAndPointsAct0AtTheInput(void) {
         TEST_ASSERT_NULL(rematWireHdr(t, id)->data);
         TEST_ASSERT_EQUAL_INT(FLOAT32, rematWireHdr(t, id)->quantization->type);
     }
-    /* Inherited headers (the seed, Flatten's dx) wait for rematWireBind. */
-    TEST_ASSERT_EQUAL_size_t(0, rematGradHdr(t, 12)->shape->dimensions[0]);
+    /* Under CE the seed is type-derived (the Softmax's dx wire): written by
+     * the table bind; the inherited Flatten dx waits for rematWireBind. */
+    assertDims(rematGradHdr(t, 12)->shape, (size_t[]){1, 6}, 2);
     TEST_ASSERT_EQUAL_size_t(0, rematGradHdr(t, 9)->shape->dimensions[0]);
 
     rematWireTableFree(t);
@@ -4161,6 +4280,9 @@ int main(void) {
     RUN_TEST(testBackwardRangeAllFrozenReturnsModelSize);
     RUN_TEST(testBackwardRangeSingleLayerUnderCrossEntropyIsMinusOne);
     RUN_TEST(testBackwardRangeCrossEntropyRequiresALastSoftmax);
+    RUN_TEST(testBackwardRangeCrossEntropyHeadIsOneOfTwoDeclaredArms);
+    RUN_TEST(testBackwardRangeCrossEntropyChecksTheHeadOnlyWhenABackwardRuns);
+    RUN_TEST(testCrossEntropySeedTakesTheSoftmaxDxWire);
     RUN_TEST(testBfpWireGroupingMatchesTheDriverRule);
     RUN_TEST(testBfpWireGroupingExitsNamingTheWireOnAnIndivisibleGroupSize);
     RUN_TEST(testHarTableNumbersWiresInProductionOrder);

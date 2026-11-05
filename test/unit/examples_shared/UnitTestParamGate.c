@@ -392,12 +392,14 @@ void testPackedBytesRejectUnsupportedDtype(void) {
 /* ---- bfpSweepConfigFromEnv ---------------------------------------------- */
 
 static const char *const kBfpKnobs[] = {
-    "BFP_MANTISSA_BITS", "BFP_EXPONENT_BITS", "BFP_WEIGHT_BLOCK", "BFP_WIRE_BLOCK",
-    "BFP_MATH",          "BFP_GRADS",         "BFP_STATE",        "BFP_ROUNDING"};
+    "BFP_MANTISSA_BITS", "BFP_EXPONENT_BITS", "BFP_WEIGHT_BLOCK", "BFP_WIRE_BLOCK", "BFP_MATH",
+    "BFP_GRADS",         "BFP_STATE",         "BFP_ROUNDING",     "BFP_HEAD"};
 static const char *const kLegacyKnobs[] = {"SYM_BITS",      "SYM_WIRES",  "WEIGHT_DTYPE",
                                            "GROUP_MODE",    "GROUP_SIZE", "SYM_ROUNDING",
                                            "ODTS_ROUNDTRIP"};
 
+/* Every knob unset except the one REQUIRED knob, BFP_HEAD (no default):
+ * float, the head every wire mode accepts. */
 static void clearSweepEnv(void) {
     for (size_t i = 0; i < sizeof(kBfpKnobs) / sizeof(kBfpKnobs[0]); i++) {
         unsetenv(kBfpKnobs[i]);
@@ -405,6 +407,36 @@ static void clearSweepEnv(void) {
     for (size_t i = 0; i < sizeof(kLegacyKnobs) / sizeof(kLegacyKnobs[0]); i++) {
         unsetenv(kLegacyKnobs[i]);
     }
+    setenv("BFP_HEAD", "float", 1);
+}
+
+/* Ruling R2: the model head is an explicit choice. A missing or empty
+ * BFP_HEAD is an error, not a default; float and bfp parse; bfp needs BFP
+ * wires (its p and p - y live on them). */
+void testSweepConfigRequiresAnExplicitHead(void) {
+    clearSweepEnv();
+    unsetenv("BFP_HEAD");
+    bfpSweepConfig_t c;
+    const char *err = bfpSweepConfigFromEnv(&c);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "BFP_HEAD is required"), err);
+    setenv("BFP_HEAD", "", 1);
+    err = bfpSweepConfigFromEnv(&c);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "BFP_HEAD is required"), err);
+
+    setenv("BFP_HEAD", "float", 1);
+    TEST_ASSERT_NULL(bfpSweepConfigFromEnv(&c));
+    TEST_ASSERT_EQUAL_INT(BFP_HEAD_FLOAT, c.head);
+
+    setenv("BFP_HEAD", "bfp", 1);
+    err = bfpSweepConfigFromEnv(&c);
+    TEST_ASSERT_NOT_NULL(err); /* the default BFP_WIRE_BLOCK is float */
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err, "BFP_HEAD=bfp needs BFP wires"), err);
+    setenv("BFP_WIRE_BLOCK", "16", 1);
+    TEST_ASSERT_NULL(bfpSweepConfigFromEnv(&c));
+    TEST_ASSERT_EQUAL_INT(BFP_HEAD_BFP, c.head);
+    clearSweepEnv();
 }
 
 void testSweepConfigDefaults(void) {
@@ -463,7 +495,8 @@ void testSweepConfigRejectsEachInvalidValue(void) {
         {"BFP_WEIGHT_BLOCK", "-4"},  {"BFP_WEIGHT_BLOCK", "chan"}, {"BFP_WIRE_BLOCK", "0"},
         {"BFP_WIRE_BLOCK", "fp32"},  {"BFP_MATH", "fake"},         {"BFP_GRADS", "2"},
         {"BFP_STATE", "yes"},        {"BFP_ROUNDING", "sr_half"},  {"BFP_WEIGHT_BLOCK", " 32"},
-        {"BFP_WEIGHT_BLOCK", "+32"}, {"BFP_MANTISSA_BITS", "+6"},
+        {"BFP_WEIGHT_BLOCK", "+32"}, {"BFP_MANTISSA_BITS", "+6"},  {"BFP_HEAD", "int"},
+        {"BFP_HEAD", "Float"},
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         clearSweepEnv();
@@ -612,6 +645,7 @@ int main(void) {
     RUN_TEST(testPackedMetadataBytesPerDtype);
     RUN_TEST(testPackedBytesRejectUnsupportedDtype);
     RUN_TEST(testSweepConfigDefaults);
+    RUN_TEST(testSweepConfigRequiresAnExplicitHead);
     RUN_TEST(testSweepConfigParsesTheAnchorConfig);
     RUN_TEST(testSweepConfigRejectsEachInvalidValue);
     RUN_TEST(testSweepConfigStateRequiresGrads);

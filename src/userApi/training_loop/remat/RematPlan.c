@@ -20,15 +20,13 @@ void rematBackwardRange(layer_t **model, size_t n, lossFuncType_t lt, size_t *de
                         ptrdiff_t *top) {
     /* CrossEntropy's backward IS the combined Softmax + CE gradient p - y, so
      * the loop starts one layer below the top: that skipped layer must be the
-     * Softmax, or its backward would silently never run. */
-    if (lt == CROSS_ENTROPY && (n == 0 || model[n - 1]->type != SOFTMAX)) {
-        PRINT_ERROR("rematBackwardRange: CrossEntropy skips the last layer's backward (its "
-                    "gradient is the combined Softmax + CrossEntropy p - y), so the model must "
-                    "end in a SOFTMAX layer; got %s",
-                    n == 0 ? "an empty model" : "another layer type");
-        exit(1);
-    }
+     * Softmax, or its backward would silently never run, and its config must
+     * declare one of the two heads. Checked only when a backward runs: with
+     * nothing to train nothing is skipped (an empty model still fails). */
     *deepest = deepestTrainableIndex(model, n);
+    if (lt == CROSS_ENTROPY && (n == 0 || *deepest < n)) {
+        requireCrossEntropyHead(n == 0 ? NULL : model[n - 1], "rematBackwardRange");
+    }
     *top = (ptrdiff_t)n - 1 - (lt == CROSS_ENTROPY ? 1 : 0);
 }
 

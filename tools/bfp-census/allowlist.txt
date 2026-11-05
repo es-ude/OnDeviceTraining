@@ -54,6 +54,8 @@ Linear.c:linearForwardKernelBfpRaw matmulBfpRawTensorsWalk __aeabi_uidiv 2
 Linear.c:linearForwardKernelBfpRaw calcElementIndexByIndices __aeabi_uidiv 1
 
 # ---- Softmax -----------------------------------------------------------------
+# The float head's forward island (BFP_HEAD=float): the FLOAT32 Softmax kernel.
+Softmax.c:softmaxForwardKernel softmaxForwardKernel
 # Two bfpGroupAt recomputes (steps 1 and 2). Steps 2-4: the i-exp core's
 # z = -qW / ln2 is one division per ELEMENT; the integer normalisation (step 5)
 # divides by restoring shifts and calls no helper.
@@ -145,11 +147,13 @@ TensorConversion.c:paramUpdateBfpInPlace bfpScaledSumInPlace __aeabi_uidiv 2
 TensorConversion.c:paramUpdateBfpInPlace bfpScaledSumInPlace __aeabi_uidivmod 1
 
 # ---- The loss boundary (backward) ----------------------------------------------
-# CrossEntropy's combined Softmax + CE gradient is the float island of a BFP
-# training step: loss-facing dequant of p and y, float p - y, then ONE float -> BFP
-# conversion into the grad wire (its RNG_TAG_LOSS stream fold included). The root
-# documents the boundary; traversal stops at it.
-CrossEntropy.c:crossEntropySoftmaxBackward crossEntropySoftmaxBackward
+# The FLOAT head's island (ruling R2): loss-facing dequant of p and y, float p - y,
+# then ONE float -> BFP conversion into the grad wire (its RNG_TAG_LOSS stream fold
+# included), or the all-FLOAT32 arm under float wires. The roots document the
+# boundary; traversal stops at them. The BFP head's root
+# (crossEntropySoftmaxBackwardKernelBfp) and the dispatch have NO entry: no float.
+CrossEntropy.c:crossEntropySoftmaxBackwardFakeQuant crossEntropySoftmaxBackwardFakeQuant
+CrossEntropy.c:crossEntropySoftmaxBackwardFloat crossEntropySoftmaxBackwardFloat
 
 # ---- MaxPool1d / AvgPool1d dx (the integer kernels) ----------------------------
 # Per call: the covering-window count (span - 1) / stride in the kernel, and the

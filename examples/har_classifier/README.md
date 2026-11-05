@@ -404,7 +404,8 @@ integer-only after it (a FLOAT32 operand in an integer forward into a BFP wire i
 run-time error). `abf` and `xfq` keep the 12 layers. Weight-init keys stay per body
 layer (conv1 = 0), so every arm starts from the same weights.
 
-**Knobs** (env): `BFP_MANTISSA_BITS` (2..16, default 8), `BFP_EXPONENT_BITS` (2..8, 8),
+**Knobs** (env): `BFP_HEAD=float|bfp` (**required, no default**: missing, empty or any other
+value is an error, exit 1 — see "Model head" below), `BFP_MANTISSA_BITS` (2..16, default 8), `BFP_EXPONENT_BITS` (2..8, 8),
 `BFP_WEIGHT_BLOCK=tensor|channel|N` (N falls back to per-channel where it does not divide
 a weight's element count — conv1 at 32/64, like the SYM g32/g64 arms), `BFP_WIRE_BLOCK=
 float|tensor|N` (`float` keeps FLOAT32 wires; N resolves PER WIRE and falls back to
@@ -414,12 +415,24 @@ LR_SCHEDULE/LR_MIN/LOG_PATH`. `MOMENTUM` must be finite and > 0 — rejected at
 the env gate (exit 1); behind it the STATE gate expects the optimizer's eight momentum
 buffers to exist (`MOMENTUM=0` would allocate none).
 
+**Model head** (`BFP_HEAD`, ruling R2). The head is the Softmax forward plus CrossEntropy's
+combined gradient `p − y` (the Softmax backward is skipped under CE). It is an explicit
+choice — the trainer refuses to start without it:
+- `float`: the logits are dequantized, the Softmax forward, the CE value and `p − y` run in
+  float, then ONE float → BFP conversion onto the loss-grad wire (the Softmax's `propLossQ`).
+- `bfp`: the integer Softmax forward and the integer `p − y` (one-hot `y` subtracts 1.0 at
+  the label on `p`'s grid in int32, then one integer re-block onto the loss-grad wire): no
+  float on the gradient path. Needs BFP wires (`BFP_WIRE_BLOCK=float` + `bfp` is an error).
+The loss VALUE (logged, divergence check) is float on both heads — monitoring only, off the
+gradient path. The numerics before the ruling (integer Softmax, float CE) are neither head:
+`bfp` is the closer one for the Softmax forward, `float` for `p − y`.
+
 **Config names encode every knob** (`--resume`-safe):
-`bfp_wb{t|pc|N}_ab{f|t|N}_m{M}_e{E}_x{nat|fq}_g{0|1}_s{0|1}_r{sr|det}_l{const|cos}`.
+`bfp_wb{t|pc|N}_ab{f|t|N}_m{M}_e{E}_x{nat|fq}_g{0|1}_s{0|1}_r{sr|det}_l{const|cos}_h{flt|bfp}`.
 
 **The arm ladder.** `abf` (FLOAT32 wires) is NOT a float arm: the GEMM math still runs
 `ARITH_BFP` and stages each float operand per-tensor at the weight widths. `xfq` pins the
-four GEMM math slots and Softmax's forward to FLOAT32 while Relu/pools keep their BFP arms
+four GEMM math slots to FLOAT32 (the head is `BFP_HEAD`'s) while Relu/pools keep their BFP arms
 — it is the GEMM fake-quant reference curve, not a whole-model fake-quant twin (the pools'
 FLOAT32 arms reject packed wires). `g1` / `g1s1` store grads / momentum as per-tensor BFP.
 
@@ -444,17 +457,13 @@ FLOAT32 arms reject packed wires). `g1` / `g1s1` store grads / momentum as per-t
 math slots: forward packs and float-operand staging are always HALF_AWAY (deterministic
 inference, evaluation never draws from the RNG); under `sr` the dx packs
 (`propLossMath`), grad/state packs and the optimizer write-back use SR_HALF_AWAY; `det`
-is HALF_AWAY everywhere. **Exception:** the CrossEntropy loss-grad pack (`p − y`, 6
-elements) has no operation carrier (it clones softmax.out's config and packs through
-`executeConvert`) and is HALF_AWAY under both — so `sr` vs `det` compares nine of the ten
-dx seams. **At coarse widths this can matter a lot:** with m=4 (and more so e=4) the five
-small components of `p − y` round deterministically to zero on that first pack — a dead
-zone at the head that SR would escape elsewhere. A `_m4_`/`_e4_` arm that stalls at the
-head is a candidate symptom of this exception, not necessarily of the width; the planned
-follow-up is a loss-owned wire template.
+is HALF_AWAY everywhere. The CrossEntropy loss-grad pack (`p − y`, 6 elements) writes the
+Softmax's dx wire (its `propLossQ`), whose template the trainer builds with the same
+training-side mode: SR under `sr` on both heads (before the ruling it cloned softmax.out's
+HALF_AWAY config and was the one deterministic dx seam).
 
 **Finding (stage-1 smoke, 1 epoch, seed 1) — recorded, not fully diagnosed.** The
-`bfp_wb32_ab16_m6_e8_xnat_g0_s0_rdet_lconst` arm (deterministic rounding, otherwise
+`bfp_wb32_ab16_m6_e8_xnat_g0_s0_rdet_lconst` (a pre-`BFP_HEAD` name: integer Softmax, float CE) arm (deterministic rounding, otherwise
 identical to the anchor) did not learn: `train_loss=1.789` (≈ ln 6) and `test_acc=0.014`
 — well below both the test set's 14% minimum class frequency and the same seed's
 untrained `initial_val_acc≈0.128`, so this is neither a uniform/constant output (that
@@ -487,7 +496,7 @@ already from m=13 (conv1's weightGrad reduction L=128 exceeds the m=13 limit of 
 `optstate_overhead_b`, `wire_overhead_b`); `mcu_total_b` is their sum IN THE C
 HARNESS since PR7 (SYM logs' totals grew by their group metadata that was previously
 only reported under `config`). Accuracy-per-byte = accuracy / (payload + ALL metadata).
-For the anchor config (`bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst`), the stage-1 smoke
+For the anchor config (`bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst`, pre-`BFP_HEAD`), the stage-1 smoke
 reported `activations_b`=10858, `wire_overhead_b`=1162, `group_overhead_b`=304.
 
 **Stage-1 matrix and run:**
@@ -495,13 +504,14 @@ reported `activations_b`=10858, `wire_overhead_b`=1162, `group_overhead_b`=304.
 cmake --preset examples_memprofile && cmake --build --preset examples_memprofile --target train_c_har_classifier train_c_har_classifier_sym train_c_har_classifier_bfp
 uv run examples/har_classifier/run_matrix.py \
   --configs float sym6g32 \
-            bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst bfp_wbt_ab16_m6_e8_xnat_g0_s0_rsr_lconst \
-            bfp_wbpc_ab16_m6_e8_xnat_g0_s0_rsr_lconst bfp_wb8_ab16_m6_e8_xnat_g0_s0_rsr_lconst \
-            bfp_wb32_abf_m6_e8_xnat_g0_s0_rsr_lconst bfp_wb32_abt_m6_e8_xnat_g0_s0_rsr_lconst \
-            bfp_wb32_ab32_m6_e8_xnat_g0_s0_rsr_lconst bfp_wb32_ab16_m4_e8_xnat_g0_s0_rsr_lconst \
-            bfp_wb32_ab16_m8_e8_xnat_g0_s0_rsr_lconst bfp_wb32_ab16_m6_e4_xnat_g0_s0_rsr_lconst \
-            bfp_wb32_ab16_m6_e8_xnat_g0_s0_rdet_lconst bfp_wb32_ab16_m6_e8_xfq_g0_s0_rsr_lconst \
-            bfp_wb32_ab16_m6_e8_xnat_g1_s0_rsr_lconst bfp_wb32_ab16_m6_e8_xnat_g1_s1_rsr_lconst \
+            bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst_hbfp bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst_hflt \
+            bfp_wbt_ab16_m6_e8_xnat_g0_s0_rsr_lconst_hbfp \
+            bfp_wbpc_ab16_m6_e8_xnat_g0_s0_rsr_lconst_hbfp bfp_wb8_ab16_m6_e8_xnat_g0_s0_rsr_lconst_hbfp \
+            bfp_wb32_abf_m6_e8_xnat_g0_s0_rsr_lconst_hflt bfp_wb32_abt_m6_e8_xnat_g0_s0_rsr_lconst_hbfp \
+            bfp_wb32_ab32_m6_e8_xnat_g0_s0_rsr_lconst_hbfp bfp_wb32_ab16_m4_e8_xnat_g0_s0_rsr_lconst_hbfp \
+            bfp_wb32_ab16_m8_e8_xnat_g0_s0_rsr_lconst_hbfp bfp_wb32_ab16_m6_e4_xnat_g0_s0_rsr_lconst_hbfp \
+            bfp_wb32_ab16_m6_e8_xnat_g0_s0_rdet_lconst_hbfp bfp_wb32_ab16_m6_e8_xfq_g0_s0_rsr_lconst_hbfp \
+            bfp_wb32_ab16_m6_e8_xnat_g1_s0_rsr_lconst_hbfp bfp_wb32_ab16_m6_e8_xnat_g1_s1_rsr_lconst_hbfp \
   --seeds 1 2 3 4 5 6 7 8 9 10 --epochs 50 --jobs 8 --logs examples/har_classifier/logs_bfp
 uv run examples/har_classifier/compare_memory.py --logs examples/har_classifier/logs_bfp
 ```
@@ -510,7 +520,7 @@ Runtime: measured, not estimated — but measured unoptimized. These numbers com
 preset sets only `BUILD_EXAMPLES`/`ODT_MEM_PROFILE`, no optimization flag, i.e. -O0),
 not the `-O2` the campaign discipline calls for. The stage-1 smoke (1 epoch,
 seed 1, 16 configs under `--jobs 4`) put the anchor
-(`bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst`) at 273.6 s/epoch under that 4-way load
+(`bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst`, pre-`BFP_HEAD`) at 273.6 s/epoch under that 4-way load
 against `sym6g32`'s 86.4 s — ≈3.2× under the same 4-way load (273.6 s vs 86.4 s); the
 anchor's solo time was 223.8 s/epoch. A 50-epoch run at these -O0 rates is therefore ≈3 h
 per (config, seed); the full 16-config × 10-seed stage-1 matrix is ≈60 h wall at

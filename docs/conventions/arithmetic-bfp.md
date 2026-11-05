@@ -2077,7 +2077,8 @@ The one division left in the root besides `bfpGroupAt` is the i-exp's
 **FLOAT32 targets of the two ops.** On the HAR proof path both head wires
 (6 elements) are per-tensor BFP (`resolveWireShape` falls back to `{1,0}`
 under `BFP_WIRE_BLOCK=16`), so no raw of these ops goes to a FLOAT32 target
-there; the loss reads the packed Softmax wire. Under `BFP_WIRE_BLOCK=float`
+there; under the bfp head the loss reads the packed Softmax wire (the float
+head keeps `p` FLOAT32, §14 "The model head"). Under `BFP_WIRE_BLOCK=float`
 (arm A) the Linear raw is `{1,0}` and the item-7 precision class above
 applies (the differential spread cell rounds 65 folds per-tensor against 32
 under raw groups of 3, float64 error `1.1e-2` vs `6e-6`, both inside the
@@ -2300,7 +2301,9 @@ called by the backward cores exactly where the float fold
 
 **Pools, ReLU, Flatten, input layer and the loss boundary (2026-11-05).**
 After this step the only float of a BFP training step (BFP wires, native
-math) is the loss boundary; `tools/bfp-census/har_backward_roots.txt` gates it.
+math) is the float head's loss island, and under the bfp head there is none
+on the gradient path (below); `tools/bfp-census/har_backward_roots.txt`
+gates both.
 
 - **MaxPool1d dx** (`maxPool1dBackwardKernelBfpRaw`): the FLOAT32 arm's loop
   (rows, outputs, the saved argmax, the `-1` sentinel) and scatter-add. One
@@ -2351,15 +2354,74 @@ math) is the loss boundary; `tools/bfp-census/har_backward_roots.txt` gates it.
   convert purpose stream. Every other pair (a FLOAT32 input-gradient export,
   SYM) keeps `executeConvert`. HAR never runs it (no dx below conv1).
 - **The loss boundary** (`crossEntropySoftmaxBackward`): the combined
-  Softmax + CrossEntropy gradient is the float island -- loss-facing dequant
-  of `p` and `y`, `p − y` in float, then ONE conversion into the grad wire
-  (`convertTensor` on the `RNG_TAG_LOSS` stream). The float arm raw-casts its
-  operands, so it runs only when output, label and grad wire are ALL
-  FLOAT32; any other mix (a FLOAT32 output into a BFP grad wire, a quantized
-  label) takes the converting arm. The training loop skips the model's last
-  layer exactly once under CrossEntropy (`rematBackwardRange`), and that
-  layer must be the Softmax: any other last layer (or an empty model) fails
-  fast, so no layer's backward is dropped silently.
+  Softmax + CrossEntropy gradient `p − y`, seeded onto the Softmax's dx wire.
+  Which arithmetic computes it is the model head's (below); the arm follows
+  `p`'s dtype, validated against the declared head at init. A FLOAT32 `p` is
+  the float island -- `p − y` in float, then ONE conversion into the grad
+  wire (`convertTensor` on the `RNG_TAG_LOSS` stream, by the wire template's
+  mode). The float arm raw-casts its operands, so it runs only when output,
+  label and grad wire are ALL FLOAT32; any other mix (a FLOAT32 output into a
+  BFP grad wire, a quantized label) takes the converting arm. A BFP `p` is
+  the integer head. The training loop skips the model's last layer exactly
+  once under CrossEntropy (`rematBackwardRange`), and that layer must be the
+  Softmax: any other last layer (or an empty model) fails fast, so no
+  layer's backward is dropped silently -- checked when a backward runs (an
+  all-frozen, eval-only model skips nothing and is not checked).
+
+**The model head: an explicit choice (ruling R2, 2026-11-05).** The head is
+the Softmax forward plus CrossEntropy's combined `p − y` (the Softmax
+backward is skipped under CE). There is no default: the last Softmax's
+config IS the declaration, and the mechanism adds no new field -- the slots
+every layer declares arithmetic with are read as the head:
+`forwardMath` (the Softmax forward), `propLossMath` (the combined gradient:
+it replaces exactly this layer's backward), `outputQ` (`p`'s wire) and
+`propLossQ` (the loss-grad wire: the seed GRAD n IS the Softmax's dx, so
+the remat wire table gives it the Softmax's `propLossQ`, type-derived; under
+MSE the seed still inherits the model output's config).
+`requireCrossEntropyHead` (`LayerConfigAccess.c`, called by
+`rematBackwardRange`) accepts a head without any BFP unchanged (FLOAT32 and
+SYM models), and with any BFP exactly two tuples:
+
+| head | forwardMath | propLossMath | outputQ (`p`) | propLossQ (loss grad) |
+|---|---|---|---|---|
+| bfp | `ARITH_BFP` | `ARITH_BFP` | BFP | BFP |
+| float | `ARITH_FLOAT32` | `ARITH_FLOAT32` | FLOAT32 | any (BFP: one conversion) |
+
+Any other mix fails fast at init -- in particular an integer Softmax with a
+float CE gradient (the numerics before the ruling) and a float Softmax whose
+`p` is packed onto a BFP wire (two conversions). The HAR trainer exposes it
+as the required knob `BFP_HEAD=float|bfp`.
+
+- **float head:** the Softmax's FLOAT32 arm dequantizes the logits; `p`
+  stays FLOAT32; CE value and `p − y` in float; ONE float → BFP conversion
+  onto the loss-grad wire. The loss island is the census's only allowed
+  float on that path.
+- **bfp head: the integer `p − y`** (`crossEntropySoftmaxBackwardKernelBfp`,
+  one funnel op, `BFP_RAW_BACKWARD_DX`, op key `CROSS_ENTROPY_OP_GRAD = 0` at
+  the layer position after the last layer). `p` is borrowed as unpacked
+  codes; the label rides in the kernel context (not staged) and must be a
+  FLOAT32 one-hot, read by BIT PATTERN (`1.0f` = the class, `±0.0f` not,
+  anything else fails fast: soft labels need the float head) -- no float
+  compare. Each element is an int32 term on its own grid: a non-label
+  element is its code `c` on its `p` group's exponent `E_g`; the label
+  subtracts `1.0 = 2^−E` on `E = clamp(E_g, −30, 0)`: exact for every `E_g`
+  in `[−30, 0]`, also when 1.0 needs the code `2^(m−1)`, one beyond the
+  m-bit maximum (`p` near 1 at `E = −(m−1)`); `|term| <= 2^30 + 2^15`. A `p`
+  group below `2^−30` (a confidently wrong prediction in a grouped `p`)
+  rounds the label's code half away onto `2^−30` first (`< 2^−31` absolute,
+  next to a value near −1); `E_g > 0` with a nonzero code is `p > 1` and
+  fails fast. Per raw target group (the loss-grad wire's geometry) the
+  exponent is the data rule of `bfpRawEmitFromRows` (`E_t = max(E +
+  bitlen|term|) − 31`, two passes recomputing the terms, no table, `p`'s
+  groups by cursor, no division); a term more than 31 binades below its
+  group's top rounds half away. Then the funnel's integer re-block onto the
+  loss-grad wire by the WIRE's mode (its template; SR under SR, one draw per
+  element in element order from the op's `RNG_TAG_OUT` stream) -- the
+  training-side seam rule of every dx wire. A BFP `p` without a BFP grad
+  wire or a FLOAT32 label fails fast.
+- **The loss value** (`crossEntropyForward`) stays float on both heads: it
+  is monitoring (the logged loss, the divergence check), computed off the
+  gradient path.
 
 **Standalone Softmax backward: the integer VJP (2026-11-05).** Not on the
 HAR path (CrossEntropy skips the Softmax), implemented for every other loss.

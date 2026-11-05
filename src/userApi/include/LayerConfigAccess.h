@@ -25,6 +25,20 @@ quantization_t *layerOutputQ(layer_t *layer);
  * headers). */
 quantization_t *backwardWireQ(layer_t *layer);
 
+/* The model head under CrossEntropy (ruling R2, arithmetic-bfp.md section
+ * 14): CE's backward IS the combined Softmax + CE gradient p - y, so the
+ * last layer must be a SOFTMAX (anything else fails fast, naming `what`),
+ * and its config declares the head -- (forwardMath, propLossMath, outputQ,
+ * propLossQ), propLossQ being the loss-grad wire. A head without any BFP is
+ * unchecked (FLOAT32, SYM_INT32 models, as before). With any BFP it must be
+ * exactly one of
+ *   bfp:   ARITH_BFP, ARITH_BFP, BFP, BFP (integer Softmax, integer p - y);
+ *   float: ARITH_FLOAT32, ARITH_FLOAT32, FLOAT32, any (float Softmax and
+ *          p - y, ONE conversion onto the loss-grad wire);
+ * any other mix -- e.g. an integer Softmax with a float CE gradient -- fails
+ * fast. There is no default: the config IS the choice. */
+void requireCrossEntropyHead(layer_t *last, const char *what);
+
 /* Declared forward compute representation. Flatten and Quantization have no
  * consumed arithmetic (arithmetic-type-split D4 — Quantization is a pure conversion node) ->
  * {ARITH_FLOAT32, HALF_AWAY}, matching arithmeticFromQuantizationOrDefault(NULL). */

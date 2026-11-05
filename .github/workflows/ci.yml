@@ -978,7 +978,7 @@ jobs:
             build/examples_memprofile/examples/har_classifier/train_c_har_classifier_adamw
           STAGE1_EPOCHS=1 STAGE2_EPOCHS=1 SEED=1 LOG_PATH=/tmp/wm_finetune.json \
             build/examples_memprofile/examples/har_classifier/train_c_har_classifier_finetune
-          EPOCHS=1 SEED=1 BFP_WEIGHT_BLOCK=32 BFP_WIRE_BLOCK=16 BFP_MANTISSA_BITS=6 BFP_EXPONENT_BITS=8 LOG_PATH=/tmp/wm_bfp.json \
+          EPOCHS=1 SEED=1 BFP_HEAD=bfp BFP_WEIGHT_BLOCK=32 BFP_WIRE_BLOCK=16 BFP_MANTISSA_BITS=6 BFP_EXPONENT_BITS=8 LOG_PATH=/tmp/wm_bfp.json \
             build/examples_memprofile/examples/har_classifier/train_c_har_classifier_bfp
 
       - name: Check stack watermarks (report-only)

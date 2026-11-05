@@ -236,12 +236,13 @@ static void buildModel(layer_t **model, mixedWidthQuant_t *mq, const trainingRng
 
     layerQuant_t lqSoftmax = {
         .forwardMath = (arithmetic_t){ARITH_FLOAT32, HALF_AWAY},
-        /* propLossMath/propLossQ are required non-NULL by the factory but
-         * never exercised: CalculateGradsSequential's CE+Softmax shortcut
-         * skips Softmax's own backward (combined gradient). */
+        /* Under CrossEntropy the Softmax's own backward is skipped; its
+         * propLossMath / propLossQ declare the combined p - y and the
+         * loss-grad wire (the training loop's seed takes propLossQ). FLOAT32:
+         * Quant1 below then converts that float seed into SYM_INT32@12. */
         .propLossMath = (arithmetic_t){ARITH_FLOAT32, HALF_AWAY},
         .outputQ = mq->floatQ,
-        .propLossQ = mq->wireQ,
+        .propLossQ = mq->floatQ,
     };
     model[SOFTMAX_IDX] = softmaxLayerInit(&lqSoftmax);
 }

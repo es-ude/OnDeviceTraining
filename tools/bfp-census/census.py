@@ -122,7 +122,17 @@ def self_test():
     ind_ok = ind_ok and "exclude v.c fwd: covered by the roots" in stale2
     if not ind_ok:
         print(f"self-test FAIL indirect coverage: {probs} {stale} {stale2}", file=sys.stderr)
-    failed = bool(bad) or not scoped_ok or not self_ok or not ind_ok
+    # Step-trace closure: an arm function the trace runs must be covered or
+    # trace-excluded; names outside the arm objects are skipped.
+    tprobs, tstale, tn = check_trace({"walked", "island", "missed", "trainerFn"},
+                                     {("a.c", "walked")}, {"walked", "island", "missed"},
+                                     {"island": "boundary", "walked": "x", "gone": "y"})
+    trace_ok = (tn == 3 and tprobs == ["step trace: missed runs on the step but no root walks it"]
+                and tstale == ["trace-exclude walked: covered by the roots",
+                               "trace-exclude gone: not an arm function the step trace executes"])
+    if not trace_ok:
+        print(f"self-test FAIL step trace: {tprobs} {tstale} {tn}", file=sys.stderr)
+    failed = bool(bad) or not scoped_ok or not self_ok or not ind_ok or not trace_ok
     print("self-test " + ("FAILED" if failed else "ok"))
     return 1 if failed else 0
 
@@ -146,16 +156,16 @@ def read_pairs(path):
 def read_roots(path, stack=()):
     """Root lines of a roots file, `include <file>` lines expanded in place
     (relative to the including file); a root line seen before is dropped, so a
-    union of phase files lists each root once. An `indirect <file>` line comes
-    back as ["indirect", <absolute path>]."""
+    union of phase files lists each root once. An `indirect <file>` or
+    `trace <file>` line comes back as [<keyword>, <absolute path>]."""
     if path.resolve() in stack:
         sys.exit(f"census: include cycle at {path}")
     out, seen = [], set()
     for parts in read_pairs(path):
         if parts[0] == "include" and len(parts) == 2:
             lines = read_roots(path.parent / parts[1], stack + (path.resolve(),))
-        elif parts[0] == "indirect" and len(parts) == 2:
-            lines = [["indirect", str((path.parent / parts[1]).resolve())]]
+        elif parts[0] in ("indirect", "trace") and len(parts) == 2:
+            lines = [[parts[0], str((path.parent / parts[1]).resolve())]]
         else:
             lines = [parts]
         for line in lines:
@@ -317,16 +327,21 @@ def read_indirect(path):
                                                        that does not run on the step
       site <source.c> <function> <count> <reason ...>  a covered function makes
                                                        exactly <count> indirect calls
+      trace-exclude <function> <reason ...>            a function the step trace
+                                                       executes that no root walks
     """
-    spec = {"exclude": {}, "site": {}}
+    spec = {"exclude": {}, "site": {}, "untraced": {}}
     for parts in read_pairs(path):
-        if parts[0] == "exclude" and len(parts) >= 4:
+        if parts[0] == "trace-exclude" and len(parts) >= 3:
+            spec["untraced"][parts[1]] = " ".join(parts[2:])
+        elif parts[0] == "exclude" and len(parts) >= 4:
             spec["exclude"][(parts[1], parts[2])] = " ".join(parts[3:])
         elif parts[0] == "site" and len(parts) >= 5 and parts[3].isdigit():
             spec["site"][(parts[1], parts[2])] = (int(parts[3]), " ".join(parts[4:]))
         else:
-            sys.exit(f"census: bad indirect line (want 'exclude <src.c> <function> <reason>' or "
-                     f"'site <src.c> <function> <count> <reason>'): {' '.join(parts)}")
+            sys.exit(f"census: bad indirect line (want 'exclude <src.c> <function> <reason>', "
+                     f"'site <src.c> <function> <count> <reason>' or 'trace-exclude <function> "
+                     f"<reason>'): {' '.join(parts)}")
     return spec
 
 
@@ -368,6 +383,29 @@ def check_indirect(spec, covered, addr_taken, indirect_sites):
     return problems, stale
 
 
+def check_trace(executed, covered, arm_functions, untraced):
+    """Close the roots over what the step really runs.
+
+    executed: function names the instrumented host step entered
+    (har_train_step_trace.txt); covered: (source, base name) of every function
+    a root walked or names; arm_functions: base names defined in the arm
+    objects; untraced: {name: reason} of the trace-exclude lines. A name that is
+    an arm function, covered by no root and not excluded is a problem; names
+    outside the arm objects (the trainer, or inlined on the arm build, where the
+    caller's walk checks the body) are skipped. An exclusion of a covered name or
+    of a name the trace does not hold is stale. Returns (problems, stale,
+    number of names checked)."""
+    covered_names = {fn for _, fn in covered}
+    checked = sorted(executed & arm_functions)
+    problems = [f"step trace: {fn} runs on the step but no root walks it"
+                for fn in checked if fn not in covered_names and fn not in untraced]
+    stale = [f"trace-exclude {fn}: covered by the roots" for fn in sorted(untraced)
+             if fn in covered_names]
+    stale += [f"trace-exclude {fn}: not an arm function the step trace executes"
+              for fn in sorted(set(untraced) - set(checked))]
+    return problems, stale, len(checked)
+
+
 def load_build(build_dir, objdump):
     """Parse every object once: {"local": {(src, fn): callees}, "defined":
     {fn: [(src, fn)]}, "indirect": {(src, fn): n}, "addr": {(src, fn): {where}}}."""
@@ -396,10 +434,10 @@ def load_build(build_dir, objdump):
     return {"local": local, "defined": defined, "indirect": indirect, "addr": dict(addr)}
 
 
-def run_census(build, roots, allow, out, err, verbose=False):
+def run_census(build, roots, allow, out, err, verbose=False, extra_executed=()):
     """Walk every root of `roots` (read_roots lines), print the report to `out`
     and the failures to `err`. Returns the number of --strict failures (0 = the
-    gate passes)."""
+    gate passes). extra_executed: names added to the step trace (controls)."""
     local, defined = build["local"], build["defined"]
     unresolved = {}  # callee -> reason; printed once so silent drops are visible
 
@@ -417,7 +455,7 @@ def run_census(build, roots, allow, out, err, verbose=False):
         sys.exit(f"census: more than one indirect file: {indirect_files}")
     rows, missing, stale_all, covered = [], 0, [], set()
     for parts in roots:
-        if parts[0] == "indirect":
+        if parts[0] in ("indirect", "trace"):
             continue
         src, name = parts[0], parts[1]
         self_only = parts[2:] == ["self"]
@@ -489,6 +527,22 @@ def run_census(build, roots, allow, out, err, verbose=False):
         for line in stale:
             print(f"census: stale indirect entry: {line}", file=err)
         n_ind = len(problems) + len(stale)
+    trace_files = [p[1] for p in roots if p[0] == "trace"]
+    if trace_files:
+        if not indirect_files:
+            sys.exit("census: a `trace` line needs an `indirect` file for its trace-exclude lines")
+        executed = {p[0] for p in read_pairs(Path(trace_files[0]))} | set(extra_executed)
+        arm_functions = {base_name(fn) for _, fn in local}
+        problems, stale, n_checked = check_trace(executed, covered, arm_functions,
+                                                 read_indirect(Path(indirect_files[0]))["untraced"])
+        print(f"\nstep trace ({Path(trace_files[0]).name}): {len(executed)} executed functions, "
+              f"{n_checked} of them in the arm objects; problems {len(problems)}, "
+              f"stale {len(stale)}", file=out)
+        for line in problems:
+            print(f"census: {line}", file=err)
+        for line in stale:
+            print(f"census: stale trace entry: {line}", file=err)
+        n_ind += len(problems) + len(stale)
     return (1 if n_gate else 0) + missing + len(stale_all) + n_ind
 
 
@@ -496,7 +550,8 @@ def run_census(build, roots, allow, out, err, verbose=False):
 # Forbidden helpers injected (in memory) into the indirect targets the step
 # reaches only through a pointer: the remat HEAP scheduler (s->fns), the
 # layers' calcOutputShape (the scheduler's wire table), the ReLU forward
-# dispatcher and the loader's getBatch.
+# dispatcher and the loader's getBatch; and into functions only the step trace
+# closure brought in (direct callees of the self roots).
 STEP_INJECTIONS = (
     [("RematHeap.c", f, "__aeabi_fmul") for f in
      ("rematHeapBegin", "rematHeapNext", "rematHeapDone", "rematHeapEnd", "rematHeapDeinit")]
@@ -505,7 +560,11 @@ STEP_INJECTIONS = (
     + [(f"{src}.c", f"{fn}CalcOutputShape", "__aeabi_lmul") for src, fn in
        (("QuantizationLayer", "quantization"), ("Conv1d", "conv1d"), ("Relu", "relu"),
         ("MaxPool1d", "maxPool1d"), ("AvgPool1d", "avgPool1d"), ("Flatten", "flatten"),
-        ("Linear", "linear"), ("Softmax", "softmax"))])
+        ("Linear", "linear"), ("Softmax", "softmax"))]
+    + [("Linear.c", "linearForwardBfpRaw", "__aeabi_fmul"),
+       ("LayerExec.c", "layerExecOpKey", "__aeabi_ldivmod"),
+       ("OptimizerKeys.c", "optimizerScaleStream", "__aeabi_fadd"),
+       ("Softmax.c", "softmaxRowGeometry", "__aeabi_lmul")])
 
 
 def negative_controls(build, roots, allow):
@@ -515,12 +574,12 @@ def negative_controls(build, roots, allow):
     import io
     bad = 0
 
-    def gate(b, r, what, want_fail, needle=None):
+    def gate(b, r, what, want_fail, needle=None, extra=()):
         """needle: text the report must contain, so a control fails for its
         own reason and not for an unrelated one."""
         nonlocal bad
         out, err = io.StringIO(), io.StringIO()
-        failures = run_census(b, r, allow, out, err)
+        failures = run_census(b, r, allow, out, err, extra_executed=extra)
         text = out.getvalue() + err.getvalue()
         found = (needle is None or (needle.search(text) if hasattr(needle, "search")
                                     else needle in text))
@@ -550,6 +609,12 @@ def negative_controls(build, roots, allow):
     b = dict(build, indirect={**build["indirect"], node: build["indirect"][node] + 1})
     gate(b, roots, "extra indirect call in RematScheduler.c:rematNext", True,
          "RematScheduler.c:rematNext makes 2 indirect call(s), declared 1")
+    # The step-trace closure: a traced function no root walks, and a dropped root.
+    gate(build, roots, "adamWStep added to the step trace", True,
+         "step trace: adamWStep runs on the step", extra=("adamWStep",))
+    dropped = [p for p in roots if p[:2] != ["Linear.c", "linearForwardBfpRaw"]]
+    gate(build, dropped, "root Linear.c:linearForwardBfpRaw dropped", True,
+         "step trace: linearForwardBfpRaw runs on the step")
     return bad
 
 

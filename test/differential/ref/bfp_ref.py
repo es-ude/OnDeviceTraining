@@ -85,9 +85,9 @@ DOC_GAPS: list[str] = [
     "for several segments fold_walk assumes: Linear -- the reduction index ascending (section "
     "5.3: storage groups are contiguous along the axis the forward reduction walks); Conv1d "
     "forward -- input channel outer, kernel tap inner (the weight's [Cout, Cin/g, K] storage "
-    "order); the gather-formulated ConvT1d forward and the Conv1d dx it serves (section 6) -- "
-    "kernel tap outer, channel inner; conv weightGrad -- '(batch, outputPosition) as the "
-    "reduction' and biasGrad 'b-outer/outPos-inner' (section 5.6, documented). The result is "
+    "order); the gather-formulated ConvT1d forward (section 6) -- kernel tap outer, channel inner; "
+    "Conv1d dx and weightGrad run on integer accumulators (conv1d_scatter_int_backward), whose "
+    "sum is order-free and predicted to the bit; biasGrad 'b-outer/outPos-inner' (section 5.6, documented). The result is "
     "reported (bit-exact or not) and never gates: the walk-order-free bound is the acceptance.",
     "(float)partial rounding mode (section 7): the doc says the int32 -> float conversion "
     "'rounds' above 2^24 without naming the mode. Assumed IEEE round-to-nearest-even (C's "
@@ -547,6 +547,416 @@ def linear_walk(batch: int, in_f: int, out_f: int, direction: str, with_bias: bo
     raise ValueError(direction)
 
 
+# --------------------------------------------------------------------------- #
+# Integer fold (arithmetic-bfp section 13, "The integer fold"): the Conv1d    #
+# forward's BFP_RAW -- int32 mantissas + one unbiased exponent per target     #
+# group -- and the section-13 re-block / dequant of that raw                   #
+# --------------------------------------------------------------------------- #
+
+
+def fold_guard_bits(n_terms: int, ma: int, mb: int, m_bias: int) -> int:
+    """Section 13 item 3, from the definition: the smallest integer g in
+    [-30, 31] with (N 2^(ma+mb-2) + 2^(mBias-1)) 2^-g + (N + 1) <= INT32_MAX,
+    every candidate evaluated exactly (rational arithmetic, no shifts);
+    m_bias 0 = no bias segment."""
+    total = n_terms * 2 ** (ma + mb - 2) + (2 ** (m_bias - 1) if m_bias else 0)
+    for g in range(-30, 32):
+        if Fraction(total) * Fraction(2) ** (-g) + (n_terms + 1) <= INT32_MAX:
+            return g
+    raise ValueError("no int32 fold holds this reduction (section 13 fails fast)")
+
+
+def shr_half_away(v: int, k: int) -> int:
+    """Section 13 item 4, k >= 0: v 2^-k rounded half away from zero, as
+    integer division of the magnitude with a remainder test (the dropped
+    fraction is >= 1/2 iff 2 rem >= 2^k). Any k: a value below one half
+    rounds to zero, the exact half rounds away."""
+    if k == 0:
+        return v
+    q, rem = divmod(abs(v), 2 ** k)
+    if 2 * rem >= 2 ** k:
+        q += 1
+    return -q if v < 0 else q
+
+
+def align_partial(v: int, k: int) -> int:
+    """Section 13 item 4: k < 0 is an exact left shift, k >= 0 shr_half_away."""
+    if k < 0:
+        r = v << (-k)
+        if not INT32_MIN <= r <= INT32_MAX:
+            raise ValueError("left shift leaves int32 -- the section-13 proof is violated")
+        return r
+    return shr_half_away(v, k)
+
+
+def _row_live_max(codes: np.ndarray, stored: np.ndarray, bias: int, group_size: int, start: int, count: int) -> int | None:
+    """Max unbiased exponent over the NONZERO codes of a flat run
+    [start, start+count) (group_size 0: the per-tensor group); None when the
+    run holds no nonzero code -- a zero code adds nothing to any sum, so its
+    group's exponent bounds nothing (sections 13/14, "zero groups")."""
+    es = [int(stored[0 if group_size == 0 else i // group_size]) - bias for i in range(start, start + count) if int(codes[i]) != 0]
+    return max(es) if es else None
+
+
+def _live_pair(a: int | None, b: int | None) -> int | None:
+    """Exponent of a product of two run maxima; None if either run is all zero."""
+    return None if a is None or b is None else a + b
+
+
+def _live_top(es) -> int | None:
+    """Max over the live exponents; None when nothing is live."""
+    vals = [e for e in es if e is not None]
+    return max(vals) if vals else None
+
+
+def _top_or_zero(e: int | None) -> int:
+    """A top nothing set is the zero state's exponent 0."""
+    return 0 if e is None else e
+
+
+@dataclass
+class IntFold:
+    mant: np.ndarray  # int64 flat, the raw mantissas
+    exps: np.ndarray  # int64 [numTargetGroups], UNBIASED E_acc
+    exact: np.ndarray  # float64 flat: the exact sum (+ bias)
+    bound: np.ndarray  # float64 flat: 1/2 (S + 1) 2^E_acc per element (section 13 item 7)
+    g: int
+    raw_group_size: int
+    n_segments_max: int
+    n_splits: int  # segments closed by the segment limit (item 5)
+    n_left: int  # folds with k < 0 (exact left shift)
+    n_rounded: int  # folds with k > 0 whose dropped remainder was nonzero
+
+    def stats(self) -> dict:
+        return {
+            "g": self.g,
+            "E_acc_range": [int(self.exps.min()), int(self.exps.max())],
+            "n_segments_max": self.n_segments_max,
+            "n_splits": self.n_splits,
+            "n_left_shifts": self.n_left,
+            "n_rounded_folds": self.n_rounded,
+            "mant_abs_max": int(np.abs(self.mant).max()) if self.mant.size else 0,
+        }
+
+
+def _int_fold_walk(
+    walk: Walk,
+    a: np.ndarray,
+    a_st: np.ndarray,
+    a_bits: tuple[int, int, int],
+    b: np.ndarray,
+    b_st: np.ndarray,
+    b_bits: tuple[int, int, int],
+    bias_codes: np.ndarray | None,
+    bias_e: np.ndarray | None,
+    exps: np.ndarray,
+    gsz: int,
+    g: int,
+    raw_group_size: int,
+) -> IntFold:
+    """Section 13 items 4-7 along a forward walk, given E_acc per raw target
+    group: per output the bias aligned first, one int partial per
+    same-exponent segment (closed on either operand's group change or at
+    segment_limit products), aligned by align_partial(partial, E_acc - (E_a +
+    E_b)); tail fold. HALF_AWAY only."""
+    ga_all, gb_all = group_ids(a.size, a_bits[2]), group_ids(b.size, b_bits[2])
+    bias_a, bias_b = exponent_bias(a_bits[1]), exponent_bias(b_bits[1])
+    limit = segment_limit(a_bits[0], b_bits[0])
+    n_out = int(np.prod(walk.out_shape))
+    mant = np.zeros(n_out, dtype=np.int64)
+    exact = np.zeros(n_out, dtype=np.float64)
+    bound = np.zeros(n_out, dtype=np.float64)
+    seg_max = n_splits = n_left = n_rounded = 0
+    for o in range(n_out):
+        e_acc = int(exps[o // gsz])
+        acc = 0
+        ex = 0.0
+        segments = 0
+        if bias_codes is not None:
+            oc = int(walk.bias_index[o])
+            k = e_acc - int(bias_e[oc])
+            acc = align_partial(int(bias_codes[oc]), k)
+            ex = float(bias_codes[oc]) * 2.0 ** int(bias_e[oc])
+            segments = 1
+        idx_a, idx_b = np.asarray(walk.ia[o], dtype=np.int64), np.asarray(walk.ib[o], dtype=np.int64)
+        partial = 0
+        seg_count = 0
+        cur = None
+        for ia_i, ib_i in zip(idx_a, idx_b):
+            key = (int(ga_all[ia_i]), int(gb_all[ib_i]))
+            if cur is None:
+                cur = key
+            elif key != cur or seg_count == limit:
+                if key == cur:
+                    n_splits += 1
+                e_seg = (int(a_st[cur[0]]) - bias_a) + (int(b_st[cur[1]]) - bias_b)
+                k = e_acc - e_seg
+                if k < 0:
+                    n_left += 1
+                elif k > 0 and shr_half_away(partial, k) * (1 << k) != partial:
+                    n_rounded += 1
+                acc += align_partial(partial, k)
+                segments += 1
+                partial, seg_count, cur = 0, 0, key
+            prod = int(a[ia_i]) * int(b[ib_i])
+            partial += prod
+            seg_count += 1
+            ex += prod * 2.0 ** ((int(a_st[key[0]]) - bias_a) + (int(b_st[key[1]]) - bias_b))
+        if cur is not None:
+            e_seg = (int(a_st[cur[0]]) - bias_a) + (int(b_st[cur[1]]) - bias_b)
+            k = e_acc - e_seg
+            if k < 0:
+                n_left += 1
+            elif k > 0 and shr_half_away(partial, k) * (1 << k) != partial:
+                n_rounded += 1
+            acc += align_partial(partial, k)
+            segments += 1
+        if not INT32_MIN <= acc <= INT32_MAX:
+            raise ValueError("accumulator leaves int32 -- the section-13 proof is violated")
+        mant[o] = acc
+        exact[o] = ex
+        bound[o] = 0.5 * (segments + 1) * 2.0 ** e_acc
+        seg_max = max(seg_max, segments)
+    return IntFold(mant, exps, exact, bound, g, raw_group_size, seg_max, n_splits, n_left, n_rounded)
+
+
+def conv1d_int_fold(
+    a_codes: np.ndarray,
+    a_stored: np.ndarray,
+    a_bits: tuple[int, int, int],
+    b_codes: np.ndarray,
+    b_stored: np.ndarray,
+    b_bits: tuple[int, int, int],
+    bias: tuple[np.ndarray, np.ndarray, tuple[int, int, int]] | None,
+    batch: int,
+    c_in: int,
+    length: int,
+    c_out: int,
+    geom: "ConvGeom",
+    raw_group_size: int,
+) -> IntFold:
+    """Section 13 "The integer fold" for the Conv1d forward along the
+    conv1d_walk order (input channel outer, tap inner -- the walk the float
+    fold was observed to use, DOC_GAPS[2]). Items 1-7 of the section:
+    E_top per output row (b, oc) from the row maxima (over NONZERO codes) of
+    the conv group's input rows and the weight row, max'ed with the channel's
+    bias exponent when its code is nonzero; E_acc per raw target group = max
+    E_top over the rows it covers (none set: 0) + g;
+    per output: bias aligned first, one int partial per same-exponent
+    segment closed on either operand's group change or at segment_limit
+    products, aligned by align_partial(partial, E_acc - (E_a + E_b)); tail
+    fold. HALF_AWAY only. ``*_bits`` = (mantissaBits, exponentBits,
+    groupSize); ``raw_group_size`` 0 = the per-tensor raw."""
+    a = np.asarray(a_codes, dtype=np.int64).ravel()
+    b = np.asarray(b_codes, dtype=np.int64).ravel()
+    a_st, b_st = np.asarray(a_stored, dtype=np.int64), np.asarray(b_stored, dtype=np.int64)
+    bias_a, bias_b = exponent_bias(a_bits[1]), exponent_bias(b_bits[1])
+    cin_g, cout_g = c_in // geom.groups, c_out // geom.groups
+    k_sz = geom.kernel_size
+    n_terms = cin_g * k_sz
+    l_out = geom.conv_out_len(length)
+    if bias is not None:
+        bias_codes = np.asarray(bias[0], dtype=np.int64).ravel()
+        bias_st = np.asarray(bias[1], dtype=np.int64)
+        bias_e = bias_st[group_ids(c_out, bias[2][2])] - exponent_bias(bias[2][1])
+        m_bias = bias[2][0]
+    else:
+        bias_codes, bias_e, m_bias = None, None, 0
+    g = fold_guard_bits(n_terms, a_bits[0], b_bits[0], m_bias)
+
+    in_row_max = [[_row_live_max(a, a_st, bias_a, a_bits[2], (bb * c_in + ic) * length, length) for ic in range(c_in)] for bb in range(batch)]
+    w_row_max = [_row_live_max(b, b_st, bias_b, b_bits[2], oc * n_terms, n_terms) for oc in range(c_out)]
+
+    def row_top(row: int) -> int | None:
+        bb, oc = divmod(row, c_out)
+        cg = oc // cout_g
+        e = _live_pair(_live_top(in_row_max[bb][cg * cin_g:(cg + 1) * cin_g]), w_row_max[oc])
+        if bias_e is not None and int(bias_codes[oc]) != 0:
+            e = _live_top([e, int(bias_e[oc])])
+        return e
+
+    n_out = batch * c_out * l_out
+    gsz = n_out if raw_group_size == 0 else raw_group_size
+    if n_out == 0:
+        z = np.zeros(0, dtype=np.int64)
+        return IntFold(z, np.zeros(1, dtype=np.int64), z.astype(np.float64), z.astype(np.float64), g, raw_group_size, 0, 0, 0, 0)
+    if n_out % gsz:
+        raise ValueError(f"raw groupSize {gsz} does not divide the output ({n_out})")
+    n_groups = n_out // gsz
+    exps = np.array(
+        [_top_or_zero(_live_top(row_top(r) for r in range((t * gsz) // l_out, ((t + 1) * gsz - 1) // l_out + 1))) + g for t in range(n_groups)],
+        dtype=np.int64,
+    )
+
+    walk = conv1d_walk(batch, c_in, length, c_out, geom, "forward", bias is not None)
+    return _int_fold_walk(walk, a, a_st, a_bits, b, b_st, b_bits, bias_codes, bias_e, exps, gsz, g, raw_group_size)
+
+
+def linear_int_fold(
+    a_codes: np.ndarray,
+    a_stored: np.ndarray,
+    a_bits: tuple[int, int, int],
+    b_codes: np.ndarray,
+    b_stored: np.ndarray,
+    b_bits: tuple[int, int, int],
+    bias: tuple[np.ndarray, np.ndarray, tuple[int, int, int]] | None,
+    batch: int,
+    in_f: int,
+    out_f: int,
+    raw_group_size: int,
+) -> IntFold:
+    """Section 13 "The integer fold" for the Linear forward (y = x W^T + b,
+    x [B, inF] row-major, W stored [outF, inF]) along linear_walk's forward
+    order: E_top of output (b, o) = the max group exponent over input row b's
+    nonzero codes + the max over weight row o's, max'ed with o's bias
+    exponent when the bias code is nonzero (a zero code sets nothing); E_acc
+    of a raw target group = max E_top over its outputs (none set: 0) + g, g =
+    fold_guard_bits(
+    inF, ...); then the section-13 fold (_int_fold_walk). The rows are the
+    contiguous storage runs the Linear layer hands the kernel."""
+    a = np.asarray(a_codes, dtype=np.int64).ravel()
+    b = np.asarray(b_codes, dtype=np.int64).ravel()
+    a_st, b_st = np.asarray(a_stored, dtype=np.int64), np.asarray(b_stored, dtype=np.int64)
+    bias_a, bias_b = exponent_bias(a_bits[1]), exponent_bias(b_bits[1])
+    if bias is not None:
+        bias_codes = np.asarray(bias[0], dtype=np.int64).ravel()
+        bias_e = np.asarray(bias[1], dtype=np.int64)[group_ids(out_f, bias[2][2])] - exponent_bias(bias[2][1])
+        m_bias = bias[2][0]
+    else:
+        bias_codes, bias_e, m_bias = None, None, 0
+    g = fold_guard_bits(in_f, a_bits[0], b_bits[0], m_bias)
+    x_row_max = [_row_live_max(a, a_st, bias_a, a_bits[2], bb * in_f, in_f) for bb in range(batch)]
+    w_row_max = [_row_live_max(b, b_st, bias_b, b_bits[2], o * in_f, in_f) for o in range(out_f)]
+
+    def top(o: int) -> int | None:
+        bb, oc = divmod(o, out_f)
+        e = _live_pair(x_row_max[bb], w_row_max[oc])
+        return _live_top([e, int(bias_e[oc])]) if bias_e is not None and int(bias_codes[oc]) != 0 else e
+
+    n_out = batch * out_f
+    gsz = n_out if raw_group_size == 0 else raw_group_size
+    if n_out == 0:
+        z = np.zeros(0, dtype=np.int64)
+        return IntFold(z, np.zeros(1, dtype=np.int64), z.astype(np.float64), z.astype(np.float64), g, raw_group_size, 0, 0, 0, 0)
+    if n_out % gsz:
+        raise ValueError(f"raw groupSize {gsz} does not divide the output ({n_out})")
+    exps = np.array([_top_or_zero(_live_top(top(o) for o in range(t * gsz, (t + 1) * gsz))) + g for t in range(n_out // gsz)], dtype=np.int64)
+    walk = linear_walk(batch, in_f, out_f, "forward", bias is not None)
+    return _int_fold_walk(walk, a, a_st, a_bits, b, b_st, b_bits, bias_codes, bias_e, exps, gsz, g, raw_group_size)
+
+
+def linear_backward_int_fold(
+    direction: str,
+    loss: tuple[np.ndarray, np.ndarray, tuple[int, int, int]],
+    other: tuple[np.ndarray, np.ndarray, tuple[int, int, int]],
+    batch: int,
+    in_f: int,
+    out_f: int,
+    raw_group_size: int,
+) -> IntFold:
+    """Section 14 "Linear dx / weightGrad / biasGrad": the section-13 integer
+    fold along linear_walk's dx (L @ W, W stored [outF, inF], reduction over
+    outF) or weightGrad (L^T @ x, reduction over the batch) order, no bias
+    segment. E_top of output (r, c) = rowTop(r) + colTop(c), each the max
+    group exponent over the NONZERO codes of the output's reduction line where
+    the reduction runs along the operand's physically innermost axis (the dx
+    loss rows), else the operand-wide max (the dx weight columns, both
+    weightGrad operands); E_acc of a raw target group = max E_top over its
+    outputs + fold_guard_bits(K, m_loss, m_other, 0)."""
+    lc, ls, lb = loss
+    oc, os_, ob = other
+    a = np.asarray(lc, dtype=np.int64).ravel()
+    b = np.asarray(oc, dtype=np.int64).ravel()
+    a_st, b_st = np.asarray(ls, dtype=np.int64), np.asarray(os_, dtype=np.int64)
+    bias_a, bias_b = exponent_bias(lb[1]), exponent_bias(ob[1])
+    k = out_f if direction == "dx" else batch
+    rows = batch if direction == "dx" else out_f
+    g = fold_guard_bits(k, lb[0], ob[0], 0)
+    loss_all = _row_live_max(a, a_st, bias_a, lb[2], 0, a.size)
+    col_top = _row_live_max(b, b_st, bias_b, ob[2], 0, b.size)
+    if direction == "dx":
+        row_top = [_row_live_max(a, a_st, bias_a, lb[2], r * out_f, out_f) for r in range(rows)]
+    else:
+        row_top = [loss_all] * rows
+    n_out = rows * in_f
+    gsz = n_out if raw_group_size == 0 else raw_group_size
+    if n_out == 0 or k == 0:
+        raise ValueError("an empty backward GEMM is not modelled")
+    if n_out % gsz:
+        raise ValueError(f"raw groupSize {gsz} does not divide the output ({n_out})")
+    exps = np.array(
+        [_top_or_zero(_live_top(_live_pair(row_top[o // in_f], col_top) for o in range(t * gsz, (t + 1) * gsz))) + g for t in range(n_out // gsz)],
+        dtype=np.int64,
+    )
+    walk = linear_walk(batch, in_f, out_f, direction, False)
+    return _int_fold_walk(walk, a, a_st, lb, b, b_st, ob, None, None, exps, gsz, g, raw_group_size)
+
+
+def _bitlen(v: int) -> int:
+    return int(v).bit_length()
+
+
+def reblock_raw(
+    mant: np.ndarray, exps: np.ndarray, raw_group_size: int, mantissa_bits: int, exponent_bits: int, out_group_size: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Section 13 "The re-block", HALF_AWAY: per target group absmax of the
+    mantissas, the smallest E with absmax <= qMax 2^E in integer form (s =
+    bitlen(absmax) - (m-1), +1 when s >= 1 and absmax > qMax << s), stored =
+    rawE + s + bias clamped to [0, min(2^e - 1, bias + 127)], zero group ->
+    bias; one shift k = stored - bias - rawE per group (k >= 1 HALF_AWAY in
+    magnitude form, k <= 0 an exact left shift), codes clamped to
+    [-2^(m-1), qMax]. The raw and the target must share the group geometry."""
+    v = np.asarray(mant, dtype=np.int64).ravel()
+    n = v.size
+    gsz = n if out_group_size == 0 else out_group_size
+    if (n if raw_group_size == 0 else raw_group_size) != gsz:
+        raise ValueError("section 13: the raw geometry must equal the target's")
+    raw_e = np.asarray(exps, dtype=np.int64)
+    bias = exponent_bias(exponent_bits)
+    cap = stored_exponent_cap(exponent_bits)
+    q = qmax(mantissa_bits)
+    floor = code_floor_twos_complement(mantissa_bits)
+    n_g = n // gsz if n else 1
+    codes = np.zeros(n, dtype=np.int64)
+    stored = np.zeros(n_g, dtype=np.int64)
+    for g in range(n_g):
+        grp = v[g * gsz:(g + 1) * gsz]
+        absmax = int(np.abs(grp).max()) if grp.size else 0
+        if absmax == 0:
+            stored[g] = bias
+        else:
+            s = _bitlen(absmax) - (mantissa_bits - 1)
+            if s >= 1 and absmax > (q << s):
+                s += 1
+            stored[g] = min(max(int(raw_e[g]) + s + bias, 0), cap)
+        k = int(stored[g]) - bias - int(raw_e[g])
+        out = []
+        for x in grp:
+            x = int(x)
+            neg = x < 0
+            mag = -x if neg else x
+            if k >= 32:
+                t = 0
+            elif k >= 1:
+                t = (mag >> k) + (1 if (mag & ((1 << k) - 1)) >= (1 << (k - 1)) else 0)
+            else:
+                t = mag << (-k)
+            c = -t if neg else t
+            out.append(min(max(c, floor), q))
+        codes[g * gsz:(g + 1) * gsz] = out
+    return codes, stored
+
+
+def dequant_raw_f32(mant: np.ndarray, exps: np.ndarray, raw_group_size: int) -> np.ndarray:
+    """Section 13 "Loss-facing dequant": ldexpf((float)mant, E) -- (float)mant
+    rounds to nearest even above 2^24 (DOC_GAPS[3]'s assumption), the
+    power-of-two scaling is exact. float32 results as float64."""
+    v = np.asarray(mant, dtype=np.int64).ravel()
+    gsz = v.size if raw_group_size == 0 else raw_group_size
+    e = np.asarray(exps, dtype=np.int64)[group_ids(v.size, gsz)]
+    return np.ldexp(v.astype(np.float32), e.astype(np.int32)).astype(np.float32).astype(np.float64)
+
+
 @dataclass(frozen=True)
 class ConvGeom:
     """Conv1d / ConvT1d geometry (PyTorch semantics, data-shape 'Weight layouts, orientation and padding'):
@@ -577,8 +987,10 @@ def conv1d_walk(
     W[oc, ic', k] (cross-correlation, PyTorch layout). Walk orders: forward
     (ic outer, k inner); weightGrad '(batch, outputPosition) as the reduction'
     and biasGrad 'per-output-channel over (batch, outputPosition)' (section
-    5.6, documented); dx = the gather adjoint (section 6; kernel tap outer,
-    channel inner, DOC_GAPS[2]). Padded taps are never visited."""
+    5.6, documented); dx = the adjoint, kernel tap outer, channel inner. Under
+    ARITH_BFP the dx and weightGrad walks give only the contributor sets of
+    conv1d_scatter_int_backward (an integer sum, order-free). Padded taps are
+    never visited."""
     cin_g = c_in // g.groups
     cout_g = c_out // g.groups
     l_out = g.conv_out_len(length)
@@ -746,3 +1158,315 @@ def convt1d_walk(
                     ib.append(np.asarray(wb, dtype=np.int64))
         return Walk((batch, c_in, length), ia, ib, cout_g * g.kernel_size, None)
     raise ValueError(direction)
+
+
+# --------------------------------------------------------------------------- #
+# Conv1d dx / weightGrad on integer accumulators (the scatter backward):      #
+# every product enters its destination aligned to a per-row-group E_acc       #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class ScatterIntFold:
+    predicted: np.ndarray  # weightGrad: float64 view of the float32 raw; dx: mant * 2^E (float64)
+    exact: np.ndarray  # float64 exact sum of the same terms
+    bound: np.ndarray  # float64 per element: alignment roundings (+ weightGrad's float32 cast, + dx's re-grid)
+    e_acc: np.ndarray  # int64 E_acc per output element (its row group's)
+    g: int
+    n_terms: int  # N of the guard
+    n_left: int
+    n_rounded: int
+    sum_abs_max: int
+    mant: np.ndarray | None = None  # dx: the BFP_RAW mantissas (int64 view of int32)
+    exps: np.ndarray | None = None  # dx: one unbiased raw exponent per raw target group
+    raw_group_size: int = 0
+    n_realigned: int = 0  # dx: sums whose re-grid to the raw group's exponent dropped a fraction
+    sums: list | None = None  # weightGrad: the exact int32 destination sums (python ints)
+    raw_bound: np.ndarray | None = None  # weightGrad: alignment roundings only (no float cast)
+
+    def stats(self) -> dict:
+        return {
+            "g": self.g,
+            "N": self.n_terms,
+            "E_acc_range": [int(self.e_acc.min()), int(self.e_acc.max())] if self.e_acc.size else [0, 0],
+            "n_left_shifts": self.n_left,
+            "n_rounded_products": self.n_rounded,
+            "sum_abs_max": self.sum_abs_max,
+            "n_realigned": self.n_realigned,
+        }
+
+
+def conv1d_max_tap_overlap(g: ConvGeom) -> int:
+    """Most kernel taps one dx position can receive: taps k, k' land together
+    iff (k - k') * dilation is a multiple of stride, i.e. k * dilation shares
+    a residue mod stride (range clipping only removes taps)."""
+    counts: dict[int, int] = {}
+    for k in range(g.kernel_size):
+        r = (k * g.dilation) % g.stride
+        counts[r] = counts.get(r, 0) + 1
+    return max(counts.values()) if counts else 0
+
+
+def conv1d_scatter_int_backward(
+    batch: int,
+    c_in: int,
+    length: int,
+    c_out: int,
+    g: ConvGeom,
+    direction: str,
+    loss: tuple[np.ndarray, np.ndarray, tuple[int, int, int]],
+    other: tuple[np.ndarray, np.ndarray, tuple[int, int, int]],
+    raw_group_size: int = 0,
+) -> ScatterIntFold:
+    """Conv1d dx (``other`` = weight) or weightGrad (``other`` = input) on
+    int32 accumulators, from the definition:
+
+    1. Row group R of a destination: dx -> (batch, conv group of the input
+       channel); weightGrad -> the output channel.
+    2. E_top(R) >= every contributing NONZERO product exponent, from row
+       maxima over the rows' nonzero codes (a row without one pairs to
+       nothing; R with nothing: E_top = 0, the zero state):
+       dx: max over the group's output channels oc of (loss row (b, oc) max +
+       weight row oc max); weightGrad: max over the batch of (loss row (b, oc)
+       max + max over the group's input rows (b, *)).
+    3. N: dx = Cout/groups * (most taps meeting on one position, conv1d_max_
+       tap_overlap); weightGrad = batch * (most output positions one tap
+       reaches). g = fold_guard_bits(N, m_loss, m_other, 0); E_acc = E_top + g.
+    4. Each product p of codes enters as align_partial(p, E_acc - E_p); the
+       destination is the integer sum.
+    5. weightGrad: float32(sum) * 2^E_acc. dx: the BFP_RAW on the dx wire's
+       geometry (raw_group_size elements per raw group, 0 = per tensor,
+       section 14): E_t = max E_acc over the group's elements whose row group
+       has a nonzero product (none: 0 + g), mant = align_partial(sum, E_t -
+       E_acc) (a HALF_AWAY re-grid, k >= 0).
+    Contributor sets come from conv1d_walk (the integer sum does not depend
+    on their order)."""
+    walk = conv1d_walk(batch, c_in, length, c_out, g, direction, False)
+    lc, ls, lb = loss
+    oc_, os_, ob = other
+    lc = np.asarray(lc, dtype=np.int64).ravel()
+    oc_ = np.asarray(oc_, dtype=np.int64).ravel()
+    l_bias, o_bias = exponent_bias(lb[1]), exponent_bias(ob[1])
+    l_exp = np.asarray(ls, dtype=np.int64)[group_ids(lc.size, lb[2])] - l_bias
+    o_exp = np.asarray(os_, dtype=np.int64)[group_ids(oc_.size, ob[2])] - o_bias
+    cin_g, cout_g = c_in // g.groups, c_out // g.groups
+    l_out = g.conv_out_len(length)
+
+    def live(exp: np.ndarray, codes: np.ndarray, s: int, n: int) -> int | None:
+        es = [int(exp[i]) for i in range(s, s + n) if int(codes[i]) != 0]
+        return max(es) if es else None
+
+    def lrow(b: int, oc: int) -> int | None:
+        return live(l_exp, lc, (b * c_out + oc) * l_out, l_out)
+
+    if direction == "dx":
+        n_terms = cout_g * conv1d_max_tap_overlap(g)
+        k_len = cin_g * g.kernel_size
+        top = {}
+        for b in range(batch):
+            for grp in range(g.groups):
+                top[(b, grp)] = _live_top(
+                    _live_pair(lrow(b, oc), live(o_exp, oc_, oc * k_len, k_len))
+                    for oc in range(grp * cout_g, (grp + 1) * cout_g)
+                )
+        row_of = [top[(b, ic // cin_g)] for b in range(batch) for ic in range(c_in) for _ in range(length)]
+    elif direction == "weightGrad":
+        reach = [
+            sum(1 for t in range(l_out) if 0 <= t * g.stride + k * g.dilation - g.pad_left < length)
+            for k in range(g.kernel_size)
+        ]
+        n_terms = batch * max(reach)
+        top = {}
+        for oc in range(c_out):
+            grp = oc // cout_g
+            xs = lambda b: (b * c_in + grp * cin_g) * length  # noqa: E731
+            top[oc] = _live_top(_live_pair(lrow(b, oc), live(o_exp, oc_, xs(b), cin_g * length)) for b in range(batch))
+        row_of = [top[oc] for oc in range(c_out) for _ in range(cin_g * g.kernel_size)]
+    else:
+        raise ValueError(direction)
+
+    guard = fold_guard_bits(n_terms, lb[0], ob[0], 0)
+    n_out = len(walk.ia)
+    predicted = np.zeros(n_out)
+    exact = np.zeros(n_out)
+    bound = np.zeros(n_out)
+    e_acc = np.zeros(n_out, dtype=np.int64)
+    n_left = n_rounded = sum_max = 0
+    totals = [0] * n_out
+    for o in range(n_out):
+        ea = _top_or_zero(row_of[o]) + guard
+        e_acc[o] = ea
+        ia, ib = walk.ia[o], walk.ib[o]
+        total = 0
+        ex = Fraction(0)
+        for i, j in zip(ia.tolist(), ib.tolist()):
+            p = int(lc[i]) * int(oc_[j])
+            ep = int(l_exp[i]) + int(o_exp[j])
+            k = ea - ep
+            q = align_partial(p, k)
+            n_left += k < 0
+            if k > 0 and Fraction(q) * 2 ** k != p:
+                n_rounded += 1
+            total += q
+            if not INT32_MIN <= total <= INT32_MAX:
+                raise ValueError("scatter accumulator leaves int32 -- the guard proof is violated")
+            ex += Fraction(p) * Fraction(2) ** ep
+        sum_max = max(sum_max, abs(total))
+        totals[o] = total
+        with np.errstate(over="ignore"):
+            pred = float(np.float32(np.ldexp(np.float32(total), np.int32(ea))))
+        predicted[o] = pred
+        exact[o] = float(ex)
+        # one half unit of 2^E_acc per product, plus the float32 cast of the sum
+        bound[o] = 0.5 * len(ia) * 2.0**ea + abs(pred) * 2.0**-24
+    shape = walk.out_shape
+    if direction == "weightGrad":
+        fold = ScatterIntFold(
+            predicted.reshape(shape), exact.reshape(shape), bound.reshape(shape), e_acc.reshape(shape),
+            guard, n_terms, n_left, n_rounded, sum_max,
+        )
+        fold.sums = list(totals)
+        # one half unit of 2^E_acc per product (no float cast on the BFP_RAW path)
+        fold.raw_bound = np.array([0.5 * len(walk.ia[o]) * 2.0 ** int(e_acc[o]) for o in range(n_out)])
+        return fold
+    gsz = n_out if raw_group_size == 0 else raw_group_size
+    if n_out % gsz:
+        raise ValueError(f"raw groupSize {gsz} does not divide the dx ({n_out})")
+    # a dx row without a nonzero product (sums 0) places nothing; a group of
+    # only such rows takes the zero state's 0 + g
+    def group_top(t: int) -> int:
+        es = [int(e_acc[o]) for o in range(t * gsz, (t + 1) * gsz) if row_of[o] is not None]
+        return max(es) if es else guard
+
+    exps = np.array([group_top(t) for t in range(n_out // gsz)], dtype=np.int64)
+    mant = np.zeros(n_out, dtype=np.int64)
+    n_realigned = 0
+    for o in range(n_out):
+        k = int(exps[o // gsz]) - int(e_acc[o])
+        mant[o] = align_partial(totals[o], k)
+        if k > 0 and Fraction(int(mant[o])) * 2**k != totals[o]:
+            n_realigned += 1
+    e_t = exps[group_ids(n_out, gsz)]
+    value = np.array([float(Fraction(int(mant[o])) * Fraction(2) ** int(e_t[o])) for o in range(n_out)])
+    # one half unit of 2^E_acc per product, plus one half unit of 2^E_t for the re-grid
+    bound_dx = np.array([0.5 * len(walk.ia[o]) * 2.0 ** int(e_acc[o]) for o in range(n_out)])
+    bound_dx = bound_dx + np.where(e_t > e_acc, 0.5 * np.exp2(e_t.astype(np.float64)), 0.0)
+    return ScatterIntFold(
+        value.reshape(shape), exact.reshape(shape), bound_dx.reshape(shape), e_acc.reshape(shape),
+        guard, n_terms, n_left, n_rounded, sum_max, mant, exps, raw_group_size, n_realigned,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Section 15 / 14: the grad path into BFP storage (BFP_RAW_BACKWARD_ACC)       #
+# --------------------------------------------------------------------------- #
+
+
+def conv1d_bias_int_sums(
+    batch: int, c_out: int, l_out: int, loss: tuple[np.ndarray, np.ndarray, tuple[int, int, int]]
+) -> tuple[list[int], list[int], int]:
+    """Section 14 "Conv1d biasGrad", from the definition: per output channel
+    oc, walk b (outer) and t (inner); consecutive codes of one loss group
+    form a segment whose code sum is exact; each segment sum s enters as
+    align_partial(s, E_acc - E_group), E_acc = max over the loss rows
+    (b, oc)'s NONZERO codes of their exponent (none: 0) + g, g =
+    fold_guard_bits(batch * l_out, m, 1, 0)
+    (a pure SUM: the product bound with the second factor 1). Returns
+    (sums, e_acc per channel, n_rounded segments)."""
+    lc, ls, lb = loss
+    lc = np.asarray(lc, dtype=np.int64).ravel()
+    bias = exponent_bias(lb[1])
+    gs = lb[2]
+    gid = group_ids(lc.size, gs)
+    l_exp = np.asarray(ls, dtype=np.int64)[gid] - bias
+    n = batch * l_out
+    g = fold_guard_bits(n, lb[0], 1, 0) if n else 0
+    sums, e_acc, n_rounded = [], [], 0
+    for oc in range(c_out):
+        rows = [(b * c_out + oc) * l_out for b in range(batch)]
+        live = [int(l_exp[i]) for s in rows for i in range(s, s + l_out) if int(lc[i]) != 0]
+        ea = ((max(live) if live else 0) + g) if n else 0
+        total, seg, seg_g, seg_e = 0, 0, None, 0
+        for s in rows:
+            for i in range(s, s + l_out):
+                if seg_g is not None and int(gid[i]) != seg_g:
+                    q = align_partial(seg, ea - seg_e)
+                    n_rounded += Fraction(q) * Fraction(2) ** (ea - seg_e) != seg
+                    total += q
+                    seg = 0
+                if seg_g is None or int(gid[i]) != seg_g:
+                    seg_g, seg_e = int(gid[i]), int(l_exp[i])
+                seg += int(lc[i])
+        if seg_g is not None:
+            q = align_partial(seg, ea - seg_e)
+            n_rounded += Fraction(q) * Fraction(2) ** (ea - seg_e) != seg
+            total += q
+        if not INT32_MIN <= total <= INT32_MAX:
+            raise ValueError("bias sum leaves int32 -- the guard proof is violated")
+        sums.append(total)
+        e_acc.append(ea)
+    return sums, e_acc, n_rounded
+
+
+def grad_raw_from_rows(sums: list[int], e_acc: list[int], raw_group_size: int) -> tuple[list[int], list[int], int]:
+    """Section 14 "Grad raw": per raw target group (raw_group_size elements,
+    0 = the whole tensor) E_t = max over the group's NONZERO sums of
+    E_acc + bitlen(|sum|), minus 31 (an all-zero group: 0); each sum is
+    re-gridded to 2^E_t with align_partial (exact left, half away right).
+    Returns (mant, exps, n_realigned)."""
+    n = len(sums)
+    gsz = n if raw_group_size == 0 else raw_group_size
+    mant, exps, n_realigned = [0] * n, [], 0
+    for t in range(n // gsz if gsz else 0):
+        idx = range(t * gsz, (t + 1) * gsz)
+        tops = [e_acc[i] + _bitlen(abs(sums[i])) for i in idx if sums[i] != 0]
+        et = max(tops) - 31 if tops else 0
+        exps.append(et)
+        for i in idx:
+            if sums[i] == 0:
+                continue
+            k = et - e_acc[i]
+            mant[i] = align_partial(sums[i], k)
+            if k > 0 and Fraction(mant[i]) * Fraction(2) ** k != sums[i]:
+                n_realigned += 1
+    return mant, exps, n_realigned
+
+
+def accumulate_raw_into_bfp(
+    codes: list[int], stored: list[int], mant: list[int], exps: list[int], mantissa_bits: int, exponent_bits: int
+) -> tuple[list[int], list[int]]:
+    """Section 15, the integer dynamic-rescale grad accumulate, HALF_AWAY, per
+    tensor (one group), from its documented result: the exact sum V_i =
+    code_i 2^E_o + mant_i 2^E_r (rational); E_c = max(E_o + bitlen(A_o),
+    E_r + bitlen(A_r)) - 30 over the nonzero sides, capped at the largest
+    stored exponent - bias; E_d = the smallest E >= E_c with max |V| <= qMax
+    2^E (capped), then clamped to the stored range; codes = V / 2^E_d rounded
+    half away from zero, clamped to [-2^(m-1), qMax]; an all-zero sum is the
+    zero state (stored = bias)."""
+    bias = exponent_bias(exponent_bits)
+    cap = stored_exponent_cap(exponent_bits)
+    cap_e = cap - bias
+    q = qmax(mantissa_bits)
+    floor = code_floor_twos_complement(mantissa_bits)
+    eo, er = int(stored[0]) - bias, int(exps[0])
+    vals = [Fraction(int(c)) * Fraction(2) ** eo + Fraction(int(r)) * Fraction(2) ** er for c, r in zip(codes, mant)]
+    vmax = max((abs(v) for v in vals), default=Fraction(0))
+    if vmax == 0:
+        return [0] * len(codes), [bias]
+    ao, ar = max(abs(int(c)) for c in codes), max(abs(int(r)) for r in mant)
+    tops = ([eo + _bitlen(ao)] if ao else []) + ([er + _bitlen(ar)] if ar else [])
+    ec = min(max(tops) - 30, cap_e)
+    e_d = ec
+    while e_d < cap_e and vmax > q * Fraction(2) ** e_d:
+        e_d += 1
+    e_d = min(max(e_d, -bias), cap_e)
+    out = []
+    for v in vals:
+        x = v / Fraction(2) ** e_d
+        mag = abs(x)
+        t = int(mag)
+        if mag - t >= Fraction(1, 2):
+            t += 1
+        c = -t if x < 0 else t
+        out.append(min(max(c, floor), q))
+    return out, [e_d + bias]

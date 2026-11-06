@@ -16,8 +16,10 @@ Run via `uv run` (CMake wires this automatically).
 """
 import argparse
 import sys
+from fractions import Fraction
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -25,7 +27,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 from sym_gold import (
     assert_rounding_canary,
     avgpool1d_bfp_backward_ref,
-    avgpool1d_bfp_forward_ref,
+    avgpool1d_bfp_raw_ref,
+    bfp_raw_dequant_f32,
+    bfp_reblock_raw_half_away_ref,
     bfp_quantize_grouped,
     emit_float_scalar,
     emit_int32_array,
@@ -335,20 +339,23 @@ def emit_sym_fixture(parts, fx):
 
 
 # ---- BFP epic PR4 (R-P4): AvgPool1d ARITH_BFP forward ------------------
-# Geometry: input [1, 2, 8], kernel 3, VALID, stride 1, DILATION 2 ->
-# effective kernel 5, out_len 4. Dilation is load-bearing: every window
-# visits non-consecutive storage indices, so a run precompute instead of the
-# per-element bfpGroupOf lookup binds the wrong exponent. The input grid is
-# {4 groups x 4} over the 16 storage elements, so channel 0 spans groups
-# 0/1 and channel 1 spans groups 2/3 -- every window crosses a boundary.
-# K = 3 is NOT a power of two, which is exactly why the /K divide lives in
-# the FLOAT32 raw (the SYM s/K scale fold has no BFP analog).
+# Geometry: input [1, 2, 8], kernel 4, SAME, STRIDE 2 -> pad 1 left/right,
+# out_len 4. The stride is load-bearing: windows start at non-consecutive
+# storage indices, so a run precompute instead of the per-element bfpGroupOf
+# lookup binds the wrong exponent. The input grid is {4 groups x 4} over the
+# 16 storage elements, so channel 0 spans groups 0/1 and channel 1 spans
+# groups 2/3 -- the middle windows cross a boundary, the edge windows cover a
+# padded cell (count_include_pad: the divisor stays K), and neighbouring
+# windows overlap (a dx cell receives two contributions).
+# BFP math takes a power-of-two K only (the mean is an exponent shift, ruling
+# R1 in arithmetic-bfp section 14); K = 4 folds -2 into the raw exponent.
 BFP_AVG_BATCH = 1
 BFP_AVG_CHANNELS = 2
 BFP_AVG_INPUT_LENGTH = 8
-BFP_AVG_KERNEL_SIZE = 3
-BFP_AVG_STRIDE = 1
-BFP_AVG_DILATION = 2
+BFP_AVG_KERNEL_SIZE = 4
+BFP_AVG_STRIDE = 2
+BFP_AVG_DILATION = 1
+BFP_AVG_PADDING = "SAME"
 BFP_AVG_MANTISSA_BITS = 6
 BFP_AVG_EXPONENT_BITS = 8
 BFP_AVG_IN_NUM_GROUPS = 4
@@ -367,7 +374,7 @@ BFP_AVG_STAGE_INPUT = [1.3, -2.6, 3.3, -1.55, 10.0, -6.1, 4.2, 7.9,
 
 def emit_bfp_fixtures(parts):
     geom = window_geometry_1d(BFP_AVG_INPUT_LENGTH, BFP_AVG_KERNEL_SIZE, BFP_AVG_STRIDE,
-                              BFP_AVG_DILATION, "VALID")
+                              BFP_AVG_DILATION, BFP_AVG_PADDING)
     assert geom["out_len"] == 4, geom
     in_qc = {"mantissa_bits": BFP_AVG_MANTISSA_BITS,
              "exponent_bits": BFP_AVG_EXPONENT_BITS,
@@ -386,12 +393,35 @@ def emit_bfp_fixtures(parts):
     parts.append(emit_int32_scalar("kBfpAvgPoolDilation", BFP_AVG_DILATION))
 
     # (1) BFP-STORED grouped input, borrowed zero-copy (BFP D8): full self-checks.
-    fwd = avgpool1d_bfp_forward_ref(BFP_AVG_IN_CODES, BFP_AVG_IN_EXPS, in_qc,
-                                    BFP_AVG_BATCH, BFP_AVG_CHANNELS, geom)
+    raw = avgpool1d_bfp_raw_ref(BFP_AVG_IN_CODES, BFP_AVG_IN_EXPS, in_qc,
+                                BFP_AVG_BATCH, BFP_AVG_CHANNELS, geom)
+    fwd = bfp_raw_dequant_f32(raw["mant"], raw["exps"], 0)
     parts.append(emit_int32_array("kBfpAvgPoolInCodes", torch.tensor(BFP_AVG_IN_CODES)))
     parts.append(emit_uint8_array("kBfpAvgPoolInExps", BFP_AVG_IN_EXPS))
     parts.append(emit_float_array("kBfpAvgPoolExpectedForward",
                                   torch.tensor(fwd, dtype=torch.float32)))
+
+    # (1b) The pinned-FLOAT32 fake-quant bridge: exact dequantized values
+    # summed in float32 (exact here: every partial sum is a float32), ONE
+    # float32 divide by K. K is a power of two (the only K BFP math takes),
+    # so both the divide and the integer path's exponent fold are exact: the
+    # bridge equals the integer native result bit for bit.
+    bias = 2 ** (BFP_AVG_EXPONENT_BITS - 1) - 1
+    float_path = []
+    for r in range(BFP_AVG_BATCH * BFP_AVG_CHANNELS):
+        for o in range(geom["out_len"]):
+            first, count = window_slice_1d(geom, o)
+            total = Fraction(0)
+            for i in range(count):
+                idx = r * BFP_AVG_INPUT_LENGTH + first + i * BFP_AVG_DILATION
+                e = BFP_AVG_IN_EXPS[idx // BFP_AVG_IN_GROUP_SIZE] - bias
+                total += Fraction(BFP_AVG_IN_CODES[idx]) * Fraction(2) ** e
+            assert Fraction(float(np.float32(total))) == total, "float32 sum not exact"
+            float_path.append(float(np.float32(np.float32(total) /
+                                               np.float32(BFP_AVG_KERNEL_SIZE))))
+    assert float_path == fwd, "power-of-two K: the float bridge must equal the integer result"
+    parts.append(emit_float_array("kBfpAvgPoolExpectedFloatBridge",
+                                  torch.tensor(float_path, dtype=torch.float32)))
 
     # (2) FLOAT32-stored input staged PER-TENSOR at the produced wire's widths
     # (R-P1: pools have no weight operand, so outputQ is the anchor). The
@@ -401,13 +431,15 @@ def emit_bfp_fixtures(parts):
                                              BFP_AVG_EXPONENT_BITS, 0)
     st_qc = {"mantissa_bits": BFP_AVG_MANTISSA_BITS,
              "exponent_bits": BFP_AVG_EXPONENT_BITS, "group_size": 0}
-    staged = avgpool1d_bfp_forward_ref(st_codes, st_exps, st_qc, BFP_AVG_BATCH,
-                                       BFP_AVG_CHANNELS, geom, self_check=False)
+    st_raw = avgpool1d_bfp_raw_ref(st_codes, st_exps, st_qc, BFP_AVG_BATCH,
+                                   BFP_AVG_CHANNELS, geom, self_check=False)
+    staged = bfp_raw_dequant_f32(st_raw["mant"], st_raw["exps"], 0)
     wide_codes, wide_exps = bfp_quantize_grouped(BFP_AVG_STAGE_INPUT, 8,
                                                  BFP_AVG_EXPONENT_BITS, 0)
-    wide = avgpool1d_bfp_forward_ref(wide_codes, wide_exps,
+    wide_raw = avgpool1d_bfp_raw_ref(wide_codes, wide_exps,
                                      {**st_qc, "mantissa_bits": 8}, BFP_AVG_BATCH,
                                      BFP_AVG_CHANNELS, geom, self_check=False)
+    wide = bfp_raw_dequant_f32(wide_raw["mant"], wide_raw["exps"], 0)
     assert wide != staged, (
         "staging at m=8 gives the same output as m=6 -- the rule-1 width-anchor "
         "mutation would be unobservable; pick lossier input values")
@@ -417,12 +449,16 @@ def emit_bfp_fixtures(parts):
     parts.append(emit_float_array("kBfpAvgPoolExpectedStaged",
                                   torch.tensor(staged, dtype=torch.float32)))
 
-    # (3) OUT_WRITE onto a BFP output wire: the epilogue packs the FLOAT32 raw
-    # through packFloatBufferAsBfp (fresh per-group exponents, op rounding =
-    # HALF_AWAY), which bfp_quantize_grouped mirrors bit-for-bit.
-    pk_codes, pk_exps = bfp_quantize_grouped(torch.tensor(fwd, dtype=torch.float32),
-                                             BFP_AVG_MANTISSA_BITS, BFP_AVG_EXPONENT_BITS,
-                                             BFP_AVG_OUT_GROUP_SIZE)
+    # (3) OUT_WRITE onto a BFP output wire: the raw takes the target's {2 x 4}
+    # blocking and the epilogue re-blocks it in integer (fresh per-group
+    # exponents, op rounding = HALF_AWAY).
+    pk_raw = avgpool1d_bfp_raw_ref(BFP_AVG_IN_CODES, BFP_AVG_IN_EXPS, in_qc, BFP_AVG_BATCH,
+                                   BFP_AVG_CHANNELS, geom, raw_group_size=BFP_AVG_OUT_GROUP_SIZE,
+                                   self_check=False)
+    pk_codes, pk_exps = bfp_reblock_raw_half_away_ref(pk_raw["mant"], pk_raw["exps"],
+                                                      BFP_AVG_OUT_GROUP_SIZE,
+                                                      BFP_AVG_MANTISSA_BITS,
+                                                      BFP_AVG_EXPONENT_BITS)
     assert len(set(pk_exps)) > 1, (
         "packed AvgPool BFP output has one exponent for both groups -- a per-tensor "
         "epilogue would be indistinguishable")

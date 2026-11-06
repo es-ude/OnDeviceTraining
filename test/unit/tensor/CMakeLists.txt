@@ -94,3 +94,70 @@ target_link_libraries(UnitTestTensorBool PRIVATE
         StorageApi
 )
 __register_target_as_unit_test(UnitTestTensorBool)
+# Integer training primitives (BfpKernelSupport.h, header-only) and the
+# integer rescale accumulate engine (TensorConversion): own target, so the
+# TensorConversion test file does not grow further.
+add_executable(UnitTestBfpIntegerAccumulate UnitTestBfpIntegerAccumulate.c)
+target_link_libraries(UnitTestBfpIntegerAccumulate PRIVATE
+        unity
+        TensorConversion
+        Tensor
+        Rounding
+        Quantization
+        StorageApi
+        RNG
+        Common
+        m
+        odt_test_death
+        odt_test_rng_pin
+)
+__register_target_as_unit_test(UnitTestBfpIntegerAccumulate)
+# Integer macro-batch mean scale: bfpScalarFromCount (BfpKernelSupport.h) and
+# scaleBfpTensorByScalarInPlace (TensorConversion).
+add_executable(UnitTestBfpIntegerMeanScale UnitTestBfpIntegerMeanScale.c)
+target_link_libraries(UnitTestBfpIntegerMeanScale PRIVATE
+        unity
+        TensorConversion
+        Tensor
+        Rounding
+        Quantization
+        StorageApi
+        RNG
+        Common
+        m
+        odt_test_death
+)
+__register_target_as_unit_test(UnitTestBfpIntegerMeanScale)
+# Integer SGD momentum store on BFP state: momentumStoreBfpInPlace
+# (TensorConversion) and the checked sticky rule of bfpQrAdd (BfpKernelSupport.h).
+add_executable(UnitTestBfpIntegerMomentum UnitTestBfpIntegerMomentum.c)
+target_link_libraries(UnitTestBfpIntegerMomentum PRIVATE
+        unity
+        TensorConversion
+        Tensor
+        Rounding
+        Quantization
+        StorageApi
+        RNG
+        Common
+        m
+        odt_test_death
+        odt_test_rng_pin
+)
+__register_target_as_unit_test(UnitTestBfpIntegerMomentum)
+# Integer SGD parameter update on BFP parameters: paramUpdateBfpInPlace (TensorConversion).
+add_executable(UnitTestBfpIntegerParamUpdate UnitTestBfpIntegerParamUpdate.c)
+target_link_libraries(UnitTestBfpIntegerParamUpdate PRIVATE
+        unity
+        TensorConversion
+        Tensor
+        Rounding
+        Quantization
+        StorageApi
+        RNG
+        Common
+        m
+        odt_test_death
+        odt_test_rng_pin
+)
+__register_target_as_unit_test(UnitTestBfpIntegerParamUpdate)

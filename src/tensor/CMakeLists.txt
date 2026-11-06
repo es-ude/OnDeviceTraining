@@ -32,6 +32,7 @@ target_link_libraries(TensorConversion PRIVATE
         Tensor
         Quantization
         Rounding
+        RNG
         Common
 )
 

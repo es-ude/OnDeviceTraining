@@ -1,0 +1,260 @@
+# The closures of har_train_step_roots.txt: over calls through pointers (its
+# `indirect` line; exclude / site below), over the direct calls of its `self`
+# roots (boundary below) and, as a cross-check, over what an instrumented step
+# really runs (its `trace` line; trace-exclude at the end).
+# Pointer closure:
+# with it, --strict fails unless
+#   - every function whose address the arm build takes (a vtable or conversion
+#     cell in data, a kernel or callback pointer loaded from a literal pool) is
+#     covered by the roots (named, or reached by a direct-call walk) or has an
+#     `exclude` line here that says why it never runs on the bfp8full step; and
+#   - every covered function that calls through a register has a `site` line
+#     with exactly that many call sites and what they reach.
+#   exclude <source.c> <function> <reason>
+#   site    <source.c> <function> <indirect call sites> <targets>
+# A new layer type, kernel arm, conversion cell or callback therefore fails the
+# gate until it is rooted or excluded here; an entry that stops applying is
+# stale. The exclusions were cross-checked against an instrumented host run of
+# both heads (-finstrument-functions, the first three batches): none of them ran.
+#
+# ---- Indirect call sites on the step -----------------------------------------
+site TrainingEpochDefault.c     trainingEpochDefault  8 dataLoader->getDatasetSize (trainer) and ->getBatch (getBatch), lossFunctions[CE].computeMeanDivisor (computeMeanDivisorCE), optimizerFunctions[SGD_M].zero (optimizerZeroGrad); the compiler repeats getBatch's call in its loop variants
+site TrainingBatchDefault.c     trainingBatchDefault  1 calculateGradsFn: the trainer's wrapper over calculateGradsSequential
+site DataLoaderApi.c            getBatch              1 dataLoader->getSample: the trainer's sample source, outside the objects
+site CalculateGradsSequential.c calculateGradsImpl    7 layerFunctions[].forward / .backward (the layer dispatchers), lossFunctions[CE].forward / .backward (crossEntropyForward, crossEntropySoftmaxBackward), the trace sink (NULL from calculateGradsSequential; the trainer's first-step wire gate passes a host-side sink)
+site RematScheduler.c           beginCall             1 s->fns->begin (rematHeapBegin)
+site RematScheduler.c           rematNext             1 s->fns->next (rematHeapNext)
+site RematScheduler.c           rematDone             1 s->fns->done (rematHeapDone)
+site RematScheduler.c           rematEnd              1 s->fns->end (rematHeapEnd)
+site RematScheduler.c           rematSchedulerDeinit  1 s->fns->deinit (rematHeapDeinit)
+site RematWireTable.c           deriveFacts           1 layerFunctions[].calcOutputShape
+site RematWireTable.c           rematWireTableBind    1 layerFunctions[].calcOutputShape
+site RematPlan.c                rematPlanBuild        1 layerFunctions[].calcOutputShape
+site ExecuteOp.c                executeOp             1 spec->kernel: the layers' BFP kernels and engines (roots)
+site ExecuteOp.c                writeOutConversion    2 conversionMatrix[BFP_RAW][BFP] (reblockBfpRawTensor)
+site TensorConversion.c         convertTensor         1 conversionMatrix cells: FLOAT32 -> BFP (the float head's one conversion), BFP -> FLOAT32 (loss value, the float head's logits and BFP label)
+site Optimizer.c                optimizerStep         1 optimizerFunctions[SGD_M].step (sgdStepM)
+site OdtHook.c                  odtHookFire           1 the application's phase hook (odtHookSet): none in the HAR trainer, a host timer in timing builds; outside the objects
+#
+# ---- Address-taken functions that do not run on the step ---------------------
+exclude AdamW.c             adamWGetLr                              AdamW: the HAR step runs SGD-M (optimizerFunctions[SGD_M])
+exclude AdamW.c             adamWMomentKernel                       AdamW: the HAR step runs SGD-M (optimizerFunctions[SGD_M])
+exclude AdamW.c             adamWParamKernel                        AdamW: the HAR step runs SGD-M (optimizerFunctions[SGD_M])
+exclude AdamW.c             adamWSetLr                              AdamW: the HAR step runs SGD-M (optimizerFunctions[SGD_M])
+exclude AdamW.c             adamWStep                               AdamW: the HAR step runs SGD-M (optimizerFunctions[SGD_M])
+exclude AdamW.c             adamWVarianceKernel                     AdamW: the HAR step runs SGD-M (optimizerFunctions[SGD_M])
+exclude AdaptiveAvgPool1d.c adaptiveAvgPool1dBackward               AdaptiveAvgPool1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude AdaptiveAvgPool1d.c adaptiveAvgPool1dBackwardKernelBfp      AdaptiveAvgPool1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude AdaptiveAvgPool1d.c adaptiveAvgPool1dBackwardKernelSymInt32 AdaptiveAvgPool1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude AdaptiveAvgPool1d.c adaptiveAvgPool1dCalcOutputShape        AdaptiveAvgPool1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude AdaptiveAvgPool1d.c adaptiveAvgPool1dForward                AdaptiveAvgPool1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude AdaptiveAvgPool1d.c adaptiveAvgPool1dForwardKernel          AdaptiveAvgPool1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude AdaptiveAvgPool1d.c adaptiveAvgPool1dForwardKernelBfp       AdaptiveAvgPool1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude AdaptiveAvgPool1d.c adaptiveAvgPool1dForwardKernelSymInt32  AdaptiveAvgPool1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Add.c               addFloats                               element-wise op callback of the float/int arithmetic ops: no HAR op calls them
+exclude Add.c               addInts                                 element-wise op callback of the float/int arithmetic ops: no HAR op calls them
+exclude AvgPool1d.c         avgPool1dBackwardKernelSymInt32         SYM_INT32 arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude AvgPool1d.c         avgPool1dForwardKernel                  FLOAT32 arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude AvgPool1d.c         avgPool1dForwardKernelSymInt32          SYM_INT32 arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude BatchNorm1d.c       batchNorm1dBackward                     BatchNorm1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude BatchNorm1d.c       batchNorm1dCalcOutputShape              BatchNorm1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude BatchNorm1d.c       batchNorm1dForward                      BatchNorm1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude BatchNorm1d.c       bnForwardKernelFloat                    BatchNorm1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Bernoulli.c         bernoulliFillMaskReference              Bernoulli mask fill: Dropout only, no Dropout in HAR
+exclude Conv1d.c            biasGradKernelBfp                       float-bridge grad kernel (FIXED_SCALE or non-BFP grad): the FULL GATE requires BFP grads under DYNAMIC_RESCALE
+exclude Conv1d.c            biasGradKernelFloat                     FLOAT32 arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude Conv1d.c            biasGradKernelSym                       SYM arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude Conv1d.c            forwardKernelFloat                      FLOAT32 arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude Conv1d.c            forwardKernelSym                        SYM arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude Conv1d.c            propLossKernelFloat                     FLOAT32 arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude Conv1d.c            propLossKernelSym                       SYM arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude Conv1d.c            weightGradKernelBfp                     float-bridge grad kernel (FIXED_SCALE or non-BFP grad): the FULL GATE requires BFP grads under DYNAMIC_RESCALE
+exclude Conv1d.c            weightGradKernelFloat                   FLOAT32 arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude Conv1d.c            weightGradKernelSym                     SYM arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude Conv1dTransposed.c  biasGradKernelBfp                       ConvTranspose1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Conv1dTransposed.c  biasGradKernelFloat                     ConvTranspose1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Conv1dTransposed.c  biasGradKernelSym                       ConvTranspose1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Conv1dTransposed.c  conv1dTransposedBackward                ConvTranspose1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Conv1dTransposed.c  conv1dTransposedCalcOutputShape         ConvTranspose1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Conv1dTransposed.c  conv1dTransposedForward                 ConvTranspose1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Conv1dTransposed.c  forwardKernelBfp                        ConvTranspose1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Conv1dTransposed.c  forwardKernelFloat                      ConvTranspose1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Conv1dTransposed.c  forwardKernelSym                        ConvTranspose1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Conv1dTransposed.c  propLossKernelBfp                       ConvTranspose1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Conv1dTransposed.c  propLossKernelFloat                     ConvTranspose1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Conv1dTransposed.c  propLossKernelSym                       ConvTranspose1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Conv1dTransposed.c  weightGradKernelBfp                     ConvTranspose1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Conv1dTransposed.c  weightGradKernelFloat                   ConvTranspose1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Conv1dTransposed.c  weightGradKernelSym                     ConvTranspose1d: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude CrossEntropy.c      computeMeanScaleCE                      float mean scale: the epoch loop takes the integer computeMeanDivisor (rooted)
+exclude Div.c               divFloats                               element-wise op callback of the float/int arithmetic ops: no HAR op calls them
+exclude Div.c               divInts                                 element-wise op callback of the float/int arithmetic ops: no HAR op calls them
+exclude Dropout.c           dropoutBackward                         Dropout: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Dropout.c           dropoutCalcOutputShape                  Dropout: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Dropout.c           dropoutForward                          Dropout: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude ExecuteOp.c         executeOpIdentityKernel                 identity kernel of the GroupNorm / LayerNorm / PPCA ops: not on the HAR step
+exclude GroupNorm.c         groupNormBackward                       GroupNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude GroupNorm.c         groupNormCalcOutputShape                GroupNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude GroupNorm.c         groupNormDbetaKernelBfp                 GroupNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude GroupNorm.c         groupNormDgammaKernelBfp                GroupNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude GroupNorm.c         groupNormDxKernelBfp                    GroupNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude GroupNorm.c         groupNormForward                        GroupNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude GroupNorm.c         groupNormForwardKernelBfp               GroupNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude GroupNorm.c         groupNormForwardKernelFloat             GroupNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude GroupNorm.c         groupNormForwardKernelSym               GroupNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude LayerConfigAccess.c layerForwardNonFloat32Field             FLOAT32-model check of the stacked paths (micro-batch m > 1, stacked eval): HAR trains at m = 1
+exclude LayerConfigAccess.c layerNonFloat32Field                    FLOAT32-model check of the stacked paths (micro-batch m > 1, stacked eval): HAR trains at m = 1
+exclude LayerNorm.c         layerNormBackward                       LayerNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude LayerNorm.c         layerNormCalcOutputShape                LayerNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude LayerNorm.c         layerNormDbetaKernelBfp                 LayerNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude LayerNorm.c         layerNormDgammaKernelBfp                LayerNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude LayerNorm.c         layerNormDxKernelBfp                    LayerNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude LayerNorm.c         layerNormForward                        LayerNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude LayerNorm.c         layerNormForwardKernelBfp               LayerNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude LayerNorm.c         layerNormForwardKernelFloat             LayerNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude LayerNorm.c         layerNormForwardKernelSym               LayerNorm: not a HAR layer (its layerFunctions[] entry and kernels)
+exclude Linear.c            biasGradKernelBfp                       float-bridge grad kernel (FIXED_SCALE or non-BFP grad): the FULL GATE requires BFP grads under DYNAMIC_RESCALE
+exclude Linear.c            biasGradKernelFloat                     FLOAT32 arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude Linear.c            biasGradKernelSym                       SYM arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude Linear.c            linearForwardKernelFloat                FLOAT32 arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude Linear.c            linearForwardKernelSym                  SYM arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude Linear.c            propLossKernelFloat                     FLOAT32 arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude Linear.c            propLossKernelSym                       SYM arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude Linear.c            weightGradKernelBfp                     float-bridge grad kernel (FIXED_SCALE or non-BFP grad): the FULL GATE requires BFP grads under DYNAMIC_RESCALE
+exclude Linear.c            weightGradKernelFloat                   FLOAT32 arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude Linear.c            weightGradKernelSym                     SYM arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude LrScheduler.c       cosineAnnealingLrComputeLr              LR schedule: per epoch in trainingRun, outside the step; bfp8full runs LR_SCHEDULE=none
+exclude LrScheduler.c       exponentialLrComputeLr                  LR schedule: per epoch in trainingRun, outside the step; bfp8full runs LR_SCHEDULE=none
+exclude LrScheduler.c       linearWarmupLrComputeLr                 LR schedule: per epoch in trainingRun, outside the step; bfp8full runs LR_SCHEDULE=none
+exclude LrScheduler.c       stepLrComputeLr                         LR schedule: per epoch in trainingRun, outside the step; bfp8full runs LR_SCHEDULE=none
+exclude MSE.c               computeMeanDivisorMSE                   MSE: the HAR loss is CrossEntropy (lossFunctions[CROSS_ENTROPY])
+exclude MSE.c               computeMeanScaleMSE                     MSE: the HAR loss is CrossEntropy (lossFunctions[CROSS_ENTROPY])
+exclude MSE.c               mseLossBackward                         MSE: the HAR loss is CrossEntropy (lossFunctions[CROSS_ENTROPY])
+exclude MSE.c               mseLossForward                          MSE: the HAR loss is CrossEntropy (lossFunctions[CROSS_ENTROPY])
+exclude MaxPool1d.c         maxPool1dBackwardKernelSymInt32         SYM_INT32 arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude MaxPool1d.c         maxPool1dForwardKernel                  FLOAT32 arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude MaxPool1d.c         maxPool1dForwardKernelSymInt32          SYM_INT32 arm kernel: every HAR wire and param is BFP (WIRE / PARAM / FULL gates)
+exclude Mul.c               mulFloats                               element-wise op callback of the float/int arithmetic ops: no HAR op calls them
+exclude Mul.c               mulInts                                 element-wise op callback of the float/int arithmetic ops: no HAR op calls them
+exclude PpcaReplay.c        ppcaCcipcaStepKernelFloat               PPCA replay (continual learning): not on the HAR step
+exclude PpcaReplay.c        ppcaMeanMergeKernelFloat                PPCA replay (continual learning): not on the HAR step
+exclude PpcaReplay.c        ppcaMergeKernelFloat                    PPCA replay (continual learning): not on the HAR step
+exclude PpcaReplay.c        ppcaSampleKernelFloat                   PPCA replay (continual learning): not on the HAR step
+exclude RematArena.c        arenaBreadthAreaBefore                  ARENA scheduler row and placement policies: the step's ephemeral scheduler is HEAP
+exclude RematArena.c        arenaPlaceBreadthArea                   ARENA scheduler row and placement policies: the step's ephemeral scheduler is HEAP
+exclude RematArena.c        arenaPlaceFirstFitDecreasing            ARENA scheduler row and placement policies: the step's ephemeral scheduler is HEAP
+exclude RematArena.c        arenaPlacePingPong                      ARENA scheduler row and placement policies: the step's ephemeral scheduler is HEAP
+exclude RematArena.c        arenaPlaceSizeThenEnd                   ARENA scheduler row and placement policies: the step's ephemeral scheduler is HEAP
+exclude RematArena.c        arenaPlaceTwoEnded                      ARENA scheduler row and placement policies: the step's ephemeral scheduler is HEAP
+exclude RematArena.c        arenaPlacesBefore                       ARENA scheduler row and placement policies: the step's ephemeral scheduler is HEAP
+exclude RematArena.c        arenaSizeThenEndBefore                  ARENA scheduler row and placement policies: the step's ephemeral scheduler is HEAP
+exclude RematArena.c        rematArenaBegin                         ARENA scheduler row and placement policies: the step's ephemeral scheduler is HEAP
+exclude RematArena.c        rematArenaDeinit                        ARENA scheduler row and placement policies: the step's ephemeral scheduler is HEAP
+exclude RematArena.c        rematArenaDone                          ARENA scheduler row and placement policies: the step's ephemeral scheduler is HEAP
+exclude RematArena.c        rematArenaEnd                           ARENA scheduler row and placement policies: the step's ephemeral scheduler is HEAP
+exclude RematArena.c        rematArenaNext                          ARENA scheduler row and placement policies: the step's ephemeral scheduler is HEAP
+exclude Sgd.c               sgdGetLr                                LR get / set: trainingRun per epoch (logging, schedule), outside the step
+exclude Sgd.c               sgdMParamKernel                         SGD executeOp kernel of the non-BFP storage arms: BFP state + param run the in-place engines (rooted)
+exclude Sgd.c               sgdMStateKernel                         SGD executeOp kernel of the non-BFP storage arms: BFP state + param run the in-place engines (rooted)
+exclude Sgd.c               sgdSetLr                                LR get / set: trainingRun per epoch (logging, schedule), outside the step
+exclude Sgd.c               sgdUpdateKernel                         SGD executeOp kernel of the non-BFP storage arms: BFP state + param run the in-place engines (rooted)
+exclude Sub.c               subFloats                               element-wise op callback of the float/int arithmetic ops: no HAR op calls them
+exclude Sub.c               subInt32s                               element-wise op callback of the float/int arithmetic ops: no HAR op calls them
+exclude TensorConversion.c  convertAsymTensorToBfpTensor            conversionMatrix cell ASYM -> BFP: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertAsymTensorToFloatTensor          conversionMatrix cell ASYM -> FLOAT32: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertAsymTensorToInt32Tensor          conversionMatrix cell ASYM -> INT32: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertAsymTensorToSymInt32Tensor       conversionMatrix cell ASYM -> SYM_INT32: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertAsymTensorToSymTensor            conversionMatrix cell ASYM -> SYM: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertBfpRawTensorToFloat32Tensor      conversionMatrix[BFP_RAW][FLOAT32]: OUT_WRITE onto a FLOAT32 wire; every HAR output wire is BFP
+exclude TensorConversion.c  convertBfpTensorToAsymTensor            conversionMatrix cell BFP -> ASYM: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertBfpTensorToInt32Tensor           conversionMatrix cell BFP -> INT32: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertBfpTensorToSymInt32Tensor        conversionMatrix cell BFP -> SYM_INT32: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertBfpTensorToSymTensor             conversionMatrix cell BFP -> SYM: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertFloatTensorToAsymTensor          conversionMatrix cell FLOAT32 -> ASYM: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertFloatTensorToInt32Tensor         conversionMatrix cell FLOAT32 -> INT32: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertFloatTensorToSymInt32Tensor      conversionMatrix cell FLOAT32 -> SYM_INT32: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertFloatTensorToSymTensor           conversionMatrix cell FLOAT32 -> SYM: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertInt32TensorToAsymTensor          conversionMatrix cell INT32 -> ASYM: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertInt32TensorToBfpTensor           conversionMatrix cell INT32 -> BFP: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertInt32TensorToFloatTensor         conversionMatrix cell INT32 -> FLOAT32: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertInt32TensorToSymInt32Tensor      conversionMatrix cell INT32 -> SYM_INT32: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertInt32TensorToSymTensor           conversionMatrix cell INT32 -> SYM: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertSymInt32TensorToAsymTensor       conversionMatrix cell SYM_INT32 -> ASYM: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertSymInt32TensorToBfpTensor        conversionMatrix cell SYM_INT32 -> BFP: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertSymInt32TensorToFloat32Tensor    conversionMatrix cell SYM_INT32 -> FLOAT32: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertSymInt32TensorToSymTensor        conversionMatrix cell SYM_INT32 -> SYM: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertSymTensorToAsymTensor            conversionMatrix cell SYM -> ASYM: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertSymTensorToBfpTensor             conversionMatrix cell SYM -> BFP: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertSymTensorToFloat32Tensor         conversionMatrix cell SYM -> FLOAT32: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertSymTensorToInt32Tensor           conversionMatrix cell SYM -> INT32: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  convertSymTensorToSymInt32Tensor        conversionMatrix cell SYM -> SYM_INT32: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  dequantGroupedAsymChunkToFloat          ASYM / SYM dequant chunk reader: no ASYM / SYM tensor on the step
+exclude TensorConversion.c  dequantGroupedSymChunkToFloat           ASYM / SYM dequant chunk reader: no ASYM / SYM tensor on the step
+exclude TensorConversion.c  extractInt32TensorFromSymInt32Tensor    conversionMatrix cell SYM_INT32 -> INT32: the step converts only FLOAT32 -> BFP, BFP -> FLOAT32 and BFP_RAW -> BFP
+exclude TensorConversion.c  requantBfpTensor                        conversionMatrix[BFP][BFP]: no BFP -> BFP storage conversion on the step
+exclude TensorConversion.c  requantSymInt32Tensor                   conversionMatrix[SYM_INT32][SYM_INT32]: no SYM_INT32 tensor on the step
+exclude TensorConversion.c  unsupportedConversionTypes              conversionMatrix error cell (exits)
+#
+# ---- Direct calls out of the `self` roots that no root walks ------------------
+# A self root checks only its own call sites, so every direct call it makes is
+# closed here statically: the callee is walked by some root, or it is a
+# boundary below -- an arm the bfp8full step does not take, with the reason
+# (the trainer's init gates pin the dtypes, modes and knobs it names). A new
+# direct call out of a self root fails --strict until rooted or declared.
+#   boundary <self.c> <self root> <callee.c> <callee> <reason>
+boundary AvgPool1d.c            avgPool1dBackward            AvgPool1d.c         avgPool1dBackwardFloat                 FLOAT32 arm: the dx wire is BFP (WIRE / FULL gates)
+boundary AvgPool1d.c            avgPool1dBackward            AvgPool1d.c         bfpRequireNoBfpWire                    a non-BFP arm's guard (exits on a BFP wire): the arm is not taken under BFP math
+boundary Conv1d.c               conv1dBackward               Conv1d.c            conv1dCalcBiasGradsSymInt32            SYM_INT32 grad arm: BFP grads under DYNAMIC_RESCALE (FULL gate)
+boundary Conv1d.c               conv1dBackward               Conv1d.c            conv1dCalcWeightGradsSymInt32          SYM_INT32 grad arm: BFP grads under DYNAMIC_RESCALE (FULL gate)
+boundary ExecuteOp.c            executeOp                    Add.c               addSymInt32TensorsInplace              SYM_INT32 ACC epilogue: grads accumulate BFP_RAW -> BFP (accumulateBfpRawIntoBfpRescale, a root)
+boundary ExecuteOp.c            executeOp                    Quantization.c      initSymInt32QConfig                    SYM_INT32 raw / staging config: every operand and raw output of the BFP step is BFP / BFP_RAW
+boundary ExecuteOp.c            executeOp                    Rounding.c          rescaleIntoAccumulatorScale            SYM_INT32 ACC epilogue: grads accumulate BFP_RAW -> BFP (accumulateBfpRawIntoBfpRescale, a root)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateFloatIntoAsymTensorRescale   ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateFloatIntoBfpTensorFixedGrid  ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateFloatIntoBfpTensorRescale    ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateFloatIntoSymTensorFixedGrid  ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateFloatIntoSymTensorRescale    ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateSymInt32IntoSymInt32Rescale  ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateTensorIntoAsymRescale        ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateTensorIntoBfpFixedGrid       ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateTensorIntoBfpRescale         ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateTensorIntoFloat32Inplace     ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateTensorIntoSymFixedGrid       ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateTensorIntoSymRescale         ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  quantizeFloatBufferToBfpCodes          FLOAT32 operand staging into BFP: no FLOAT32 operand on the BFP step (executeOp rejects it on the forward)
+boundary MaxPool1d.c            maxPool1dBackward            MaxPool1d.c         bfpRequireNoBfpWire                    a non-BFP arm's guard (exits on a BFP wire): the arm is not taken under BFP math
+boundary MaxPool1d.c            maxPool1dBackward            MaxPool1d.c         maxPool1dBackwardFloat                 FLOAT32 arm: the dx wire is BFP (WIRE / FULL gates)
+boundary OptimizerApi.c         scaleOptimizerGradientsMean  OptimizerApi.c      meanFactorOf                           float 1/divisor of a non-BFP grad: every grad is BFP (FULL gate); its arm is scaleBfpTensorByScalarInPlace, a root
+boundary OptimizerApi.c         scaleOptimizerGradientsMean  OptimizerApi.c      scaleNonBfpGradient                    mean scale of a non-BFP grad: every grad is BFP (FULL gate)
+boundary QuantizationLayer.c    quantizationBackward         ExecuteOp.c         executeConvert                         the input layer's dx: never runs (no dx below conv1, the deepest trainable layer)
+boundary QuantizationLayer.c    quantizationForward          QuantizationLayer.c quantizationForwardConvert             converting arm for samples NOT in input.out's BFP format (FLOAT32): the full-integer path trains on pre-converted data, every sample checked at load (FULL gate: dataset)
+boundary Relu.c                 reluBackward                 Relu.c              reluBackwardFloat                      FLOAT32 arm: the dx wire is BFP (WIRE / FULL gates)
+boundary Relu.c                 reluBackward                 Relu.c              reluBackwardSymInt32                   SYM_INT32 arm: the dx wire is BFP (WIRE / FULL gates)
+boundary Relu.c                 reluForward                  Comparison.c        gteFloatValue                          FLOAT32 arm of the ReLU mask: the wire is BFP
+boundary Relu.c                 reluForward                  Comparison.c        gteSymInt32Zero                        SYM_INT32 arm of the ReLU mask: the wire is BFP
+boundary Relu.c                 reluForward                  Relu.c              bfpRequireNoBfpWire                    a non-BFP arm's guard (exits on a BFP wire): the arm is not taken under BFP math
+boundary Sgd.c                  sgdStepM                     Sgd.c               sgdRejectIntegerWeightDecay            cold reject of integer weight decay (exits): bfp8full has none (FULL gate optimizer check)
+boundary Softmax.c              softmaxBackward              Softmax.c           bfpRequireNoBfpWire                    standalone Softmax backward: HAR never runs it (CrossEntropy's combined p - y replaces it)
+boundary Softmax.c              softmaxBackward              Softmax.c           softmaxBackwardRequireWires            standalone Softmax backward: HAR never runs it (CrossEntropy's combined p - y replaces it)
+boundary Softmax.c              softmaxBackward              Softmax.c           softmaxVjpRows                         standalone Softmax backward: HAR never runs it (CrossEntropy's combined p - y replaces it)
+boundary TrainingBatchDefault.c trainingBatchDefault         StackGather.c       stackGatherRequireFloat32Model         micro-batch m > 1 path: HAR trains at m = 1
+boundary TrainingBatchDefault.c trainingBatchDefault         TrainingBatchDefault.c trainingBatchStacked                   micro-batch m > 1 path: HAR trains at m = 1
+#
+# ---- Executed on the step (har_train_step_trace.txt), walked by no root ------
+# The roots file's `trace` line: every <translation unit, function> of the
+# generated step trace that is a function of the arm objects must be walked by
+# a root or listed here. Entries outside the arm objects (the trainer;
+# functions the arm build inlines into a walked caller) are skipped. A
+# cross-check of the static closure above; regenerate with trace_step.py (the
+# census fails on a stale source fingerprint).
+#   trace-exclude <source.c> <function> <reason>
+# Inside the stopped float boundaries (the loss island; the samples cross no
+# float boundary any more -- they are pre-converted):
+trace-exclude CrossEntropy.c      crossEntropyForwardFloat  the loss VALUE's float core: stopped under CrossEntropy.c:crossEntropyForward
+trace-exclude Softmax.c           softmaxValuesFloat        the float head's FLOAT32 Softmax: inside the softmaxForwardKernel island root
+trace-exclude TensorConversion.c  packFloatBufferAsBfp      FLOAT32 -> BFP packing: inside the float head's convertFloatTensorToBfpTensor boundary root
+trace-exclude TensorConversion.c  deriveBfpStoredExponent   FLOAT32 -> BFP block exponent: inside the float head's convertFloatTensorToBfpTensor boundary root
+trace-exclude Rounding.c          roundByMode               FLOAT32 -> BFP rounding: inside the float head's convertFloatTensorToBfpTensor boundary root
+trace-exclude RNG.c               rngNextUnitFloat          the SR draw of FLOAT32 -> BFP rounding: inside the float head's convertFloatTensorToBfpTensor boundary root
+trace-exclude Rounding.c          clamp                     FLOAT32 -> BFP code clamp: inside the float head's convertFloatTensorToBfpTensor boundary root
+trace-exclude Quantization.c      bfpGroupScale             the float scale of a block: only the float head's FLOAT32 <-> BFP boundary roots and dequantChunkToFloat reach it

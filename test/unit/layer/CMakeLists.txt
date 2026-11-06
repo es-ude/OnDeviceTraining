@@ -143,6 +143,7 @@ add_elastic_ai_unit_test(
         odt_test_death
         odt_test_layer_builders
         odt_test_keyed_draw
+        odt_test_bfp_scatter_ref
 )
 add_dependencies(UnitTestConv1d generate_expected_conv1d)
 add_dependencies(UnitTestConv1d generate_expected_conv1d_grouped)
@@ -183,6 +184,8 @@ add_elastic_ai_unit_test(
         SymAccumGuard
         odt_test_death
         odt_test_layer_builders
+        odt_test_bfp_raw_fixture
+        odt_test_bfp_scatter_ref
 )
 add_dependencies(UnitTestLinear generate_expected_linear_grouped_asym)
 add_dependencies(UnitTestLinear generate_expected_bfp_layer_forward)
@@ -259,6 +262,7 @@ add_elastic_ai_unit_test(
         TensorConversion
         odt_test_death
         odt_test_keyed_draw
+        odt_test_bfp_raw_fixture
 )
 add_dependencies(UnitTestSoftmax generate_expected_softmax)
 add_dependencies(UnitTestSoftmax generate_expected_bfp_softmax)
@@ -320,6 +324,7 @@ add_elastic_ai_unit_test(
         TensorConversion
         odt_test_death
         odt_test_keyed_draw
+        odt_test_bfp_raw_fixture
 )
 add_dependencies(UnitTestMaxPool1d generate_expected_max_pool_1d)
 target_include_directories(UnitTestMaxPool1d PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
@@ -337,6 +342,7 @@ add_elastic_ai_unit_test(
         TensorConversion
         odt_test_death
         odt_test_keyed_draw
+        odt_test_bfp_raw_fixture
 )
 add_dependencies(UnitTestAvgPool1d generate_expected_avg_pool_1d)
 target_include_directories(UnitTestAvgPool1d PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
@@ -556,6 +562,7 @@ add_elastic_ai_unit_test(
         StorageApi
         odt_test_death
         odt_test_keyed_draw
+        odt_test_bfp_raw_fixture
 )
 
 add_elastic_ai_unit_test(

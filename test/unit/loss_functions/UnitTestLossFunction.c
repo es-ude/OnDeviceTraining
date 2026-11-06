@@ -96,6 +96,21 @@ void testDefaultLossConfig_CrossEntropy() {
     TEST_ASSERT_NULL(cfg.classWeights);
 }
 
+/* The integer mean divisor (the BFP mean scale's input): CE = N, MSE = N * F,
+ * and each family's float scale is exactly 1.0f / (float)divisor. */
+void testComputeMeanDivisor_CeIsNAndMseIsNTimesF(void) {
+    tensor_t *output = buildOutputShapeTensor2D(1, 10);
+    size_t mse = lossFunctions[MSE].computeMeanDivisor(6, output);
+    size_t ce = lossFunctions[CROSS_ENTROPY].computeMeanDivisor(6, output);
+    float mseScale = computeMeanScaleMSE(6, output);
+    float ceScale = computeMeanScaleCE(6, output);
+    freeTensor(output);
+    TEST_ASSERT_EQUAL_size_t(60, mse);
+    TEST_ASSERT_EQUAL_size_t(6, ce);
+    TEST_ASSERT_TRUE(mseScale == 1.0f / (float)mse);
+    TEST_ASSERT_TRUE(ceScale == 1.0f / (float)ce);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testComputeMeanScaleMSE_ScaleIsOneOverNTimesF);
@@ -106,5 +121,6 @@ int main(void) {
     RUN_TEST(testLossFunctionsVtable_ForwardSlotBindsCrossEntropyDispatcher);
     RUN_TEST(testDefaultLossConfig_MSE);
     RUN_TEST(testDefaultLossConfig_CrossEntropy);
+    RUN_TEST(testComputeMeanDivisor_CeIsNAndMseIsNTimesF);
     return UNITY_END();
 }

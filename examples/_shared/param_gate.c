@@ -230,6 +230,7 @@ const char *bfpSweepConfigFromEnv(bfpSweepConfig_t *out) {
                               .bfpGrads = false,
                               .bfpState = false,
                               .rounding = BFP_ROUNDING_SR,
+                              .head = BFP_HEAD_FLOAT, /* overwritten: BFP_HEAD is required */
                               .ignoredLegacyKnobs = 0u};
     strncpy(out->weightBlockStr, "tensor", sizeof(out->weightBlockStr));
     strncpy(out->wireBlockStr, "float", sizeof(out->wireBlockStr));
@@ -317,6 +318,23 @@ const char *bfpSweepConfigFromEnv(bfpSweepConfig_t *out) {
         } else {
             return "BFP_ROUNDING must be sr or det";
         }
+    }
+    s = envOrEmpty("BFP_HEAD");
+    if (s[0] == '\0') {
+        return "BFP_HEAD is required (float or bfp; no default): float = float Softmax and "
+               "p - y with one conversion onto the loss-grad wire, bfp = integer Softmax and "
+               "integer p - y";
+    }
+    if (strcmp(s, "float") == 0) {
+        out->head = BFP_HEAD_FLOAT;
+    } else if (strcmp(s, "bfp") == 0) {
+        out->head = BFP_HEAD_BFP;
+    } else {
+        return "BFP_HEAD must be float or bfp";
+    }
+    if (out->head == BFP_HEAD_BFP && out->wireMode == WIRE_BLOCK_FLOAT) {
+        return "BFP_HEAD=bfp needs BFP wires (BFP_WIRE_BLOCK=tensor or a size): the integer head "
+               "reads p and writes p - y on them";
     }
 
     static const struct {

@@ -5,7 +5,10 @@ driver I/O and row evaluation for
                 D6 edges, F2 boundary census);
 - ``bfp_gemm``  B2/B3/B4: Linear / Conv1d / ConvT1d forward, dx, weightGrad
                 (+ biasGrad) under ARITH_BFP, kernel and layer tier, raw
-                FLOAT32 output or a packed BFP wire;
+                FLOAT32 output or a packed BFP wire; the Conv1d forward is
+                the integer fold of arithmetic-bfp section 13 (a BFP_RAW on
+                the kernel tier, its dequant / re-block on the layer tier,
+                all judged exactly -- ``evaluate_int_fold_output``);
 - ``bfp_fq``    B5: ARITH_FLOAT32 over BFP storage against the FLOAT32 layer
                 run on the dequantized operands, bit for bit.
 
@@ -145,7 +148,9 @@ def random_bfp_operand(rng: np.random.Generator, shape: tuple, spec: dict) -> Bf
     around the one the exact rule gives for `absmax` (value units), spread
     by +-`expSpread` per group and clamped into the D6 range. `codes:
     "full_scale"` sets every code to +qMax (the headroom / section-7
-    probes); `codes: "alternating"` to +-qMax."""
+    probes); `codes: "alternating"` to +-qMax. `zeroGroups: [g, ...]` puts
+    those groups in the canonical zero state (codes 0, stored = bias), as a
+    pack leaves an all-zero group (e.g. a ReLU-zeroed loss run)."""
     m, e, gs = int(spec["m"]), int(spec["e"]), int(spec.get("groupSize", 0))
     n = int(np.prod(shape))
     q = bfp_ref.qmax(m)
@@ -169,6 +174,12 @@ def random_bfp_operand(rng: np.random.Generator, shape: tuple, spec: dict) -> Bf
     cap = bfp_ref.stored_exponent_cap(e)
     stored = bias + e_center + rng.integers(-spread, spread + 1, size=ng)
     stored = np.clip(stored, 0, cap).astype(np.int64)
+    zero = [int(g) for g in spec.get("zeroGroups", [])]
+    if zero:
+        g_of = bfp_ref.group_ids(n, gs_eff)
+        for g in zero:
+            codes[g_of == g] = 0
+            stored[g] = bias
     return BfpOperand(spec.get("storage", "BFP"), codes.reshape(shape), stored, m, e, gs_eff)
 
 
@@ -754,9 +765,376 @@ def evaluate_gemm_output(fx: GemmFixture, direction: str, drv, out_name: str, k:
     return row
 
 
+def _is_scatter_int(cell: dict) -> bool:
+    """Conv1d dx / weightGrad under ARITH_BFP: integer accumulators on the
+    FLOAT32 scatter loop (bfp_ref.conv1d_scatter_int_backward)."""
+    return cell["op"] == "conv1d" and cell["direction"] in ("dx", "weightGrad") and cell["arith"]["type"] == "BFP"
+
+
+def evaluate_scatter_int_output(fx: GemmFixture, direction: str, drv, out_name: str, out_spec: dict | None = None) -> dict:
+    """Leg A: the integer sum is order-free, so the C output is predicted bit
+    for bit (EXACT, no fold-order latitude); a completed run where the guard
+    has no g <= 31 or an abort is a MISMATCH. weightGrad: the raw FLOAT32 =
+    float32(sum) * 2^E_acc. dx (section 14): the BFP_RAW on the dx wire's
+    geometry, then onto a FLOAT32 wire the section-13 dequant of the
+    per-tensor raw, onto a BFP wire the section-13 re-block (codes and
+    stored exponents). Leg B: float64 exact within one half unit of 2^E_acc
+    per product (+ the dx re-grid's half unit of 2^E_t) plus the float32 cast
+    or half a code of the wire."""
+    a, b = gemm_operands(fx, direction)
+    x = fx.ops["input"].codes.shape
+    c_out = fx.ops["loss"].codes.shape[1]
+    row: dict = {"output": out_name, "n_elements": 0, "headroom": {"ok": True, "kind": "guard"}}
+    wire = out_spec is not None and out_spec["dtype"] == "BFP"
+    n_dx = int(np.prod(x))
+    wire_gs = int(out_spec["groupSize"]) if wire else 0
+    if wire and n_dx and wire_gs >= n_dx:
+        wire_gs = 0
+    try:
+        ref = bfp_ref.conv1d_scatter_int_backward(
+            x[0], x[1], x[2], c_out, fx.geom, direction, (a.codes, a.stored, a.bits), (b.codes, b.stored, b.bits),
+            raw_group_size=wire_gs,
+        )
+    except ValueError as exc:
+        ref = None
+        row["headroom"] = {"ok": False, "kind": "guard", "error": str(exc)}
+    if drv.exit != 0 or ref is None:
+        kind = "ABORT" if (drv.exit != 0 and ref is None) else "MISMATCH"
+        row["legA"] = {"taxonomy": kind, "census": None, "mismatch_class": "-" if kind == "ABORT" else ("abort" if ref is not None else "guard"), "seed": None, "scale": {"c": None, "ref": None, "rel": None, "ok": kind == "ABORT"}, "ref_scale": None}
+        row["legB"] = {"taxonomy": "n/a", "err_max": float("nan"), "bound": float("nan"), "ratio": float("nan")}
+        row["c_scale"] = None
+        row["bfp"] = {"summary": f"scatter-int: exit {drv.exit}, guard {'ok' if ref is not None else 'none'}"}
+        return row
+    exact, _ = gemm_exact_and_abs(fx, direction)
+    if not np.allclose(ref.exact, exact, rtol=1e-12, atol=1e-30):
+        raise RuntimeError("harness: the scatter reference's exact sum disagrees with the float64 reference")
+    c_vals, grid = c_output_image(drv.out(out_name))
+    c_vals = c_vals.reshape(exact.shape)
+    if direction == "weightGrad" or not wire:
+        if grid:
+            raise RuntimeError("harness: a conv weightGrad BFP output is not modelled for the integer scatter")
+        if direction == "weightGrad":
+            pred = ref.predicted
+            bound = ref.bound
+            kind = "0.5*2^E_acc per product + float32 cast (scatter-int)"
+        else:
+            pred = bfp_ref.dequant_raw_f32(ref.mant, ref.exps, 0).reshape(exact.shape)
+            bound = ref.bound + np.abs(pred) * F32_U
+            kind = "0.5*2^E_acc per product + 0.5*2^E_t re-grid + float32 cast (scatter-int dx raw)"
+        bit = float_bitexact(c_vals, pred)
+        taxonomy = "EXACT" if bit["n_mismatch"] == 0 else "MISMATCH"
+        census_row = {"taxonomy": taxonomy, "mode": "float32_bits", "n_elements": bit["n_elements"], "n_mismatch": bit["n_mismatch"], "n_tie": 0, "max_abs_diff": bit["max_ulp32"], "worst": bit["worst"]}
+        b_leg = elementwise_leg_b(np.abs(c_vals - exact), bound)
+    else:
+        m, e = int(out_spec["mantissaBits"]), int(out_spec["exponentBits"])
+        codes, stored = bfp_ref.reblock_raw(ref.mant, ref.exps, wire_gs, m, e, wire_gs)
+        c_codes = np.asarray(grid["codes"], dtype=np.int64).ravel()
+        c_stored = np.asarray(grid["stored"], dtype=np.int64)
+        if c_stored.shape != stored.shape:
+            raise RuntimeError(f"wire numGroups: C {c_stored.size} vs ref {stored.size}")
+        bad_c = np.flatnonzero(c_codes != codes)
+        bad_e = np.flatnonzero(c_stored != stored)
+        taxonomy = "EXACT" if bad_c.size == 0 and bad_e.size == 0 else "MISMATCH"
+        census_row = {"taxonomy": taxonomy, "mode": "bfp_reblock", "n_elements": int(c_codes.size), "n_mismatch": int(bad_c.size), "n_tie": 0, "max_abs_diff": int(np.abs(c_codes - codes).max()) if codes.size else 0, "n_groups": int(stored.size), "n_E_differs": int(bad_e.size), "worst": [{"index": int(i), "c": int(c_codes[i]), "ref": int(codes[i])} for i in bad_c[:8]] + [{"group": int(g), "c_E": int(c_stored[g]), "ref_E": int(stored[g])} for g in bad_e[:8]]}
+        gsz = n_dx if wire_gs == 0 else wire_gs
+        scale = 2.0 ** (c_stored[bfp_ref.group_ids(n_dx, gsz)] - bfp_ref.exponent_bias(e))
+        raw_scale = 2.0 ** ref.exps[bfp_ref.group_ids(n_dx, gsz)]
+        clamped = _outside_grid(ref.mant * raw_scale / scale, m).reshape(exact.shape)
+        b_leg = elementwise_leg_b(np.abs(c_vals - exact), ref.bound + (0.5 * scale).reshape(exact.shape), ~clamped)
+        b_leg["n_clamped_excluded"] = int(clamped.sum())
+        kind = "0.5*2^E_acc per product + 0.5*2^E_t re-grid + 0.5*2^E_C (scatter-int dx raw + re-block)"
+    row["n_elements"] = int(exact.size)
+    row["legA"] = {
+        "taxonomy": taxonomy,
+        "census": census_row,
+        "mismatch_class": "none" if taxonomy == "EXACT" else "fold",
+        "seed": None,
+        "scale": {"c": None, "ref": None, "rel": None, "ok": True},
+        "ref_scale": None,
+        "scatter_int": ref.stats(),
+    }
+    row["legB"] = b_leg
+    row["legB"]["bound_kind"] = kind
+    row["c_scale"] = None
+    st = ref.stats()
+    row["bfp"] = {"summary": f"scatter-int N={st['N']} g={st['g']} E_acc={st['E_acc_range']} left={st['n_left_shifts']} rounded={st['n_rounded_products']} realigned={st['n_realigned']} |sum|<={st['sum_abs_max']}", "stats": st}
+    return row
+
+
+def evaluate_grad_bfp_output(fx: GemmFixture, drv, out_name: str, grad: dict, calls: int) -> dict:
+    """weightGrad / biasGrad into per-tensor BFP grad storage (section 14
+    "Grad raw" + section 15, HALF_AWAY), accumulated `calls` times from zero
+    codes over the same operands. Leg A: the integer sums (the scatter /
+    the bias segment fold), the data-derived raw (grad_raw_from_rows) and
+    the exact accumulate chain (accumulate_raw_into_bfp) predict codes AND
+    the stored exponent exactly. Leg B: calls * the exact float64 grad
+    within, per call, the raw's roundings (half a unit of 2^E_acc per product
+    / per segment, half a unit of 2^E_t per re-gridded sum) plus half a code
+    of that call's grid."""
+    m, e = int(grad["mantissaBits"]), int(grad["exponentBits"])
+    x = fx.ops["input"].codes.shape
+    loss = fx.ops["loss"]
+    c_out = loss.codes.shape[1]
+    row: dict = {"output": out_name, "n_elements": 0, "headroom": {"ok": True, "kind": "guard"}}
+    if drv.exit != 0:
+        row["legA"] = {"taxonomy": "MISMATCH", "census": None, "mismatch_class": "abort", "seed": None, "scale": {"c": None, "ref": None, "rel": None, "ok": False}, "ref_scale": None}
+        row["legB"] = {"taxonomy": "n/a", "err_max": float("nan"), "bound": float("nan"), "ratio": float("nan")}
+        row["c_scale"] = None
+        row["bfp"] = {"summary": f"grad-bfp: exit {drv.exit}"}
+        return row
+    if fx.op == "linear":
+        return _evaluate_linear_grad_bfp(fx, drv, out_name, m, e, calls, row)
+    if out_name == "weightGrad":
+        a, b = gemm_operands(fx, "weightGrad")
+        ref = bfp_ref.conv1d_scatter_int_backward(
+            x[0], x[1], x[2], c_out, fx.geom, "weightGrad", (a.codes, a.stored, a.bits), (b.codes, b.stored, b.bits)
+        )
+        sums, e_acc = ref.sums, [int(v) for v in ref.e_acc.ravel()]
+        per_call_raw = ref.raw_bound.ravel()
+        stats = {"g": ref.g, "N": ref.n_terms, "rounded": ref.n_rounded, "left": ref.n_left}
+        exact, _ = gemm_exact_and_abs(fx, "weightGrad")
+    else:
+        l_out = loss.codes.shape[2]
+        sums, e_acc, n_rounded = bfp_ref.conv1d_bias_int_sums(x[0], c_out, l_out, (loss.codes, loss.stored, loss.bits))
+        per_call_raw = np.array([0.5 * x[0] * l_out * 2.0 ** ea for ea in e_acc])
+        stats = {"rounded_segments": n_rounded}
+        exact, _ = gemm_exact_and_abs(fx, "biasGrad")
+    exact = exact.ravel()
+    mant, exps, n_realigned = bfp_ref.grad_raw_from_rows(sums, e_acc, 0)
+    regrid = np.array([0.5 * 2.0 ** exps[0] if exps[0] > ea else 0.0 for ea in e_acc])
+    codes, stored = [0] * len(sums), [bfp_ref.exponent_bias(e)]
+    bound = np.zeros(len(sums))
+    for _ in range(calls):
+        codes, stored = bfp_ref.accumulate_raw_into_bfp(codes, stored, mant, exps, m, e)
+        bound += per_call_raw + regrid + 0.5 * 2.0 ** (stored[0] - bfp_ref.exponent_bias(e))
+    c_vals, grid = c_output_image(drv.out(out_name))
+    if not grid:
+        raise RuntimeError("harness: a BFP grad cell produced a FLOAT32 grad")
+    c_codes = np.asarray(grid["codes"], dtype=np.int64).ravel()
+    c_stored = np.asarray(grid["stored"], dtype=np.int64)
+    codes = np.asarray(codes, dtype=np.int64)
+    bad_c = np.flatnonzero(c_codes != codes)
+    bad_e = c_stored.size != 1 or int(c_stored[0]) != stored[0]
+    taxonomy = "EXACT" if bad_c.size == 0 and not bad_e else "MISMATCH"
+    row["n_elements"] = int(codes.size)
+    row["legA"] = {
+        "taxonomy": taxonomy,
+        "census": {"taxonomy": taxonomy, "mode": "bfp_grad_acc", "n_elements": int(codes.size), "n_mismatch": int(bad_c.size), "n_tie": 0,
+                   "max_abs_diff": int(np.abs(c_codes - codes).max()) if codes.size else 0, "n_groups": 1, "n_E_differs": int(bad_e),
+                   "worst": [{"index": int(i), "c": int(c_codes[i]), "ref": int(codes[i])} for i in bad_c[:8]] + ([{"c_E": c_stored.tolist(), "ref_E": stored}] if bad_e else [])},
+        "mismatch_class": "none" if taxonomy == "EXACT" else ("E" if bad_e else "code"),
+        "seed": None,
+        "scale": {"c": None, "ref": None, "rel": None, "ok": True},
+        "ref_scale": None,
+    }
+    row["legB"] = elementwise_leg_b(np.abs(c_vals.ravel() - calls * exact), bound)
+    row["legB"]["bound_kind"] = "per call: raw roundings + 0.5*2^E_t re-grid + 0.5*2^E_d store (grad-bfp)"
+    row["c_scale"] = None
+    row["bfp"] = {"summary": f"grad-bfp calls={calls} m={m} E_t={exps[0]} realigned={n_realigned} stored={stored[0]} {stats}", "stats": stats}
+    return row
+
+
+def _evaluate_linear_grad_bfp(fx: GemmFixture, drv, out_name: str, m: int, e: int, calls: int, row: dict) -> dict:
+    """evaluate_grad_bfp_output for Linear (section 14): weightGrad = the
+    GEMM raw itself (linear_backward_int_fold, E_acc per raw group, no row
+    re-grid), biasGrad = the Conv1d bias rule on the [B, outF, 1] view
+    (conv1d_bias_int_sums) + the data-derived raw (grad_raw_from_rows); both
+    then the exact accumulate chain. Leg B per call: the raw's roundings
+    (half a unit of 2^E_acc per segment, + the bias re-grid) plus half a
+    code of that call's grid."""
+    loss = fx.ops["loss"]
+    batch, out_f = loss.codes.shape
+    in_f = fx.ops["input"].codes.shape[1]
+    if out_name == "weightGrad":
+        a, b = gemm_operands(fx, "weightGrad")
+        fold = bfp_ref.linear_backward_int_fold("weightGrad", (a.codes, a.stored, a.bits), (b.codes, b.stored, b.bits), int(batch), int(in_f), int(out_f), 0)
+        mant, exps, n_realigned = [int(v) for v in fold.mant], [int(v) for v in fold.exps], 0
+        per_call = fold.bound.ravel() - 0.5 * 2.0 ** float(fold.exps[0])  # S segments x 1/2 unit (the +1 is the dequant slack)
+        regrid = np.zeros(len(mant))
+        stats = fold.stats()
+        exact, _ = gemm_exact_and_abs(fx, "weightGrad")
+    else:
+        sums, e_acc, n_rounded = bfp_ref.conv1d_bias_int_sums(int(batch), int(out_f), 1, (loss.codes, loss.stored, loss.bits))
+        mant, exps, n_realigned = bfp_ref.grad_raw_from_rows(sums, e_acc, 0)
+        per_call = np.array([0.5 * batch * 2.0 ** ea for ea in e_acc])
+        regrid = np.array([0.5 * 2.0 ** exps[0] if exps[0] > ea else 0.0 for ea in e_acc])
+        stats = {"rounded_segments": n_rounded}
+        exact, _ = gemm_exact_and_abs(fx, "biasGrad")
+    exact = exact.ravel()
+    codes, stored = [0] * len(mant), [bfp_ref.exponent_bias(e)]
+    bound = np.zeros(len(mant))
+    for _ in range(calls):
+        codes, stored = bfp_ref.accumulate_raw_into_bfp(codes, stored, mant, exps, m, e)
+        bound += per_call + regrid + 0.5 * 2.0 ** (stored[0] - bfp_ref.exponent_bias(e))
+    c_vals, grid = c_output_image(drv.out(out_name))
+    if not grid:
+        raise RuntimeError("harness: a BFP grad cell produced a FLOAT32 grad")
+    c_codes = np.asarray(grid["codes"], dtype=np.int64).ravel()
+    c_stored = np.asarray(grid["stored"], dtype=np.int64)
+    codes = np.asarray(codes, dtype=np.int64)
+    bad_c = np.flatnonzero(c_codes != codes)
+    bad_e = c_stored.size != 1 or int(c_stored[0]) != stored[0]
+    taxonomy = "EXACT" if bad_c.size == 0 and not bad_e else "MISMATCH"
+    row["n_elements"] = int(codes.size)
+    row["legA"] = {
+        "taxonomy": taxonomy,
+        "census": {"taxonomy": taxonomy, "mode": "bfp_grad_acc", "n_elements": int(codes.size), "n_mismatch": int(bad_c.size), "n_tie": 0,
+                   "max_abs_diff": int(np.abs(c_codes - codes).max()) if codes.size else 0, "n_groups": 1, "n_E_differs": int(bad_e),
+                   "worst": [{"index": int(i), "c": int(c_codes[i]), "ref": int(codes[i])} for i in bad_c[:8]] + ([{"c_E": c_stored.tolist(), "ref_E": stored}] if bad_e else [])},
+        "mismatch_class": "none" if taxonomy == "EXACT" else ("E" if bad_e else "code"),
+        "seed": None,
+        "scale": {"c": None, "ref": None, "rel": None, "ok": True},
+        "ref_scale": None,
+    }
+    row["legB"] = elementwise_leg_b(np.abs(c_vals.ravel() - calls * exact), bound)
+    row["legB"]["bound_kind"] = "per call: raw roundings (+ 0.5*2^E_t bias re-grid) + 0.5*2^E_d store (linear grad-bfp)"
+    row["c_scale"] = None
+    row["bfp"] = {"summary": f"linear grad-bfp calls={calls} m={m} E_t={exps[0]} realigned={n_realigned} stored={stored[0]} {stats}", "stats": stats}
+    return row
+
+
+def _is_int_fold(cell: dict) -> bool:
+    """The ops that emit the section-13 integer BFP_RAW of a GEMM fold: the
+    Conv1d and Linear forwards (the ConvT1d forward still folds in float)
+    and the Linear dx (section 14)."""
+    if cell["arith"]["type"] != "BFP":
+        return False
+    if cell["direction"] == "forward":
+        return cell["op"] in ("conv1d", "linear")
+    return cell["op"] == "linear" and cell["direction"] == "dx"
+
+
+def evaluate_int_fold_output(fx: GemmFixture, drv, tier: str, raw_group_size: int, out_spec: dict | None, direction: str = "forward") -> dict:
+    """The Conv1d / Linear forward under the integer fold (section 13): Leg A is the
+    documented fold evaluated exactly -- kernel tier: the BFP_RAW mantissas
+    and per-group exponents bit for bit; layer tier onto FLOAT32: the
+    section-13 dequant of the predicted raw bit for bit; onto a BFP wire:
+    the section-13 re-block of the predicted raw, codes and stored
+    exponents exactly. Leg B is float64 within the fold bound 1/2 (S+1)
+    2^E_acc (+ the (float)mant cast, + half a code at the wire's exponent).
+    No fail-fast is predicted: over-long runs split instead. direction "dx"
+    (Linear, section 14): the same, on the backward GEMM (loss @ W), output
+    propLoss."""
+    a, b = gemm_operands(fx, direction)
+    bias = (fx.ops["bias"].codes, fx.ops["bias"].stored, fx.ops["bias"].bits) if "bias" in fx.ops and direction == "forward" else None
+    x = fx.ops["input"].codes.shape
+    c_out = int(fx.ops["weight"].codes.shape[0])
+    exact, _ = gemm_exact_and_abs(fx, direction)
+    n_out = int(exact.size)
+    out_name = "output" if direction == "forward" else "propLoss"
+    if n_out and raw_group_size >= n_out:
+        raw_group_size = 0
+    if direction == "dx":
+        fold = bfp_ref.linear_backward_int_fold("dx", (a.codes, a.stored, a.bits), (b.codes, b.stored, b.bits), int(x[0]), int(x[1]), c_out, raw_group_size)
+        n_red = c_out
+    elif fx.op == "linear":
+        fold = bfp_ref.linear_int_fold(a.codes, a.stored, a.bits, b.codes, b.stored, b.bits, bias, int(x[0]), int(x[1]), c_out, raw_group_size)
+        n_red = int(x[1])
+    else:
+        fold = bfp_ref.conv1d_int_fold(a.codes, a.stored, a.bits, b.codes, b.stored, b.bits, bias, int(x[0]), int(x[1]), int(x[2]), c_out, fx.geom, raw_group_size)
+        n_red = int(x[1]) // fx.geom.groups * fx.geom.kernel_size
+    if not np.allclose(fold.exact.reshape(exact.shape), exact, rtol=1e-12, atol=1e-30):
+        raise RuntimeError("harness: the integer fold's exact sum disagrees with the float64 reference")
+    row: dict = {
+        "output": out_name,
+        "n_elements": n_out,
+        "headroom": {"ok": True, "kind": "int_fold", "limit": bfp_ref.segment_limit(a.m, b.m), "max_segment": n_red, "reduction": n_red, "widths": [a.m, b.m], "g": fold.g},
+    }
+    if drv.exit != 0:
+        row["legA"] = {"taxonomy": "MISMATCH", "census": None, "mismatch_class": "abort", "banner_problems": ["the integer fold never fails fast (runs split)"], "seed": None, "scale": {"c": None, "ref": None, "rel": None, "ok": False}, "ref_scale": None}
+        row["legB"] = {"taxonomy": "n/a", "err_max": float("nan"), "bound": float("nan"), "ratio": float("nan")}
+        row["c_scale"] = None
+        row["bfp"] = {"summary": f"int fold g={fold.g}: driver exit {drv.exit} (NOT predicted)"}
+        return row
+    o = drv.out(out_name)
+    bound = fold.bound.reshape(exact.shape)
+    if tier == "kernel":
+        if o["dtype"] != "BFP_RAW":
+            raise RuntimeError(f"kernel tier: expected a BFP_RAW output, got {o['dtype']}")
+        c_mant = np.asarray(o["codes"], dtype=np.int64).ravel()
+        c_exps = np.asarray(o["meta"]["rawExponents"], dtype=np.int64)
+        if c_exps.shape != fold.exps.shape:
+            raise RuntimeError(f"raw numGroups: C {c_exps.size} vs ref {fold.exps.size}")
+        d_m = c_mant - fold.mant
+        d_e = c_exps - fold.exps
+        bad_m = np.flatnonzero(d_m != 0)
+        bad_e = np.flatnonzero(d_e != 0)
+        classes = ([] if bad_m.size == 0 else ["mant"]) + ([] if bad_e.size == 0 else ["E_acc"])
+        taxonomy = "EXACT" if not classes else "MISMATCH"
+        a_leg = {
+            "taxonomy": taxonomy,
+            "census": {"taxonomy": taxonomy, "mode": "bfp_raw_bits", "n_elements": int(c_mant.size), "n_mismatch": int(bad_m.size), "n_tie": 0, "max_abs_diff": int(np.abs(d_m).max()) if d_m.size else 0, "n_groups": int(fold.exps.size), "n_E_differs": int(bad_e.size), "worst": [{"index": int(i), "c": int(c_mant[i]), "ref": int(fold.mant[i])} for i in bad_m[:8]] + [{"group": int(g), "c_E": int(c_exps[g]), "ref_E": int(fold.exps[g])} for g in bad_e[:8]]},
+            "mismatch_class": "+".join(classes) if classes else "none",
+            "seed": None,
+            "scale": {"c": None, "ref": None, "rel": None, "ok": True},
+            "ref_scale": None,
+        }
+        gsz = n_out if raw_group_size == 0 else raw_group_size
+        c_vals = np.ldexp(c_mant.astype(np.float64), c_exps[bfp_ref.group_ids(n_out, gsz)].astype(np.int64)).reshape(exact.shape)
+        b_leg = elementwise_leg_b(np.abs(c_vals - exact), bound)
+        b_leg["bound_kind"] = "1/2 (S+1) 2^E_acc (section 13 fold)"
+    elif out_spec is None or out_spec["dtype"] == "FLOAT32":
+        pred = bfp_ref.dequant_raw_f32(fold.mant, fold.exps, raw_group_size).reshape(exact.shape)
+        c_vals = np.asarray(o["values"], dtype=np.float64).reshape(exact.shape)
+        bit = float_bitexact(c_vals, pred)
+        taxonomy = "EXACT" if bit["n_mismatch"] == 0 else "MISMATCH"
+        a_leg = {
+            "taxonomy": taxonomy,
+            "census": {"taxonomy": taxonomy, "mode": "float32_bits", "n_elements": bit["n_elements"], "n_mismatch": bit["n_mismatch"], "n_tie": 0, "max_abs_diff": bit["max_ulp32"], "worst": bit["worst"]},
+            "mismatch_class": "none" if taxonomy == "EXACT" else "dequant",
+            "seed": None,
+            "scale": {"c": None, "ref": None, "rel": None, "ok": True},
+            "ref_scale": None,
+        }
+        b_leg = elementwise_leg_b(np.abs(c_vals - exact), bound + np.abs(pred) * F32_U)
+        b_leg["bound_kind"] = "1/2 (S+1) 2^E_acc + u |value| (section 13 fold + (float)mant)"
+    else:
+        m, e, gs = int(out_spec["mantissaBits"]), int(out_spec["exponentBits"]), int(out_spec["groupSize"])
+        if n_out and gs >= n_out:
+            gs = 0
+        codes, stored = bfp_ref.reblock_raw(fold.mant, fold.exps, raw_group_size, m, e, gs)
+        c_vals, grid = c_output_image(o)
+        c_codes = np.asarray(grid["codes"], dtype=np.int64).ravel()
+        c_stored = np.asarray(grid["stored"], dtype=np.int64)
+        if c_stored.shape != stored.shape:
+            raise RuntimeError(f"wire numGroups: C {c_stored.size} vs ref {stored.size}")
+        bad_c = np.flatnonzero(c_codes != codes)
+        bad_e = np.flatnonzero(c_stored != stored)
+        classes = ([] if bad_e.size == 0 else ["E"]) + ([] if bad_c.size == 0 else ["code"])
+        taxonomy = "EXACT" if not classes else "MISMATCH"
+        a_leg = {
+            "taxonomy": taxonomy,
+            "census": {"taxonomy": taxonomy, "mode": "bfp_reblock", "n_elements": int(c_codes.size), "n_mismatch": int(bad_c.size), "n_tie": 0, "max_abs_diff": int(np.abs(c_codes - codes).max()) if codes.size else 0, "n_groups": int(stored.size), "n_E_differs": int(bad_e.size), "worst": [{"index": int(i), "c": int(c_codes[i]), "ref": int(codes[i])} for i in bad_c[:8]] + [{"group": int(g), "c_E": int(c_stored[g]), "ref_E": int(stored[g])} for g in bad_e[:8]]},
+            "mismatch_class": "+".join(classes) if classes else "none",
+            "seed": None,
+            "scale": {"c": None, "ref": None, "rel": None, "ok": True},
+            "ref_scale": None,
+        }
+        bias_e = bfp_ref.exponent_bias(e)
+        gsz = n_out if gs == 0 else gs
+        scale = 2.0 ** (c_stored[bfp_ref.group_ids(n_out, gsz)] - bias_e)
+        raw_scale = 2.0 ** fold.exps[bfp_ref.group_ids(n_out, n_out if raw_group_size == 0 else raw_group_size)]
+        pre = fold.mant * raw_scale / scale
+        clamped = _outside_grid(pre, m).reshape(exact.shape)
+        b_leg = elementwise_leg_b(np.abs(c_vals.reshape(exact.shape) - exact), bound + (0.5 * scale).reshape(exact.shape), ~clamped)
+        b_leg["bound_kind"] = "1/2 (S+1) 2^E_acc + 0.5 2^E_C (section 13 fold + re-block)"
+        b_leg["n_clamped_excluded"] = int(clamped.sum())
+    row["legA"] = a_leg
+    row["legB"] = b_leg
+    row["c_scale"] = None
+    st = fold.stats()
+    row["bfp"] = {
+        "summary": f"int fold N={n_red} g={st['g']} E_acc={st['E_acc_range']} segs<={st['n_segments_max']} splits={st['n_splits']} left={st['n_left_shifts']} rounded={st['n_rounded_folds']} |mant|<={st['mant_abs_max']}",
+        "stats": st,
+    }
+    return row
+
+
 def run_gemm_cell(cell: dict, driver: Path, out_root: Path, k: int, run_driver) -> list[dict]:
     name = cell["name"]
     rows = []
+    int_fold = _is_int_fold(cell)
+    raw_gs = int(cell.get("raw", {}).get("groupSize", 0))
     for tier in cell.get("tiers", ["kernel", "layer"]):
         base = {"cell": name, "tier": tier, "op": cell["op"], "direction": cell["direction"]}
         try:
@@ -766,8 +1144,21 @@ def run_gemm_cell(cell: dict, driver: Path, out_root: Path, k: int, run_driver) 
             in_dir.mkdir(parents=True, exist_ok=True)
             rounding = cell["arith"].get("rounding", "HALF_AWAY")
             operands = {nm: o.spec(nm, in_dir, rounding, "BFP" if tier == "kernel" else None) for nm, o in fx.ops.items()}
-            out = output_spec(cell) if tier == "layer" else {"dtype": "FLOAT32"}
-            spec_path = write_spec(in_dir, cell, tier, operands, out)
+            if tier == "layer":
+                out = output_spec(cell)
+            elif int_fold:
+                out = {"dtype": "BFP_RAW", "groupSize": raw_gs}
+            else:
+                out = {"dtype": "FLOAT32"}
+            grad = cell.get("grad")
+            extra = None
+            if grad is not None:
+                integer_dw = _is_scatter_int(cell) or (cell["op"] == "linear" and cell["arith"]["type"] == "BFP")
+                if not integer_dw or cell["direction"] != "weightGrad" or tier != "layer":
+                    raise RuntimeError("harness: BFP grad storage is modelled for the Conv1d / Linear integer weightGrad layer tier only")
+                extra = {"gradStorage": "BFP", "calls": int(cell.get("calls", 1)),
+                         "grad": {"mantissaBits": int(grad["m"]), "exponentBits": int(grad["e"]), "groupSize": 0, "rounding": "HALF_AWAY"}}
+            spec_path = write_spec(in_dir, cell, tier, operands, out, extra)
             drv = run_driver(driver, spec_path, in_dir, work / "out")
             direction = cell["direction"]
             out_name = {"forward": "output", "dx": "propLoss", "weightGrad": "weightGrad"}[direction]
@@ -776,17 +1167,31 @@ def run_gemm_cell(cell: dict, driver: Path, out_root: Path, k: int, run_driver) 
                 "shapes": {nm: list(o.codes.shape) for nm, o in fx.ops.items()},
                 "storage": {nm: ("BFP" if tier == "kernel" else o.storage) for nm, o in fx.ops.items()},
                 "scales": {},
-                "notes": fx.notes,
+                "notes": fx.notes + ([f"kernel-tier raw groupSize {raw_gs}"] if int_fold and tier == "kernel" else []),
             }
             expect = cell.get("expect", {})
-            res = evaluate_gemm_output(fx, direction, drv, out_name, k, True)
+            if int_fold:
+                layer_out = output_spec(cell) if tier == "layer" else None
+                layer_gs = 0 if (layer_out is None or layer_out["dtype"] == "FLOAT32") else int(layer_out["groupSize"])
+                res = evaluate_int_fold_output(fx, drv, tier, raw_gs if tier == "kernel" else layer_gs, layer_out, cell["direction"])
+            elif grad is not None:
+                res = evaluate_grad_bfp_output(fx, drv, "weightGrad", extra["grad"], extra["calls"])
+            elif _is_scatter_int(cell):
+                if tier != "layer":
+                    raise RuntimeError("harness: the integer scatter is modelled at the layer tier only")
+                res = evaluate_scatter_int_output(fx, direction, drv, out_name, output_spec(cell))
+            else:
+                res = evaluate_gemm_output(fx, direction, drv, out_name, k, True)
             row = dict(base)
             row.update(res)
             row["fixture"] = fixture_info
             row["verdict"] = verdict(row, expect)
             rows.append(row)
             if direction == "weightGrad" and "bias" in fx.ops and (drv.exit == 0 or not res["headroom"]["ok"]):
-                res2 = evaluate_gemm_output(fx, "biasGrad", drv, "biasGrad", k, False)
+                if grad is not None:
+                    res2 = evaluate_grad_bfp_output(fx, drv, "biasGrad", extra["grad"], extra["calls"])
+                else:
+                    res2 = evaluate_gemm_output(fx, "biasGrad", drv, "biasGrad", k, False)
                 r2 = dict(base)
                 r2.update(res2)
                 r2["fixture"] = fixture_info

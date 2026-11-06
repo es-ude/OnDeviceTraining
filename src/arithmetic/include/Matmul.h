@@ -65,7 +65,10 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
                                         tensor_t *outputTensor,
                                         const symGroupedWeight_t *groupedWeight, rngStream_t *rs);
 
-/*! BFP epic PR2 (Task 3): block-floating-point GEMM forward. Operands are in
+/*! BFP epic PR2 (Task 3): block-floating-point GEMM with the FLOAT32 raw --
+ *  since the integer forward and backward (matmulBfpRawTensors below) it
+ *  serves only the Linear weightGrad into FLOAT32 grads and under the fixed
+ *  grid (the float bridge). Operands are in
  *  the executeOp funnel's UNPACKED-BFP scratch form: ->data holds int32
  *  sign-extended mantissa codes, ->quantization is BFP with a live
  *  bfpQConfig_t (the form exists only between funnel prologue and kernel).
@@ -77,9 +80,10 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
  *
  *  Kernel contract (shared across the BFP GEMM family): per output element
  *  ONE int32 partial; per reduction step both operands' STORAGE indices map
- *  to group ids (bfpGroupOf -- gap-robust on strided walks, exactly like
- *  matmulIntCoreGrouped's per-element division); when EITHER id changes, the
- *  finished segment folds via acc += ldexpf((float)partial, Ea + Eb - biasA
+ *  to group ids (bfpGroupAt -- gap-robust on strided walks like
+ *  matmulIntCoreGrouped's per-element division, but the division runs only
+ *  when an index leaves the cached current group); when EITHER id changes, the
+ *  finished segment folds via acc += bfpLdexpInt32(partial, Ea + Eb - biasA
  *  - biasB) and the partial resets; tail-fold after the loop. The kernel
  *  never rounds (rounding lives at staging and the OUT_WRITE epilogue).
  *  Every operand's group shape is fail-fast-checked against its element
@@ -91,6 +95,25 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
  *  bfpSegmentLimit(ma, mb) == INT32_MAX >> (ma+mb-2) (#227 headroom, no
  *  int64 anywhere). */
 void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias, tensor_t *outputTensor);
+
+/*! Integer-only BFP GEMM (docs/conventions/arithmetic-bfp.md §13: the Linear
+ *  forward; §14: the Linear dx and the weightGrad into BFP grads, through the
+ *  same entry on the backward operands' views).
+ *  Same operands, walk and group tracking as matmulBfpTensors; the output is
+ *  BFP_RAW (int32 mantissas + one unbiased exponent per raw target group,
+ *  geometry from the output's own bfpRawQConfig_t, every exponent written)
+ *  and the fold is integer: ONE int32 accumulator per output in units of
+ *  2^E_acc, E_acc = (max over the group's outputs of max(rowTop(a) +
+ *  colTop(b), E_bias)) + g, g from bfpFoldGuardBits; every segment enters
+ *  through bfpAlignPartial (exact left shift / HALF_AWAY right shift, never
+ *  SR) and the bias is one more segment. Over-long same-exponent runs SPLIT
+ *  at bfpSegmentLimit (no fail-fast). rowTop / colTop are per-line maxima when
+ *  the reduction axis is physically innermost (Linear's input and transposed
+ *  weight), else the operand-wide max (coarser, still sound) -- every
+ *  maximum over the groups holding a NONZERO code, and E_bias only for a
+ *  nonzero bias code (zero groups never set E_acc; nothing set: 0). */
+void matmulBfpRawTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
+                         tensor_t *outputTensor);
 
 size_t getMatmulInstructionCounter();
 

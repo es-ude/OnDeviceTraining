@@ -189,6 +189,8 @@ add_elastic_ai_unit_test(
         RNG
         Common
         odt_test_death
+        odt_test_bfp_raw_fixture
+        m
 )
 add_dependencies(UnitTestMatmul generate_expected_group_matmul generate_expected_bfp_matmul)
 target_include_directories(UnitTestMatmul PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
@@ -294,6 +296,7 @@ add_elastic_ai_unit_test(
         QuantizationApi
         StorageApi
         odt_test_death
+        odt_test_bfp_raw_fixture
 )
 add_dependencies(UnitTestConv1dKernel generate_expected_conv1d_kernel
         generate_expected_bfp_conv1d)
@@ -325,6 +328,8 @@ add_elastic_ai_unit_test(
         QuantizationApi
         StorageApi
         odt_test_death
+        odt_test_bfp_raw_fixture
+        odt_test_bfp_scatter_ref
 )
 add_dependencies(UnitTestConvTranspose1dKernel generate_expected_conv_transpose_1d_kernel
         generate_expected_bfp_convT1d)

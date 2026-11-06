@@ -1,0 +1,44 @@
+# The HAR classifier's integer BFP forward (examples/har_classifier/train_c_bfp.c,
+# BFP wires, native math): the --strict gate.
+#   <source file> <function base name>         walk the root and everything it calls
+#   <source file> <function base name> self    the function's OWN call sites only
+# The kernels are reached through executeOp's function pointer and the conversion
+# cells through conversionMatrix, so each is its own root. The dtype dispatchers
+# (executeOp, the layers' forward switches) are `self` roots: a walk from them
+# reaches every dtype's arm, so only their own bodies are checked. Their one float
+# route on this path -- staging a FLOAT32 operand -- is closed at run time by
+# executeOp's forward check.
+#
+# The input layer: the samples arrive pre-converted into input.out's BFP format
+# and pass straight through (self: its own body is the copy; the converting arm
+# for FLOAT32 samples is out of line and never runs on this path -- the trainer's
+# FULL gate checks every sample's format at load).
+QuantizationLayer.c quantizationForward  self
+# Boundary (allowed float, see allowlist.txt): the loss-facing dequant of p. It
+# stops at itself: its row documents the boundary and checks nothing.
+TensorConversion.c  convertBfpTensorToFloat32Tensor
+# The funnel (prologue, raw setup, epilogue dispatch) and the conversion entry:
+ExecuteOp.c         executeOp            self
+ExecuteOp.c         writeOutConversion   self
+# Operand unpack (executeOp prologue, BFP-stored operands):
+TensorConversion.c  unpackSignExtend
+# Layers, in model order (dispatch wrapper, then kernel):
+Conv1d.c            conv1dForward        self
+Conv1d.c            forwardKernelBfpRaw
+Relu.c              reluForward          self
+Relu.c              reluForwardBfp
+MaxPool1d.c         maxPool1dForward     self
+MaxPool1d.c         maxPool1dForwardKernelBfpRaw
+AvgPool1d.c         avgPool1dForward     self
+AvgPool1d.c         avgPool1dForwardKernelBfpRaw
+Flatten.c           flattenForward
+Linear.c            linearForward        self
+Linear.c            linearForwardKernelBfpRaw
+Softmax.c           softmaxForward       self
+Softmax.c           softmaxForwardKernelBfp
+# The float head (BFP_HEAD=float, ruling R2): the FLOAT32 Softmax forward on the
+# dequantized logits is the head's forward island -- allow-listed and stopped at the
+# root (documents the boundary). The bfp head runs the integer kernel above.
+Softmax.c           softmaxForwardKernel
+# OUT_WRITE epilogue (conversionMatrix[BFP_RAW][BFP]):
+TensorConversion.c  reblockBfpRawTensor

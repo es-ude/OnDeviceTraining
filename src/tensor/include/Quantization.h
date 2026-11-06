@@ -5,7 +5,9 @@
 
 #include "Rounding.h"
 
-typedef enum qtype { INT32, FLOAT32, SYM_INT32, SYM, ASYM, BOOL, BFP } qtype_t;
+/* BFP_RAW is appended last: stored tags (Serialize.c writes the enum value)
+ * stay stable, and it is never a stored tag itself (see bfpRawQConfig_t). */
+typedef enum qtype { INT32, FLOAT32, SYM_INT32, SYM, ASYM, BOOL, BFP, BFP_RAW } qtype_t;
 
 typedef struct symInt32QConfig {
     float scale;
@@ -153,6 +155,29 @@ typedef struct bfpQConfig {
     uint8_t exponentBits; /* [2, 8]; bias = 2^(exponentBits-1) - 1 */
 } bfpQConfig_t;
 
+/* Integer-only BFP: the executeOp funnel's RAW intermediate under ARITH_BFP
+ * when an op opts in (opSpec_t.bfpRawOut: the integer forward, the Conv1d
+ * dx, the Conv1d weight / bias grads into BFP grads) -- int32 mantissas in
+ * the tensor data plus ONE exponent per TARGET group, so a BFP kernel folds
+ * integer partials and the OUT_WRITE epilogue re-blocks with shifts
+ * (conversionMatrix[BFP_RAW][BFP]) or dequantizes into a FLOAT32 target
+ * ([BFP_RAW][FLOAT32]); the grad ACC epilogue adds it to the stored grad
+ * (accumulateBfpRawIntoBfpRescale). Transient by design: it lives on the funnel's stack
+ * for one op, is never storage, never serialized, copied or cloned, and every
+ * other dtype switch rejects it.
+ * Exponents are UNBIASED (value = mantissa * 2^exponents[g]), unlike the
+ * biased bytes of bfpQConfig_t: an accumulation exponent is the sum of two
+ * unbiased operand exponents plus the fold guard, which exceeds int8.
+ * Geometry grammar is bfpQConfig_t's ({1,0} per-tensor or {>1,>0} with
+ * numGroups*groupSize == n); the funnel COPIES it from the target wire (a
+ * FLOAT32 target has no groups: {1,0}), and the re-block cell rejects any
+ * other pairing. The exponent array is the funnel's transient slice. */
+typedef struct bfpRawQConfig {
+    int16_t *exponents; /* [numGroups], UNBIASED; written by the kernel, one per group */
+    size_t numGroups;   /* 1 = per-tensor */
+    size_t groupSize;   /* 0 = whole-tensor sentinel; >0 grouped */
+} bfpRawQConfig_t;
+
 /* Group-quant PR4 (Task 1, group-quant D6): always-array ASYM with a NUDGED
  * CODE-DOMAIN affine parametrization (TFLite-standard). Ownership and shape
  * grammar are exactly symQConfig_t's (see the block comment above): both
@@ -276,5 +301,12 @@ void initSymInt32Quantization(symInt32QConfig_t *symInt32QConfig, quantization_t
 void initSymQuantization(symQConfig_t *symQConfig, quantization_t *quantization);
 void initAsymQuantization(asymQConfig_t *asymQConfig, quantization_t *quantization);
 void initBfpQuantization(bfpQConfig_t *bfpQConfig, quantization_t *quantization);
+void initBfpRawQuantization(bfpRawQConfig_t *bfpRawQConfig, quantization_t *quantization);
+/*! The BFP_RAW geometry check every raw producer and consumer runs before
+ * indexing exponents[]: fail-fast (banner prefixed by `what`) unless
+ * {numGroups=1, groupSize=0} or {numGroups>1, groupSize>0,
+ * numGroups*groupSize == numberOfElements}. */
+void validateBfpRawQConfigShape(const bfpRawQConfig_t *qC, size_t numberOfElements,
+                                const char *what);
 
 #endif // ENV5_RUNTIME_QUANTIZATION_H

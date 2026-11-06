@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "ArithmeticType.h"
 #include "BatchView.h"
@@ -4250,6 +4251,130 @@ void testEvaluationOfADrawingForwardWithoutAKeyExits(void) {
                              evaluateAnSrForwardWithoutAKey());
 }
 
+/* ---- Integer macro-batch mean scale of BFP grads in the loop -------------
+ * A 2x2 identity Linear, MSE (F = 2), lr = 0 (the weights never move, so
+ * every sample of a batch gives the same raw grad), grads in per-tensor BFP8.
+ * Macro-batch 1 holds samples x = [1, 0.5], macro-batch 2 x = [0.5, 0.25];
+ * label 0. Raw per sample dW = 2 x x^T, db = 2 x; the mean over N * F gives
+ * dW = x x^T, db = x. A spy on SGD_M's step records the grads the optimizer
+ * sees: they must be the mean of THIS batch -- scaled exactly once (not raw,
+ * not twice) and from a fresh zero (not carrying the previous batch). */
+#define MS_MAX_SAMPLES 8
+static tensor_t *msItems[MS_MAX_SAMPLES];
+static tensor_t *msLabels[MS_MAX_SAMPLES];
+static size_t msCount;
+static float msStepGrads[2][6];
+static size_t msSteps;
+static optimizerFunctions_t msSavedSgdM;
+
+static sample_t *getMsSample(size_t id) {
+    sample_t *s = reserveMemory(sizeof(sample_t));
+    s->item = msItems[id];
+    s->label = msLabels[id];
+    return s;
+}
+
+static size_t getMsDatasetSize(void) {
+    return msCount;
+}
+
+static void spyStepRecordsGrads(optimizer_t *optim, const rngKey_t *updateKey) {
+    if (msSteps < 2) {
+        dequantChunkToFloat(optim->parameter[0]->grad, 0, 4, msStepGrads[msSteps]);
+        dequantChunkToFloat(optim->parameter[1]->grad, 0, 2, msStepGrads[msSteps] + 4);
+    }
+    msSteps++;
+    msSavedSgdM.step(optim, updateKey);
+}
+
+/* One epoch over 2 * batch samples; grads FLOAT32 or BFP8 (SR). */
+static void runMeanScaleEpoch(size_t batch, bool bfpGrads) {
+    static const float eye[4] = {1.f, 0.f, 0.f, 1.f};
+    tensor_t *wParam = buildFloatTensor2D(2, 2, eye, 4);
+    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
+    quantization_t *gradQ = bfpGrads ? quantizationInitBfp(8, 8, SR_HALF_AWAY) : NULL;
+    tensor_t *wGrad = bfpGrads ? gradInit(wParam, gradQ, NULL) : gradInitFloat(wParam, NULL);
+    tensor_t *bGrad = bfpGrads ? gradInit(bParam, gradQ, NULL) : gradInitFloat(bParam, NULL);
+    if (gradQ != NULL) {
+        freeQuantization(gradQ);
+    }
+    parameter_t *w = parameterInit(wParam, wGrad);
+    parameter_t *b = parameterInit(bParam, bGrad);
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *linear = buildBorrowedLinearLayer(w, b, &testQ);
+    /* both grads re-derive their grid per micro-batch (the HAR BFP_GRADS=1
+     * mode); a fixed bias grid taken from sample 1 cannot hold the sum */
+    linear->config->linear->biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
+    layer_t *model[] = {linear};
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.f, 0.f, 0.f, model, 1, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    freeQuantization(momentumQ);
+
+    msCount = 2 * batch;
+    for (size_t i = 0; i < msCount; i++) {
+        const float scale = i < batch ? 1.f : 0.5f;
+        msItems[i] = buildFloatTensor1D(2, (float[]){scale, 0.5f * scale});
+        msLabels[i] = buildFloatTensor1D(2, (float[]){0.f, 0.f});
+    }
+    dataLoader_t *dl =
+        dataLoaderInit(getMsSample, getMsDatasetSize, (uint16_t)batch, NULL, NULL, false, true);
+    trainingRng_t rng;
+    trainingRngInit(&rng, 0x7a5c7u);
+
+    msSavedSgdM = optimizerFunctions[SGD_M];
+    optimizerFunctions[SGD_M].step = spyStepRecordsGrads;
+    msSteps = 0;
+    trainingCall_t call = {.rng = &rng};
+    trainingEpochDefault(model, 1, defaultLossConfig(MSE), dl, sgd, calculateGradsSequential,
+                         REDUCTION_MEAN, 1, &call);
+    optimizerFunctions[SGD_M] = msSavedSgdM;
+
+    freeOptim(sgd);
+    freeDataLoader(dl);
+    freeLinearLayerShellOnly(linear);
+    for (size_t i = 0; i < msCount; i++) {
+        freeTensor(msItems[i]);
+        freeTensor(msLabels[i]);
+    }
+}
+
+static void assertStepGradsAreBatchMeans(float tol) {
+    TEST_ASSERT_EQUAL_size_t(2, msSteps);
+    for (size_t step = 0; step < 2; step++) {
+        const float s = step == 0 ? 1.f : 0.5f;
+        const float x[2] = {s, 0.5f * s};
+        const float expected[6] = {x[0] * x[0], x[0] * x[1], x[1] * x[0], x[1] * x[1], x[0], x[1]};
+        for (size_t i = 0; i < 6; i++) {
+            TEST_ASSERT_FLOAT_WITHIN(tol, expected[i], msStepGrads[step][i]);
+        }
+    }
+}
+
+/* Power-of-two divisor (B = 4, N * F = 8): the BFP grads the optimizer sees
+ * are the FLOAT32 run's means exactly. */
+void testTrainingEpochDefaultMeanScalesBfpGradsOncePerBatchPowerOfTwo(void) {
+    runMeanScaleEpoch(4, false);
+    assertStepGradsAreBatchMeans(0.f);
+    float floatGrads[2][6];
+    memcpy(floatGrads, msStepGrads, sizeof floatGrads);
+    runMeanScaleEpoch(4, true);
+    assertStepGradsAreBatchMeans(0.f);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(&floatGrads[0][0], &msStepGrads[0][0], 12);
+}
+
+/* Non-power-of-two divisor (B = 3, N * F = 6): the integer scale by the
+ * 15-bit 1/6 rounds by SR onto the fresh grid -- within one code step of the
+ * exact mean (absmax 1 -> step 2^-6 in batch 1, 2^-8 in batch 2). A missing
+ * or doubled scale (x6, /6) or a missing reset (batch 2 = 1.25x batch 1's
+ * mean) lands far outside. */
+void testTrainingEpochDefaultMeanScalesBfpGradsOncePerBatchNonPowerOfTwo(void) {
+    runMeanScaleEpoch(3, true);
+    assertStepGradsAreBatchMeans(1.f / 64.f);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testTrainingBatchDefaultHandsCalculateGradsBatchAxisViews);
@@ -4265,6 +4390,8 @@ int main(void) {
     RUN_TEST(testTrainingEpochDefault_DoesOptimizerStepPerBatch);
     RUN_TEST(testTrainingEpochDefault_MinibatchStepsOncePerMinibatch);
     RUN_TEST(testTrainingEpochDefault_MeanScalesGradByOneOverNF);
+    RUN_TEST(testTrainingEpochDefaultMeanScalesBfpGradsOncePerBatchPowerOfTwo);
+    RUN_TEST(testTrainingEpochDefaultMeanScalesBfpGradsOncePerBatchNonPowerOfTwo);
     RUN_TEST(testTrainingEpochDefault_SumBackwardSkipsOptimizerScaling);
     RUN_TEST(testTrainingEpochDefault_MeanForwardSumBackward_MixedCombination);
     RUN_TEST(testTrainingRun_ReturnsResult);

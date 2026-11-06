@@ -44,11 +44,14 @@ static float trainingBatchPerSample(layer_t **model, size_t modelSize, lossConfi
  * [0, sampleOrder + 1]; quantization and sparsity stay shared with that first
  * sample). One calculateGradsFn call per chunk; the chunk's sample_t structs
  * are freed after it (the tensors stay dataset-owned). Returns the loss sum
- * weighted by rows for MEAN (Σ chunkLoss * m), plain for SUM. */
-static float trainingBatchStacked(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
-                                  batch_t *batch, calculateGradsFn_t calculateGradsFn,
-                                  reduction_t forwardReduction, size_t m,
-                                  const trainingCall_t *call) {
+ * weighted by rows for MEAN (Σ chunkLoss * m), plain for SUM. Out of line, so
+ * the bfp-census's `trainingBatchDefault self` row holds only the per-sample
+ * path's own call sites (the m == 1 loss-value sum). */
+static __attribute__((noinline)) float trainingBatchStacked(layer_t **model, size_t modelSize,
+                                                            lossConfig_t lossConfig, batch_t *batch,
+                                                            calculateGradsFn_t calculateGradsFn,
+                                                            reduction_t forwardReduction, size_t m,
+                                                            const trainingCall_t *call) {
     /* Sample 0's TENSORS (dataset-owned) stay valid for the whole call; its
      * sample_t is freed with chunk 0, so the reference is captured up front. */
     tensor_t *referenceItem = batch->samples[0]->item;

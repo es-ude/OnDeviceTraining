@@ -1,0 +1,61 @@
+{
+  "name": "b4_conv_dx_wire_pt_m16",
+  "description": "B4 Conv1d dx into a per-tensor m16 BFP wire: SAME, m16 operands (the guard is positive), batch 2, grouped loss with a spread.",
+  "family": "bfp_gemm",
+  "op": "conv1d",
+  "direction": "dx",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "geometry": {
+    "kernelSize": 5,
+    "padding": "SAME",
+    "groups": 1
+  },
+  "output": {
+    "dtype": "BFP",
+    "m": 16,
+    "e": 8,
+    "groupSize": 0
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 5503,
+    "batch": 2,
+    "cin": 3,
+    "length": 10,
+    "cout": 4,
+    "kernelSize": 5,
+    "input": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 1.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 4,
+      "absmax": 0.5,
+      "expSpread": 3
+    },
+    "loss": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 10,
+      "absmax": 1.0,
+      "expSpread": 6
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  }
+}

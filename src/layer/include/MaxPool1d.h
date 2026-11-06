@@ -50,6 +50,22 @@ void maxPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGra
 void maxPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
                             tensor_t *propLoss);
 
+struct rngStream;
+
+/* The integer-only ARITH_BFP forward kernel (executeOp adapter, ctx = the
+ * config): ops[0] = the unpacked-BFP input, rawOut = BFP_RAW, auxOut = the
+ * INT32 argmax. Exposed for kernel-level tests; layers call maxPool1dForward. */
+void maxPool1dForwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                  const void *ctx, struct rngStream *rs);
+
+/* The integer-only ARITH_BFP dx kernel (executeOp adapter, ctx = the config,
+ * whose argmaxIndices the forward recorded; no auxOut): ops[0] = the
+ * unpacked-BFP loss gradient, rawOut = BFP_RAW on the dx geometry
+ * (opSpec_t.bfpRawOut = BFP_RAW_BACKWARD_DX). Exposed for kernel-level
+ * tests; layers call maxPool1dBackward. */
+void maxPool1dBackwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                   const void *ctx, struct rngStream *rs);
+
 void maxPool1dCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_t *outputShape);
 
 #endif // ODT_MAX_POOL_1D_H

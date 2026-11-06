@@ -1,8 +1,12 @@
+#include <limits.h>
+#include <math.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "Arithmetic.h"
 #include "BfpKernelSupport.h"
+#include "BfpRawFixture.h"
 #include "DeathTest.h"
 #include "Matmul.h"
 #include "RNG.h"
@@ -1436,6 +1440,430 @@ void testBfpSumSegmentLimitTableValues(void) {
     TEST_ASSERT_EQUAL_size_t((size_t)(INT32_MAX >> 1), bfpSumSegmentLimit(2));
 }
 
+/* bfpGroupAt: the per-MAC group lookup divides only when the index leaves the
+ * cached [start, end) of the current group. The cache is a public struct, so
+ * the tests pre-load a WRONG group id to prove which path ran: an in-range
+ * index must return the cached id untouched, an out-of-range index must
+ * recompute (and overwrite it). */
+static const bfpQConfig_t groupAtQc = {
+    .exponents = NULL, .numGroups = 3, .groupSize = 4, .mantissaBits = 8, .exponentBits = 8};
+
+void testBfpGroupAtInRangeTrustsCache(void) {
+    bfpGroupRange_t r = {.group = 7, .start = 0, .end = 4};
+    TEST_ASSERT_EQUAL_size_t(7, bfpGroupAt(&r, &groupAtQc, 2));
+    TEST_ASSERT_EQUAL_size_t(7, bfpGroupAt(&r, &groupAtQc, 0));
+    TEST_ASSERT_EQUAL_size_t(7, bfpGroupAt(&r, &groupAtQc, 3));
+    TEST_ASSERT_EQUAL_size_t(0, r.start);
+    TEST_ASSERT_EQUAL_size_t(4, r.end);
+}
+
+void testBfpGroupAtForwardJumpRecomputes(void) {
+    bfpGroupRange_t r = {.group = 7, .start = 0, .end = 4};
+    /* end is exclusive: index 4 is the first element of group 1 */
+    TEST_ASSERT_EQUAL_size_t(1, bfpGroupAt(&r, &groupAtQc, 4));
+    TEST_ASSERT_EQUAL_size_t(4, r.start);
+    TEST_ASSERT_EQUAL_size_t(8, r.end);
+    /* a jump that skips a whole group lands on the right one */
+    TEST_ASSERT_EQUAL_size_t(2, bfpGroupAt(&r, &groupAtQc, 9));
+    TEST_ASSERT_EQUAL_size_t(8, r.start);
+    TEST_ASSERT_EQUAL_size_t(12, r.end);
+}
+
+void testBfpGroupAtBackwardJumpRecomputes(void) {
+    bfpGroupRange_t r = {.group = 2, .start = 8, .end = 12};
+    TEST_ASSERT_EQUAL_size_t(0, bfpGroupAt(&r, &groupAtQc, 1));
+    TEST_ASSERT_EQUAL_size_t(0, r.start);
+    TEST_ASSERT_EQUAL_size_t(4, r.end);
+    /* start is inclusive: stepping back exactly onto start stays cached */
+    r.group = 7;
+    TEST_ASSERT_EQUAL_size_t(7, bfpGroupAt(&r, &groupAtQc, 0));
+}
+
+/* A zero-initialised range is EMPTY ([0, 0)), so the very first lookup --
+ * index 0 included -- recomputes instead of trusting the zeroed group id. */
+void testBfpGroupAtZeroInitIsEmptyRange(void) {
+    bfpGroupRange_t r = {0};
+    r.group = 7;
+    TEST_ASSERT_EQUAL_size_t(0, bfpGroupAt(&r, &groupAtQc, 0));
+    TEST_ASSERT_EQUAL_size_t(0, r.start);
+    TEST_ASSERT_EQUAL_size_t(4, r.end);
+}
+
+/* The last group's range ends exactly at the element count (a partial last
+ * group cannot exist: validateBfpQConfigShape enforces numGroups * groupSize
+ * == N), so the final storage index resolves to numGroups - 1. */
+void testBfpGroupAtLastGroupEndsAtElementCount(void) {
+    bfpGroupRange_t r = {0};
+    TEST_ASSERT_EQUAL_size_t(2, bfpGroupAt(&r, &groupAtQc, 11));
+    TEST_ASSERT_EQUAL_size_t(8, r.start);
+    TEST_ASSERT_EQUAL_size_t(12, r.end);
+}
+
+/* Per-tensor {numGroups=1, groupSize=0}: everything is group 0 and the first
+ * lookup installs a range covering every index, so no later lookup ever
+ * recomputes -- a poisoned group id after the first call proves it. */
+void testBfpGroupAtPerTensorNeverRecomputes(void) {
+    bfpQConfig_t perTensor = groupAtQc;
+    perTensor.numGroups = 1;
+    perTensor.groupSize = 0;
+    bfpGroupRange_t r = {0};
+    TEST_ASSERT_EQUAL_size_t(0, bfpGroupAt(&r, &perTensor, 5));
+    TEST_ASSERT_EQUAL_size_t(0, r.start);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.end);
+    r.group = 9;
+    TEST_ASSERT_EQUAL_size_t(9, bfpGroupAt(&r, &perTensor, 1000000));
+    TEST_ASSERT_EQUAL_size_t(9, bfpGroupAt(&r, &perTensor, 0));
+}
+
+/* Bit-identity with bfpGroupOf over a strided walk that jumps forward and
+ * backward across groups (the backward GEMM's transposed-view access pattern),
+ * grouped and per-tensor. */
+void testBfpGroupAtMatchesBfpGroupOfOnStridedWalk(void) {
+    bfpQConfig_t grouped = groupAtQc;
+    grouped.numGroups = 6;
+    grouped.groupSize = 4;
+    bfpQConfig_t perTensor = groupAtQc;
+    perTensor.numGroups = 1;
+    perTensor.groupSize = 0;
+    bfpGroupRange_t rg = {0};
+    bfpGroupRange_t rp = {0};
+    for (size_t i = 0; i < 96; i++) {
+        size_t idx = (i * 7) % 24;
+        TEST_ASSERT_EQUAL_size_t(bfpGroupOf(&grouped, idx), bfpGroupAt(&rg, &grouped, idx));
+        TEST_ASSERT_EQUAL_size_t(bfpGroupOf(&perTensor, idx), bfpGroupAt(&rp, &perTensor, idx));
+    }
+}
+
+/* bfpTapsBelow: how many taps idx, idx + stride, ... (at most cap) stay below
+ * a group range's exclusive end -- the run a MAC loop may take without a
+ * group lookup. end is exclusive; idx is always inside the range. */
+void testBfpTapsBelowUnitStride(void) {
+    TEST_ASSERT_EQUAL_size_t(5, bfpTapsBelow(3, 8, 1, 100));
+    TEST_ASSERT_EQUAL_size_t(2, bfpTapsBelow(3, 8, 1, 2));
+    TEST_ASSERT_EQUAL_size_t(1, bfpTapsBelow(7, 8, 1, 100));
+    TEST_ASSERT_EQUAL_size_t(0, bfpTapsBelow(3, 8, 1, 0));
+}
+
+void testBfpTapsBelowDilatedStride(void) {
+    /* taps 0, 2, 4 < 5 */
+    TEST_ASSERT_EQUAL_size_t(3, bfpTapsBelow(0, 5, 2, 100));
+    /* taps 0, 2 < 4; tap 4 is the next group's first element */
+    TEST_ASSERT_EQUAL_size_t(2, bfpTapsBelow(0, 4, 2, 100));
+    TEST_ASSERT_EQUAL_size_t(1, bfpTapsBelow(0, 4, 2, 1));
+    TEST_ASSERT_EQUAL_size_t(1, bfpTapsBelow(9, 10, 3, 100));
+    TEST_ASSERT_EQUAL_size_t(0, bfpTapsBelow(0, 4, 2, 0));
+}
+
+/* The per-tensor sentinel range ends at SIZE_MAX: the count is the cap,
+ * with no overflow on any stride. */
+void testBfpTapsBelowPerTensorSentinelReturnsCap(void) {
+    TEST_ASSERT_EQUAL_size_t(7, bfpTapsBelow(5, SIZE_MAX, 1, 7));
+    TEST_ASSERT_EQUAL_size_t(7, bfpTapsBelow(5, SIZE_MAX, 3, 7));
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX - 5, bfpTapsBelow(5, SIZE_MAX, 1, SIZE_MAX));
+}
+
+void testBfpTapsBelowMatchesTapByTapCount(void) {
+    for (size_t stride = 1; stride <= 5; stride++) {
+        for (size_t idx = 0; idx < 12; idx++) {
+            for (size_t end = idx + 1; end <= 24; end++) {
+                for (size_t cap = 0; cap <= 10; cap++) {
+                    size_t n = 0;
+                    while (n < cap && idx + n * stride < end) {
+                        n++;
+                    }
+                    TEST_ASSERT_EQUAL_size_t(n, bfpTapsBelow(idx, end, stride, cap));
+                }
+            }
+        }
+    }
+}
+
+/* bfpLdexpInt32 replaces ldexpf((float)m, e) in the BFP float-accumulator
+ * folds, so it must equal it BIT FOR BIT for every int32 m and every int e --
+ * the multiply fast path, the subnormal / underflow / overflow fallback and
+ * the boundaries between them. */
+static uint32_t floatBits(float f) {
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+static void assertLdexpInt32MatchesLdexpf(int32_t m, int e) {
+    uint32_t want = floatBits(ldexpf((float)m, e));
+    uint32_t got = floatBits(bfpLdexpInt32(m, e));
+    if (want != got) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "m=%ld e=%d", (long)m, e);
+        TEST_ASSERT_EQUAL_HEX32_MESSAGE(want, got, msg);
+    }
+}
+
+void testBfpLdexpInt32MatchesLdexpfBitForBit(void) {
+    int32_t corpus[200];
+    size_t n = 0;
+    corpus[n++] = 0;
+    corpus[n++] = INT32_MAX;
+    corpus[n++] = INT32_MIN;
+    corpus[n++] = INT32_MIN + 1;
+    for (int k = 0; k <= 30; k++) {
+        int32_t p = (int32_t)1 << k;
+        corpus[n++] = p;
+        corpus[n++] = -p;
+        corpus[n++] = p + 1; /* k >= 24: the int -> float cast rounds */
+        corpus[n++] = -(p + 1);
+        if (k > 0) {
+            corpus[n++] = p - 1;
+        }
+    }
+    uint32_t lcg = 12345u;
+    while (n < sizeof(corpus) / sizeof(corpus[0])) {
+        lcg = lcg * 1664525u + 1013904223u;
+        corpus[n++] = (int32_t)lcg;
+    }
+    /* Reachable fold exponents lie in [-254, 256] (two operands, 8 exponent
+     * bits); the sweep covers them with margin plus the int extremes. */
+    int const extremes[] = {INT_MIN, INT_MIN + 1, -100000, 100000, INT_MAX - 1, INT_MAX};
+    for (size_t i = 0; i < n; i++) {
+        for (int e = -400; e <= 600; e++) {
+            assertLdexpInt32MatchesLdexpf(corpus[i], e);
+        }
+        for (size_t j = 0; j < sizeof(extremes) / sizeof(extremes[0]); j++) {
+            assertLdexpInt32MatchesLdexpf(corpus[i], extremes[j]);
+        }
+    }
+}
+
+void testBfpLdexpInt32Boundaries(void) {
+    /* Smallest normal power vs the first subnormal one. */
+    TEST_ASSERT_EQUAL_HEX32(0x00800000u, floatBits(bfpLdexpInt32(1, -126)));
+    TEST_ASSERT_EQUAL_HEX32(0x00400000u, floatBits(bfpLdexpInt32(1, -127)));
+    /* Subnormal results round once, ties to even: 3 * 2^-150 = 1.5 ulp -> 2,
+     * 1 * 2^-150 = 0.5 ulp -> 0. */
+    TEST_ASSERT_EQUAL_HEX32(0x00000002u, floatBits(bfpLdexpInt32(3, -150)));
+    TEST_ASSERT_EQUAL_HEX32(0x00000000u, floatBits(bfpLdexpInt32(1, -150)));
+    TEST_ASSERT_EQUAL_HEX32(0x80000001u, floatBits(bfpLdexpInt32(-1, -149)));
+    /* Largest finite reach of an int32 partial vs overflow to infinity. */
+    TEST_ASSERT_EQUAL_HEX32(0xFF000000u, floatBits(bfpLdexpInt32(INT32_MIN, 96)));
+    TEST_ASSERT_EQUAL_HEX32(0xFF800000u, floatBits(bfpLdexpInt32(INT32_MIN, 97)));
+    TEST_ASSERT_EQUAL_HEX32(0x7F800000u, floatBits(bfpLdexpInt32(1, 128)));
+    /* Zero stays +0 at every exponent (never 0 * inf = NaN, never -0). */
+    TEST_ASSERT_EQUAL_HEX32(0x00000000u, floatBits(bfpLdexpInt32(0, 128)));
+    TEST_ASSERT_EQUAL_HEX32(0x00000000u, floatBits(bfpLdexpInt32(0, -127)));
+    TEST_ASSERT_EQUAL_HEX32(0x00000000u, floatBits(bfpLdexpInt32(0, INT_MAX)));
+}
+
+/* Integer fold helpers (arithmetic-bfp §13 "The integer fold"): a partial
+ * enters the int32 accumulator as partial * 2^-k. k > 0 rounds HALF_AWAY in
+ * the overflow-safe magnitude form, k == 0 is the identity, k < 0 is an
+ * exact left shift the headroom proof licenses. */
+void testBfpShrHalfAwayRoundsHalfAwayFromZero(void) {
+    TEST_ASSERT_EQUAL_INT32(4, bfpShrHalfAway(7, 1));   /* 3.5 -> 4 */
+    TEST_ASSERT_EQUAL_INT32(-4, bfpShrHalfAway(-7, 1)); /* -3.5 -> -4 */
+    TEST_ASSERT_EQUAL_INT32(3, bfpShrHalfAway(5, 1));   /* 2.5 -> 3 */
+    TEST_ASSERT_EQUAL_INT32(-3, bfpShrHalfAway(-5, 1));
+    TEST_ASSERT_EQUAL_INT32(2, bfpShrHalfAway(6, 2));  /* 1.5 -> 2 */
+    TEST_ASSERT_EQUAL_INT32(2, bfpShrHalfAway(9, 2));  /* 2.25 -> 2 */
+    TEST_ASSERT_EQUAL_INT32(3, bfpShrHalfAway(11, 2)); /* 2.75 -> 3 */
+    TEST_ASSERT_EQUAL_INT32(-3, bfpShrHalfAway(-11, 2));
+    TEST_ASSERT_EQUAL_INT32(1, bfpShrHalfAway(1, 1)); /* 0.5 -> 1 */
+    TEST_ASSERT_EQUAL_INT32(-1, bfpShrHalfAway(-1, 1));
+    TEST_ASSERT_EQUAL_INT32(0, bfpShrHalfAway(1, 2)); /* 0.25 -> 0 */
+    TEST_ASSERT_EQUAL_INT32(0, bfpShrHalfAway(0, 5));
+    TEST_ASSERT_EQUAL_INT32(12, bfpShrHalfAway(12, 0));
+    TEST_ASSERT_EQUAL_INT32(INT32_MIN, bfpShrHalfAway(INT32_MIN, 0));
+    TEST_ASSERT_EQUAL_INT32(INT32_MAX, bfpShrHalfAway(INT32_MAX, 0));
+}
+
+void testBfpShrHalfAwayInt32Extremes(void) {
+    TEST_ASSERT_EQUAL_INT32(1 << 30, bfpShrHalfAway(INT32_MAX, 1)); /* 2^30 - 0.5 -> 2^30 */
+    TEST_ASSERT_EQUAL_INT32(-(1 << 30), bfpShrHalfAway(INT32_MIN, 1));
+    TEST_ASSERT_EQUAL_INT32(2, bfpShrHalfAway(INT32_MAX, 30)); /* 1.99.. -> 2 */
+    TEST_ASSERT_EQUAL_INT32(1, bfpShrHalfAway(INT32_MAX, 31)); /* 0.99.. -> 1 */
+    TEST_ASSERT_EQUAL_INT32(-1, bfpShrHalfAway(INT32_MIN, 31));
+    TEST_ASSERT_EQUAL_INT32(0, bfpShrHalfAway(INT32_MAX, 32));  /* < 0.5 */
+    TEST_ASSERT_EQUAL_INT32(-1, bfpShrHalfAway(INT32_MIN, 32)); /* exactly -0.5 */
+    TEST_ASSERT_EQUAL_INT32(0, bfpShrHalfAway(INT32_MAX, 40));
+    TEST_ASSERT_EQUAL_INT32(0, bfpShrHalfAway(INT32_MIN, 40));
+}
+
+void testBfpAlignPartialLeftShiftIsExactAndRightShiftRounds(void) {
+    TEST_ASSERT_EQUAL_INT32(40, bfpAlignPartial(5, -3));
+    TEST_ASSERT_EQUAL_INT32(-40, bfpAlignPartial(-5, -3));
+    TEST_ASSERT_EQUAL_INT32(3 << 29, bfpAlignPartial(3, -29));
+    TEST_ASSERT_EQUAL_INT32(-(1 << 30), bfpAlignPartial(-1, -30));
+    TEST_ASSERT_EQUAL_INT32(5, bfpAlignPartial(5, 0));
+    TEST_ASSERT_EQUAL_INT32(4, bfpAlignPartial(7, 1));
+    TEST_ASSERT_EQUAL_INT32(-4, bfpAlignPartial(-7, 1));
+    TEST_ASSERT_EQUAL_INT32(0, bfpAlignPartial(INT32_MAX, 40));
+}
+
+/* -k >= 32 is reachable only for a ZERO partial (a group that set nothing
+ * sitting far above E_acc); the headroom proof caps every nonzero one at
+ * -k <= 30. Debug builds (DEBUG_MODE_DEBUG) check that the dropped value is 0;
+ * release builds pay nothing and return 0. */
+static void alignFarLeftNonzero(void) {
+    (void)bfpAlignPartial(5, -40);
+}
+
+void testBfpAlignPartialFarLeftShiftIsZeroAndCheckedInDebug(void) {
+    TEST_ASSERT_EQUAL_INT32(0, bfpAlignPartial(0, -32));
+    TEST_ASSERT_EQUAL_INT32(0, bfpAlignPartial(0, -400));
+#ifdef DEBUG_MODE_DEBUG
+    ASSERT_EXITS_WITH_OUTPUT(1, "bfpAlignPartial: nonzero partial", alignFarLeftNonzero());
+#else
+    alignFarLeftNonzero();
+#endif
+}
+
+/* The static headroom proof in units of 2^E_acc: (N 2^(ma+mb-2) + 2^(mb-1))
+ * 2^-g + (N + 1) <= INT32_MAX, g the smallest integer (negative allowed) that
+ * satisfies it -- the product bound, not the int32 bound on a partial. */
+void testBfpFoldGuardBitsFromTheProductBound(void) {
+    TEST_ASSERT_EQUAL_INT(-10, bfpFoldGuardBits(80, 8, 8, 8, "t")); /* HAR conv2/3 widths */
+    TEST_ASSERT_EQUAL_INT(-20, bfpFoldGuardBits(6, 6, 4, 8, "t"));  /* the conv gold fixture */
+    TEST_ASSERT_EQUAL_INT(-21, bfpFoldGuardBits(2, 6, 4, 0, "t"));
+    TEST_ASSERT_EQUAL_INT(-28,
+                          bfpFoldGuardBits(1, 2, 2, 0, "t")); /* T = 4: the floor is never hit */
+    TEST_ASSERT_EQUAL_INT(1, bfpFoldGuardBits(2, 16, 16, 0, "t")); /* 2 * 2^30 = 2^31 > INT32_MAX */
+    TEST_ASSERT_EQUAL_INT(1, bfpFoldGuardBits(600, 16, 8, 0, "t"));
+    TEST_ASSERT_EQUAL_INT(0, bfpFoldGuardBits(1, 16, 16, 0, "t")); /* 2^30 + 2 fits exactly once */
+    TEST_ASSERT_EQUAL_INT(0, bfpFoldGuardBits(511, 16, 8, 0, "t"));
+    TEST_ASSERT_EQUAL_INT(-30, bfpFoldGuardBits(0, 8, 8, 0, "t")); /* empty: only the floor */
+    /* g >= 2: the right-shift search must keep going past 1 (a search that
+     * walked back from g = 1 with an out-of-range shift returned 1 here). */
+    TEST_ASSERT_EQUAL_INT(2, bfpFoldGuardBits(4, 16, 16, 0, "t"));   /* 4 * 2^30 = 2^32 */
+    TEST_ASSERT_EQUAL_INT(6, bfpFoldGuardBits(80, 16, 16, 0, "t"));  /* 80 * 2^30 ~ 2^36.3 */
+    TEST_ASSERT_EQUAL_INT(3, bfpFoldGuardBits(2400, 16, 8, 0, "t")); /* 2400 * 2^22 ~ 2^33.2 */
+    TEST_ASSERT_EQUAL_INT(2, bfpFoldGuardBits(4, 16, 16, 16, "t"));  /* + a m16 bias segment */
+    TEST_ASSERT_EQUAL_INT(-15, bfpFoldGuardBits(2, 4, 4, 16, "t"));  /* bias-dominated */
+}
+
+/* The proof's inequality checked directly on the returned g over a sweep of
+ * (N, ma, mb, mBias): g satisfies it and g - 1 does not (minimality), both
+ * sides in exact 64-bit arithmetic with shift counts always in range. */
+static bool foldGuardHolds(uint64_t total, uint64_t room, int g) {
+    if (g >= 0) {
+        return g <= 31 && total <= (room << (unsigned)g);
+    }
+    return -g <= 30 && (total << (unsigned)(-g)) <= room;
+}
+
+void testBfpFoldGuardBitsIsTheSmallestGThatHolds(void) {
+    static const uint8_t widths[] = {2, 4, 8, 12, 16};
+    static const uint8_t biases[] = {0, 8, 16};
+    static const size_t lengths[] = {1, 2, 3, 4, 7, 8, 63, 80, 511, 512, 600, 2400, 100000};
+    for (size_t wa = 0; wa < 5; wa++) {
+        for (size_t wb = 0; wb < 5; wb++) {
+            for (size_t li = 0; li < 13; li++) {
+                for (size_t bi = 0; bi < 3; bi++) {
+                    size_t n = lengths[li];
+                    uint64_t total = ((uint64_t)n << (widths[wa] + widths[wb] - 2u)) +
+                                     (biases[bi] ? (uint64_t)1 << (biases[bi] - 1u) : 0u);
+                    uint64_t room = (uint64_t)INT32_MAX - (n + 1u);
+                    if (total > (room << 31)) {
+                        continue; /* the fail-fast regime, covered by the death test */
+                    }
+                    int g = bfpFoldGuardBits(n, widths[wa], widths[wb], biases[bi], "sweep");
+                    TEST_ASSERT_TRUE(foldGuardHolds(total, room, g));
+                    TEST_ASSERT_TRUE(g == -30 || !foldGuardHolds(total, room, g - 1));
+                }
+            }
+        }
+    }
+}
+
+static void bfpFoldGuardBitsOverlongReductionBody(void) {
+    (void)bfpFoldGuardBits((size_t)1 << 33, 16, 16, 0, "t"); /* g would be 33: every fold flushes */
+}
+
+void testBfpFoldGuardBitsRejectsAReductionNoShiftCanHold(void) {
+    ASSERT_EXITS_WITH_FAILURE(bfpFoldGuardBitsOverlongReductionBody());
+}
+
+/* ---- Pool helpers of the integer-only forward (arithmetic-bfp.md §13) ---- */
+
+/* Exact reference for value(ma, ea) > value(mb, eb): both sides as int64 on
+ * the smaller exponent's grid. A gap beyond 47 binades decides exactly like
+ * a gap of 47 (|code| <= 2^15, so 2^47 already dwarfs the other side), which
+ * keeps the int64 product in range. */
+static bool exactValueGreater(int32_t ma, int ea, int32_t mb, int eb) {
+    int lo = ea < eb ? ea : eb;
+    int da = ea - lo > 47 ? 47 : ea - lo;
+    int db = eb - lo > 47 ? 47 : eb - lo;
+    return (int64_t)ma * ((int64_t)1 << da) > (int64_t)mb * ((int64_t)1 << db);
+}
+
+void testBfpValueGreaterIsTheExactCompare(void) {
+    static const int32_t codes[] = {-32768, -32767, -129, -128, -2, -1, 0, 1, 2, 127, 32767};
+    static const int gaps[] = {0, 1, 2, 7, 14, 15, 16, 17, 30, 40, 200};
+    const size_t nc = sizeof(codes) / sizeof(codes[0]);
+    const size_t ng = sizeof(gaps) / sizeof(gaps[0]);
+    for (size_t a = 0; a < nc; a++) {
+        for (size_t b = 0; b < nc; b++) {
+            for (size_t d = 0; d < ng; d++) {
+                int base = -60;
+                /* Both orders: a above b by the gap, and b above a. */
+                TEST_ASSERT_EQUAL(exactValueGreater(codes[a], base + gaps[d], codes[b], base),
+                                  bfpValueGreater(codes[a], base + gaps[d], codes[b], base));
+                TEST_ASSERT_EQUAL(exactValueGreater(codes[a], base, codes[b], base + gaps[d]),
+                                  bfpValueGreater(codes[a], base, codes[b], base + gaps[d]));
+            }
+        }
+    }
+    /* Equal values across groups are NOT greater (the tie keeps the first). */
+    TEST_ASSERT_FALSE(bfpValueGreater(8, 0, 4, 1));
+    TEST_ASSERT_FALSE(bfpValueGreater(4, 1, 8, 0));
+    TEST_ASSERT_FALSE(bfpValueGreater(0, 20, 0, 0));
+    TEST_ASSERT_FALSE(bfpValueGreater(-32768, 16, -32768, 16));
+}
+
+/* Reference: round half away from zero of a / b in exact int64. */
+static int32_t exactDivHalfAway(int64_t a, int64_t b) {
+    int64_t mag = a < 0 ? -a : a;
+    int64_t q = mag / b;
+    if (2 * (mag - q * b) >= b) {
+        q++;
+    }
+    return (int32_t)(a < 0 ? -q : q);
+}
+
+void testRoundedDivHalfAwayInt32IsExactOverTheInt32Range(void) {
+    static const int32_t sums[] = {
+        INT32_MIN, INT32_MIN + 1, -1000001,      -7,       -5, -3, -2, -1, 0, 1, 2, 3, 5,
+        7,         1000001,       INT32_MAX - 1, INT32_MAX};
+    static const int32_t divs[] = {1, 2, 3, 4, 5, 6, 7, 10, 100, 65535, INT32_MAX};
+    for (size_t s = 0; s < sizeof(sums) / sizeof(sums[0]); s++) {
+        for (size_t d = 0; d < sizeof(divs) / sizeof(divs[0]); d++) {
+            TEST_ASSERT_EQUAL_INT32(exactDivHalfAway(sums[s], divs[d]),
+                                    roundedDivHalfAwayInt32(sums[s], divs[d]));
+        }
+    }
+    /* The ties, both signs: 5/2 -> 3, -5/2 -> -3, 3/6 -> 1, -3/6 -> -1. */
+    TEST_ASSERT_EQUAL_INT32(3, roundedDivHalfAwayInt32(5, 2));
+    TEST_ASSERT_EQUAL_INT32(-3, roundedDivHalfAwayInt32(-5, 2));
+    TEST_ASSERT_EQUAL_INT32(1, roundedDivHalfAwayInt32(3, 6));
+    TEST_ASSERT_EQUAL_INT32(-1, roundedDivHalfAwayInt32(-3, 6));
+}
+
+/* The SUM guard is the product proof with the second factor bounded by 1:
+ * K codes, each |code| <= 2^(m-1), so K 2^(m-1) 2^-g + (K + 1) <= INT32_MAX,
+ * smallest g -- checked on the inequality itself, in 64-bit arithmetic. */
+void testBfpSumFoldGuardBitsIsTheSmallestGThatHolds(void) {
+    static const uint8_t widths[] = {2, 4, 6, 8, 12, 16};
+    static const size_t lengths[] = {1, 2, 3, 4, 7, 32, 100, 511, 65536, 1000000};
+    for (size_t w = 0; w < sizeof(widths) / sizeof(widths[0]); w++) {
+        for (size_t l = 0; l < sizeof(lengths) / sizeof(lengths[0]); l++) {
+            size_t n = lengths[l];
+            uint64_t total = (uint64_t)n << (widths[w] - 1u);
+            uint64_t room = (uint64_t)INT32_MAX - (n + 1u);
+            int g = bfpSumFoldGuardBits(n, widths[w], "sweep");
+            TEST_ASSERT_TRUE(foldGuardHolds(total, room, g));
+            TEST_ASSERT_TRUE(g == -30 || !foldGuardHolds(total, room, g - 1));
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(-18, bfpSumFoldGuardBits(32, 8, "t")); /* HAR AvgPool K = 32 */
+}
+
 /* Group-shape fail-fast: bfpGroupOf divides by groupSize
  * with no relation to numGroups, so a mismatched config ({numGroups=2,
  * groupSize=4} on 12 elements: 2*4 == 8 != 12) would silently read
@@ -1689,6 +2117,546 @@ void testMatmulBfpDxPowerOfTwoBitIdenticalToGroupedSym(void) {
         float symDequant = (float)outSymData[i] * outSymQC.scale;
         TEST_ASSERT_EQUAL_MEMORY(&symDequant, &outBfpData[i], sizeof(float));
     }
+}
+
+/* ---- Integer-only forward (arithmetic-bfp.md §13): matmulBfpRawTensors ----
+ *
+ * The Linear forward's integer fold, operands in the funnel's unpacked-BFP
+ * scratch form, output BFP_RAW. Every reference below is computed HERE from
+ * the §13 definition in int64 (division + remainder for HALF_AWAY, the guard
+ * by its defining inequality), never from the kernel's bit forms. `a` is
+ * [rows, k] row-major, the weight is STORED [cols, k] and handed to the
+ * kernel as the transposed [k, cols] view (Linear.c's transpose dance). */
+
+#define LIN_RAW_MAX_K 2400
+#define LIN_RAW_MAX_OUT 16
+
+typedef struct linRawCase {
+    size_t rows, cols, k;
+    const int32_t *a;
+    const uint8_t *aExps;
+    size_t aGroups, aGs;
+    uint8_t ma;
+    const int32_t *w;
+    const uint8_t *wExps;
+    size_t wGroups, wGs;
+    uint8_t mw;
+    const int32_t *bias; /* NULL = no bias */
+    const uint8_t *biasExps;
+    size_t biasGroups, biasGs;
+    uint8_t mBias;
+    size_t rawGroups, rawGs;
+} linRawCase_t;
+
+typedef struct linRawRef {
+    int32_t mant[LIN_RAW_MAX_OUT];
+    int16_t exps[LIN_RAW_MAX_OUT];
+    double exact[LIN_RAW_MAX_OUT];
+    double bound[LIN_RAW_MAX_OUT]; /* 1/2 (S + 1) 2^E_acc, §13 item 7 */
+    int g;
+    size_t rounded; /* right-shift folds that dropped a nonzero remainder */
+    size_t splits;  /* segments closed by the segment limit */
+} linRawRef_t;
+
+static int linUnbiased(const uint8_t *exps, size_t gs, size_t idx) {
+    return (int)exps[gs == 0 ? 0 : idx / gs] - 127;
+}
+
+static int64_t refShrHalfAway(int64_t v, int k) {
+    if (k == 0) {
+        return v;
+    }
+    if (k > 40) {
+        return 0; /* |v| < 2^32 <= 2^(k-1): below one half */
+    }
+    int64_t d = (int64_t)1 << k;
+    int64_t mag = v < 0 ? -v : v;
+    int64_t q = mag / d;
+    if (2 * (mag % d) >= d) {
+        q++;
+    }
+    return v < 0 ? -q : q;
+}
+
+static int64_t refAlign(int64_t v, int k, size_t *rounded) {
+    if (v == 0) {
+        return 0; /* a zero group may sit any distance above E_acc */
+    }
+    if (k < 0) {
+        int64_t r = v * ((int64_t)1 << -k);
+        TEST_ASSERT_TRUE(r >= INT32_MIN && r <= INT32_MAX);
+        return r;
+    }
+    int64_t r = refShrHalfAway(v, k);
+    if (k > 0 && (k > 40 || r * ((int64_t)1 << k) != v)) {
+        (*rounded)++;
+    }
+    return r;
+}
+
+/* Smallest g in [-30, 31] with (N 2^(ma+mb-2) + 2^(mBias-1)) 2^-g + (N + 1) <=
+ * INT32_MAX, compared without shifting the total left (it is an integer, so
+ * total 2^-g <= R iff total <= floor(R 2^g)). */
+static int refGuard(size_t n, uint8_t ma, uint8_t mb, uint8_t mBias) {
+    int64_t total =
+        (int64_t)n * ((int64_t)1 << (ma + mb - 2)) + (mBias > 0 ? ((int64_t)1 << (mBias - 1)) : 0);
+    int64_t room = (int64_t)INT32_MAX - (int64_t)n - 1;
+    for (int g = -30; g <= 31; g++) {
+        int64_t lim = g <= 0 ? room >> -g : room * ((int64_t)1 << g);
+        if (total <= lim) {
+            return g;
+        }
+    }
+    TEST_FAIL_MESSAGE("no guard holds");
+    return 0;
+}
+
+static void refLinearRaw(const linRawCase_t *c, linRawRef_t *r) {
+    size_t nOut = c->rows * c->cols;
+    TEST_ASSERT_TRUE(nOut <= LIN_RAW_MAX_OUT);
+    unsigned shift = (unsigned)c->ma + c->mw - 2u;
+    size_t limit = shift >= 31u ? 1u : (size_t)(INT32_MAX >> shift);
+    r->g = refGuard(c->k, c->ma, c->mw, c->bias != NULL ? c->mBias : 0);
+    r->rounded = 0;
+    r->splits = 0;
+    size_t gsz = c->rawGs == 0 ? nOut : c->rawGs;
+    for (size_t t = 0; t * gsz < nOut; t++) {
+        int top = INT32_MIN;
+        for (size_t o = t * gsz; o < (t + 1) * gsz; o++) {
+            size_t row = o / c->cols, col = o % c->cols;
+            /* maxima over the NONZERO codes only (zero groups never set E_acc) */
+            int aMax = INT32_MIN, wMax = INT32_MIN;
+            for (size_t i = 0; i < c->k; i++) {
+                int ea = linUnbiased(c->aExps, c->aGs, row * c->k + i);
+                int ew = linUnbiased(c->wExps, c->wGs, col * c->k + i);
+                aMax = c->a[row * c->k + i] != 0 && ea > aMax ? ea : aMax;
+                wMax = c->w[col * c->k + i] != 0 && ew > wMax ? ew : wMax;
+            }
+            int e = aMax == INT32_MIN || wMax == INT32_MIN ? INT32_MIN : aMax + wMax;
+            if (c->bias != NULL && c->bias[col] != 0) {
+                int eb = linUnbiased(c->biasExps, c->biasGs, col);
+                e = eb > e ? eb : e;
+            }
+            top = e > top ? e : top;
+        }
+        r->exps[t] = (int16_t)((top == INT32_MIN ? 0 : top) + r->g);
+    }
+    for (size_t o = 0; o < nOut; o++) {
+        size_t row = o / c->cols, col = o % c->cols;
+        int eAcc = r->exps[o / gsz];
+        int64_t acc = 0;
+        double exact = 0.0;
+        size_t segments = 0;
+        if (c->bias != NULL) {
+            int eb = linUnbiased(c->biasExps, c->biasGs, col);
+            acc = refAlign(c->bias[col], eAcc - eb, &r->rounded);
+            exact = ldexp((double)c->bias[col], eb);
+            segments = 1;
+        }
+        int64_t partial = 0;
+        size_t count = 0;
+        size_t curA = SIZE_MAX, curW = SIZE_MAX;
+        int curE = 0;
+        for (size_t i = 0; i < c->k; i++) {
+            size_t ia = row * c->k + i, iw = col * c->k + i;
+            size_t ga = c->aGs == 0 ? 0 : ia / c->aGs;
+            size_t gw = c->wGs == 0 ? 0 : iw / c->wGs;
+            if (curA != SIZE_MAX && (ga != curA || gw != curW || count == limit)) {
+                if (ga == curA && gw == curW) {
+                    r->splits++;
+                }
+                acc += refAlign(partial, eAcc - curE, &r->rounded);
+                TEST_ASSERT_TRUE(acc >= INT32_MIN && acc <= INT32_MAX);
+                segments++;
+                partial = 0;
+                count = 0;
+            }
+            curA = ga;
+            curW = gw;
+            curE = linUnbiased(c->aExps, c->aGs, ia) + linUnbiased(c->wExps, c->wGs, iw);
+            int64_t prod = (int64_t)c->a[ia] * c->w[iw];
+            partial += prod;
+            TEST_ASSERT_TRUE(partial >= INT32_MIN && partial <= INT32_MAX);
+            count++;
+            exact += ldexp((double)prod, curE);
+        }
+        if (curA != SIZE_MAX) {
+            acc += refAlign(partial, eAcc - curE, &r->rounded);
+            segments++;
+        }
+        TEST_ASSERT_TRUE(acc >= INT32_MIN && acc <= INT32_MAX);
+        r->mant[o] = (int32_t)acc;
+        r->exact[o] = exact;
+        r->bound[o] = 0.5 * (double)(segments + 1) * ldexp(1.0, eAcc);
+    }
+}
+
+/* The kernel's operands for one case: a [rows, k] identity order; the weight
+ * stored [cols, k] under the transposed view (order {1, 0}), exactly what
+ * linearForwardBfpRaw hands the kernel. */
+typedef struct linRawOperands {
+    bfpScratchFixture_t a, w, bias;
+    bfpRawFixture_t out;
+} linRawOperands_t;
+
+static void linRawBuild(const linRawCase_t *c, linRawOperands_t *ops) {
+    size_t aDims[] = {c->rows, c->k};
+    bfpScratchInit(&ops->a, 2, aDims, c->a, c->aExps, c->aGroups, c->aGs, c->ma, 8);
+    size_t wDims[] = {c->cols, c->k};
+    bfpScratchInit(&ops->w, 2, wDims, c->w, c->wExps, c->wGroups, c->wGs, c->mw, 8);
+    ops->w.order[0] = 1;
+    ops->w.order[1] = 0;
+    if (c->bias != NULL) {
+        size_t biasDims[] = {c->cols};
+        bfpScratchInit(&ops->bias, 1, biasDims, c->bias, c->biasExps, c->biasGroups, c->biasGs,
+                       c->mBias, 8);
+    }
+    size_t outDims[] = {c->rows, c->cols};
+    bfpRawInit(&ops->out, 2, outDims, c->rawGroups, c->rawGs);
+}
+
+static void runLinRawCase(const linRawCase_t *c, linRawRef_t *ref, linRawOperands_t *ops) {
+    refLinearRaw(c, ref);
+    linRawBuild(c, ops);
+    matmulBfpRawTensors(&ops->a.tensor, &ops->w.tensor, c->bias != NULL ? &ops->bias.tensor : NULL,
+                        &ops->out.tensor);
+    size_t nOut = c->rows * c->cols;
+    assertRawEquals(&ops->out, ref->mant, nOut, ref->exps, c->rawGroups);
+    size_t gsz = c->rawGs == 0 ? nOut : c->rawGs;
+    for (size_t o = 0; o < nOut; o++) {
+        double got = ldexp((double)ops->out.mant[o], ops->out.exps[o / gsz]);
+        TEST_ASSERT_TRUE_MESSAGE(fabs(got - ref->exact[o]) <= ref->bound[o],
+                                 "raw value outside the 1/2 (S+1) 2^E_acc fold bound");
+    }
+}
+
+/* Grouped operands whose groups straddle rows (a gs 4 over k = 6, the weight
+ * gs 9 over its [3, 6] storage), per-column bias groups with one exponent
+ * ABOVE every product (it sets E_top for column 0), and raw target groups of
+ * 2 that straddle the two output rows. The input exponents span 22 binades
+ * against g = -14, so some segments are left-shifted exactly and others
+ * rounded HALF_AWAY. */
+void testMatmulBfpRawMatchesTheFoldReferenceOnStraddlingGroups(void) {
+    static const int32_t a[] = {100, -128, 127, -3, 55, -77, 64, -1, 90, -100, 33, 7};
+    static const uint8_t aExps[] = {127 + 12, 127 - 10, 127 + 3};
+    static const int32_t w[] = {-90, 17, 127, -128, 5,    60,  31, -45, 99,
+                                -7,  88, -66, 12,   -128, 127, 1,  -2,  43};
+    static const uint8_t wExps[] = {127 - 4, 127 + 9};
+    static const int32_t bias[] = {-101, 77, 3};
+    static const uint8_t biasExps[] = {127 + 25, 127 - 30, 127};
+    linRawCase_t c = {.rows = 2,
+                      .cols = 3,
+                      .k = 6,
+                      .a = a,
+                      .aExps = aExps,
+                      .aGroups = 3,
+                      .aGs = 4,
+                      .ma = 8,
+                      .w = w,
+                      .wExps = wExps,
+                      .wGroups = 2,
+                      .wGs = 9,
+                      .mw = 8,
+                      .bias = bias,
+                      .biasExps = biasExps,
+                      .biasGroups = 3,
+                      .biasGs = 1,
+                      .mBias = 8,
+                      .rawGroups = 3,
+                      .rawGs = 2};
+    linRawRef_t ref;
+    linRawOperands_t ops;
+    runLinRawCase(&c, &ref, &ops);
+    TEST_ASSERT_EQUAL_INT(-14, ref.g);
+    TEST_ASSERT_TRUE_MESSAGE(ref.rounded > 0, "fixture too weak: no fold rounds");
+    /* column 0's bias exponent (+25) sets E_top of both groups holding a
+     * column-0 output; group 2 is row 1 x weight row 2 (3 + 9). */
+    TEST_ASSERT_EQUAL_INT16(25 - 14, ops.out.exps[0]);
+    TEST_ASSERT_EQUAL_INT16(25 - 14, ops.out.exps[1]);
+    TEST_ASSERT_EQUAL_INT16(12 - 14, ops.out.exps[2]);
+
+    /* Same operands without bias, onto the per-tensor raw. */
+    c.bias = NULL;
+    c.rawGroups = 1;
+    c.rawGs = 0;
+    runLinRawCase(&c, &ref, &ops);
+    TEST_ASSERT_EQUAL_INT(-14, ref.g);
+    TEST_ASSERT_TRUE_MESSAGE(ref.rounded > 0, "fixture too weak: no fold rounds");
+}
+
+/* Worst-case headroom: every code at a grid edge, at the proof's limits, one
+ * output of a [1, k] x [k, 1] reduction, every exponent unbiased 0. */
+static int32_t gLinWorstA[LIN_RAW_MAX_K];
+static int32_t gLinWorstW[LIN_RAW_MAX_K];
+
+static void runLinWorst(size_t k, int32_t aCode, uint8_t ma, int32_t wCode, uint8_t mw,
+                        const int32_t *biasCode, uint8_t mBias, uint8_t biasStored,
+                        linRawRef_t *ref) {
+    TEST_ASSERT_TRUE(k <= LIN_RAW_MAX_K);
+    for (size_t i = 0; i < k; i++) {
+        gLinWorstA[i] = aCode;
+        gLinWorstW[i] = wCode;
+    }
+    static const uint8_t unit[] = {127};
+    uint8_t biasExps[] = {biasStored};
+    linRawCase_t c = {.rows = 1,
+                      .cols = 1,
+                      .k = k,
+                      .a = gLinWorstA,
+                      .aExps = unit,
+                      .aGroups = 1,
+                      .aGs = 0,
+                      .ma = ma,
+                      .w = gLinWorstW,
+                      .wExps = unit,
+                      .wGroups = 1,
+                      .wGs = 0,
+                      .mw = mw,
+                      .bias = biasCode,
+                      .biasExps = biasExps,
+                      .biasGroups = 1,
+                      .biasGs = 0,
+                      .mBias = mBias,
+                      .rawGroups = 1,
+                      .rawGs = 0};
+    linRawOperands_t ops;
+    runLinRawCase(&c, ref, &ops);
+}
+
+/* m16 x m16, N = 80: g = 6 and the segment limit is 1 (two 2^30 products
+ * already overflow), so every product is its own segment; floor x floor and
+ * floor x ceiling. */
+void testMatmulBfpRawWorstCaseM16xM16AllCodesAtTheEdges(void) {
+    linRawRef_t ref;
+    runLinWorst(80, -32768, 16, -32768, 16, NULL, 0, 0, &ref);
+    TEST_ASSERT_EQUAL_INT(6, ref.g);
+    TEST_ASSERT_EQUAL_INT32(80 << 24, ref.mant[0]); /* 80 * 2^30 exactly */
+    TEST_ASSERT_EQUAL_size_t(79, ref.splits);
+    runLinWorst(80, -32768, 16, 32767, 16, NULL, 0, 0, &ref);
+    TEST_ASSERT_EQUAL_INT(6, ref.g);
+}
+
+/* m16 x m8, N = 2400 (g = 3): the run splits at 511 products (four full
+ * segments + 356) instead of failing fast as the backward kernel does. */
+void testMatmulBfpRawWorstCaseM16xM8SplitsAtTheSegmentLimit(void) {
+    linRawRef_t ref;
+    runLinWorst(2400, -32768, 16, -128, 8, NULL, 0, 0, &ref);
+    TEST_ASSERT_EQUAL_INT(3, ref.g);
+    TEST_ASSERT_EQUAL_size_t(4, ref.splits);
+    TEST_ASSERT_EQUAL_INT32(2400 << 19, ref.mant[0]); /* 2400 * 2^22 / 2^3 */
+    runLinWorst(2400, 32767, 16, -128, 8, NULL, 0, 0, &ref);
+}
+
+/* m16 x m16, N = 4, a m16 bias at its floor (g = 2); and a m8 bias whose
+ * exponent (+20) is ABOVE the products' (m8 x m8, N = 80, g = -10): E_top is
+ * the bias exponent and the products shift right by 10 exactly. */
+void testMatmulBfpRawWorstCaseBiasAtTheFloorAndAboveTheProducts(void) {
+    linRawRef_t ref;
+    int32_t biasFloor = -32768;
+    runLinWorst(4, -32768, 16, -32768, 16, &biasFloor, 16, 127, &ref);
+    TEST_ASSERT_EQUAL_INT(2, ref.g);
+    TEST_ASSERT_EQUAL_INT64((int64_t)4 * ((int64_t)1 << 30) - 32768,
+                            (int64_t)ref.mant[0] * ((int64_t)1 << 2));
+
+    int32_t biasHigh = -128;
+    runLinWorst(80, -128, 8, -128, 8, &biasHigh, 8, 127 + 20, &ref);
+    TEST_ASSERT_EQUAL_INT(-10, ref.g);
+    TEST_ASSERT_EQUAL_INT16(10, ref.exps[0]);
+    TEST_ASSERT_EQUAL_INT32(-129792, ref.mant[0]);
+}
+
+/* ---- Zero groups never set E_acc -------------------------------------------
+ * An all-zero group (zero state: stored = bias, E = 0) next to live codes 28
+ * binades lower: every output must equal its exact int64 value. */
+
+static const int32_t kMmZgW[] = {101, -67, 45,  13,  -99, 87,  21,   -5,
+                                 77,  3,   -41, 119, 63,  -17, -127, 9};
+
+/* a [1, 8] in groups of 4: the first all zero, the second live at E = -28;
+ * w [8, 2] per tensor at E = 0. */
+void testMatmulBfpRawZeroRowGroupDoesNotSetTheAccumulator(void) {
+    int32_t a[8] = {0, 0, 0, 0, 113, -77, 91, -59};
+    uint8_t aE[] = {127, 127 - 28};
+    uint8_t wE[] = {127};
+    bfpScratchFixture_t aF, wF;
+    size_t aDims[] = {1, 8};
+    size_t wDims[] = {8, 2};
+    bfpScratchInit(&aF, 2, aDims, a, aE, 2, 4, 8, 8);
+    bfpScratchInit(&wF, 2, wDims, kMmZgW, wE, 1, 0, 8, 8);
+    bfpRawFixture_t out;
+    size_t outDims[] = {1, 2};
+    bfpRawInit(&out, 2, outDims, 1, 0);
+
+    matmulBfpRawTensors(&aF.tensor, &wF.tensor, NULL, &out.tensor);
+
+    for (size_t c = 0; c < 2; c++) {
+        int64_t exact = 0;
+        for (size_t i = 0; i < 8; i++) {
+            exact += (int64_t)a[i] * kMmZgW[i * 2 + c];
+        }
+        assertBfpValueExact(out.mant[c], out.exps[0], exact, -28, c);
+    }
+}
+
+/* The strided operand (operand-wide max): w storage [4, 2] in groups of 2
+ * (storage row i = group i), rows 0 and 1 all zero, rows 2 and 3 live at
+ * E = -20; a per tensor at E = -8. */
+void testMatmulBfpRawStridedOperandIgnoresZeroGroups(void) {
+    static const int32_t a[] = {113, -77, 91, -59};
+    static const int32_t w[] = {0, 0, 0, 0, 97, -83, 71, 55};
+    uint8_t aE[] = {127 - 8};
+    uint8_t wE[] = {127, 127, 127 - 20, 127 - 20};
+    bfpScratchFixture_t aF, wF;
+    size_t aDims[] = {1, 4};
+    size_t wDims[] = {4, 2};
+    bfpScratchInit(&aF, 2, aDims, a, aE, 1, 0, 8, 8);
+    bfpScratchInit(&wF, 2, wDims, w, wE, 4, 2, 8, 8);
+    bfpRawFixture_t out;
+    size_t outDims[] = {1, 2};
+    bfpRawInit(&out, 2, outDims, 1, 0);
+
+    matmulBfpRawTensors(&aF.tensor, &wF.tensor, NULL, &out.tensor);
+
+    for (size_t c = 0; c < 2; c++) {
+        int64_t exact = 0;
+        for (size_t i = 0; i < 4; i++) {
+            exact += (int64_t)a[i] * w[i * 2 + c];
+        }
+        assertBfpValueExact(out.mant[c], out.exps[0], exact, -28, c);
+    }
+}
+
+/* Zero bias codes (zero state, E = 0) next to products at E = -28. */
+void testMatmulBfpRawZeroBiasDoesNotSetTheAccumulator(void) {
+    static const int32_t a[] = {113, -77, 91, -59};
+    int32_t bias[] = {0, 0};
+    uint8_t aE[] = {127 - 14};
+    uint8_t wE[] = {127 - 14};
+    uint8_t biasE[] = {127};
+    bfpScratchFixture_t aF, wF, bF;
+    size_t aDims[] = {1, 4};
+    size_t wDims[] = {4, 2};
+    size_t bDims[] = {2};
+    bfpScratchInit(&aF, 2, aDims, a, aE, 1, 0, 8, 8);
+    bfpScratchInit(&wF, 2, wDims, kMmZgW, wE, 1, 0, 8, 8);
+    bfpScratchInit(&bF, 1, bDims, bias, biasE, 1, 0, 8, 8);
+    bfpRawFixture_t out;
+    size_t outDims[] = {1, 2};
+    bfpRawInit(&out, 2, outDims, 1, 0);
+
+    matmulBfpRawTensors(&aF.tensor, &wF.tensor, &bF.tensor, &out.tensor);
+
+    for (size_t c = 0; c < 2; c++) {
+        int64_t exact = 0;
+        for (size_t i = 0; i < 4; i++) {
+            exact += (int64_t)a[i] * kMmZgW[i * 2 + c];
+        }
+        assertBfpValueExact(out.mant[c], out.exps[0], exact, -28, c);
+    }
+}
+
+/* A weight view whose reduction axis is NOT the physically innermost one
+ * (identity-ordered [k, cols] storage): a weight column is no contiguous run,
+ * so E_top uses the weight's tensor-wide max exponent -- coarser, still
+ * sound. Every fold here is an exact left shift, so the raw equals the int64
+ * sum and E_acc = rowmax(a) + max(w) + g. */
+void testMatmulBfpRawStridedWeightViewUsesTheTensorWideMax(void) {
+    static const int32_t a[] = {3, -5, 7, 11};
+    static const uint8_t aExps[] = {127 - 2};
+    /* storage [k = 4, cols = 2], gs 2: storage row i is group i */
+    static const int32_t w[] = {1, -2, 4, 8, -16, 32, 64, -128};
+    static const uint8_t wExps[] = {127 + 1, 127 - 6, 127 + 5, 127};
+    bfpScratchFixture_t aF, wF;
+    size_t aDims[] = {1, 4};
+    bfpScratchInit(&aF, 2, aDims, a, aExps, 1, 0, 8, 8);
+    size_t wDims[] = {4, 2};
+    bfpScratchInit(&wF, 2, wDims, w, wExps, 4, 2, 8, 8);
+    bfpRawFixture_t out;
+    size_t outDims[] = {1, 2};
+    bfpRawInit(&out, 2, outDims, 2, 1);
+
+    matmulBfpRawTensors(&aF.tensor, &wF.tensor, NULL, &out.tensor);
+
+    /* one raw group per output: a column read as a contiguous run would cover
+     * storage groups {0, 1} (max +1) for column 0 instead of the +5 it visits */
+    int eAcc = -2 + 5 + refGuard(4, 8, 8, 0);
+    TEST_ASSERT_EQUAL_INT16((int16_t)eAcc, out.exps[0]);
+    TEST_ASSERT_EQUAL_INT16((int16_t)eAcc, out.exps[1]);
+    for (size_t col = 0; col < 2; col++) {
+        int64_t exactScaled = 0; /* in units of 2^eAcc; every shift is left */
+        for (size_t i = 0; i < 4; i++) {
+            int e = -2 + ((int)wExps[i] - 127);
+            exactScaled += (int64_t)a[i] * w[i * 2 + col] * ((int64_t)1 << (e - eAcc));
+        }
+        TEST_ASSERT_EQUAL_INT64(exactScaled, (int64_t)out.mant[col]);
+    }
+}
+
+/* Exact power-of-two data (the matmulBfpTensors gold fixture): the raw's
+ * dequant (float)mant * 2^E is bit-identical to the float kernel's
+ * rounding-free fold, bias included. */
+void testMatmulBfpRawPowerOfTwoDequantMatchesFloatKernel(void) {
+    bfpScratchFixture_t a, b, bias;
+    size_t aDims[] = {(size_t)kBfpOutRows, (size_t)kBfpReduceLen};
+    bfpScratchInit(&a, 2, aDims, kBfpACodes, kBfpAExponents, (size_t)kBfpANumGroups,
+                   (size_t)kBfpAGroupSize, (uint8_t)kBfpAMantissaBits, (uint8_t)kBfpAExponentBits);
+    size_t bDims[] = {(size_t)kBfpOutCols, (size_t)kBfpReduceLen};
+    bfpScratchInit(&b, 2, bDims, kBfpBCodes, kBfpBExponents, (size_t)kBfpBNumGroups,
+                   (size_t)kBfpBGroupSize, (uint8_t)kBfpBMantissaBits, (uint8_t)kBfpBExponentBits);
+    b.order[0] = 1;
+    b.order[1] = 0;
+    size_t biasDims[] = {(size_t)kBfpOutCols};
+    bfpScratchInit(&bias, 1, biasDims, kBfpBiasCodes, kBfpBiasExponents, 1, 0,
+                   (uint8_t)kBfpBiasMantissaBits, (uint8_t)kBfpBiasExponentBits);
+    bfpRawFixture_t out;
+    size_t outDims[] = {(size_t)kBfpOutRows, (size_t)kBfpOutCols};
+    bfpRawInit(&out, 2, outDims, 1, 0);
+
+    matmulBfpRawTensors(&a.tensor, &b.tensor, &bias.tensor, &out.tensor);
+
+    float deq[6];
+    TEST_ASSERT_TRUE(kBfpMatmulExpected_len <= 6);
+    for (size_t i = 0; i < kBfpMatmulExpected_len; i++) {
+        deq[i] = ldexpf((float)out.mant[i], out.exps[0]);
+    }
+    TEST_ASSERT_EQUAL_MEMORY(kBfpMatmulExpected, deq, kBfpMatmulExpected_len * sizeof(float));
+}
+
+static bfpScratchFixture_t gLinDieA, gLinDieW;
+static bfpRawFixture_t gLinDieRaw;
+static void linRawDieSetup(void) {
+    static const int32_t codes[] = {1, 2, 3, 4};
+    static const uint8_t unit[] = {127};
+    size_t aDims[] = {1, 2};
+    bfpScratchInit(&gLinDieA, 2, aDims, codes, unit, 1, 0, 8, 8);
+    size_t wDims[] = {2, 2};
+    bfpScratchInit(&gLinDieW, 2, wDims, codes, unit, 1, 0, 8, 8);
+    gLinDieW.order[0] = 1;
+    gLinDieW.order[1] = 0;
+}
+static void linRawIntoFloatBody(void) {
+    linRawDieSetup();
+    float outData[2];
+    tensor_t outT;
+    shape_t outShape;
+    size_t outDims[] = {1, 2};
+    size_t outOrder[] = {0, 1};
+    setShape(&outShape, outDims, 2, outOrder);
+    quantization_t outQ;
+    initFloat32Quantization(&outQ);
+    setTensorValues(&outT, (uint8_t *)outData, &outShape, &outQ, NULL);
+    matmulBfpRawTensors(&gLinDieA.tensor, &gLinDieW.tensor, NULL, &outT);
+}
+static void linRawBadGeometryBody(void) {
+    linRawDieSetup();
+    size_t outDims[] = {1, 2};
+    bfpRawInit(&gLinDieRaw, 2, outDims, 3, 1); /* 3 groups of 1 over 2 outputs */
+    matmulBfpRawTensors(&gLinDieA.tensor, &gLinDieW.tensor, NULL, &gLinDieRaw.tensor);
+}
+
+void testMatmulBfpRawRejectsANonRawOutputAndBadRawGeometry(void) {
+    ASSERT_EXITS_WITH_FAILURE(linRawIntoFloatBody());
+    ASSERT_EXITS_WITH_FAILURE(linRawBadGeometryBody());
 }
 
 void setUp() {}
@@ -2203,10 +3171,43 @@ int main(void) {
     RUN_TEST(testMatmulBfpHeadroomGuardDies);
     RUN_TEST(testBfpSegmentLimitTableValues);
     RUN_TEST(testBfpSumSegmentLimitTableValues);
+    RUN_TEST(testBfpGroupAtInRangeTrustsCache);
+    RUN_TEST(testBfpGroupAtForwardJumpRecomputes);
+    RUN_TEST(testBfpGroupAtBackwardJumpRecomputes);
+    RUN_TEST(testBfpGroupAtZeroInitIsEmptyRange);
+    RUN_TEST(testBfpGroupAtLastGroupEndsAtElementCount);
+    RUN_TEST(testBfpGroupAtPerTensorNeverRecomputes);
+    RUN_TEST(testBfpGroupAtMatchesBfpGroupOfOnStridedWalk);
+    RUN_TEST(testBfpTapsBelowUnitStride);
+    RUN_TEST(testBfpTapsBelowDilatedStride);
+    RUN_TEST(testBfpTapsBelowPerTensorSentinelReturnsCap);
+    RUN_TEST(testBfpTapsBelowMatchesTapByTapCount);
+    RUN_TEST(testBfpLdexpInt32MatchesLdexpfBitForBit);
+    RUN_TEST(testBfpLdexpInt32Boundaries);
+    RUN_TEST(testBfpShrHalfAwayRoundsHalfAwayFromZero);
+    RUN_TEST(testBfpShrHalfAwayInt32Extremes);
+    RUN_TEST(testBfpAlignPartialLeftShiftIsExactAndRightShiftRounds);
+    RUN_TEST(testBfpAlignPartialFarLeftShiftIsZeroAndCheckedInDebug);
+    RUN_TEST(testBfpFoldGuardBitsFromTheProductBound);
+    RUN_TEST(testBfpFoldGuardBitsIsTheSmallestGThatHolds);
+    RUN_TEST(testBfpFoldGuardBitsRejectsAReductionNoShiftCanHold);
+    RUN_TEST(testBfpValueGreaterIsTheExactCompare);
+    RUN_TEST(testRoundedDivHalfAwayInt32IsExactOverTheInt32Range);
+    RUN_TEST(testBfpSumFoldGuardBitsIsTheSmallestGThatHolds);
     RUN_TEST(testMatmulBfpRejectsMismatchedGroupShape);
     RUN_TEST(testMatmulBfpDxStridedWeightWalkMatchesGold);
     RUN_TEST(testMatmulBfpWeightGradTransposedLossViewMatchesGold);
     RUN_TEST(testMatmulBfpDxPowerOfTwoBitIdenticalToGroupedSym);
+    RUN_TEST(testMatmulBfpRawMatchesTheFoldReferenceOnStraddlingGroups);
+    RUN_TEST(testMatmulBfpRawWorstCaseM16xM16AllCodesAtTheEdges);
+    RUN_TEST(testMatmulBfpRawWorstCaseM16xM8SplitsAtTheSegmentLimit);
+    RUN_TEST(testMatmulBfpRawWorstCaseBiasAtTheFloorAndAboveTheProducts);
+    RUN_TEST(testMatmulBfpRawStridedWeightViewUsesTheTensorWideMax);
+    RUN_TEST(testMatmulBfpRawZeroRowGroupDoesNotSetTheAccumulator);
+    RUN_TEST(testMatmulBfpRawStridedOperandIgnoresZeroGroups);
+    RUN_TEST(testMatmulBfpRawZeroBiasDoesNotSetTheAccumulator);
+    RUN_TEST(testMatmulBfpRawPowerOfTwoDequantMatchesFloatKernel);
+    RUN_TEST(testMatmulBfpRawRejectsANonRawOutputAndBadRawGeometry);
 
     return UNITY_END();
 }

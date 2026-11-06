@@ -604,7 +604,7 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
 /* BFP epic PR2 (Task 3): matmulIntCoreGrouped's BFP twin (see Matmul.h for
  * the full contract). Differences from the SYM grouped core: BOTH operands
  * are group-tracked (not just the weight), the boundary combine is a
- * rounding-free ldexpf fold into a float accumulator (never
+ * rounding-free power-of-two fold into a float accumulator (never
  * rescaleIntoAccumulatorScale), and the output is raw FLOAT32. */
 void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
                       tensor_t *outputTensor) {
@@ -670,6 +670,8 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
 
     int32_t aExpBias = bfpExponentBias(aQC);
     int32_t bExpBias = bfpExponentBias(bQC);
+    bfpGroupRange_t aRange = {0};
+    bfpGroupRange_t bRange = {0};
 
     size_t resultCounter = 0;
     for (size_t rowIndex = 0; rowIndex < aRows; rowIndex++) {
@@ -701,8 +703,8 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
                     bValueIndex = calcElementIndexByIndices(bNumberOfDims, bDims, bIndices,
                                                             bTensor->shape->orderOfDimensions);
                 }
-                size_t aGroup = bfpGroupOf(aQC, aValueIndex);
-                size_t bGroup = bfpGroupOf(bQC, bValueIndex);
+                size_t aGroup = bfpGroupAt(&aRange, aQC, aValueIndex);
+                size_t bGroup = bfpGroupAt(&bRange, bQC, bValueIndex);
                 if (i == 0) {
                     currentAGroup = aGroup;
                     currentBGroup = bGroup;
@@ -711,7 +713,7 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
                      * int32 partial enters the float accumulator via a pure
                      * exponent shift -- rounding-free by kernel contract. */
                     acc +=
-                        ldexpf((float)partial, (int)aQC->exponents[currentAGroup] - aExpBias +
+                        bfpLdexpInt32(partial, (int)aQC->exponents[currentAGroup] - aExpBias +
                                                    (int)bQC->exponents[currentBGroup] - bExpBias);
                     partial = 0;
                     currentAGroup = aGroup;
@@ -725,13 +727,304 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
              * so this is its only fold (and the ONLY fold when neither
              * operand changes groups over the walk). */
             if (aColumns > 0) {
-                acc += ldexpf((float)partial, (int)aQC->exponents[currentAGroup] - aExpBias +
+                acc += bfpLdexpInt32(partial, (int)aQC->exponents[currentAGroup] - aExpBias +
                                                   (int)bQC->exponents[currentBGroup] - bExpBias);
             }
             writeFloatToByteArray(acc, &outputTensor->data[resultCounter * sizeof(float)]);
             resultCounter++;
         }
     }
+}
+
+/* Max unbiased exponent of each reduction LINE of a matmul operand (line l =
+ * the elements one output row reads from `a`, or one output column from
+ * `b`), over the groups holding a nonzero code of the line (int16 marker
+ * INT16_MIN: none). When the reduction axis is the physically innermost
+ * dimension (1-D operands trivially), line l is the storage run
+ * [l * k, (l + 1) * k) and one forward cursor serves all lines (no
+ * division). Any other view gets the operand-wide max: coarser, still an
+ * upper bound. */
+static void matmulBfpLineMaxExponents(const tensor_t *t, size_t reductionAxis, size_t lines,
+                                      size_t k, int16_t *lineMax) {
+    const bfpQConfig_t *qC = t->quantization->qConfig;
+    int32_t expBias = bfpExponentBias(qC);
+    if (t->shape->numberOfDimensions < 2 || t->shape->orderOfDimensions[1] == reductionAxis) {
+        bfpRowCursor_t c = {.group = 0, .groupEnd = qC->groupSize};
+        for (size_t l = 0; l < lines; l++) {
+            lineMax[l] = bfpLiveExpTo16(
+                bfpRowMaxExponent(&c, qC, expBias, (const int32_t *)t->data, l * k, k));
+        }
+        return;
+    }
+    bfpRowCursor_t c = {.group = 0, .groupEnd = qC->groupSize};
+    int e = bfpRowMaxExponent(&c, qC, expBias, (const int32_t *)t->data, 0, lines * k);
+    for (size_t l = 0; l < lines; l++) {
+        lineMax[l] = bfpLiveExpTo16(e);
+    }
+}
+
+/* What the walk of matmulBfpRawTensors reads; the tables are the pre-pass's. */
+typedef struct matmulBfpRawWalk {
+    const tensor_t *aTensor;
+    const tensor_t *bTensor;
+    size_t aNumberOfDims, bNumberOfDims;
+    size_t *aDims;
+    size_t *bDims;
+    size_t aRows, aColumns, bColumns, gsz, segmentLimit;
+    const bfpQConfig_t *aQC;
+    const bfpQConfig_t *bQC;
+    int32_t aExpBias, bExpBias;
+    const int32_t *aArr;
+    const int32_t *bArr;
+    const int32_t *biasArr; /* NULL without bias */
+    const int16_t *biasE;   /* [bColumns] */
+    const int16_t *rawE;    /* E_acc per raw target group */
+    int32_t *mant;
+} matmulBfpRawWalk_t;
+
+/* The MAC walk (BFP_WALK_NOINLINE: no VLA in this frame). */
+BFP_WALK_NOINLINE void matmulBfpRawTensorsWalk(const matmulBfpRawWalk_t *p) {
+    const tensor_t *aTensor = p->aTensor;
+    const tensor_t *bTensor = p->bTensor;
+    size_t aNumberOfDims = p->aNumberOfDims, bNumberOfDims = p->bNumberOfDims;
+    size_t *aDims = p->aDims;
+    size_t *bDims = p->bDims;
+    size_t aRows = p->aRows, aColumns = p->aColumns, bColumns = p->bColumns;
+    size_t gsz = p->gsz, segmentLimit = p->segmentLimit;
+    const bfpQConfig_t *aQC = p->aQC;
+    const bfpQConfig_t *bQC = p->bQC;
+    int32_t aExpBias = p->aExpBias, bExpBias = p->bExpBias;
+    int32_t const *aArr = p->aArr;
+    int32_t const *bArr = p->bArr;
+    int32_t const *biasArr = p->biasArr;
+    const int16_t *biasE = p->biasE;
+    const int16_t *rawE = p->rawE;
+    int32_t *mant = p->mant;
+
+    bfpGroupRange_t aRange = {0};
+    bfpGroupRange_t bRange = {0};
+    size_t targetGroup = 0;
+    size_t targetEnd = gsz;
+    int eAcc = rawE[0];
+
+    size_t resultCounter = 0;
+    for (size_t rowIndex = 0; rowIndex < aRows; rowIndex++) {
+        for (size_t columnIndex = 0; columnIndex < bColumns; columnIndex++) {
+            if (resultCounter >= targetEnd) {
+                targetGroup++;
+                targetEnd += gsz;
+                eAcc = rawE[targetGroup];
+            }
+            /* The bias is one more segment (§13 item 6); the column changes
+             * every output, so it is aligned per output. */
+            int32_t acc = biasArr != NULL
+                              ? bfpAlignPartial(biasArr[columnIndex], eAcc - biasE[columnIndex])
+                              : 0;
+            int32_t partial = 0;
+            size_t segCount = 0;
+            size_t currentAGroup = 0;
+            size_t currentBGroup = 0;
+            for (size_t i = 0; i < aColumns; i++) {
+                size_t aValueIndex;
+                if (aNumberOfDims == 1) {
+                    aValueIndex = i;
+                } else {
+                    size_t aIndices[] = {rowIndex, i};
+                    aValueIndex = calcElementIndexByIndices(aNumberOfDims, aDims, aIndices,
+                                                            aTensor->shape->orderOfDimensions);
+                }
+                size_t bValueIndex;
+                if (bNumberOfDims == 1) {
+                    bValueIndex = i;
+                } else {
+                    size_t bIndices[] = {i, columnIndex};
+                    bValueIndex = calcElementIndexByIndices(bNumberOfDims, bDims, bIndices,
+                                                            bTensor->shape->orderOfDimensions);
+                }
+                size_t aGroup = bfpGroupAt(&aRange, aQC, aValueIndex);
+                size_t bGroup = bfpGroupAt(&bRange, bQC, bValueIndex);
+                if (i == 0) {
+                    currentAGroup = aGroup;
+                    currentBGroup = bGroup;
+                } else if (aGroup != currentAGroup || bGroup != currentBGroup ||
+                           segCount == segmentLimit) {
+                    /* A segment closes on EITHER operand's group change or at
+                     * the int32 limit (run split); its partial is aligned to
+                     * E_acc. */
+                    acc += bfpAlignPartial(partial,
+                                           eAcc - ((int)aQC->exponents[currentAGroup] - aExpBias +
+                                                   (int)bQC->exponents[currentBGroup] - bExpBias));
+                    partial = 0;
+                    segCount = 0;
+                    currentAGroup = aGroup;
+                    currentBGroup = bGroup;
+                }
+                partial += mulInt32s(aArr[aValueIndex], bArr[bValueIndex]);
+                segCount++;
+            }
+            if (aColumns > 0) {
+                acc += bfpAlignPartial(partial,
+                                       eAcc - ((int)aQC->exponents[currentAGroup] - aExpBias +
+                                               (int)bQC->exponents[currentBGroup] - bExpBias));
+            }
+            mant[resultCounter] = acc;
+            resultCounter++;
+        }
+    }
+}
+
+/* Integer-only forward (arithmetic-bfp.md §13): matmulBfpTensors' walk
+ * verbatim -- loop order, MAC count, calcElementIndexByIndices, bfpGroupAt on
+ * both operands -- with the float fold replaced by the integer fold (see
+ * Matmul.h). */
+void matmulBfpRawTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
+                         tensor_t *outputTensor) {
+    if (aTensor->shape->numberOfDimensions > 2 || bTensor->shape->numberOfDimensions > 2) {
+        PRINT_ERROR("Matmul only supports up to 2D Tensors");
+        exit(1);
+    }
+    if (aTensor->quantization->type != BFP || bTensor->quantization->type != BFP) {
+        PRINT_ERROR("matmulBfpRawTensors: operands must be BFP (unpacked scratch form)");
+        exit(1);
+    }
+    if (outputTensor->quantization->type != BFP_RAW) {
+        PRINT_ERROR("matmulBfpRawTensors: output must be BFP_RAW (the integer GEMM raw)");
+        exit(1);
+    }
+
+    bfpQConfig_t *aQC = aTensor->quantization->qConfig;
+    bfpQConfig_t *bQC = bTensor->quantization->qConfig;
+
+    size_t aNumberOfDims = aTensor->shape->numberOfDimensions;
+    size_t *aDims = aTensor->shape->dimensions;
+    size_t bNumberOfDims = bTensor->shape->numberOfDimensions;
+    size_t *bDims = bTensor->shape->dimensions;
+
+    size_t aRows, aColumns;
+    if (aNumberOfDims < 2) {
+        aRows = 1;
+        aColumns = getDimensionsByIndex(aTensor, 0);
+    } else {
+        aRows = getDimensionsByIndex(aTensor, 0);
+        aColumns = getDimensionsByIndex(aTensor, 1);
+    }
+    size_t bRows = getDimensionsByIndex(bTensor, 0);
+    size_t bColumns = (bNumberOfDims < 2) ? 1 : getDimensionsByIndex(bTensor, 1);
+
+    if (aColumns != bRows) {
+        PRINT_ERROR("Rows dont match Columns");
+        PRINT_DEBUG("aColumns: %zu, bRows: %zu", aColumns, bRows);
+        exit(1);
+    }
+
+    validateBfpQConfigShape(aQC, calcNumberOfElementsByTensor(aTensor));
+    validateBfpQConfigShape(bQC, calcNumberOfElementsByTensor(bTensor));
+
+    bfpQConfig_t *biasQC = NULL;
+    if (bias != NULL) {
+        if (bias->quantization->type != BFP) {
+            PRINT_ERROR("matmulBfpRawTensors: bias must be BFP");
+            exit(1);
+        }
+        if (calcNumberOfElementsByTensor(bias) != bColumns) {
+            PRINT_ERROR("matmulBfpRawTensors: bias element count != output columns");
+            exit(1);
+        }
+        biasQC = bias->quantization->qConfig;
+        validateBfpQConfigShape(biasQC, bColumns);
+    }
+
+    size_t outElems = aRows * bColumns;
+    if (calcNumberOfElementsByTensor(outputTensor) != outElems) {
+        PRINT_ERROR("matmulBfpRawTensors: output holds %zu elements, the product has %zu",
+                    calcNumberOfElementsByTensor(outputTensor), outElems);
+        exit(1);
+    }
+    bfpRawQConfig_t *rawQC = outputTensor->quantization->qConfig;
+    size_t gsz = bfpRawRequireOutput(rawQC, outElems, "matmulBfpRawTensors");
+    int16_t *rawE = rawQC->exponents;
+    if (outElems == 0) {
+        return;
+    }
+
+    /* Static headroom proof (§13 item 3) over the reduction; over-long
+     * same-exponent runs split at the segment limit instead of failing. */
+    int guard = bfpFoldGuardBits(aColumns, aQC->mantissaBits, bQC->mantissaBits,
+                                 biasQC != NULL ? biasQC->mantissaBits : 0, "matmulBfpRawTensors");
+    size_t segmentLimit = bfpSegmentLimit(aQC->mantissaBits, bQC->mantissaBits);
+
+    int32_t const *aArr = (int32_t const *)aTensor->data;
+    int32_t const *bArr = (int32_t const *)bTensor->data;
+    int32_t const *biasArr = bias != NULL ? (int32_t const *)bias->data : NULL;
+    int32_t *mant = (int32_t *)outputTensor->data;
+    int32_t aExpBias = bfpExponentBias(aQC);
+    int32_t bExpBias = bfpExponentBias(bQC);
+
+    /* Pre-pass (stack tables sized by the topology, never by the MACs): per
+     * output row / column the max exponent of the line it reduces over, per
+     * column the bias exponent; E_acc of a raw target group = the max over its
+     * outputs of max(rowTop + colTop, biasE) + g, walked in output order. A
+     * line without nonzero codes and a zero bias code set nothing; a group
+     * with nothing set takes the zero state's top 0. */
+    int16_t aMax[aRows];
+    int16_t bMax[bColumns];
+    int16_t biasE[biasQC != NULL ? bColumns : 1];
+    matmulBfpLineMaxExponents(aTensor, 1, aRows, aColumns, aMax);
+    matmulBfpLineMaxExponents(bTensor, 0, bColumns, aColumns, bMax);
+    if (biasQC != NULL) {
+        bfpGroupRange_t biasRange = {0};
+        int32_t biasExpBias = bfpExponentBias(biasQC);
+        for (size_t c = 0; c < bColumns; c++) {
+            biasE[c] =
+                (int16_t)((int)biasQC->exponents[bfpGroupAt(&biasRange, biasQC, c)] - biasExpBias);
+        }
+    }
+    {
+        size_t t = 0;
+        size_t tEnd = gsz;
+        int top = INT_MIN;
+        size_t o = 0;
+        for (size_t rowIndex = 0; rowIndex < aRows; rowIndex++) {
+            for (size_t columnIndex = 0; columnIndex < bColumns; columnIndex++) {
+                int e = bfpLiveExpSum(bfpLiveExpFrom16(aMax[rowIndex]),
+                                      bfpLiveExpFrom16(bMax[columnIndex]));
+                if (biasArr != NULL && biasArr[columnIndex] != 0 && biasE[columnIndex] > e) {
+                    e = biasE[columnIndex];
+                }
+                if (e > top) {
+                    top = e;
+                }
+                if (++o == tEnd) {
+                    rawE[t++] = (int16_t)(bfpLiveTopOrZero(top) + guard);
+                    tEnd += gsz;
+                    top = INT_MIN;
+                }
+            }
+        }
+    }
+
+    matmulBfpRawWalk_t walk = {.aTensor = aTensor,
+                               .bTensor = bTensor,
+                               .aNumberOfDims = aNumberOfDims,
+                               .bNumberOfDims = bNumberOfDims,
+                               .aDims = aDims,
+                               .bDims = bDims,
+                               .aRows = aRows,
+                               .aColumns = aColumns,
+                               .bColumns = bColumns,
+                               .gsz = gsz,
+                               .segmentLimit = segmentLimit,
+                               .aQC = aQC,
+                               .bQC = bQC,
+                               .aExpBias = aExpBias,
+                               .bExpBias = bExpBias,
+                               .aArr = aArr,
+                               .bArr = bArr,
+                               .biasArr = biasArr,
+                               .biasE = biasE,
+                               .rawE = rawE,
+                               .mant = mant};
+    matmulBfpRawTensorsWalk(&walk);
 }
 
 size_t getMatmulInstructionCounter() {

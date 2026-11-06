@@ -55,8 +55,9 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
 from sym_gold import (assert_rounding_canary, bfp_quantize_grouped, check_exact_roundtrip,
-                      conv1d_bfp_dx_ref, conv1d_bfp_ref, emit_float_array, emit_int32_array,
-                      emit_int32_scalar, emit_uint8_array)
+                      conv1d_bfp_dx_ref, conv1d_bfp_raw_ref, conv1d_bfp_ref, emit_double_array,
+                      emit_float_array, emit_int16_array, emit_int32_array, emit_int32_scalar,
+                      emit_uint8_array)
 
 BATCH = 1
 IN_CHANNELS = 2
@@ -279,6 +280,124 @@ def main() -> int:
         "structure unobservable through the grouped dx path")
     assert any(v != 0.0 for v in g2_dx), "g2 dx: all-zero expected output"
 
+    # ---- Integer-only forward (conv1dKernelBfpRaw, arithmetic-bfp section 13)
+    # The same operands through the integer fold: int32 mantissas + one
+    # UNBIASED exponent per raw target group, pinned bit for bit, plus the
+    # float64 exact values and the per-element fold bound 1/2 (S+1) 2^E_acc.
+    def raw_main(bias_triple, raw_gs, **kw):
+        bc, be, bq = bias_triple if bias_triple is not None else (None, None, None)
+        return conv1d_bfp_raw_ref(x_codes, x_exps, X_QC, w_codes, w_exps, W_QC, bc, be, bq,
+                                  BATCH, IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE, INPUT_LENGTH,
+                                  stride=STRIDE, padding_type="EXPLICIT", padding=PADDING,
+                                  raw_group_size=raw_gs, **kw)
+
+    raw = raw_main((bias_codes, bias_exps, BIAS_QC), 0)
+    raw_no_bias = raw_main(None, 0)
+    raw_bias_grouped = raw_main((bias_g_codes, bias_g_exps, bias_g_qc), 0)
+    # Raw target groups of 2 over the [1, 2, 5] output: group 2 straddles the
+    # two output rows (channels), so its E_acc must cover BOTH rows' maxima.
+    # Output channel 1's weight groups (3..5) get their stored exponent bumped
+    # by 3 (codes unchanged, values x8) so the two rows' maxima DIFFER and the
+    # straddling group observably takes the larger one.
+    w_exps_gs2 = [e + (3 if g >= 3 else 0) for g, e in enumerate(w_exps)]
+    raw_gs2 = conv1d_bfp_raw_ref(x_codes, x_exps, X_QC, w_codes, w_exps_gs2, W_QC,
+                                 bias_codes, bias_exps, BIAS_QC,
+                                 BATCH, IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE, INPUT_LENGTH,
+                                 stride=STRIDE, padding_type="EXPLICIT", padding=PADDING,
+                                 raw_group_size=2)
+    assert len(raw_gs2["exps"]) == 5
+    assert raw_gs2["exps"][3] == raw_gs2["exps"][1] + 3, "raw gs2: rows do not differ"
+    assert raw_gs2["exps"][2] == raw_gs2["exps"][3], (
+        "raw gs2: the straddling group's exponent does not cover the larger row")
+    assert raw["mant"] != raw_no_bias["mant"], "raw: bias segment unobservable"
+    raw_dil = raw_main((bias_codes, bias_exps, BIAS_QC), 0, dilation=dil_dilation)
+    assert len(raw_dil["mant"]) == BATCH * OUT_CHANNELS * dil_out_len
+    g2_raw = conv1d_bfp_raw_ref(g2x_codes, g2x_exps, G2_X_QC, g2w_codes, g2w_exps, G2_W_QC,
+                                g2b_codes, g2b_exps, G2_BIAS_QC,
+                                BATCH, G2_IN_CHANNELS, G2_OUT_CHANNELS, KERNEL_SIZE,
+                                G2_INPUT_LENGTH, stride=STRIDE, padding_type="EXPLICIT",
+                                padding=PADDING, conv_groups=G2_CONV_GROUPS)
+    assert len(g2_raw["mant"]) == BATCH * G2_OUT_CHANNELS * G2_OUT_LEN
+    # The grouped-weight / grouped-input structure must be observable through
+    # the integer fold too: a per-tensor collapse of either operand changes
+    # the mantissas (the exponent pre-pass alone would hide a group mix-up
+    # only if the fold were also wrong in the same way).
+    raw_x_collapsed = conv1d_bfp_raw_ref(x_codes, [x_exps[0]], {**X_QC, "group_size": 0},
+                                         w_codes, w_exps, W_QC, bias_codes, bias_exps, BIAS_QC,
+                                         BATCH, IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE,
+                                         INPUT_LENGTH, stride=STRIDE, padding_type="EXPLICIT",
+                                         padding=PADDING)
+    raw_w_collapsed = conv1d_bfp_raw_ref(x_codes, x_exps, X_QC, w_codes, [w_exps[0]],
+                                         {**W_QC, "group_size": 0}, bias_codes, bias_exps,
+                                         BIAS_QC, BATCH, IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE,
+                                         INPUT_LENGTH, stride=STRIDE, padding_type="EXPLICIT",
+                                         padding=PADDING)
+    assert raw_x_collapsed["mant"] != raw["mant"], "raw: input group structure unobservable"
+    assert raw_w_collapsed["mant"] != raw["mant"], "raw: weight group structure unobservable"
+
+    # Two-sided alignment fixture: input groups 24 binades apart, so with the
+    # (negative) fold guard of this reduction the max-exponent segment is
+    # LEFT-shifted exactly and the low-exponent segment is RIGHT-shifted and
+    # rounded -- both arms inside ONE output (position 3, taps 3 and 4 sit in
+    # different input groups). Group 1's last code is -7 so the right shift
+    # lands on a HALF_AWAY tie (3.5 -> 4), not an exact quotient.
+    spread_x_values = [16777216.0, -33554432.0, 50331648.0, -16777216.0,
+                       -0.875, -2.0, 3.0, 1.0]
+    spread_x_qc = {"mantissa_bits": 6, "exponent_bits": 8, "group_size": 4}
+    spread_w_values = [1.0, -0.5]
+    spread_w_qc = {"mantissa_bits": 4, "exponent_bits": 8, "group_size": 0}
+    spread_x_codes, spread_x_exps = bfp_quantize_grouped(
+        spread_x_values, spread_x_qc["mantissa_bits"], spread_x_qc["exponent_bits"],
+        spread_x_qc["group_size"])
+    spread_w_codes, spread_w_exps = bfp_quantize_grouped(
+        spread_w_values, spread_w_qc["mantissa_bits"], spread_w_qc["exponent_bits"], 0)
+    check_exact_roundtrip("spread input", spread_x_values, spread_x_codes, spread_x_exps,
+                          spread_x_qc)
+    check_exact_roundtrip("spread weight", spread_w_values, spread_w_codes, spread_w_exps,
+                          spread_w_qc)
+    assert spread_x_exps[0] - spread_x_exps[1] >= 21, "spread: groups not far enough apart"
+    spread_raw = conv1d_bfp_raw_ref(spread_x_codes, spread_x_exps, spread_x_qc,
+                                    spread_w_codes, spread_w_exps, spread_w_qc,
+                                    None, None, None, 1, 1, 1, 2, 8)
+    assert spread_raw["g"] < 0, "spread: the fold guard is not negative -- no left shift"
+    e_acc = spread_raw["exps"][0]
+    assert spread_raw["mant"][3] * 2.0 ** e_acc != spread_raw["exact"][3], (
+        "spread: output 3 is exact -- the right-shift rounding arm is unobserved")
+    assert abs(spread_raw["mant"][3]) > 2 ** 20, (
+        "spread: output 3 is small -- the left-shift arm is unobserved")
+
+    # m16 x m16: bfpSegmentLimit == 1, so EVERY product is its own segment and
+    # the run splitting (not a fail-fast) carries the reduction; g = 1.
+    m16_x_codes = [3, -5, 7, 2]
+    m16_w_codes = [2, -3]
+    m16_qc = {"mantissa_bits": 16, "exponent_bits": 8, "group_size": 0}
+    m16_raw = conv1d_bfp_raw_ref(m16_x_codes, [127], m16_qc, m16_w_codes, [127], m16_qc,
+                                 None, None, None, 1, 1, 1, 2, 4)
+    assert m16_raw["g"] == 1 and m16_raw["exps"] == [1]
+    assert m16_raw["mant"] == [11, -16, 4], m16_raw["mant"]
+
+    # m16 x m8, one 600-tap reduction at the code floors: the product is
+    # exactly 2^22 and 600 of them overflow int32, so the run splits at 511;
+    # g = 1 aligns both partials exactly (no rounding: both are even).
+    long_raw = conv1d_bfp_raw_ref([-32768] * 600, [127], m16_qc, [-128] * 600, [127],
+                                  {"mantissa_bits": 8, "exponent_bits": 8, "group_size": 0},
+                                  None, None, None, 1, 1, 1, 600, 600)
+    assert long_raw["mant"] == [600 * 2 ** 21] and long_raw["exps"] == [1], long_raw
+
+    # Dilation 2 over input groups of 3 binades apart, per-tensor weight: the
+    # window at output 1 taps inputs 1, 3, 5 -- two taps 2 elements apart
+    # straddle the group-0/1 boundary, so a run that counts unit steps instead
+    # of dilated ones folds tap 3 at group 0's exponent.
+    dilgrp_x_codes = [5, -7, 3, 6, -2, 4, 7, -5, 2]
+    dilgrp_x_exps = [120, 126, 123]
+    dilgrp_x_qc = {"mantissa_bits": 4, "exponent_bits": 8, "group_size": 3}
+    dilgrp_w_codes = [3, -2, 5]
+    dilgrp_w_qc = {"mantissa_bits": 4, "exponent_bits": 8, "group_size": 0}
+    dilgrp_raw = conv1d_bfp_raw_ref(dilgrp_x_codes, dilgrp_x_exps, dilgrp_x_qc, dilgrp_w_codes,
+                                    [127], dilgrp_w_qc, None, None, None, 1, 1, 1, 3, 9,
+                                    dilation=2)
+    assert len(dilgrp_raw["mant"]) == 5
+
     parts = [
         "// AUTOGENERATED by generate_expected_bfp_conv1d.py — DO NOT EDIT\n",
         "#ifndef ODT_EXPECTED_BFP_CONV1D_H\n",
@@ -351,6 +470,54 @@ def main() -> int:
         emit_int32_scalar("kBfpConvG2DxLossMantissaBits", G2_DX_LOSS_QC["mantissa_bits"]),
         emit_int32_scalar("kBfpConvG2DxLossExponentBits", G2_DX_LOSS_QC["exponent_bits"]),
         emit_float_array("kBfpConvG2DxExpected", torch.tensor(g2_dx, dtype=torch.float32)),
+        # ---- integer-only forward (conv1dKernelBfpRaw) ----
+        emit_int32_scalar("kBfpConvRawG", raw["g"]),
+        emit_int32_array("kBfpConvRawMant", torch.tensor(raw["mant"])),
+        emit_int16_array("kBfpConvRawExps", raw["exps"]),
+        emit_double_array("kBfpConvRawExact", raw["exact"]),
+        emit_double_array("kBfpConvRawBound", raw["bound"]),
+        emit_int32_array("kBfpConvRawNoBiasMant", torch.tensor(raw_no_bias["mant"])),
+        emit_int16_array("kBfpConvRawNoBiasExps", raw_no_bias["exps"]),
+        emit_int32_array("kBfpConvRawBiasGroupedMant", torch.tensor(raw_bias_grouped["mant"])),
+        emit_int16_array("kBfpConvRawBiasGroupedExps", raw_bias_grouped["exps"]),
+        emit_int32_scalar("kBfpConvRawGs2GroupSize", 2),
+        emit_uint8_array("kBfpConvRawGs2WExponents", w_exps_gs2),
+        emit_int32_array("kBfpConvRawGs2Mant", torch.tensor(raw_gs2["mant"])),
+        emit_int16_array("kBfpConvRawGs2Exps", raw_gs2["exps"]),
+        emit_int32_array("kBfpConvRawDilMant", torch.tensor(raw_dil["mant"])),
+        emit_int16_array("kBfpConvRawDilExps", raw_dil["exps"]),
+        emit_int32_array("kBfpConvG2RawMant", torch.tensor(g2_raw["mant"])),
+        emit_int16_array("kBfpConvG2RawExps", g2_raw["exps"]),
+        emit_int32_scalar("kBfpConvSpreadInputLength", 8),
+        emit_int32_scalar("kBfpConvSpreadOutLen", 7),
+        emit_int32_array("kBfpConvSpreadInCodes", torch.tensor(spread_x_codes)),
+        emit_uint8_array("kBfpConvSpreadInExponents", spread_x_exps),
+        emit_int32_scalar("kBfpConvSpreadInMantissaBits", spread_x_qc["mantissa_bits"]),
+        emit_int32_scalar("kBfpConvSpreadInGroupSize", spread_x_qc["group_size"]),
+        emit_int32_array("kBfpConvSpreadWCodes", torch.tensor(spread_w_codes)),
+        emit_uint8_array("kBfpConvSpreadWExponents", spread_w_exps),
+        emit_int32_scalar("kBfpConvSpreadWMantissaBits", spread_w_qc["mantissa_bits"]),
+        emit_int32_scalar("kBfpConvSpreadG", spread_raw["g"]),
+        emit_int32_array("kBfpConvSpreadRawMant", torch.tensor(spread_raw["mant"])),
+        emit_int16_array("kBfpConvSpreadRawExps", spread_raw["exps"]),
+        emit_double_array("kBfpConvSpreadRawExact", spread_raw["exact"]),
+        emit_double_array("kBfpConvSpreadRawBound", spread_raw["bound"]),
+        emit_int32_array("kBfpConvM16InCodes", torch.tensor(m16_x_codes)),
+        emit_int32_array("kBfpConvM16WCodes", torch.tensor(m16_w_codes)),
+        emit_int32_array("kBfpConvM16RawMant", torch.tensor(m16_raw["mant"])),
+        emit_int16_array("kBfpConvM16RawExps", m16_raw["exps"]),
+        emit_double_array("kBfpConvM16RawExact", m16_raw["exact"]),
+        emit_double_array("kBfpConvM16RawBound", m16_raw["bound"]),
+        emit_int32_scalar("kBfpConvLongTaps", 600),
+        emit_int32_scalar("kBfpConvLongRawMant", long_raw["mant"][0]),
+        emit_int32_scalar("kBfpConvLongRawExp", long_raw["exps"][0]),
+        emit_int32_array("kBfpConvDilGrpInCodes", torch.tensor(dilgrp_x_codes)),
+        emit_uint8_array("kBfpConvDilGrpInExponents", dilgrp_x_exps),
+        emit_int32_array("kBfpConvDilGrpWCodes", torch.tensor(dilgrp_w_codes)),
+        emit_int32_array("kBfpConvDilGrpRawMant", torch.tensor(dilgrp_raw["mant"])),
+        emit_int16_array("kBfpConvDilGrpRawExps", dilgrp_raw["exps"]),
+        emit_double_array("kBfpConvDilGrpRawExact", dilgrp_raw["exact"]),
+        emit_double_array("kBfpConvDilGrpRawBound", dilgrp_raw["bound"]),
         "\n#endif // ODT_EXPECTED_BFP_CONV1D_H\n",
     ]
 

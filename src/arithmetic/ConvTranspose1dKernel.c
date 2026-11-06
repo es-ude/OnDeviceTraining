@@ -622,6 +622,8 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
 
     int32_t inExpBias = bfpExponentBias(inQC);
     int32_t wExpBias = bfpExponentBias(wQC);
+    bfpGroupRange_t inRange = {0};
+    bfpGroupRange_t wRange = {0};
 
     /* Per-output-channel bias seed, dequantized to float BEFORE the reduction
      * (value-seed, headroom-exempt -- it never touches the int32 partial).
@@ -667,15 +669,17 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
                      * order the gold emulation mirrors). Per-element group
                      * lookup on BOTH operands: tap hops make both index
                      * sequences non-contiguous, so no run length could be
-                     * precomputed (the SYM grouped kernels' gap rationale). */
+                     * precomputed (the SYM grouped kernels' gap rationale);
+                     * bfpGroupAt divides only when an index leaves the current
+                     * group's range. */
                     for (size_t t = 0; t < tapCount; t++) {
                         for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
                             size_t ic = inLo + icOffset;
                             size_t inIdx = (b * inChannels + ic) * inputLength + taps[t].inPos;
                             size_t wIdx =
                                 (ic * outChPerGroup + ocOffset) * kernelSize + taps[t].kernelIdx;
-                            size_t inGroup = bfpGroupOf(inQC, inIdx);
-                            size_t wGroup = bfpGroupOf(wQC, wIdx);
+                            size_t inGroup = bfpGroupAt(&inRange, inQC, inIdx);
+                            size_t wGroup = bfpGroupAt(&wRange, wQC, wIdx);
 
                             if (currentWGroup == SIZE_MAX) {
                                 currentInGroup = inGroup;
@@ -685,9 +689,9 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
                                  * the finished same-exponent segment's raw int32
                                  * partial enters the float accumulator via a pure
                                  * exponent shift -- rounding-free by contract. */
-                                acc += ldexpf((float)partial,
-                                              (int)inQC->exponents[currentInGroup] - inExpBias +
-                                                  (int)wQC->exponents[currentWGroup] - wExpBias);
+                                acc += bfpLdexpInt32(
+                                    partial, (int)inQC->exponents[currentInGroup] - inExpBias +
+                                                 (int)wQC->exponents[currentWGroup] - wExpBias);
                                 partial = 0;
                                 currentInGroup = inGroup;
                                 currentWGroup = wGroup;
@@ -700,13 +704,296 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
                      * boundary, so this is its only fold; tap-free positions
                      * never seed a segment at all. */
                     if (currentWGroup != SIZE_MAX) {
-                        acc += ldexpf((float)partial,
-                                      (int)inQC->exponents[currentInGroup] - inExpBias +
-                                          (int)wQC->exponents[currentWGroup] - wExpBias);
+                        acc += bfpLdexpInt32(partial,
+                                             (int)inQC->exponents[currentInGroup] - inExpBias +
+                                                 (int)wQC->exponents[currentWGroup] - wExpBias);
                     }
 
                     yArr[(b * outChannels + oc) * outputLength + outPos] = acc;
                 }
+            }
+        }
+    }
+}
+
+/* Taps that can land on one output position: k and k' meet when
+ * (k - k') * dilation is a multiple of stride. Range clipping can only lower
+ * the count, so this bounds every position. */
+static size_t convT1dMaxTapOverlap(size_t kernelSize, size_t stride, size_t dilation) {
+    size_t best = 0;
+    for (size_t k = 0; k < kernelSize; k++) {
+        size_t n = 0;
+        for (size_t j = 0; j < kernelSize; j++) {
+            size_t gap = k > j ? (k - j) * dilation : (j - k) * dilation;
+            n += gap % stride == 0;
+        }
+        best = n > best ? n : best;
+    }
+    return best;
+}
+
+/* What the scatter walk of convTranspose1dKernelBfpScatter reads; eAccOf is
+ * the pre-pass's table. */
+typedef struct convT1dBfpScatterWalk {
+    size_t batch, groups, inChannels, inputLength, outChannels, outputLength, kernelSize;
+    size_t inChPerGroup, outChPerGroup, padLeft;
+    int guard;
+    const kernel_t *kernel;
+    const bfpQConfig_t *inQC;
+    const bfpQConfig_t *wQC;
+    int32_t inExpBias, wExpBias;
+    const int32_t *xArr;
+    const int32_t *wArr;
+    const int *eAccOf; /* [batch * groups] */
+    int32_t *acc;
+} convT1dBfpScatterWalk_t;
+
+/* The MAC walk (BFP_WALK_NOINLINE: no VLA in this frame). */
+BFP_WALK_NOINLINE void convTranspose1dKernelBfpScatterWalk(const convT1dBfpScatterWalk_t *p) {
+    size_t batch = p->batch, groups = p->groups, inChannels = p->inChannels;
+    size_t inputLength = p->inputLength, outChannels = p->outChannels;
+    size_t outputLength = p->outputLength, kernelSize = p->kernelSize;
+    size_t inChPerGroup = p->inChPerGroup, outChPerGroup = p->outChPerGroup;
+    size_t padLeft = p->padLeft;
+    int guard = p->guard;
+    const kernel_t *kernel = p->kernel;
+    const bfpQConfig_t *inQC = p->inQC;
+    const bfpQConfig_t *wQC = p->wQC;
+    int32_t inExpBias = p->inExpBias, wExpBias = p->wExpBias;
+    int32_t const *xArr = p->xArr;
+    int32_t const *wArr = p->wArr;
+    const int *eAccOf = p->eAccOf;
+    int32_t *acc = p->acc;
+
+    long long padLeftSigned = (long long)padLeft;
+    long long outputLengthSigned = (long long)outputLength;
+    long long dilation = (long long)kernel->dilation;
+    bfpGroupRange_t inRange = {0};
+    bfpGroupRange_t wRange = {0};
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+            int eAcc = eAccOf[b * groups + g];
+            if (eAcc == BFP_NO_LIVE_EXP) {
+                eAcc = guard; /* every product is zero: any finite grid holds them */
+            }
+
+            for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                size_t ic = inLo + icOffset;
+                for (size_t inPos = 0; inPos < inputLength; inPos++) {
+                    size_t inIdx = (b * inChannels + ic) * inputLength + inPos;
+                    int32_t xv = xArr[inIdx];
+                    int xShift = eAcc - ((int)inQC->exponents[bfpGroupAt(&inRange, inQC, inIdx)] -
+                                         inExpBias);
+                    long long outBase = (long long)(inPos * kernel->stride) - padLeftSigned;
+
+                    for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                        size_t oc = outLo + ocOffset;
+                        for (size_t k = 0; k < kernelSize; k++) {
+                            long long outIdx = outBase + (long long)k * dilation;
+                            if (outIdx < 0 || outIdx >= outputLengthSigned) {
+                                continue;
+                            }
+
+                            size_t wIdx = (ic * outChPerGroup + ocOffset) * kernelSize + k;
+                            int shift =
+                                xShift -
+                                ((int)wQC->exponents[bfpGroupAt(&wRange, wQC, wIdx)] - wExpBias);
+                            acc[(b * outChannels + oc) * outputLength + (size_t)outIdx] +=
+                                bfpAlignPartial(mulInt32s(xv, wArr[wIdx]), shift);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* Contract in ConvTranspose1dKernel.h. */
+void convTranspose1dKernelBfpScatter(tensor_t const *input, tensor_t const *weight,
+                                     kernel_t const *kernel, size_t groups, size_t outputPadding,
+                                     tensor_t *output) {
+    size_t batch = input->shape->dimensions[0];
+    size_t inChannels = input->shape->dimensions[1];
+    size_t inputLength = input->shape->dimensions[2];
+    size_t outChannels = output->shape->dimensions[1];
+    size_t outputLength = output->shape->dimensions[2];
+    size_t kernelSize = weight->shape->dimensions[2];
+
+    if (input->quantization->type != BFP || weight->quantization->type != BFP) {
+        PRINT_ERROR("convTranspose1dKernelBfpScatter: input and weight must be BFP "
+                    "(unpacked scratch form)");
+        exit(1);
+    }
+    if (output->quantization->type != BFP_RAW) {
+        PRINT_ERROR("convTranspose1dKernelBfpScatter: output must be BFP_RAW (the dx raw, "
+                    "opSpec_t.bfpRawOut = BFP_RAW_BACKWARD_DX)");
+        exit(1);
+    }
+    if (inChannels % groups != 0 || outChannels % groups != 0) {
+        PRINT_ERROR("convTranspose1dKernelBfpScatter: groups (%zu) must divide "
+                    "in_channels (%zu) and out_channels (%zu)",
+                    groups, inChannels, outChannels);
+        exit(1);
+    }
+
+    size_t padLeft = convT1dResolveGeometry(kernel, inputLength, outputLength, outputPadding,
+                                            "convTranspose1dKernelBfpScatter");
+
+    size_t inChPerGroup = inChannels / groups;
+    size_t outChPerGroup = outChannels / groups;
+
+    bfpQConfig_t *inQC = input->quantization->qConfig;
+    bfpQConfig_t *wQC = weight->quantization->qConfig;
+    validateBfpQConfigShape(inQC, calcNumberOfElementsByShape(input->shape));
+    validateBfpQConfigShape(wQC, calcNumberOfElementsByShape(weight->shape));
+
+    size_t totalOut = batch * outChannels * outputLength;
+    bfpRawQConfig_t *rawQC = output->quantization->qConfig;
+    size_t gsz = bfpRawRequireOutput(rawQC, totalOut, "convTranspose1dKernelBfpScatter");
+    int16_t *rawE = rawQC->exponents;
+    int32_t *acc = (int32_t *)output->data;
+    for (size_t i = 0; i < totalOut; i++) {
+        acc[i] = 0;
+    }
+    if (totalOut == 0) {
+        return;
+    }
+
+    int guard = bfpFoldGuardBits(
+        inChPerGroup * convT1dMaxTapOverlap(kernelSize, kernel->stride, kernel->dilation),
+        inQC->mantissaBits, wQC->mantissaBits, 0, "convTranspose1dKernelBfpScatter");
+
+    int32_t const *xArr = (int32_t const *)input->data;
+    int32_t const *wArr = (int32_t const *)weight->data;
+    int32_t inExpBias = bfpExponentBias(inQC);
+    int32_t wExpBias = bfpExponentBias(wQC);
+
+    /* Pre-pass (stack tables sized by the topology): E_acc per (batch, conv
+     * group) = max over the group's input channels of input-row max +
+     * weight-row max, plus the guard, each row max over the groups holding a
+     * nonzero code. A (batch, conv group) whose every product is zero sets
+     * nothing (BFP_NO_LIVE_EXP; its walk uses the zero state's 0 + g). A
+     * group without products keeps 0. */
+    int eAccOf[batch * groups];
+    for (size_t i = 0; i < batch * groups; i++) {
+        eAccOf[i] = 0;
+    }
+    size_t wRowLen = outChPerGroup * kernelSize;
+    if (inChannels > 0 && inputLength > 0 && wRowLen > 0) {
+        int wRowMax[inChannels];
+        bfpRowCursor_t wc = {.group = 0, .groupEnd = wQC->groupSize};
+        for (size_t ic = 0; ic < inChannels; ic++) {
+            wRowMax[ic] = bfpRowMaxExponent(&wc, wQC, wExpBias, wArr, ic * wRowLen, wRowLen);
+        }
+        bfpRowCursor_t xc = {.group = 0, .groupEnd = inQC->groupSize};
+        for (size_t b = 0; b < batch; b++) {
+            for (size_t g = 0; g < groups; g++) {
+                int eTop = BFP_NO_LIVE_EXP;
+                for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                    size_t ic = g * inChPerGroup + icOffset;
+                    int e = bfpLiveExpSum(bfpRowMaxExponent(&xc, inQC, inExpBias, xArr,
+                                                            (b * inChannels + ic) * inputLength,
+                                                            inputLength),
+                                          wRowMax[ic]);
+                    eTop = e > eTop ? e : eTop;
+                }
+                eAccOf[b * groups + g] = eTop == BFP_NO_LIVE_EXP ? BFP_NO_LIVE_EXP : eTop + guard;
+            }
+        }
+    }
+
+    convT1dBfpScatterWalk_t walk = {.batch = batch,
+                                    .groups = groups,
+                                    .inChannels = inChannels,
+                                    .inputLength = inputLength,
+                                    .outChannels = outChannels,
+                                    .outputLength = outputLength,
+                                    .kernelSize = kernelSize,
+                                    .inChPerGroup = inChPerGroup,
+                                    .outChPerGroup = outChPerGroup,
+                                    .padLeft = padLeft,
+                                    .guard = guard,
+                                    .kernel = kernel,
+                                    .inQC = inQC,
+                                    .wQC = wQC,
+                                    .inExpBias = inExpBias,
+                                    .wExpBias = wExpBias,
+                                    .xArr = xArr,
+                                    .wArr = wArr,
+                                    .eAccOf = eAccOf,
+                                    .acc = acc};
+    convTranspose1dKernelBfpScatterWalk(&walk);
+
+    /* The raw (BFP_RAW contract: one exponent per TARGET group). A target
+     * group may straddle dx rows of different (batch, conv group), so its
+     * exponent is the max E_acc over the rows it covers, and each sum on a
+     * lower row is re-gridded to it: a HALF_AWAY right shift of the finished
+     * sum (it only shrinks, so the headroom proof above still holds). A row
+     * whose products are all zero sets nothing and is not re-gridded (its
+     * sums are 0); a group of such rows only takes the zero state's 0 + g.
+     * Rows and groups advance with cursors, no division. Where every row of
+     * a group shares one E_acc (HAR: micro-batch 1, conv groups 1) the shift
+     * is 0 and the sums pass unchanged. */
+    size_t t = 0;
+    size_t tEnd = gsz;
+    int eT = BFP_NO_LIVE_EXP;
+    size_t cg = 0;
+    size_t cgEnd = outChPerGroup;
+    for (size_t b = 0; b < batch; b++) {
+        cg = 0;
+        cgEnd = outChPerGroup;
+        for (size_t oc = 0; oc < outChannels; oc++) {
+            if (oc >= cgEnd) {
+                cg++;
+                cgEnd += outChPerGroup;
+            }
+            int eRow = eAccOf[b * groups + cg];
+            size_t rowEnd = (b * outChannels + oc + 1) * outputLength;
+            for (;;) {
+                eT = eRow > eT ? eRow : eT;
+                if (tEnd > rowEnd) {
+                    break; /* the group goes on into the next row */
+                }
+                rawE[t++] = (int16_t)(eT == BFP_NO_LIVE_EXP ? guard : eT);
+                eT = BFP_NO_LIVE_EXP;
+                if (tEnd >= rowEnd) {
+                    tEnd += gsz;
+                    break; /* the next group starts with the next row */
+                }
+                tEnd += gsz;
+            }
+        }
+    }
+
+    t = 0;
+    tEnd = gsz;
+    for (size_t b = 0; b < batch; b++) {
+        cg = 0;
+        cgEnd = outChPerGroup;
+        for (size_t oc = 0; oc < outChannels; oc++) {
+            if (oc >= cgEnd) {
+                cg++;
+                cgEnd += outChPerGroup;
+            }
+            int eRow = eAccOf[b * groups + cg];
+            size_t idx = (b * outChannels + oc) * outputLength;
+            size_t rowEnd = idx + outputLength;
+            while (idx < rowEnd) {
+                if (idx >= tEnd) {
+                    t++;
+                    tEnd += gsz;
+                }
+                size_t runEnd = tEnd < rowEnd ? tEnd : rowEnd;
+                int k = eRow == BFP_NO_LIVE_EXP ? 0 : (int)rawE[t] - eRow;
+                if (k != 0) {
+                    for (size_t i = idx; i < runEnd; i++) {
+                        acc[i] = bfpAlignPartial(acc[i], k);
+                    }
+                }
+                idx = runEnd;
             }
         }
     }

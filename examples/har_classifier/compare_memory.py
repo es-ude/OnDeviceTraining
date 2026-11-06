@@ -65,20 +65,23 @@ CONFIG_ORDER = [
     "asym4", "asym4pc", "asym4g64", "asym4g32",
     # BFP epic PR7 (#410): anchor first, then one axis per row -- weight block, wire
     # block, mantissa, exponent, rounding, GEMM fake-quant twin, +grads, +state.
-    "bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst",
-    "bfp_wbt_ab16_m6_e8_xnat_g0_s0_rsr_lconst",
-    "bfp_wbpc_ab16_m6_e8_xnat_g0_s0_rsr_lconst",
-    "bfp_wb8_ab16_m6_e8_xnat_g0_s0_rsr_lconst",
-    "bfp_wb32_abf_m6_e8_xnat_g0_s0_rsr_lconst",
-    "bfp_wb32_abt_m6_e8_xnat_g0_s0_rsr_lconst",
-    "bfp_wb32_ab32_m6_e8_xnat_g0_s0_rsr_lconst",
-    "bfp_wb32_ab16_m4_e8_xnat_g0_s0_rsr_lconst",
-    "bfp_wb32_ab16_m8_e8_xnat_g0_s0_rsr_lconst",
-    "bfp_wb32_ab16_m6_e4_xnat_g0_s0_rsr_lconst",
-    "bfp_wb32_ab16_m6_e8_xnat_g0_s0_rdet_lconst",
-    "bfp_wb32_ab16_m6_e8_xfq_g0_s0_rsr_lconst",
-    "bfp_wb32_ab16_m6_e8_xnat_g1_s0_rsr_lconst",
-    "bfp_wb32_ab16_m6_e8_xnat_g1_s1_rsr_lconst",
+    "bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst_hbfp",
+    "bfp_wb32_ab16_m6_e8_xnat_g0_s0_rsr_lconst_hflt",
+    "bfp_wbt_ab16_m6_e8_xnat_g0_s0_rsr_lconst_hbfp",
+    "bfp_wbpc_ab16_m6_e8_xnat_g0_s0_rsr_lconst_hbfp",
+    "bfp_wb8_ab16_m6_e8_xnat_g0_s0_rsr_lconst_hbfp",
+    "bfp_wb32_abf_m6_e8_xnat_g0_s0_rsr_lconst_hflt",
+    "bfp_wb32_abt_m6_e8_xnat_g0_s0_rsr_lconst_hbfp",
+    "bfp_wb32_ab32_m6_e8_xnat_g0_s0_rsr_lconst_hbfp",
+    "bfp_wb32_ab16_m4_e8_xnat_g0_s0_rsr_lconst_hbfp",
+    "bfp_wb32_ab16_m8_e8_xnat_g0_s0_rsr_lconst_hbfp",
+    "bfp_wb32_ab16_m6_e4_xnat_g0_s0_rsr_lconst_hbfp",
+    "bfp_wb32_ab16_m6_e8_xnat_g0_s0_rdet_lconst_hbfp",
+    "bfp_wb32_ab16_m6_e8_xfq_g0_s0_rsr_lconst_hbfp",
+    "bfp_wb32_ab16_m6_e8_xnat_g1_s0_rsr_lconst_hbfp",
+    "bfp_wb32_ab16_m6_e8_xnat_g1_s1_rsr_lconst_hbfp",
+    # The full-integer training path, one alias per head (run_matrix._BFP8FULL_CONFIGS).
+    "bfp8full_hflt", "bfp8full_hbfp",
 ]
 
 # Analytic MCU categories, in report order. mcu_total_b is their sum.

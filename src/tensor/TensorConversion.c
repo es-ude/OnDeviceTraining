@@ -1,13 +1,16 @@
 #define SOURCE_FILE "TENSOR_CONVERSION"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "BfpKernelSupport.h"
 #include "Common.h"
 #include "DTypes.h"
 #include "MinMax.h"
+#include "RNG.h"
 #include "SymGridBounds.h"
 #include "Tensor.h"
 #include "TensorConversion.h"
@@ -771,6 +774,32 @@ void unpackSignExtend(const uint8_t *src, size_t srcBits, size_t srcStartBit, in
         PRINT_ERROR("unpackSignExtend: srcBits must be > 0");
         exit(1);
     }
+    if (n == 0) {
+        /* N=0 tensor data may be NULL (#160): no pointer arithmetic on src. */
+        return;
+    }
+    if (srcStartBit % 8 == 0 && (srcBits == 8 || srcBits == 16)) {
+        /* Byte-aligned 8/16-bit codes (the BFP m=8/16 and sym8/sym16 wires):
+         * the packed stream is LSB-first, so a code is one byte, or two bytes
+         * low-then-high, whatever the host endianness. Read them as bytes --
+         * never as a halfword: a DeltaSym-style srcStartBit == 8 lands on an
+         * odd address, which faults on Cortex-M0+. The narrowing casts are
+         * the two's-complement wrap GCC and Clang document for out-of-range
+         * conversions (C17 6.3.1.3), i.e. the same value as the
+         * (v ^ signBit) - signBit idiom below; written as casts because GCC
+         * folds them to ldrsb / sxth and leaves the idiom as three ALU ops. */
+        const uint8_t *p = src + srcStartBit / 8;
+        if (srcBits == 8) {
+            for (size_t i = 0; i < n; i++) {
+                dst[i] = (int8_t)p[i];
+            }
+        } else {
+            for (size_t i = 0; i < n; i++) {
+                dst[i] = (int16_t)(p[2 * i] | (p[2 * i + 1] << 8));
+            }
+        }
+        return;
+    }
     /* clear-then-set writeByte actively zero-fills the high bits on widen,
      * so no memset of dst is needed. */
     byteConversionAppend((uint8_t *)src, srcBits, (uint8_t *)dst, 32, n, 0, srcStartBit);
@@ -969,6 +998,8 @@ char *quantTypeToString(qtype_t t) {
         return "BOOL";
     case BFP:
         return "BFP";
+    case BFP_RAW:
+        return "BFP_RAW";
     default:
         return "UNKNOWN";
     }
@@ -1558,6 +1589,206 @@ void requantBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t
                            "requantBfpTensor", rs);
 }
 
+/* ---- Integer-only BFP forward: BFP_RAW -> BFP re-block, BFP_RAW -> FLOAT32 ---- */
+
+/* deriveBfpStoredExponent's rule in integer form: the smallest E with
+ * absMax <= qMax * 2^E for a uint32 absmax under the raw exponent rawE. With
+ * b = bfpBitLength32(absMax), s = b - (m - 1) gives absMax < 2^(m-1) * 2^s; since
+ * qMax = 2^(m-1) - 1 is one below a power of two, the top of each octave
+ * (absMax > qMax << s, s >= 1) needs one more; for s <= 0 that never
+ * happens. Then the BFP D6 clamp to [0, cap]. *shiftOut = stored - bias -
+ * rawE is the right shift (negative: left) from raw mantissa to stored code
+ * The emit shift stored - bias - rawE differs from s exactly when a clamp
+ * fired. */
+static uint8_t deriveBfpRawStoredExponent(uint32_t absMax, int rawE, uint8_t mantissaBits,
+                                          int32_t bias, int cap) {
+    if (absMax == 0) {
+        return (uint8_t)bias; /* zero state, as the float authority */
+    }
+    const uint32_t qMax = (1u << (mantissaBits - 1)) - 1u;
+    int s = (int)bfpBitLength32(absMax) - (int)(mantissaBits - 1);
+    if (s > 0 && absMax > (qMax << s)) {
+        s++;
+    }
+    int stored = (int)rawE + s + (int)bias;
+    if (stored < 0) {
+        stored = 0; /* flush-toward-zero regime */
+    }
+    if (stored > cap) {
+        stored = cap; /* mantissa-saturation regime */
+    }
+    return (uint8_t)stored;
+}
+
+/* One element of the cold path: k <= 0 (exact, a left shift saturating at
+ * cap) or k >= 32 (flush to 0). cap is the sign's code bound. */
+static inline uint32_t shiftRawMagnitudeCold(uint32_t mag, int k, uint32_t cap) {
+    if (k >= 32 || mag == 0) {
+        return 0;
+    }
+    if (k == 0) {
+        return mag;
+    }
+    unsigned s = (unsigned)(-k);
+    if (s >= 31u || mag > (cap >> s)) {
+        return cap;
+    }
+    return mag << s;
+}
+
+/* The integer re-block engine (contract: TensorConversion.h,
+ * reblockBfpRawTensor). Pass 1 per group: absmax, stored exponent. Pass 2
+ * chunked, per run inside a chunk (groups are contiguous, so a run cursor
+ * replaces every division): one shift k per run; k in [1, 31] is the hot
+ * path with the rounding mode hoisted out of the element loop. Codes are
+ * clamped to the sign's bound ([-2^(m-1), qMax]), which only binds in the D6
+ * cap regime. Under SR every element consumes exactly one draw, on every
+ * path, so the stream position matches the float re-pack's. */
+static void reblockBfpRawBuffer(const int32_t *mant, const int16_t *rawE, size_t n,
+                                bfpQConfig_t *outQC, uint8_t *dst, const char *what,
+                                rngStream_t *rs) {
+    validateBfpQConfigShape(outQC, n);
+    const int32_t bias = bfpExponentBias(outQC);
+    int cap = (int)((1u << outQC->exponentBits) - 1u);
+    if (cap > (int)bias + 127) {
+        cap = (int)bias + 127; /* largest stored exponent with a finite float scale */
+    }
+    if (n == 0) {
+        for (size_t g = 0; g < outQC->numGroups; g++) {
+            outQC->exponents[g] = (uint8_t)bias;
+        }
+        return;
+    }
+    const roundingMode_t rm = outQC->roundingMode;
+    if (rm == SR_HALF_AWAY && rs == NULL) {
+        PRINT_ERROR("%s: SR rounding without a stream", what);
+        exit(1);
+    }
+    const uint32_t posCap = (1u << (outQC->mantissaBits - 1)) - 1u;
+    const uint32_t negCap = 1u << (outQC->mantissaBits - 1);
+    const size_t gsz = outQC->groupSize == 0 ? n : outQC->groupSize;
+
+    for (size_t g = 0; g < outQC->numGroups; g++) {
+        size_t start = g * gsz;
+        size_t end = start + gsz;
+        uint32_t absMax = 0;
+        for (size_t i = start; i < end; i++) {
+            int32_t v = mant[i];
+            uint32_t mag = v < 0 ? 0u - (uint32_t)v : (uint32_t)v;
+            if (mag > absMax) {
+                absMax = mag;
+            }
+        }
+        outQC->exponents[g] =
+            deriveBfpRawStoredExponent(absMax, rawE[g], outQC->mantissaBits, bias, cap);
+    }
+
+    int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
+    size_t g = 0;
+    size_t groupEnd = gsz;
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        size_t chunkEnd = off + count;
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            while (idx >= groupEnd) {
+                g++;
+                groupEnd += gsz;
+            }
+            size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            const int32_t *in = mant + idx;
+            int32_t *out = codes + (idx - off);
+            size_t runLen = runEnd - idx;
+            const int k = (int)outQC->exponents[g] - (int)bias - (int)rawE[g];
+            if (k >= 1 && k <= 31) {
+                const unsigned uk = (unsigned)k;
+                const uint32_t mask = (1u << uk) - 1u;
+                if (rm == SR_HALF_AWAY) {
+                    for (size_t i = 0; i < runLen; i++) {
+                        int32_t v = in[i];
+                        bool neg = v < 0;
+                        uint32_t mag = neg ? 0u - (uint32_t)v : (uint32_t)v;
+                        uint32_t t = mag >> uk;
+                        uint32_t rem = mag & mask;
+                        t += (rngNextU32(rs) >> (32u - uk)) < rem;
+                        uint32_t cap = neg ? negCap : posCap;
+                        if (t > cap) {
+                            t = cap;
+                        }
+                        out[i] = neg ? -(int32_t)t : (int32_t)t;
+                    }
+                } else {
+                    const uint32_t half = 1u << (uk - 1u);
+                    for (size_t i = 0; i < runLen; i++) {
+                        int32_t v = in[i];
+                        bool neg = v < 0;
+                        uint32_t mag = neg ? 0u - (uint32_t)v : (uint32_t)v;
+                        uint32_t t = (mag >> uk) + ((mag & mask) >= half);
+                        uint32_t cap = neg ? negCap : posCap;
+                        if (t > cap) {
+                            t = cap;
+                        }
+                        out[i] = neg ? -(int32_t)t : (int32_t)t;
+                    }
+                }
+            } else {
+                for (size_t i = 0; i < runLen; i++) {
+                    int32_t v = in[i];
+                    bool neg = v < 0;
+                    uint32_t mag = neg ? 0u - (uint32_t)v : (uint32_t)v;
+                    uint32_t cap = neg ? negCap : posCap;
+                    if (rm == SR_HALF_AWAY) {
+                        (void)rngNextU32(rs); /* exact or flushed: the draw is still consumed */
+                    }
+                    uint32_t t = shiftRawMagnitudeCold(mag, k, cap);
+                    if (t > cap) {
+                        t = cap;
+                    }
+                    out[i] = neg ? -(int32_t)t : (int32_t)t;
+                }
+            }
+            idx = runEnd;
+        }
+        packChunkGuarded(codes, count, dst, outQC->mantissaBits, off, what);
+    }
+}
+
+void reblockBfpRawTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs) {
+    size_t n = calcNumberOfElementsByTensor(inputTensor);
+    bfpRawQConfig_t *rawQC = inputTensor->quantization->qConfig;
+    bfpQConfig_t *outQC = outputTensor->quantization->qConfig;
+    if (rawQC->numGroups != outQC->numGroups || rawQC->groupSize != outQC->groupSize) {
+        /* The raw exponent is per TARGET group by contract (the funnel copies
+         * the target's geometry); a mismatch would need an alignment pass. */
+        PRINT_ERROR("reblockBfpRawTensor: raw geometry {numGroups=%zu, groupSize=%zu} must equal "
+                    "the target's {%zu, %zu}",
+                    rawQC->numGroups, rawQC->groupSize, outQC->numGroups, outQC->groupSize);
+        exit(1);
+    }
+    reblockBfpRawBuffer((const int32_t *)inputTensor->data, rawQC->exponents, n, outQC,
+                        outputTensor->data, "reblockBfpRawTensor", rs);
+}
+
+void convertBfpRawTensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outputTensor,
+                                        rngStream_t *rs) {
+    size_t n = calcNumberOfElementsByTensor(inputTensor);
+    bfpRawQConfig_t *rawQC = inputTensor->quantization->qConfig;
+    validateBfpRawQConfigShape(rawQC, n, "convertBfpRawTensorToFloat32Tensor");
+    const int32_t *mant = (const int32_t *)inputTensor->data;
+    float *out = (float *)outputTensor->data;
+    const size_t gsz = rawQC->groupSize == 0 ? n : rawQC->groupSize;
+    /* ldexpf per element, not a hoisted 2^E multiply: a raw exponent is an
+     * uncapped int16, and 0 * ldexpf(1, 200) would be NaN where 0 belongs. */
+    for (size_t g = 0; g < rawQC->numGroups; g++) {
+        const int e = rawQC->exponents[g];
+        size_t start = g * gsz;
+        size_t end = start + gsz;
+        for (size_t i = start; i < end; i++) {
+            out[i] = ldexpf((float)mant[i], e);
+        }
+    }
+}
+
 /* BFP -> ASYM derives the affine grid via the canonical
  * deriveAsymGridFromMinMax (group-quant PR4 D6: nudged CODE-domain grid,
  * single grid source) -- convertSymInt32TensorToAsymTensor's two-pass shape
@@ -1676,16 +1907,82 @@ typedef struct {
     const tensor_t *tens;
 } incSrc_t;
 
-static void rejectAliasedIncrement(const tensor_t *target, const tensor_t *increment,
-                                   const char *what) {
-    /* Self-aliasing is rejected: the rescale engines rewrite the target's
-     * grid between phase A and phase B, so an aliased increment would be
-     * decoded against the wrong grid mid-stream (PR #324). The funnel epilogue always passes a
-     * distinct intermediate. */
-    if (increment->data == target->data) {
-        PRINT_ERROR("%s: increment must not alias the target", what);
+/* [a, a + aBytes) and [b, b + bBytes) share a byte (uintptr_t compare; an
+ * empty range overlaps nothing). */
+static bool byteRangesOverlap(const void *a, size_t aBytes, const void *b, size_t bBytes) {
+    if (a == NULL || b == NULL || aBytes == 0 || bBytes == 0) {
+        return false;
+    }
+    const uintptr_t a0 = (uintptr_t)a;
+    const uintptr_t b0 = (uintptr_t)b;
+    return a0 < b0 + bBytes && b0 < a0 + aBytes;
+}
+
+/* A tensor's exponent side table: BFP one u8 per group, BFP_RAW one int16
+ * per group; every other dtype has none here. */
+static void exponentStorageOf(const tensor_t *t, const void **base, size_t *bytes) {
+    *base = NULL;
+    *bytes = 0;
+    if (t->quantization->type == BFP) {
+        const bfpQConfig_t *qc = t->quantization->qConfig;
+        *base = qc->exponents;
+        *bytes = qc->numGroups * sizeof(uint8_t);
+    } else if (t->quantization->type == BFP_RAW) {
+        const bfpRawQConfig_t *qc = t->quantization->qConfig;
+        *base = qc->exponents;
+        *bytes = qc->numGroups * sizeof(int16_t);
+    }
+}
+
+/* The in-place engines rewrite the updated tensor's packed payload chunk by
+ * chunk and publish its group exponents as each group finishes, while still
+ * reading the other operand: ANY shared byte between what they write
+ * (payload, exponents) and what they read (the other operand's payload and
+ * exponents) would feed rewritten bytes back in -- not only pointer identity
+ * (a payload one byte in, an exponent array sharing its first byte). Fails
+ * fast naming the two regions. */
+static void rejectOverlappingOperands(const tensor_t *updated, const tensor_t *readOnly,
+                                      const char *role, const char *what) {
+    if (readOnly->data == updated->data) {
+        PRINT_ERROR("%s: the %s must not alias the updated tensor", what, role);
         exit(1);
     }
+    const size_t nU = calcNumberOfElementsByTensor((tensor_t *)updated);
+    const size_t nR = calcNumberOfElementsByTensor((tensor_t *)readOnly);
+    const size_t payU = calcNumberOfBytesForData(updated->quantization, nU);
+    const size_t payR = calcNumberOfBytesForData(readOnly->quantization, nR);
+    const void *expU;
+    const void *expR;
+    size_t expUBytes;
+    size_t expRBytes;
+    exponentStorageOf(updated, &expU, &expUBytes);
+    exponentStorageOf(readOnly, &expR, &expRBytes);
+    const char *clash = NULL;
+    if (byteRangesOverlap(updated->data, payU, readOnly->data, payR)) {
+        clash = "payload overlaps the updated tensor's payload";
+    } else if (byteRangesOverlap(expU, expUBytes, expR, expRBytes)) {
+        clash = "exponents overlap the updated tensor's exponents";
+    } else if (byteRangesOverlap(updated->data, payU, expR, expRBytes)) {
+        clash = "exponents overlap the updated tensor's payload";
+    } else if (byteRangesOverlap(expU, expUBytes, readOnly->data, payR)) {
+        clash = "payload overlaps the updated tensor's exponents";
+    }
+    if (clash != NULL) {
+        PRINT_ERROR("%s: the %s's %s -- the in-place engine would read bytes it already "
+                    "rewrote; the operands need disjoint storage",
+                    what, role, clash);
+        exit(1);
+    }
+}
+
+static void rejectAliasedIncrement(const tensor_t *target, const tensor_t *increment,
+                                   const char *what) {
+    /* The rescale engines rewrite the target's grid between phase A and
+     * phase B (PR #324), and every engine packs the target chunk by chunk:
+     * an increment sharing any byte of the target's storage would be decoded
+     * from rewritten bytes mid-stream. The funnel epilogue always passes a
+     * distinct intermediate. */
+    rejectOverlappingOperands(target, increment, "increment", what);
 }
 
 static void incSrcChunk(const incSrc_t *src, size_t off, size_t count, float *out) {
@@ -2413,6 +2710,679 @@ void scaleBfpTensorInPlace(tensor_t *t, float factor, rngStream_t *rs) {
     bfpRescaleWalk(t, NULL, factor, n, "scaleBfpTensorInPlace", rs);
 }
 
+/* ---- Integer dynamic-rescale accumulate: BFP += BFP_RAW (arithmetic-bfp.md §15) ----
+ * Contract: TensorConversion.h, accumulateBfpRawIntoBfpRescale. Per target
+ * group g, with E_o = the old stored exponent - bias and E_r = rawE[g]:
+ *   pass 0: A_o, A_r = absmax of the old codes and of the raw mantissas;
+ *           E_c = max(E_o + bitlen(A_o), E_r + bitlen(A_r)) - 30, capped at
+ *           capE (a zero side has no top). Every aligned term is then below
+ *           2^30 on the grid 2^E_c, so their sum fits int32 -- the addition
+ *           bound, re-established on every call from the actual data.
+ *   pass 1: the sum per element on 2^E_c in quotient/remainder form (exact:
+ *           the term that sets E_c drops at most 2 bits, so at most one term
+ *           is sticky), rounded UP to the grid; the group absmax of those
+ *           gives the exponent by the integer rule, max'ed with E_c. Since
+ *           qMax * 2^E is a grid multiple for E >= E_c, the rounded-up
+ *           magnitude decides exactly like the exact sum would: E_d is the
+ *           exact rule's exponent of the true sum, floored at E_c, then the
+ *           D6 clamp. An all-zero sum (both sides zero, or exact
+ *           cancellation) is the zero state.
+ *   pass 2: per element the same exact sum, re-gridded E_d - E_c >= 0 steps
+ *           and rounded once by the target's mode (bfpQrRound), one draw per
+ *           element in element order under SR on every path; the fresh
+ *           exponent is published after the group's last element is read.
+ * Cap regime: E_c is capped at capE (= the largest stored exponent - bias),
+ * so E_d = E_c. The old term stays below 2^15 there (E_o <= capE), so a raw
+ * term at or beyond 2^30 on the grid -- the only one that could overflow --
+ * saturates the element with the raw's sign, exactly: |sum| > 2^30 - 2^15.
+ * Passes 0 and 1 run one group boundary ahead of pass 2, the window rule of
+ * bfpRescaleWalk (#421 U6), so qc->exponents keeps the OLD grid for every
+ * group pass 2 has not finished, and the per-group state lives in two fixed
+ * rings of ODT_RESCALE_FRESH_WINDOW slots. */
+#define BFP_INT_ACC_ZERO_GROUP INT32_MIN /* workE marker: every sum of the group is 0 */
+
+/* The raw term reaches 2^30 on the working grid, shifted left or unshifted --
+ * possible only in the cap regime (outside it, E_c >= E_r + bitlen(A_r) - 30). */
+static inline bool bfpRawTermSaturates(int32_t r, int kr) {
+    if (kr > 0 || r == 0) {
+        return false;
+    }
+    const unsigned l = (unsigned)(-kr);
+    if (l >= 30u) {
+        return true;
+    }
+    const uint32_t mag = r < 0 ? 0u - (uint32_t)r : (uint32_t)r;
+    return mag >= (1u << (30u - l));
+}
+
+/* Passes 0 and 1 over [from, to): whole groups only (both ends are group
+ * boundaries or n), reads only. Reads restart at the 8-aligned offset below
+ * `from` (the unpack's byte-alignment contract); re-read elements are never
+ * re-absorbed. `mant` is the caller's chunk buffer (ODT_CONVERSION_CHUNK_ELEMS
+ * entries), borrowed: the scan runs before the emit unpacks into it. */
+static void bfpIntAccScan(const bfpQConfig_t *qc, const uint8_t *data, const int32_t *raw,
+                          const int16_t *rawE, size_t from, size_t to, size_t gsz, int cap,
+                          int32_t *workE, uint8_t *fresh, int32_t *mant) {
+    const int32_t bias = bfpExponentBias(qc);
+    const int capE = cap - (int)bias;
+    for (int pass = 0; pass < 2; pass++) {
+        size_t g = from / gsz; /* once per call; runs advance a cursor */
+        size_t gEnd = (g + 1) * gsz;
+        size_t slot = g % ODT_RESCALE_FRESH_WINDOW;
+        uint32_t ao = 0;
+        uint32_t ar = 0;
+        size_t pos = from;
+        while (pos < to) {
+            const size_t start = pos & ~(size_t)7;
+            const size_t take =
+                to - start < ODT_CONVERSION_CHUNK_ELEMS ? to - start : ODT_CONVERSION_CHUNK_ELEMS;
+            unpackSignExtendChunk(data, qc->mantissaBits, start, take, mant);
+            const size_t segEnd = start + take;
+            while (pos < segEnd) {
+                const size_t runEnd = gEnd < segEnd ? gEnd : segEnd;
+                const int eo = (int)qc->exponents[g] - (int)bias;
+                if (pass == 0) {
+                    for (size_t i = pos; i < runEnd; i++) {
+                        const int32_t o = mant[i - start];
+                        const uint32_t mo = o < 0 ? 0u - (uint32_t)o : (uint32_t)o;
+                        const uint32_t mr = raw[i] < 0 ? 0u - (uint32_t)raw[i] : (uint32_t)raw[i];
+                        ao = mo > ao ? mo : ao;
+                        ar = mr > ar ? mr : ar;
+                    }
+                    if (runEnd == gEnd) {
+                        if (ao == 0 && ar == 0) {
+                            workE[slot] = BFP_INT_ACC_ZERO_GROUP;
+                        } else {
+                            const int topOld = ao ? eo + (int)bfpBitLength32(ao) : INT32_MIN;
+                            const int topRaw =
+                                ar ? (int)rawE[g] + (int)bfpBitLength32(ar) : INT32_MIN;
+                            int ec = (topOld > topRaw ? topOld : topRaw) - 30;
+                            workE[slot] = ec > capE ? capE : ec;
+                        }
+                        ao = 0;
+                        ar = 0;
+                    }
+                } else if (workE[slot] != BFP_INT_ACC_ZERO_GROUP) {
+                    const int ec = workE[slot];
+                    const int ko = ec - eo;
+                    const int kr = ec - (int)rawE[g];
+                    for (size_t i = pos; i < runEnd; i++) {
+                        uint32_t mag;
+                        if (bfpRawTermSaturates(raw[i], kr)) {
+                            mag = UINT32_MAX; /* forces the cap, E_d = E_c = capE */
+                        } else {
+                            mag = bfpQrCeilMagnitude(bfpQrAdd(bfpQrOfTerm(mant[i - start], ko),
+                                                              bfpQrOfTerm(raw[i], kr)));
+                        }
+                        ao = mag > ao ? mag : ao; /* pass 1 reuses ao as the sum's absmax */
+                    }
+                    if (runEnd == gEnd) {
+                        if (ao == 0) {
+                            workE[slot] = BFP_INT_ACC_ZERO_GROUP; /* exact cancellation */
+                            fresh[slot] = (uint8_t)bias;
+                        } else {
+                            int stored =
+                                deriveBfpRawStoredExponent(ao, ec, qc->mantissaBits, bias, cap);
+                            if (stored < ec + (int)bias) {
+                                stored =
+                                    ec + (int)bias; /* E_d >= E_c; ec <= capE keeps it <= cap */
+                            }
+                            fresh[slot] = (uint8_t)stored;
+                        }
+                        ao = 0;
+                    }
+                } else if (runEnd == gEnd) {
+                    fresh[slot] = (uint8_t)bias; /* zero group: zero state */
+                }
+                if (runEnd == gEnd) {
+                    g++;
+                    gEnd += gsz;
+                    slot = slot + 1 == ODT_RESCALE_FRESH_WINDOW ? 0 : slot + 1;
+                }
+                pos = runEnd;
+            }
+        }
+    }
+}
+
+void accumulateBfpRawIntoBfpRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs) {
+    const char *what = "accumulateBfpRawIntoBfpRescale";
+    if (target->quantization->type != BFP || increment->quantization->type != BFP_RAW) {
+        PRINT_ERROR("%s: needs a BFP target and a BFP_RAW increment, got %s and %s", what,
+                    quantTypeToString(target->quantization->type),
+                    quantTypeToString(increment->quantization->type));
+        exit(1);
+    }
+    const size_t n = calcNumberOfElementsByTensor(target);
+    if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
+        PRINT_ERROR("%s: element-count mismatch", what);
+        exit(1);
+    }
+    rejectAliasedIncrement(target, increment, what);
+    bfpQConfig_t *qc = target->quantization->qConfig;
+    const bfpRawQConfig_t *rawQC = increment->quantization->qConfig;
+    validateBfpQConfigShape(qc, n);
+    validateBfpRawQConfigShape(rawQC, n, what);
+    if (rawQC->numGroups != qc->numGroups || rawQC->groupSize != qc->groupSize) {
+        PRINT_ERROR("%s: raw geometry {numGroups=%zu, groupSize=%zu} must equal the target's "
+                    "{%zu, %zu} (one raw exponent per TARGET group)",
+                    what, rawQC->numGroups, rawQC->groupSize, qc->numGroups, qc->groupSize);
+        exit(1);
+    }
+    if (n == 0) {
+        resetBfpGridToZeroState(qc); /* R7 */
+        return;
+    }
+    const roundingMode_t rm = qc->roundingMode;
+    if (rm == SR_HALF_AWAY && rs == NULL) {
+        PRINT_ERROR("%s: SR rounding without a stream", what);
+        exit(1);
+    }
+    const int32_t *raw = (const int32_t *)increment->data;
+    const int16_t *rawE = rawQC->exponents;
+    const int32_t bias = bfpExponentBias(qc);
+    int cap = (int)((1u << qc->exponentBits) - 1u);
+    if (cap > (int)bias + 127) {
+        cap = (int)bias + 127; /* largest stored exponent with a finite float scale */
+    }
+    const uint8_t m = qc->mantissaBits;
+    const uint32_t posCap = (1u << (m - 1)) - 1u;
+    const uint32_t negCap = 1u << (m - 1);
+    const size_t gsz = qc->groupSize == 0 ? n : qc->groupSize;
+    int32_t workE[ODT_RESCALE_FRESH_WINDOW];
+    uint8_t fresh[ODT_RESCALE_FRESH_WINDOW];
+    int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
+    int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
+    size_t scanned = 0;
+    size_t g = 0; /* emit cursor: group, its end, its ring slot -- no division per run */
+    size_t groupEnd = gsz;
+    size_t slot = 0;
+
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        const size_t count =
+            n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        const size_t chunkEnd = off + count;
+        size_t needed = ((chunkEnd - 1) / gsz + 1) * gsz;
+        if (needed > n) {
+            needed = n;
+        }
+        if (scanned < needed) {
+            bfpIntAccScan(qc, target->data, raw, rawE, scanned, needed, gsz, cap, workE, fresh,
+                          mant);
+            scanned = needed;
+        }
+        unpackSignExtendChunk(target->data, m, off, count, mant);
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            const size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            const int ec = workE[slot];
+            const uint8_t freshStored = fresh[slot];
+            if (ec == BFP_INT_ACC_ZERO_GROUP) {
+                for (size_t i = idx; i < runEnd; i++) {
+                    if (rm == SR_HALF_AWAY) {
+                        (void)rngNextU32(rs); /* exact zero: the draw is still consumed */
+                    }
+                    codes[i - off] = 0;
+                }
+            } else {
+                const int ko = ec - ((int)qc->exponents[g] - (int)bias); /* OLD, unpublished */
+                const int kr = ec - (int)rawE[g];
+                const unsigned kd = (unsigned)((int)freshStored - (int)bias - ec);
+                for (size_t i = idx; i < runEnd; i++) {
+                    const uint32_t u = rm == SR_HALF_AWAY ? rngNextU32(rs) : 0u;
+                    if (bfpRawTermSaturates(raw[i], kr)) {
+                        codes[i - off] = raw[i] < 0 ? -(int32_t)negCap : (int32_t)posCap;
+                    } else {
+                        codes[i - off] = bfpAddAndRound(mant[i - off], ko, raw[i], kr, kd, rm, u,
+                                                        posCap, negCap);
+                    }
+                }
+            }
+            if (runEnd == groupEnd) {
+                qc->exponents[g] = freshStored; /* every read of the old grid is done */
+                g++;
+                groupEnd += gsz;
+                slot = slot + 1 == ODT_RESCALE_FRESH_WINDOW ? 0 : slot + 1;
+            }
+            idx = runEnd;
+        }
+        packChunkGuarded(codes, count, target->data, m, off, what);
+    }
+}
+
+/* ---- Integer in-place scale by s in (0, 1] (arithmetic-bfp.md §15.6) ----
+ * Contract: TensorConversion.h, scaleBfpTensorByScalarInPlace. The scan
+ * (absmax per group -> fresh exponent and emit shift) runs one group
+ * boundary ahead of the emit, the window rule of the rescale engines, so the
+ * per-group state lives in two fixed rings and qc->exponents keeps the OLD
+ * exponent of every group the emit has not finished. */
+#define BFP_SCALE_KEEP (-1) /* emit shift marker: codes unchanged (exact power of two, or zero) */
+
+static void bfpScaleScan(const bfpQConfig_t *qc, const uint8_t *data, size_t from, size_t to,
+                         size_t gsz, bfpScalar_t s, int cap, int32_t *shift, uint8_t *fresh,
+                         int32_t *mant) {
+    const int32_t bias = bfpExponentBias(qc);
+    size_t g = from / gsz; /* once per call; runs advance a cursor */
+    size_t gEnd = (g + 1) * gsz;
+    size_t slot = g % ODT_RESCALE_FRESH_WINDOW;
+    uint32_t a = 0;
+    size_t pos = from;
+    while (pos < to) {
+        const size_t start = pos & ~(size_t)7;
+        const size_t take =
+            to - start < ODT_CONVERSION_CHUNK_ELEMS ? to - start : ODT_CONVERSION_CHUNK_ELEMS;
+        unpackSignExtendChunk(data, qc->mantissaBits, start, take, mant);
+        const size_t segEnd = start + take;
+        while (pos < segEnd) {
+            const size_t runEnd = gEnd < segEnd ? gEnd : segEnd;
+            for (size_t i = pos; i < runEnd; i++) {
+                const int32_t c = mant[i - start];
+                const uint32_t mag = c < 0 ? 0u - (uint32_t)c : (uint32_t)c;
+                a = mag > a ? mag : a;
+            }
+            if (runEnd == gEnd) {
+                if (a == 0) {
+                    fresh[slot] = (uint8_t)bias; /* zero state; codes are already 0 */
+                    shift[slot] = BFP_SCALE_KEEP;
+                } else {
+                    /* code * q on the grid 2^(E + e); q * A <= 2^30 - 2^15 */
+                    const int rawE = (int)qc->exponents[g] - (int)bias + (int)s.e;
+                    const uint8_t stored = deriveBfpRawStoredExponent(a * (uint32_t)s.q, rawE,
+                                                                      qc->mantissaBits, bias, cap);
+                    const int32_t d = (int32_t)stored - bias - rawE; /* >= 0, see contract */
+                    fresh[slot] = stored;
+                    shift[slot] = (s.q == 16384 && d == 14) ? BFP_SCALE_KEEP : d;
+                }
+                a = 0;
+                g++;
+                gEnd += gsz;
+                slot = slot + 1 == ODT_RESCALE_FRESH_WINDOW ? 0 : slot + 1;
+            }
+            pos = runEnd;
+        }
+    }
+}
+
+void scaleBfpTensorByScalarInPlace(tensor_t *t, bfpScalar_t s, rngStream_t *rs) {
+    const char *what = "scaleBfpTensorByScalarInPlace";
+    if (t->quantization->type != BFP) {
+        PRINT_ERROR("%s: needs a BFP tensor, got %s", what,
+                    quantTypeToString(t->quantization->type));
+        exit(1);
+    }
+    /* normalized and in (0, 1]: q * 2^e <= 1 iff e <= -15, or e == -14 at q == 2^14 */
+    if (s.q < 16384 || s.q > 32767 || s.e > -14 || (s.e == -14 && s.q != 16384)) {
+        PRINT_ERROR("%s: scalar {q=%d, e=%d} is not a normalized factor in (0, 1]", what, (int)s.q,
+                    (int)s.e);
+        exit(1);
+    }
+    bfpQConfig_t *qc = t->quantization->qConfig;
+    const size_t n = calcNumberOfElementsByTensor(t);
+    validateBfpQConfigShape(qc, n);
+    if (n == 0) {
+        resetBfpGridToZeroState(qc); /* R7 */
+        return;
+    }
+    const roundingMode_t rm = qc->roundingMode;
+    if (rm == SR_HALF_AWAY && rs == NULL) {
+        PRINT_ERROR("%s: SR rounding without a stream", what);
+        exit(1);
+    }
+    const int32_t bias = bfpExponentBias(qc);
+    int cap = (int)((1u << qc->exponentBits) - 1u);
+    if (cap > (int)bias + 127) {
+        cap = (int)bias + 127; /* largest stored exponent with a finite float scale */
+    }
+    const uint8_t m = qc->mantissaBits;
+    const uint32_t posCap = (1u << (m - 1)) - 1u;
+    const uint32_t negCap = 1u << (m - 1);
+    const size_t gsz = qc->groupSize == 0 ? n : qc->groupSize;
+    int32_t shift[ODT_RESCALE_FRESH_WINDOW];
+    uint8_t fresh[ODT_RESCALE_FRESH_WINDOW];
+    int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
+    size_t scanned = 0;
+    size_t g = 0; /* emit cursor: group, its end, its ring slot -- no division per run */
+    size_t groupEnd = gsz;
+    size_t slot = 0;
+
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        const size_t count =
+            n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        const size_t chunkEnd = off + count;
+        size_t needed = ((chunkEnd - 1) / gsz + 1) * gsz;
+        if (needed > n) {
+            needed = n;
+        }
+        if (scanned < needed) {
+            bfpScaleScan(qc, t->data, scanned, needed, gsz, s, cap, shift, fresh, mant);
+            scanned = needed;
+        }
+        bool unpacked = false; /* a chunk of unchanged groups is neither read nor written */
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            const size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            const int32_t d = shift[slot];
+            if (d != BFP_SCALE_KEEP) {
+                if (!unpacked) {
+                    unpackSignExtendChunk(t->data, m, off, count, mant);
+                    unpacked = true;
+                }
+                for (size_t i = idx; i < runEnd; i++) {
+                    const uint32_t u = rm == SR_HALF_AWAY ? rngNextU32(rs) : 0u;
+                    mant[i - off] = bfpQrRound(bfpQrOfTerm(bfpScalarMulMant(mant[i - off], s), d),
+                                               rm, u, posCap, negCap);
+                }
+            }
+            if (runEnd == groupEnd) {
+                qc->exponents[g] = fresh[slot]; /* every read of the old grid is done */
+                g++;
+                groupEnd += gsz;
+                slot = slot + 1 == ODT_RESCALE_FRESH_WINDOW ? 0 : slot + 1;
+            }
+            idx = runEnd;
+        }
+        if (unpacked) {
+            packChunkGuarded(mant, count, t->data, m, off, what);
+        }
+    }
+}
+
+/* ---- Integer scaled sum in place: t' = a * t + b * s (arithmetic-bfp.md §15.7) ----
+ * The engine behind the integer SGD momentum store (a = mu, b = 1) and
+ * parameter update (a = 1, b = -lr); contracts in TensorConversion.h. The
+ * accumulate engine's three passes, each operand under its OWN exponent: the
+ * in-place target contributes t_i * a.q (< 2^30, on 2^(E_t + a.e)), the
+ * read-only source s_i * b.q (< 2^30, on 2^(E_s + b.e)). The source is
+ * per-tensor (its one exponent for every target group, sStep = 0) or in the
+ * target's geometry (sStep = 1). Per target group:
+ *   pass 0: A_t, A_s; E_c = max(E_t + a.e + bitlen(a.q * A_t),
+ *           E_s + b.e + bitlen(|b.q| * A_s)) - 30, capped at capE. The term
+ *           that sets E_c is then exact on the grid (shift <= 0), so at most
+ *           one term carries a tail.
+ *   pass 1: absmax of the exact sums rounded UP to the grid -> the integer
+ *           exponent rule, floored at E_c, D6 clamp (the accumulate engine's
+ *           exactness argument verbatim).
+ *   pass 2: the same exact sum re-gridded and rounded once by the caller's
+ *           mode, one draw per element in element order on every path.
+ * Cap regime: only the source can push E_c past capE (E_t <= capE and a <= 1,
+ * so a.e <= -14, keep the target's term below 2^16 on the capped grid), and
+ * a source term reaching 2^30 there -- possible only for a left shift, k_s <
+ * 0 -- saturates its element with that term's sign, exactly.
+ * Passes 0 and 1 run one group boundary ahead of pass 2 (the window rule),
+ * so the target's exponents stay OLD for every group not yet emitted. */
+static void bfpScaledSumScan(const bfpQConfig_t *tqc, const uint8_t *tData, bfpScalar_t a,
+                             const bfpQConfig_t *sqc, const uint8_t *sData, bfpScalar_t b,
+                             size_t sStep, size_t from, size_t to, size_t gsz, int cap,
+                             int32_t *workE, uint8_t *fresh, int32_t *tm, int32_t *sm) {
+    const int32_t biasT = bfpExponentBias(tqc);
+    const int32_t biasS = bfpExponentBias(sqc);
+    const int capE = cap - (int)biasT;
+    const uint32_t qa = (uint32_t)a.q;                                /* >= 0, validated */
+    const uint32_t qb = b.q < 0 ? 0u - (uint32_t)b.q : (uint32_t)b.q; /* |b.q| */
+    for (int pass = 0; pass < 2; pass++) {
+        size_t g = from / gsz; /* once per call; runs advance a cursor */
+        size_t gEnd = (g + 1) * gsz;
+        size_t slot = g % ODT_RESCALE_FRESH_WINDOW;
+        uint32_t at = 0;
+        uint32_t as = 0;
+        size_t pos = from;
+        while (pos < to) {
+            const size_t start = pos & ~(size_t)7;
+            const size_t take =
+                to - start < ODT_CONVERSION_CHUNK_ELEMS ? to - start : ODT_CONVERSION_CHUNK_ELEMS;
+            unpackSignExtendChunk(tData, tqc->mantissaBits, start, take, tm);
+            unpackSignExtendChunk(sData, sqc->mantissaBits, start, take, sm);
+            const size_t segEnd = start + take;
+            while (pos < segEnd) {
+                const size_t runEnd = gEnd < segEnd ? gEnd : segEnd;
+                const int et = (int)tqc->exponents[g] - (int)biasT + (int)a.e;
+                const int es = (int)sqc->exponents[g * sStep] - (int)biasS + (int)b.e;
+                if (pass == 0) {
+                    for (size_t i = pos; i < runEnd; i++) {
+                        const int32_t x = tm[i - start];
+                        const int32_t y = sm[i - start];
+                        const uint32_t mx = x < 0 ? 0u - (uint32_t)x : (uint32_t)x;
+                        const uint32_t my = y < 0 ? 0u - (uint32_t)y : (uint32_t)y;
+                        at = mx > at ? mx : at;
+                        as = my > as ? my : as;
+                    }
+                    if (runEnd == gEnd) {
+                        const uint32_t atq = at * qa; /* <= 2^15 * (2^15 - 1) */
+                        const uint32_t asq = as * qb;
+                        if (atq == 0 && asq == 0) {
+                            workE[slot] = BFP_INT_ACC_ZERO_GROUP;
+                        } else {
+                            const int topT = atq ? et + (int)bfpBitLength32(atq) : INT32_MIN;
+                            const int topS = asq ? es + (int)bfpBitLength32(asq) : INT32_MIN;
+                            const int ec = (topT > topS ? topT : topS) - 30;
+                            workE[slot] = ec > capE ? capE : ec;
+                        }
+                        at = 0;
+                        as = 0;
+                    }
+                } else if (workE[slot] != BFP_INT_ACC_ZERO_GROUP) {
+                    const int ec = workE[slot];
+                    const int kt = ec - et;
+                    const int ks = ec - es;
+                    for (size_t i = pos; i < runEnd; i++) {
+                        const int32_t ys = bfpScalarMulMant(sm[i - start], b);
+                        uint32_t mag;
+                        if (bfpRawTermSaturates(ys, ks)) {
+                            mag = UINT32_MAX; /* forces the cap, E_d = E_c = capE */
+                        } else {
+                            mag = bfpQrCeilMagnitude(
+                                bfpQrAdd(bfpQrOfTerm(bfpScalarMulMant(tm[i - start], a), kt),
+                                         bfpQrOfTerm(ys, ks)));
+                        }
+                        at = mag > at ? mag : at; /* pass 1 reuses at as the sum's absmax */
+                    }
+                    if (runEnd == gEnd) {
+                        if (at == 0) {
+                            workE[slot] = BFP_INT_ACC_ZERO_GROUP; /* exact cancellation */
+                            fresh[slot] = (uint8_t)biasT;
+                        } else {
+                            int stored =
+                                deriveBfpRawStoredExponent(at, ec, tqc->mantissaBits, biasT, cap);
+                            if (stored < ec + (int)biasT) {
+                                stored = ec + (int)biasT; /* E_d >= E_c; ec <= capE */
+                            }
+                            fresh[slot] = (uint8_t)stored;
+                        }
+                        at = 0;
+                    }
+                } else if (runEnd == gEnd) {
+                    fresh[slot] = (uint8_t)biasT; /* zero group: zero state */
+                }
+                if (runEnd == gEnd) {
+                    g++;
+                    gEnd += gsz;
+                    slot = slot + 1 == ODT_RESCALE_FRESH_WINDOW ? 0 : slot + 1;
+                }
+                pos = runEnd;
+            }
+        }
+    }
+}
+
+/* Pass 2 over one run of one group, codes written back into tm: the hot
+ * element loop in its own small frame (the chunk buffers and rings live in
+ * the caller's), see BFP_WALK_NOINLINE. A source term (< 2^30 before the
+ * shift) can reach 2^30 only when shifted left, so the saturation test runs
+ * only for ks < 0. */
+BFP_WALK_NOINLINE void bfpScaledSumEmitRun(int32_t *tm, const int32_t *sm, size_t len,
+                                           bfpScalar_t a, bfpScalar_t b, int kt, int ks,
+                                           unsigned kd, roundingMode_t rm, rngStream_t *rs,
+                                           uint32_t posCap, uint32_t negCap) {
+    if (ks < 0) {
+        for (size_t i = 0; i < len; i++) {
+            const uint32_t u = rm == SR_HALF_AWAY ? rngNextU32(rs) : 0u;
+            const int32_t ys = bfpScalarMulMant(sm[i], b);
+            if (bfpRawTermSaturates(ys, ks)) {
+                tm[i] = ys < 0 ? -(int32_t)negCap : (int32_t)posCap;
+            } else {
+                tm[i] = bfpAddAndRound(bfpScalarMulMant(tm[i], a), kt, ys, ks, kd, rm, u, posCap,
+                                       negCap);
+            }
+        }
+        return;
+    }
+    for (size_t i = 0; i < len; i++) {
+        const uint32_t u = rm == SR_HALF_AWAY ? rngNextU32(rs) : 0u;
+        tm[i] = bfpAddAndRound(bfpScalarMulMant(tm[i], a), kt, bfpScalarMulMant(sm[i], b), ks, kd,
+                               rm, u, posCap, negCap);
+    }
+}
+
+/* b normalized, any sign and exponent: zero, or 2^14 <= |q| <= 2^15 - 1 --
+ * in particular |q| <= 2^15 - 1, so -q never overflows. */
+static void requireNormalizedSignedScalar(bfpScalar_t b, const char *what, const char *role) {
+    const bool bZero = b.q == 0 && b.e == 0;
+    if (!bZero && ((b.q < 16384 && b.q > -16384) || b.q > 32767 || b.q < -32767)) {
+        PRINT_ERROR("%s: %s {q=%ld, e=%d} is not a normalized coefficient", what, role, (long)b.q,
+                    (int)b.e);
+        exit(1);
+    }
+}
+
+/* t' = a * t + b * s in place (the block comment above). Fails fast on
+ * everything the engine does not implement: non-BFP operands, element-count
+ * or geometry mismatch, mantissa width > 16, a source sharing any byte of the
+ * target's payload or exponents, `a` not normalized or outside [0, 1], `b` not normalized, a
+ * rounding mode other than HALF_AWAY / SR_HALF_AWAY, SR without a stream. */
+static void bfpScaledSumInPlace(tensor_t *t, bfpScalar_t a, const tensor_t *s, bfpScalar_t b,
+                                roundingMode_t rm, rngStream_t *rs, const char *what) {
+    if (t->quantization->type != BFP || s->quantization->type != BFP) {
+        PRINT_ERROR("%s: needs BFP operands, got %s and %s", what,
+                    quantTypeToString(t->quantization->type),
+                    quantTypeToString(s->quantization->type));
+        exit(1);
+    }
+    const size_t n = calcNumberOfElementsByTensor(t);
+    if (calcNumberOfElementsByTensor((tensor_t *)s) != n) {
+        PRINT_ERROR("%s: element-count mismatch", what);
+        exit(1);
+    }
+    rejectOverlappingOperands(t, s, "read-only operand", what);
+    bfpQConfig_t *tqc = t->quantization->qConfig;
+    const bfpQConfig_t *sqc = s->quantization->qConfig;
+    validateBfpQConfigShape(tqc, n);
+    validateBfpQConfigShape((bfpQConfig_t *)sqc, n);
+    /* the source's exponent of target group g is exponents[g * sStep]: its own
+     * group (same geometry) or its only one (per-tensor) */
+    size_t sStep = 1;
+    if (sqc->numGroups != tqc->numGroups || sqc->groupSize != tqc->groupSize) {
+        if (sqc->numGroups != 1) {
+            PRINT_ERROR("%s: read-only operand geometry {numGroups=%zu, groupSize=%zu} must be "
+                        "per-tensor or equal the updated operand's {%zu, %zu}",
+                        what, sqc->numGroups, sqc->groupSize, tqc->numGroups, tqc->groupSize);
+            exit(1);
+        }
+        sStep = 0;
+    }
+    if (tqc->mantissaBits > 16 || sqc->mantissaBits > 16) {
+        PRINT_ERROR("%s: mantissa widths %u / %u exceed 16 bits", what, (unsigned)tqc->mantissaBits,
+                    (unsigned)sqc->mantissaBits);
+        exit(1);
+    }
+    /* a normalized and in [0, 1]: zero, or q in [2^14, 2^15) with q * 2^e <= 1 */
+    const bool aZero = a.q == 0 && a.e == 0;
+    if (!aZero && (a.q < 16384 || a.q > 32767 || a.e > -14 || (a.e == -14 && a.q != 16384))) {
+        PRINT_ERROR("%s: scalar {q=%d, e=%d} is not a normalized coefficient in [0, 1]", what,
+                    (int)a.q, (int)a.e);
+        exit(1);
+    }
+    requireNormalizedSignedScalar(b, what, "scalar");
+    if (rm != HALF_AWAY && rm != SR_HALF_AWAY) {
+        PRINT_ERROR("%s: rounding mode %d unsupported (HALF_AWAY / SR_HALF_AWAY)", what, (int)rm);
+        exit(1);
+    }
+    if (n == 0) {
+        resetBfpGridToZeroState(tqc); /* R7 */
+        return;
+    }
+    if (rm == SR_HALF_AWAY && rs == NULL) {
+        PRINT_ERROR("%s: SR rounding without a stream", what);
+        exit(1);
+    }
+    const int32_t biasT = bfpExponentBias(tqc);
+    const int32_t biasS = bfpExponentBias(sqc);
+    int cap = (int)((1u << tqc->exponentBits) - 1u);
+    if (cap > (int)biasT + 127) {
+        cap = (int)biasT + 127; /* largest stored exponent with a finite float scale */
+    }
+    const uint8_t m = tqc->mantissaBits;
+    const uint32_t posCap = (1u << (m - 1)) - 1u;
+    const uint32_t negCap = 1u << (m - 1);
+    const size_t gsz = tqc->groupSize == 0 ? n : tqc->groupSize;
+    int32_t workE[ODT_RESCALE_FRESH_WINDOW];
+    uint8_t fresh[ODT_RESCALE_FRESH_WINDOW];
+    int32_t tm[ODT_CONVERSION_CHUNK_ELEMS];
+    int32_t sm[ODT_CONVERSION_CHUNK_ELEMS];
+    size_t scanned = 0;
+    size_t g = 0; /* emit cursor: group, its end, its ring slot -- no division per run */
+    size_t groupEnd = gsz;
+    size_t slot = 0;
+
+    for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
+        const size_t count =
+            n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
+        const size_t chunkEnd = off + count;
+        size_t needed = ((chunkEnd - 1) / gsz + 1) * gsz;
+        if (needed > n) {
+            needed = n;
+        }
+        if (scanned < needed) {
+            bfpScaledSumScan(tqc, t->data, a, sqc, s->data, b, sStep, scanned, needed, gsz, cap,
+                             workE, fresh, tm, sm);
+            scanned = needed;
+        }
+        unpackSignExtendChunk(t->data, m, off, count, tm);
+        unpackSignExtendChunk(s->data, sqc->mantissaBits, off, count, sm);
+        size_t idx = off;
+        while (idx < chunkEnd) {
+            const size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
+            const int ec = workE[slot];
+            if (ec == BFP_INT_ACC_ZERO_GROUP) {
+                for (size_t i = idx; i < runEnd; i++) {
+                    if (rm == SR_HALF_AWAY) {
+                        (void)rngNextU32(rs); /* exact zero: the draw is still consumed */
+                    }
+                    tm[i - off] = 0;
+                }
+            } else {
+                /* the target's OLD exponent: unpublished until this group is done */
+                const int et = (int)tqc->exponents[g] - (int)biasT + (int)a.e;
+                const int es = (int)sqc->exponents[g * sStep] - (int)biasS + (int)b.e;
+                const unsigned kd = (unsigned)((int)fresh[slot] - (int)biasT - ec);
+                bfpScaledSumEmitRun(&tm[idx - off], &sm[idx - off], runEnd - idx, a, b, ec - et,
+                                    ec - es, kd, rm, rs, posCap, negCap);
+            }
+            if (runEnd == groupEnd) {
+                tqc->exponents[g] = fresh[slot]; /* every read of the old grid is done */
+                g++;
+                groupEnd += gsz;
+                slot = slot + 1 == ODT_RESCALE_FRESH_WINDOW ? 0 : slot + 1;
+            }
+            idx = runEnd;
+        }
+        packChunkGuarded(tm, count, t->data, m, off, what);
+    }
+}
+
+void momentumStoreBfpInPlace(tensor_t *state, const tensor_t *grad, bfpScalar_t mu,
+                             roundingMode_t rm, rngStream_t *rs) {
+    bfpScaledSumInPlace(state, mu, grad, (bfpScalar_t){.q = 16384, .e = -14}, rm, rs,
+                        "momentumStoreBfpInPlace");
+}
+
+void paramUpdateBfpInPlace(tensor_t *param, const tensor_t *update, bfpScalar_t lr,
+                           roundingMode_t rm, rngStream_t *rs) {
+    /* validated BEFORE the negation: lr.q = INT32_MIN would overflow -lr.q */
+    requireNormalizedSignedScalar(lr, "paramUpdateBfpInPlace", "lr");
+    bfpScaledSumInPlace(param, (bfpScalar_t){.q = 16384, .e = -14}, update,
+                        (bfpScalar_t){.q = -lr.q, .e = lr.e}, rm, rs, "paramUpdateBfpInPlace");
+}
+
 /* SYM_INT32 -> SYM_INT32 grad accumulate: reproduces addSymInt32TensorsInplace's
  * Strategy-A semantics (dequant both -> float add -> fresh-absmax requant with
  * the TARGET's roundingMode) directly over the flat int32 mantissa arrays --
@@ -2482,61 +3452,85 @@ void accumulateTensorIntoFloat32Inplace(tensor_t *target, const tensor_t *increm
     }
 }
 
-_Static_assert(BFP + 1 == 7, "extend conversionMatrix when adding qtype_t entries");
+_Static_assert(BFP_RAW + 1 == 8, "extend conversionMatrix when adding qtype_t entries");
 
-conversionFunction_t conversionMatrix[7][7] = {
+/* BFP_RAW (the funnel's transient forward raw) has exactly two cells out --
+ * the integer re-block and the loss-facing dequant -- and none in. */
+conversionFunction_t conversionMatrix[8][8] = {
     [INT32] = {[INT32] = NULL,
                [FLOAT32] = convertInt32TensorToFloatTensor,
                [SYM_INT32] = convertInt32TensorToSymInt32Tensor,
                [SYM] = convertInt32TensorToSymTensor,
                [ASYM] = convertInt32TensorToAsymTensor,
                [BOOL] = unsupportedConversionTypes,
-               [BFP] = convertInt32TensorToBfpTensor},
+               [BFP] = convertInt32TensorToBfpTensor,
+               [BFP_RAW] = unsupportedConversionTypes},
     [FLOAT32] = {[INT32] = convertFloatTensorToInt32Tensor,
                  [FLOAT32] = NULL,
                  [SYM_INT32] = convertFloatTensorToSymInt32Tensor,
                  [SYM] = convertFloatTensorToSymTensor,
                  [ASYM] = convertFloatTensorToAsymTensor,
                  [BOOL] = unsupportedConversionTypes,
-                 [BFP] = convertFloatTensorToBfpTensor},
+                 [BFP] = convertFloatTensorToBfpTensor,
+                 [BFP_RAW] = unsupportedConversionTypes},
     [SYM_INT32] = {[INT32] = extractInt32TensorFromSymInt32Tensor,
                    [FLOAT32] = convertSymInt32TensorToFloat32Tensor,
                    [SYM_INT32] = requantSymInt32Tensor,
                    [SYM] = convertSymInt32TensorToSymTensor,
                    [ASYM] = convertSymInt32TensorToAsymTensor,
                    [BOOL] = unsupportedConversionTypes,
-                   [BFP] = convertSymInt32TensorToBfpTensor},
+                   [BFP] = convertSymInt32TensorToBfpTensor,
+                   [BFP_RAW] = unsupportedConversionTypes},
     [SYM] = {[INT32] = convertSymTensorToInt32Tensor,
              [FLOAT32] = convertSymTensorToFloat32Tensor,
              [SYM_INT32] = convertSymTensorToSymInt32Tensor,
              [SYM] = NULL,
              [ASYM] = convertSymTensorToAsymTensor,
              [BOOL] = unsupportedConversionTypes,
-             [BFP] = convertSymTensorToBfpTensor},
+             [BFP] = convertSymTensorToBfpTensor,
+             [BFP_RAW] = unsupportedConversionTypes},
     [ASYM] = {[INT32] = convertAsymTensorToInt32Tensor,
               [FLOAT32] = convertAsymTensorToFloatTensor,
               [SYM_INT32] = convertAsymTensorToSymInt32Tensor,
               [SYM] = convertAsymTensorToSymTensor,
               [ASYM] = NULL,
               [BOOL] = unsupportedConversionTypes,
-              [BFP] = convertAsymTensorToBfpTensor},
+              [BFP] = convertAsymTensorToBfpTensor,
+              [BFP_RAW] = unsupportedConversionTypes},
     [BOOL] = {[INT32] = unsupportedConversionTypes,
               [FLOAT32] = unsupportedConversionTypes,
               [SYM_INT32] = unsupportedConversionTypes,
               [SYM] = unsupportedConversionTypes,
               [ASYM] = unsupportedConversionTypes,
               [BOOL] = NULL,
-              [BFP] = unsupportedConversionTypes},
+              [BFP] = unsupportedConversionTypes,
+              [BFP_RAW] = unsupportedConversionTypes},
     [BFP] = {[INT32] = convertBfpTensorToInt32Tensor,
              [FLOAT32] = convertBfpTensorToFloat32Tensor,
              [SYM_INT32] = convertBfpTensorToSymInt32Tensor,
              [SYM] = convertBfpTensorToSymTensor,
              [ASYM] = convertBfpTensorToAsymTensor,
              [BOOL] = unsupportedConversionTypes,
-             [BFP] = requantBfpTensor}};
+             [BFP] = requantBfpTensor,
+             [BFP_RAW] = unsupportedConversionTypes},
+    [BFP_RAW] = {[INT32] = unsupportedConversionTypes,
+                 [FLOAT32] = convertBfpRawTensorToFloat32Tensor,
+                 [SYM_INT32] = unsupportedConversionTypes,
+                 [SYM] = unsupportedConversionTypes,
+                 [ASYM] = unsupportedConversionTypes,
+                 [BOOL] = unsupportedConversionTypes,
+                 [BFP] = reblockBfpRawTensor,
+                 [BFP_RAW] = NULL}};
 
 static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTensor,
                                        qtype_t qType) {
+    if (qType == BFP_RAW) {
+        /* A verbatim copy would carry the mantissas and drop the exponents;
+         * the raw is a transient funnel intermediate with no copy semantics. */
+        PRINT_ERROR("convertTensor: BFP_RAW -> BFP_RAW has no copy semantics -- the raw "
+                    "intermediate only re-blocks to BFP or dequantizes to FLOAT32");
+        exit(1);
+    }
     size_t inputBits = calcBitsPerElement(inputTensor->quantization);
     size_t outputBits = calcBitsPerElement(outputTensor->quantization);
     if (inputBits != outputBits) {

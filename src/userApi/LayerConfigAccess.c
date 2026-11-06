@@ -61,9 +61,67 @@ quantization_t *layerOutputQ(layer_t *layer) {
     }
 }
 
+static const char *headArithName(arithmeticType_t t) {
+    switch (t) {
+    case ARITH_FLOAT32:
+        return "ARITH_FLOAT32";
+    case ARITH_SYM_INT32:
+        return "ARITH_SYM_INT32";
+    case ARITH_BFP:
+        return "ARITH_BFP";
+    default:
+        return "?";
+    }
+}
+
+static bool headWireIs(const quantization_t *q, qtype_t t) {
+    return q != NULL && q->type == t;
+}
+
+bool crossEntropyHeadDeclaresBfp(const layer_t *last) {
+    if (last == NULL || last->type != SOFTMAX) {
+        return false;
+    }
+    const softmaxConfig_t *cfg = last->config->softmax;
+    return cfg->forwardMath.type == ARITH_BFP || cfg->propLossMath.type == ARITH_BFP ||
+           headWireIs(cfg->outputQ, BFP) || headWireIs(cfg->propLossQ, BFP);
+}
+
+void requireCrossEntropyHead(layer_t *last, const char *what) {
+    if (last == NULL || last->type != SOFTMAX) {
+        PRINT_ERROR("%s: CrossEntropy skips the last layer's backward (its gradient is the "
+                    "combined Softmax + CrossEntropy p - y), so the model must end in a SOFTMAX "
+                    "layer; got %s",
+                    what, last == NULL ? "an empty model" : "another layer type");
+        exit(1);
+    }
+    const softmaxConfig_t *cfg = last->config->softmax;
+    arithmeticType_t fwd = cfg->forwardMath.type;
+    arithmeticType_t bwd = cfg->propLossMath.type;
+    if (!crossEntropyHeadDeclaresBfp(last)) {
+        return;
+    }
+    bool bfpHead = fwd == ARITH_BFP && bwd == ARITH_BFP && headWireIs(cfg->outputQ, BFP) &&
+                   headWireIs(cfg->propLossQ, BFP);
+    bool floatHead = fwd == ARITH_FLOAT32 && bwd == ARITH_FLOAT32 &&
+                     headWireIs(cfg->outputQ, FLOAT32) && cfg->propLossQ != NULL;
+    if (!bfpHead && !floatHead) {
+        PRINT_ERROR("%s: the CrossEntropy head (the last Softmax: forwardMath %s, propLossMath %s, "
+                    "outputQ dtype %d, propLossQ dtype %d) is neither the bfp head (ARITH_BFP, "
+                    "ARITH_BFP, BFP, BFP: integer Softmax and integer p - y) nor the float head "
+                    "(ARITH_FLOAT32, ARITH_FLOAT32, FLOAT32, any loss-grad wire: float Softmax "
+                    "and p - y, one conversion onto the wire)",
+                    what, headArithName(fwd), headArithName(bwd),
+                    cfg->outputQ != NULL ? (int)cfg->outputQ->type : -1,
+                    cfg->propLossQ != NULL ? (int)cfg->propLossQ->type : -1);
+        exit(1);
+    }
+}
+
 /* Producer's declared backward config for the dx wire it emits (#221). NULL = no declared config
- * (Flatten) -> passthrough of the upstream dtype. The loss-grad seed also passes NULL (lossConfig_t
- * has no quantization field -> model-output dtype, as before). */
+ * (Flatten) -> passthrough of the upstream dtype. The loss-grad seed takes the last Softmax's
+ * propLossQ only under CrossEntropy with a BFP-declaring head (crossEntropyHeadDeclaresBfp, the
+ * remat wire table); otherwise it inherits the model output's dtype. */
 quantization_t *backwardWireQ(layer_t *layer) {
     switch (layer->type) {
     case LINEAR:

@@ -856,6 +856,15 @@ jobs:
             exit 1
           fi
 
+      - name: Assert cmake >= 3.25 (CMakePresets.json schema 6)
+        run: |
+          cmake --version | head -1
+          v=$(cmake --version | head -1 | awk '{print $3}')
+          if [ "$(printf '%s\n' 3.25 "$v" | sort -V | head -1)" != "3.25" ]; then
+            echo "::error::cmake on PATH is ${v}, need >= 3.25: CMakePresets.json uses schema version 6, which older cmake rejects before configuring."
+            exit 1
+          fi
+
       - name: Configure (arm_cross preset)
         run: |
           export PATH="$HOME/arm-gnu-toolchain/bin:$PATH"
@@ -896,6 +905,17 @@ jobs:
           major=$(arm-none-eabi-gcc -dumpversion | cut -d. -f1)
           if [ "$major" != "10" ]; then
             echo "::error::apt arm-none-eabi-gcc major is ${major}, expected 10 (the pre-C23 portability floor this job exists to guard). If the runner image bumped the package, re-pin the floor deliberately -- do not just widen this check."
+            exit 1
+          fi
+
+      # Ubuntu 22.04's apt cmake is 3.22, so this job needs a newer runner
+      # cmake winning PATH; fail fast with a clear message if it does not.
+      - name: Assert cmake >= 3.25 (CMakePresets.json schema 6)
+        run: |
+          cmake --version | head -1
+          v=$(cmake --version | head -1 | awk '{print $3}')
+          if [ "$(printf '%s\n' 3.25 "$v" | sort -V | head -1)" != "3.25" ]; then
+            echo "::error::cmake on PATH is ${v}, need >= 3.25: CMakePresets.json uses schema version 6, which older cmake rejects before configuring."
             exit 1
           fi
 
@@ -958,11 +978,19 @@ jobs:
             build/examples_memprofile/examples/har_classifier/train_c_har_classifier_adamw
           STAGE1_EPOCHS=1 STAGE2_EPOCHS=1 SEED=1 LOG_PATH=/tmp/wm_finetune.json \
             build/examples_memprofile/examples/har_classifier/train_c_har_classifier_finetune
-          EPOCHS=1 SEED=1 BFP_WEIGHT_BLOCK=32 BFP_WIRE_BLOCK=16 BFP_MANTISSA_BITS=6 BFP_EXPONENT_BITS=8 LOG_PATH=/tmp/wm_bfp.json \
+          EPOCHS=1 SEED=1 BFP_HEAD=bfp BFP_WEIGHT_BLOCK=32 BFP_WIRE_BLOCK=16 BFP_MANTISSA_BITS=6 BFP_EXPONENT_BITS=8 LOG_PATH=/tmp/wm_bfp.json \
             build/examples_memprofile/examples/har_classifier/train_c_har_classifier_bfp
+          # bfp8full, both heads: the full-integer training path behind the FULL gate.
+          # It trains on pre-converted BFP data: write it once (same data for both heads).
+          BFP_HEAD=bfp BFP_WEIGHT_BLOCK=channel BFP_WIRE_BLOCK=16 BFP_MANTISSA_BITS=8 BFP_EXPONENT_BITS=8 BFP_GRADS=1 BFP_STATE=1 \
+            build/examples_memprofile/examples/har_classifier/train_c_har_classifier_bfp --write-bfp-data
+          for head in float bfp; do
+            EPOCHS=1 SEED=1 BFP_HEAD=$head BFP_WEIGHT_BLOCK=channel BFP_WIRE_BLOCK=16 BFP_MANTISSA_BITS=8 BFP_EXPONENT_BITS=8 BFP_GRADS=1 BFP_STATE=1 LOG_PATH=/tmp/wm_bfp8full_$head.json \
+              build/examples_memprofile/examples/har_classifier/train_c_har_classifier_bfp
+          done
 
       - name: Check stack watermarks (report-only)
-        run: uv run examples/_shared/check_stack_watermark.py --platform linux /tmp/wm_float.json /tmp/wm_sym8.json /tmp/wm_adamw.json /tmp/wm_finetune.json /tmp/wm_bfp.json
+        run: uv run examples/_shared/check_stack_watermark.py --platform linux /tmp/wm_float.json /tmp/wm_sym8.json /tmp/wm_adamw.json /tmp/wm_finetune.json /tmp/wm_bfp.json /tmp/wm_bfp8full_float.json /tmp/wm_bfp8full_bfp.json
 
   python-test:
     needs: gate

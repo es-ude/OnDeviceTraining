@@ -65,11 +65,12 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
-from sym_gold import (assert_rounding_canary, bfp_quantize_grouped, check_exact_roundtrip,
-                      conv1d_bfp_ref, conv1d_bfp_dx_ref, conv1d_bfp_weight_grad_ref,
-                      conv_bfp_bias_grad_ref, convT1d_bfp_gather_ref, convT1d_bfp_dx_ref,
-                      convT1d_bfp_weight_grad_ref, emit_float_array, emit_int32_array,
-                      emit_int32_scalar, emit_uint8_array, matmul_bfp_ref)
+from sym_gold import (assert_rounding_canary, bfp_quantize_grouped, bfp_raw_dequant_f32,
+                      check_exact_roundtrip, conv1d_bfp_raw_ref, conv1d_bfp_dx_ref,
+                      conv1d_bfp_weight_grad_ref, conv_bfp_bias_grad_ref,
+                      convT1d_bfp_gather_ref, convT1d_bfp_dx_ref, convT1d_bfp_weight_grad_ref,
+                      emit_float_array, emit_int32_array, emit_int32_scalar, emit_uint8_array,
+                      linear_bfp_raw_ref, matmul_bfp_ref)
 
 # Weights' widths (PR2-Decision 1: the funnel stages FLOAT32 operands at these).
 # m=6 deliberately != 8 so the hardcode-m=8 mutation is observable.
@@ -346,21 +347,29 @@ def main() -> int:
     lx_codes, lx_exps, lx_qc = stage_per_tensor(LIN_X_VALUES, W_MANTISSA_BITS)
     lb_codes, lb_exps, lb_qc = stage_per_tensor(LIN_BIAS_VALUES, W_MANTISSA_BITS)
 
-    lin_no_bias = matmul_bfp_ref(lx_codes, lx_exps, lx_qc, lw_codes, lw_exps, lw_qc,
-                                 None, None, None, LIN_BATCH, LIN_OUT_FEATURES,
-                                 LIN_IN_FEATURES, b_transposed=True, self_check=False)
-    lin_with_bias = matmul_bfp_ref(lx_codes, lx_exps, lx_qc, lw_codes, lw_exps, lw_qc,
-                                   lb_codes, lb_exps, lb_qc, LIN_BATCH, LIN_OUT_FEATURES,
-                                   LIN_IN_FEATURES, b_transposed=True, self_check=False)
+    # Integer-only forward (arithmetic-bfp section 13): the FLOAT32 wire is the
+    # loss-facing dequant of the per-tensor BFP_RAW of the integer fold.
+    def lin_forward_wire(x_codes, x_exps, x_qc, w_exps, w_qc, b_codes, b_exps, b_qc):
+        raw = linear_bfp_raw_ref(x_codes, x_exps, x_qc, lw_codes, w_exps, w_qc, b_codes, b_exps,
+                                 b_qc, LIN_BATCH, LIN_OUT_FEATURES, LIN_IN_FEATURES,
+                                 raw_group_size=0)
+        return bfp_raw_dequant_f32(raw["mant"], raw["exps"], 0)
+
+    lin_no_bias = lin_forward_wire(lx_codes, lx_exps, lx_qc, lw_exps, lw_qc, None, None, None)
+    lin_with_bias = lin_forward_wire(lx_codes, lx_exps, lx_qc, lw_exps, lw_qc,
+                                     lb_codes, lb_exps, lb_qc)
 
     lx8_codes, lx8_exps, lx8_qc = stage_per_tensor(LIN_X_VALUES, 8)
-    lin_m8 = matmul_bfp_ref(lx8_codes, lx8_exps, lx8_qc, lw_codes, lw_exps, lw_qc,
-                            None, None, None, LIN_BATCH, LIN_OUT_FEATURES,
-                            LIN_IN_FEATURES, b_transposed=True, self_check=False)
-    lin_collapsed = matmul_bfp_ref(lx_codes, lx_exps, lx_qc, lw_codes, [lw_exps[0]],
-                                   {**lw_qc, "group_size": 0}, None, None, None,
-                                   LIN_BATCH, LIN_OUT_FEATURES, LIN_IN_FEATURES,
-                                   b_transposed=True, self_check=False)
+    lin_m8 = lin_forward_wire(lx8_codes, lx8_exps, lx8_qc, lw_exps, lw_qc, None, None, None)
+    lin_collapsed = lin_forward_wire(lx_codes, lx_exps, lx_qc, [lw_exps[0]],
+                                     {**lw_qc, "group_size": 0}, None, None, None)
+    # The old float fold, kept only as a check that the fixture still means
+    # what it did: on these values the integer fold is exact (every segment
+    # within -g binades of its row top), so both agree bit for bit.
+    lin_float = matmul_bfp_ref(lx_codes, lx_exps, lx_qc, lw_codes, lw_exps, lw_qc,
+                               lb_codes, lb_exps, lb_qc, LIN_BATCH, LIN_OUT_FEATURES,
+                               LIN_IN_FEATURES, b_transposed=True, self_check=False)
+    assert lin_float == lin_with_bias, "linear: integer fold differs from the exact float fold"
     check_fixture_strength("linear", lin_no_bias, lin_m8, lin_collapsed, lw_exps)
     assert all(w != n for w, n in zip(lin_with_bias, lin_no_bias)), (
         "linear: with-bias and no-bias expectations coincide somewhere -- bias "
@@ -371,22 +380,23 @@ def main() -> int:
                                                 CONV_W_GROUP_SIZE)
     cx_codes, cx_exps, cx_qc = stage_per_tensor(CONV_X_VALUES, W_MANTISSA_BITS)
 
-    conv_expected = conv1d_bfp_ref(cx_codes, cx_exps, cx_qc, cw_codes, cw_exps, cw_qc,
-                                   None, None, None, CONV_BATCH, CONV_IN_CHANNELS,
-                                   CONV_OUT_CHANNELS, CONV_KERNEL_SIZE, CONV_INPUT_LENGTH,
-                                   stride=CONV_STRIDE, self_check=False)
+    # Integer-only forward (arithmetic-bfp section 13): the layer's FLOAT32
+    # wire is the loss-facing dequant of the per-tensor BFP_RAW the funnel
+    # builds for a FLOAT32 target ({1,0}: one E_acc over the whole output).
+    def conv_forward_wire(x_codes, x_exps, x_qc, w_exps, w_qc):
+        raw = conv1d_bfp_raw_ref(x_codes, x_exps, x_qc, cw_codes, w_exps, w_qc,
+                                 None, None, None, CONV_BATCH, CONV_IN_CHANNELS,
+                                 CONV_OUT_CHANNELS, CONV_KERNEL_SIZE, CONV_INPUT_LENGTH,
+                                 stride=CONV_STRIDE, raw_group_size=0)
+        return bfp_raw_dequant_f32(raw["mant"], raw["exps"], 0)
+
+    conv_expected = conv_forward_wire(cx_codes, cx_exps, cx_qc, cw_exps, cw_qc)
     assert len(conv_expected) == CONV_BATCH * CONV_OUT_CHANNELS * CONV_OUT_LEN
 
     cx8_codes, cx8_exps, cx8_qc = stage_per_tensor(CONV_X_VALUES, 8)
-    conv_m8 = conv1d_bfp_ref(cx8_codes, cx8_exps, cx8_qc, cw_codes, cw_exps, cw_qc,
-                             None, None, None, CONV_BATCH, CONV_IN_CHANNELS,
-                             CONV_OUT_CHANNELS, CONV_KERNEL_SIZE, CONV_INPUT_LENGTH,
-                             stride=CONV_STRIDE, self_check=False)
-    conv_collapsed = conv1d_bfp_ref(cx_codes, cx_exps, cx_qc, cw_codes, [cw_exps[0]],
-                                    {**cw_qc, "group_size": 0}, None, None, None,
-                                    CONV_BATCH, CONV_IN_CHANNELS, CONV_OUT_CHANNELS,
-                                    CONV_KERNEL_SIZE, CONV_INPUT_LENGTH,
-                                    stride=CONV_STRIDE, self_check=False)
+    conv_m8 = conv_forward_wire(cx8_codes, cx8_exps, cx8_qc, cw_exps, cw_qc)
+    conv_collapsed = conv_forward_wire(cx_codes, cx_exps, cx_qc, [cw_exps[0]],
+                                       {**cw_qc, "group_size": 0})
     check_fixture_strength("conv1d", conv_expected, conv_m8, conv_collapsed, cw_exps)
 
     # ---- Conv1d backward (PR3 Task 3) -------------------------------------

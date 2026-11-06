@@ -3,6 +3,9 @@
 #include <string.h>
 
 #include "ArithmeticType.h"
+#include "BfpAccumulateRef.h"
+#include "BfpRawFixture.h"
+#include "BfpScatterRef.h"
 #include "BorrowedLayer.h"
 #include "DTypes.h"
 #include "DeathTest.h"
@@ -4007,6 +4010,815 @@ void testLinearWeightGradSymIsStampedByTheMatmul(void) {
     freeTensor(loss);
 }
 
+/* ---- Linear backward under ARITH_BFP: integer end to end -----------------
+ * dx: the BFP_RAW of the backward GEMM (BfpScatterRef.h's
+ * bfpRefLinearBackwardRaw, the section-13 integer fold along the Linear walk)
+ * re-blocked into the BFP dx wire by the OP's mode, SR drawing from the op's
+ * RNG_TAG_OUT stream (bfpRefReblockRaw). weightGrad / biasGrad into BFP grads
+ * under DYNAMIC_RESCALE: the GEMM raw / the bias segment fold with the
+ * data-derived raw exponent (bfpRefConv1dBiasGradSums on the [batch, outF, 1]
+ * view + bfpRefRawFromRows), accumulated by the integer engine
+ * (BfpAccumulateRef.h). Several micro-batch calls into one grad; codes AND
+ * stored exponents compared after every call. */
+
+/*! BFP-STORED tensor from int32 codes (packed to mantissaBits) and stored
+ *  exponents: what the funnel prologue unpacks for a BFP-stored operand. */
+static tensor_t *lbStored(size_t numDims, const size_t *dimsIn, const int32_t *codes,
+                          const uint8_t *exponents, uint8_t m, size_t groupSize) {
+    size_t *dims = reserveMemory(numDims * sizeof(size_t));
+    memcpy(dims, dimsIn, numDims * sizeof(size_t));
+    size_t *order = reserveMemory(numDims * sizeof(size_t));
+    setOrderOfDimsForNewTensor(numDims, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, numDims, order);
+    size_t n = calcNumberOfElementsByShape(shape);
+    size_t numGroups = groupSize == 0 ? 1 : n / groupSize;
+    tensor_t *t =
+        initTensor(shape, quantizationInitBfpGrouped(m, 8, HALF_AWAY, numGroups, groupSize), NULL);
+    byteConversion((uint8_t *)codes, 32, t->data, m, n);
+    bfpQConfig_t *qc = t->quantization->qConfig;
+    for (size_t g = 0; g < numGroups; g++) {
+        qc->exponents[g] = exponents[g];
+    }
+    return t;
+}
+
+static uint32_t lbLcg(uint32_t *s) {
+    *s = *s * 1664525u + 1013904223u;
+    return *s >> 8;
+}
+
+static size_t lbGroups(size_t n, size_t gsz) {
+    return gsz == 0 ? 1 : n / gsz;
+}
+
+/* The op's stream of Linear op `op` under RNG_TAG_BACKWARD: rngFold(op key,
+ * tag, 0), op key = rngFold(rngFold(exec key, RNG_TAG_BACKWARD, 0),
+ * RNG_TAG_OP, op) -- LINEAR_OP_WEIGHT_GRAD 1, _BIAS_GRAD 2, _PROP_LOSS 3,
+ * part of the key contract. */
+static rngStream_t lbOpStream(rngKey_t execKey, uint32_t op, uint32_t tag) {
+    return rngOpen(
+        rngFold(rngFold(rngFold(execKey, RNG_TAG_BACKWARD, 0u), RNG_TAG_OP, op), tag, 0u));
+}
+
+typedef struct lbCase {
+    size_t batch, inF, outF;
+    uint8_t m;                /* loss and input mantissa bits */
+    size_t lossGs, xGs;       /* 0 = per tensor */
+    uint8_t gm, ge;           /* grad widths */
+    roundingMode_t grm;       /* grad storage rounding */
+    size_t wgGs, bgGs;        /* grad groups (0 = per tensor) */
+    uint8_t initWgE, initBgE; /* stored exponent of the fresh (zero-code) grads */
+} lbCase_t;
+
+#define LB_MAX 256
+#define LB_MAX_CALLS 4
+
+typedef struct lbOperands {
+    int32_t x[LB_MAX], loss[LB_MAX];
+    uint8_t xE[LB_MAX], lossE[LB_MAX];
+} lbOperands_t;
+
+typedef struct lbResult {
+    size_t wN, bN, wGroups, bGroups;
+    int32_t wCodes[LB_MAX], bCodes[LB_MAX], wRef[LB_MAX], bRef[LB_MAX];
+    uint8_t wE[LB_MAX], bE[LB_MAX], wRefE[LB_MAX], bRefE[LB_MAX];
+    bfpRefStats_t wSt, bSt; /* summed over the calls */
+} lbResult_t;
+
+static tensor_t *lbGrad(tensor_t *param, uint8_t m, uint8_t e, roundingMode_t rm, size_t gsz,
+                        uint8_t storedE) {
+    size_t n = calcNumberOfElementsByTensor(param);
+    quantization_t *q = gsz == 0 ? quantizationInitBfp(m, e, rm)
+                                 : quantizationInitBfpGrouped(m, e, rm, n / gsz, gsz);
+    tensor_t *g = initTensor(getShapeLike(param->shape), q, NULL);
+    bfpQConfig_t *qc = g->quantization->qConfig;
+    for (size_t i = 0; i < qc->numGroups; i++) {
+        qc->exponents[i] = storedE;
+    }
+    return g;
+}
+
+static void lbReadGrad(tensor_t *g, int32_t *codes, uint8_t *stored) {
+    bfpQConfig_t *qc = g->quantization->qConfig;
+    unpackSignExtend(g->data, qc->mantissaBits, 0, codes, calcNumberOfElementsByTensor(g));
+    memcpy(stored, qc->exponents, qc->numGroups);
+}
+
+/* A Linear layer [outF, inF] with BFP-stored weights (the width anchor; the
+ * grad ops never read their values) and BFP grads, both grad slots ARITH_BFP
+ * under `mode`. */
+static layer_t *lbLayer(const lbCase_t *c, outputMode_t mode, quantization_t *floatQ) {
+    size_t wDims[] = {c->outF, c->inF};
+    tensor_t *wParam = makeFloatTensor(wDims, 2, NULL);
+    quantization_t *wq = quantizationInitBfp(8, 8, HALF_AWAY);
+    requantizeTensorInPlace(wParam, wq);
+    freeQuantization(wq);
+    parameter_t *weights =
+        parameterInit(wParam, lbGrad(wParam, c->gm, c->ge, c->grm, c->wgGs, c->initWgE));
+    size_t bDims[] = {c->outF};
+    tensor_t *bParam = makeFloatTensor(bDims, 1, NULL);
+    parameter_t *bias =
+        parameterInit(bParam, lbGrad(bParam, c->gm, c->ge, c->grm, c->bgGs, c->initBgE));
+    layer_t *layer = buildBorrowedLinearLayer(weights, bias, floatQ);
+    linearConfig_t *cfg = layer->config->linear;
+    cfg->weightGradMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    cfg->biasGradMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    cfg->weightGradAccMode = mode;
+    cfg->biasGradAccMode = mode;
+    return layer;
+}
+
+/* Runs `calls` micro-batches (ops[j]) through linearBackward (grads only)
+ * into one weight / bias grad pair and the reference chain next to it;
+ * asserts equality after every call. seed 0 = no exec (HALF_AWAY grads). */
+static void lbRun(const lbCase_t *c, const lbOperands_t *ops, size_t calls, uint64_t seed,
+                  lbResult_t *r) {
+    size_t xN = c->batch * c->inF;
+    size_t lossN = c->batch * c->outF;
+    r->wN = c->outF * c->inF;
+    r->bN = c->outF;
+    r->wGroups = lbGroups(r->wN, c->wgGs);
+    r->bGroups = lbGroups(r->bN, c->bgGs);
+    TEST_ASSERT_TRUE(xN <= LB_MAX && lossN <= LB_MAX && r->wN <= LB_MAX);
+
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *layer = lbLayer(c, OUT_ACC_DYNAMIC_RESCALE, floatQ);
+    linearConfig_t *cfg = layer->config->linear;
+    tensor_t *wGrad = getGradFromParameter(cfg->weights);
+    tensor_t *bGrad = getGradFromParameter(cfg->bias);
+    lbReadGrad(wGrad, r->wRef, r->wRefE);
+    lbReadGrad(bGrad, r->bRef, r->bRefE);
+    r->wSt = (bfpRefStats_t){.fitsInt32 = true};
+    r->bSt = (bfpRefStats_t){.fitsInt32 = true};
+    layerExec_t exec = {.key = rngKeyFromSeed(seed)};
+    bfpRefGeom_t G = {.batch = c->batch, .cout = c->outF, .outLength = 1};
+    size_t xDims[] = {c->batch, c->inF};
+    size_t lossDims[] = {c->batch, c->outF};
+    for (size_t j = 0; j < calls; j++) {
+        const lbOperands_t *o = &ops[j];
+        tensor_t *x = lbStored(2, xDims, o->x, o->xE, c->m, c->xGs);
+        tensor_t *loss = lbStored(2, lossDims, o->loss, o->lossE, c->m, c->lossGs);
+        linearBackward(layer, x, loss, NULL, seed != 0 ? &exec : NULL);
+        freeTensor(loss);
+        freeTensor(x);
+
+        bfpRefOperand_t xRef = {o->x, o->xE, c->xGs, c->m, 8};
+        bfpRefOperand_t lossRef = {o->loss, o->lossE, c->lossGs, c->m, 8};
+        int32_t mant[LB_MAX];
+        int16_t rawE[LB_MAX];
+        bfpRefLinearBackwardRaw(BFP_REF_LIN_WEIGHT_GRAD, c->batch, c->inF, c->outF, &lossRef, &xRef,
+                                c->wgGs, mant, rawE, &r->wSt);
+        rngStream_t s = lbOpStream(exec.key, 1u, RNG_TAG_ACC);
+        bfpAccRefAccumulate(r->wRef, r->wRefE, mant, rawE, r->wN, c->wgGs, c->gm, c->ge, c->grm,
+                            seed != 0 ? &s : NULL);
+        int64_t sum[LB_MAX];
+        int eAcc[LB_MAX];
+        bfpRefConv1dBiasGradSums(&G, &lossRef, sum, eAcc, &r->bSt);
+        bfpRefRawFromRows(sum, eAcc, r->bN, c->bgGs, mant, rawE, &r->bSt);
+        s = lbOpStream(exec.key, 2u, RNG_TAG_ACC);
+        bfpAccRefAccumulate(r->bRef, r->bRefE, mant, rawE, r->bN, c->bgGs, c->gm, c->ge, c->grm,
+                            seed != 0 ? &s : NULL);
+
+        lbReadGrad(wGrad, r->wCodes, r->wE);
+        lbReadGrad(bGrad, r->bCodes, r->bE);
+        TEST_ASSERT_EQUAL_UINT8_ARRAY(r->wRefE, r->wE, r->wGroups);
+        TEST_ASSERT_EQUAL_INT32_ARRAY(r->wRef, r->wCodes, r->wN);
+        TEST_ASSERT_EQUAL_UINT8_ARRAY(r->bRefE, r->bE, r->bGroups);
+        TEST_ASSERT_EQUAL_INT32_ARRAY(r->bRef, r->bCodes, r->bN);
+    }
+    TEST_ASSERT_TRUE(r->wSt.fitsInt32);
+    TEST_ASSERT_TRUE(r->bSt.fitsInt32);
+    TEST_ASSERT_EQUAL_INT(c->grm, ((bfpQConfig_t *)wGrad->quantization->qConfig)->roundingMode);
+
+    freeLinearLayer(layer);
+    freeQuantization(floatQ);
+}
+
+/* Random codes in the full m-bit range; stored exponents uniform in bias +
+ * [lo, hi]. */
+static void lbFill(lbOperands_t *o, uint32_t seed, uint8_t m, size_t xN, size_t xGroups, int xLo,
+                   int xHi, size_t lossN, size_t lossGroups, int lossLo, int lossHi) {
+    uint32_t s = seed;
+    uint32_t span = 1u << m;
+    for (size_t i = 0; i < xN; i++) {
+        o->x[i] = (int32_t)(lbLcg(&s) % span) - (int32_t)(span / 2u);
+    }
+    for (size_t i = 0; i < lossN; i++) {
+        o->loss[i] = (int32_t)(lbLcg(&s) % span) - (int32_t)(span / 2u);
+    }
+    for (size_t i = 0; i < xGroups; i++) {
+        o->xE[i] = (uint8_t)(127 + xLo + (int)(lbLcg(&s) % (uint32_t)(xHi - xLo + 1)));
+    }
+    for (size_t i = 0; i < lossGroups; i++) {
+        o->lossE[i] = (uint8_t)(127 + lossLo + (int)(lbLcg(&s) % (uint32_t)(lossHi - lossLo + 1)));
+    }
+}
+
+/* batch 3, [6, 8]: loss groups of 9 straddle the loss rows, input groups of
+ * 6 straddle the input rows, so every reduction step of a weightGrad output
+ * can change either operand's group (one segment per product); a 36-binade
+ * product spread against g = -14 makes some segments exact left shifts and
+ * rounds others. Per-tensor m8 grads, four micro-batches: fresh, carried, a
+ * much smaller loss (the old grid dominates), a much larger one (the
+ * increment does). */
+static const lbCase_t kLbMixed = {.batch = 3,
+                                  .inF = 8,
+                                  .outF = 6,
+                                  .m = 8,
+                                  .lossGs = 9,
+                                  .xGs = 6,
+                                  .gm = 8,
+                                  .ge = 8,
+                                  .grm = HALF_AWAY,
+                                  .wgGs = 0,
+                                  .bgGs = 0,
+                                  .initWgE = 127,
+                                  .initBgE = 127};
+
+static void lbMixedOperands(lbOperands_t *ops, uint32_t seed) {
+    static const int lossShift[LB_MAX_CALLS] = {0, 3, -14, 12};
+    for (size_t j = 0; j < LB_MAX_CALLS; j++) {
+        lbFill(&ops[j], seed + 101u * (uint32_t)j, 8, 24, 4, -10, 10, 18, 2, -8 + lossShift[j],
+               8 + lossShift[j]);
+    }
+}
+
+void testLinearBfpGradsIntoBfpStorageMatchIntegerReferenceOverMicroBatches(void) {
+    static lbOperands_t ops[LB_MAX_CALLS];
+    static lbResult_t r;
+    lbMixedOperands(ops, 777u);
+    lbRun(&kLbMixed, ops, LB_MAX_CALLS, 0, &r);
+    TEST_ASSERT_TRUE(r.wSt.rounded > 0);   /* in-loop alignment rounded */
+    TEST_ASSERT_TRUE(r.wSt.leftShift > 0); /* ... and shifted left exactly */
+    TEST_ASSERT_TRUE(r.bSt.leftShift > 0);
+}
+
+/* Grouped grads whose groups straddle the weight rows (rows of 8, groups of
+ * 6; bias groups of 2) from zero codes under a STALE exponent (the fresh-
+ * accumulator rule: an all-zero old side must not set the working grid), at
+ * m6 grads. */
+void testLinearBfpGradsIntoGroupedBfpStorageStraddlingRowsMatchReference(void) {
+    static lbOperands_t ops[LB_MAX_CALLS];
+    static lbResult_t r;
+    lbCase_t c = kLbMixed;
+    c.wgGs = 6;
+    c.bgGs = 2;
+    c.initWgE = 127 + 40;
+    c.initBgE = 127 - 40;
+    c.gm = 6;
+    lbMixedOperands(ops, 4242u);
+    lbRun(&c, ops, LB_MAX_CALLS, 0, &r);
+    TEST_ASSERT_TRUE(r.wSt.rounded > 0);
+}
+
+/* SR grads (the HAR template): the engine rounds by the grad's own mode,
+ * one uniform per element in element order from each grad op's ACC(0)
+ * stream (op keys LINEAR_OP_WEIGHT_GRAD / _BIAS_GRAD). Non-vacuous: the
+ * HALF_AWAY grads differ. */
+void testLinearBfpGradsIntoSrBfpStorageDrawFromTheAccStream(void) {
+    static lbOperands_t ops[LB_MAX_CALLS];
+    static lbResult_t sr;
+    static lbResult_t ha;
+    lbMixedOperands(ops, 99u);
+    lbCase_t c = kLbMixed;
+    c.grm = SR_HALF_AWAY;
+    lbRun(&c, ops, LB_MAX_CALLS, 2027u, &sr);
+    lbRun(&kLbMixed, ops, LB_MAX_CALLS, 0, &ha);
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(sr.wCodes, ha.wCodes, sr.wN * sizeof(int32_t)) == 0,
+                              "SR and HALF_AWAY weight grads agree: the SR test is vacuous");
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(sr.bCodes, ha.bCodes, sr.bN * sizeof(int32_t)) == 0,
+                              "SR and HALF_AWAY bias grads agree: the SR test is vacuous");
+}
+
+/* Cancellation to the exact zero state: one product per grad element, codes
+ * that fit the grad exactly, then the same micro-batch with the loss negated
+ * -- every sum is exactly zero, so codes 0 and stored = bias. */
+void testLinearBfpGradsCancelToTheZeroState(void) {
+    lbCase_t c = {.batch = 1,
+                  .inF = 1,
+                  .outF = 2,
+                  .m = 8,
+                  .lossGs = 0,
+                  .xGs = 0,
+                  .gm = 8,
+                  .ge = 8,
+                  .grm = HALF_AWAY,
+                  .wgGs = 0,
+                  .bgGs = 0,
+                  .initWgE = 127,
+                  .initBgE = 127};
+    static lbOperands_t ops[2];
+    static lbResult_t r;
+    ops[0].x[0] = 3;
+    ops[0].xE[0] = 127 - 4;
+    ops[0].loss[0] = 5;
+    ops[0].loss[1] = -7;
+    ops[0].lossE[0] = 127 - 9;
+    ops[1] = ops[0];
+    ops[1].loss[0] = -5;
+    ops[1].loss[1] = 7;
+    lbRun(&c, ops, 1, 0, &r);
+    /* {15, -21} * 2^-13: absmax 21 <= 127 * 2^(E + 13) first at E = -15 */
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){60, -84}), r.wCodes, 2);
+    TEST_ASSERT_EQUAL_UINT8(127 - 15, r.wE[0]);
+    lbRun(&c, ops, 2, 0, &r);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){0, 0}), r.wCodes, 2);
+    TEST_ASSERT_EQUAL_UINT8(127, r.wE[0]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){0, 0}), r.bCodes, 2);
+    TEST_ASSERT_EQUAL_UINT8(127, r.bE[0]);
+}
+
+/* Exponent extremes from fresh grads: the m16 worst case (every code -2^15,
+ * every product 2^30: the segment limit is ONE product and the guard is
+ * positive, g = 1 at batch 2) into m16 grads, exact over two calls; operands
+ * at the top of e = 8 (the grad saturates at the cap) and at its floor. */
+void testLinearBfpGradsExponentExtremes(void) {
+    lbCase_t c = {.batch = 2,
+                  .inF = 2,
+                  .outF = 2,
+                  .m = 16,
+                  .lossGs = 0,
+                  .xGs = 0,
+                  .gm = 16,
+                  .ge = 8,
+                  .grm = HALF_AWAY,
+                  .wgGs = 0,
+                  .bgGs = 0,
+                  .initWgE = 127,
+                  .initBgE = 127};
+    static lbOperands_t ops[2];
+    static lbResult_t r;
+    for (size_t i = 0; i < 4; i++) {
+        ops[0].x[i] = -32768;
+        ops[0].loss[i] = -32768;
+    }
+    ops[0].xE[0] = 127 - 4;
+    ops[0].lossE[0] = 127 + 1;
+    ops[1] = ops[0];
+    lbRun(&c, ops, 2, 0, &r);
+    /* per call 2 products of 2^30 * 2^-3 = 2^28, two calls 2^29 = 16384 * 2^15 */
+    TEST_ASSERT_EQUAL_INT32(16384, r.wCodes[0]);
+    TEST_ASSERT_EQUAL_UINT8(127 + 15, r.wE[0]);
+    /* bias: per call 2 * -2^15 * 2^1, two calls -2^18 = -16384 * 2^4 */
+    TEST_ASSERT_EQUAL_INT32(-16384, r.bCodes[0]);
+    TEST_ASSERT_EQUAL_UINT8(127 + 4, r.bE[0]);
+
+    c.m = 8;
+    c.gm = 8;
+    for (size_t i = 0; i < 4; i++) {
+        ops[0].x[i] = (int32_t)(i * 71 % 256) - 128;
+        ops[0].loss[i] = 127 - (int32_t)(i * 45 % 256);
+    }
+    ops[0].xE[0] = 254;
+    ops[0].lossE[0] = 254;
+    lbRun(&c, ops, 1, 0, &r);
+    TEST_ASSERT_EQUAL_UINT8(254, r.wE[0]); /* capped: bias + 127 */
+    TEST_ASSERT_EQUAL_UINT8(254, r.bE[0]);
+    ops[0].xE[0] = 1;
+    ops[0].lossE[0] = 3;
+    lbRun(&c, ops, 1, 0, &r);
+    TEST_ASSERT_EQUAL_UINT8(0, r.wE[0]); /* floored (the bias sums stay on the loss's grid) */
+}
+
+/* The bias sum's guard is a pure-SUM guard (N 2^(m-1), not the product bound
+ * N 2^(2m-2)): one loss group per code (every code its own segment). Each
+ * feature's batch-0 code is a 1 at E = 0 (the feature's top; a ZERO code
+ * there would set nothing), the others sit 15-20 binades lower. With batch 10
+ * the sum guard (-20) keeps every segment exact; the product guard (-13)
+ * would round the lowest ones. */
+void testLinearBfpBiasGradSegmentsFoldExactlyUnderTheSumGuard(void) {
+    lbCase_t c = kLbMixed;
+    c.batch = 10;
+    c.outF = 4;
+    c.lossGs = 1;
+    c.xGs = 0;
+    c.gm = 16;
+    static lbOperands_t ops[2];
+    static lbResult_t r;
+    for (size_t j = 0; j < 2; j++) {
+        lbFill(&ops[j], 515u + (uint32_t)j, 8, 80, 1, -2, 2, 40, 40, -20, -15);
+        for (size_t f = 0; f < 4; f++) {
+            ops[j].loss[f] = 1; /* batch 0 of feature f */
+            ops[j].lossE[f] = 127;
+        }
+    }
+    lbRun(&c, ops, 2, 0, &r);
+    TEST_ASSERT_EQUAL_size_t(0, r.bSt.rounded);
+}
+
+/* The fixed grid is a separate mode (Linear's default bias mode): BFP grads
+ * under OUT_ACC_FIXED_SCALE keep the FLOAT32 raw of the float cores and the
+ * float fixed-grid engine -- the result equals that engine fed the float
+ * cores' output on the same operands. */
+void testLinearBfpGradsFixedScaleKeepTheFloatBridge(void) {
+    static lbOperands_t ops[LB_MAX_CALLS];
+    lbMixedOperands(ops, 31u);
+    const lbCase_t *c = &kLbMixed;
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *layer = lbLayer(c, OUT_ACC_FIXED_SCALE, floatQ);
+    linearConfig_t *cfg = layer->config->linear;
+    tensor_t *wGrad = getGradFromParameter(cfg->weights);
+    tensor_t *bGrad = getGradFromParameter(cfg->bias);
+    tensor_t *wTwin = lbGrad(cfg->weights->param, 8, 8, HALF_AWAY, 0, 127);
+    tensor_t *bTwin = lbGrad(cfg->bias->param, 8, 8, HALF_AWAY, 0, 127);
+    size_t xDims[] = {c->batch, c->inF};
+    size_t lossDims[] = {c->batch, c->outF};
+    tensor_t *x = lbStored(2, xDims, ops[0].x, ops[0].xE, 8, c->xGs);
+    tensor_t *loss = lbStored(2, lossDims, ops[0].loss, ops[0].lossE, 8, c->lossGs);
+    linearBackward(layer, x, loss, NULL, NULL);
+    freeTensor(loss);
+    freeTensor(x);
+
+    bfpScratchFixture_t xF, lossF;
+    bfpScratchInit(&xF, 2, xDims, ops[0].x, ops[0].xE, 4, c->xGs, 8, 8);
+    bfpScratchInit(&lossF, 2, lossDims, ops[0].loss, ops[0].lossE, 2, c->lossGs, 8, 8);
+    size_t wgDims[] = {c->outF, c->inF};
+    size_t bgDims[] = {c->outF};
+    tensor_t *wRaw = makeFloatTensor(wgDims, 2, NULL);
+    tensor_t *bRaw = makeFloatTensor(bgDims, 1, NULL);
+    linearCalcWeightGradsBfp(&lossF.tensor, &xF.tensor, wRaw);
+    linearCalcBiasGradsBfp(&lossF.tensor, bRaw);
+    accumulateFloatIntoBfpTensorFixedGrid(wTwin, (const float *)wRaw->data, 48, NULL);
+    accumulateFloatIntoBfpTensorFixedGrid(bTwin, (const float *)bRaw->data, 6, NULL);
+
+    int32_t got[48], want[48];
+    uint8_t gotE[1], wantE[1];
+    lbReadGrad(wGrad, got, gotE);
+    lbReadGrad(wTwin, want, wantE);
+    TEST_ASSERT_EQUAL_UINT8(wantE[0], gotE[0]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(want, got, 48);
+    lbReadGrad(bGrad, got, gotE);
+    lbReadGrad(bTwin, want, wantE);
+    TEST_ASSERT_EQUAL_UINT8(wantE[0], gotE[0]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(want, got, 6);
+
+    freeTensor(bRaw);
+    freeTensor(wRaw);
+    freeTensor(bTwin);
+    freeTensor(wTwin);
+    freeLinearLayer(layer);
+    freeQuantization(floatQ);
+}
+
+/* The integer bias core is a public symbol: a non-raw output would be
+ * written as int32 mantissas into a float buffer. */
+void testLinearCalcBiasGradsBfpRawRejectsANonRawOutput(void) {
+    static const int32_t codes[] = {5, -7};
+    static const uint8_t exps[] = {127};
+    bfpScratchFixture_t lossF;
+    size_t lossDims[] = {1, 2};
+    bfpScratchInit(&lossF, 2, lossDims, codes, exps, 1, 0, 8, 8);
+    size_t bgDims[] = {2};
+    tensor_t *bRaw = makeFloatTensor(bgDims, 1, NULL);
+
+    ASSERT_EXITS_WITH_FAILURE(linearCalcBiasGradsBfpRaw(&lossF.tensor, bRaw));
+
+    freeTensor(bRaw);
+}
+
+/* ---- The integer backward cores (kernel tier, unpacked-BFP scratch in,
+ * BFP_RAW out) against the int64 references, mantissas AND raw exponents. */
+
+static void lbFillCodes(uint32_t *s, uint8_t m, int32_t *codes, size_t n, uint8_t *exps,
+                        size_t groups, int lo, int hi) {
+    uint32_t span = 1u << m;
+    for (size_t i = 0; i < n; i++) {
+        codes[i] = (int32_t)(lbLcg(s) % span) - (int32_t)(span / 2u);
+    }
+    for (size_t g = 0; g < groups; g++) {
+        exps[g] = (uint8_t)(127 + lo + (int)(lbLcg(s) % (uint32_t)(hi - lo + 1)));
+    }
+}
+
+/* dW = loss^T x at batch 3: loss [3, 6] in groups of 9, x [3, 8] in groups
+ * of 6, a 30-binade spread against g = -14 (some products rounded, some sums
+ * wider than 24 bits -- where a float bridge would round); raw per tensor and
+ * in groups of 6 straddling the [6, 8] rows. The core restores the caller's
+ * loss view (its transpose dance runs on scratch that aliases the shape). */
+void testLinearCalcWeightGradsBfpRawMatchesTheGemmReference(void) {
+    static const size_t rawGs[] = {0, 6};
+    bool wide = false;
+    for (size_t v = 0; v < 2; v++) {
+        uint32_t s = 2718u;
+        int32_t loss[18], x[24];
+        uint8_t lossE[2], xE[4];
+        lbFillCodes(&s, 8, loss, 18, lossE, 2, -15, 15);
+        lbFillCodes(&s, 8, x, 24, xE, 4, -6, 6);
+        /* both operands' top groups hold batch row 0, so the top products
+         * meet the bound (sums beyond 24 bits); the others sit 30 binades lower */
+        lossE[0] = 127 + 15;
+        lossE[1] = 127 - 15;
+        xE[0] = 127 + 6;
+        bfpScratchFixture_t lossF, xF;
+        size_t lossDims[] = {3, 6};
+        size_t xDims[] = {3, 8};
+        bfpScratchInit(&lossF, 2, lossDims, loss, lossE, 2, 9, 8, 8);
+        bfpScratchInit(&xF, 2, xDims, x, xE, 4, 6, 8, 8);
+        bfpRawFixture_t out;
+        size_t outDims[] = {6, 8};
+        size_t groups = rawGs[v] == 0 ? 1 : 48 / rawGs[v];
+        bfpRawInit(&out, 2, outDims, groups, rawGs[v]);
+
+        linearCalcWeightGradsBfpRaw(&lossF.tensor, &xF.tensor, &out.tensor);
+
+        bfpRefOperand_t lossRef = {loss, lossE, 9, 8, 8};
+        bfpRefOperand_t xRef = {x, xE, 6, 8, 8};
+        int32_t mant[48];
+        int16_t rawE[8];
+        bfpRefStats_t st = {.fitsInt32 = true};
+        bfpRefLinearBackwardRaw(BFP_REF_LIN_WEIGHT_GRAD, 3, 8, 6, &lossRef, &xRef, rawGs[v], mant,
+                                rawE, &st);
+        TEST_ASSERT_TRUE(st.fitsInt32);
+        TEST_ASSERT_TRUE(st.rounded > 0);
+        assertRawEquals(&out, mant, 48, rawE, groups);
+        TEST_ASSERT_EQUAL_size_t(0, lossF.order[0]);
+        TEST_ASSERT_EQUAL_size_t(1, lossF.order[1]);
+        wide = wide || st.absMaxSum >= ((int64_t)1 << 24);
+    }
+    TEST_ASSERT_TRUE_MESSAGE(wide, "no sum beyond 24 bits: the test cannot tell a float bridge");
+}
+
+/* dx = loss W at batch 2 (the weight as stored, [6, 8], groups of 4: a weight
+ * column sees half the groups, E_top takes the operand-wide max there): raw
+ * groups of 4 and per tensor. */
+void testLinearCalcPropLossBfpEmitsTheGemmRaw(void) {
+    static const size_t rawGs[] = {4, 0};
+    for (size_t v = 0; v < 2; v++) {
+        uint32_t s = 1618u;
+        int32_t loss[12], w[48];
+        uint8_t lossE[3], wE[12];
+        lbFillCodes(&s, 8, loss, 12, lossE, 3, -12, 12);
+        lbFillCodes(&s, 8, w, 48, wE, 12, -6, 6);
+        bfpScratchFixture_t lossF, wF;
+        size_t lossDims[] = {2, 6};
+        size_t wDims[] = {6, 8};
+        bfpScratchInit(&lossF, 2, lossDims, loss, lossE, 3, 4, 8, 8);
+        bfpScratchInit(&wF, 2, wDims, w, wE, 12, 4, 8, 8);
+        bfpRawFixture_t out;
+        size_t outDims[] = {2, 8};
+        size_t groups = rawGs[v] == 0 ? 1 : 16 / rawGs[v];
+        bfpRawInit(&out, 2, outDims, groups, rawGs[v]);
+
+        linearCalcPropLossBfp(&lossF.tensor, &wF.tensor, &out.tensor);
+
+        bfpRefOperand_t lossRef = {loss, lossE, 4, 8, 8};
+        bfpRefOperand_t wRef = {w, wE, 4, 8, 8};
+        int32_t mant[16];
+        int16_t rawE[4];
+        bfpRefStats_t st = {.fitsInt32 = true};
+        bfpRefLinearBackwardRaw(BFP_REF_LIN_DX, 2, 8, 6, &lossRef, &wRef, rawGs[v], mant, rawE,
+                                &st);
+        TEST_ASSERT_TRUE(st.fitsInt32);
+        assertRawEquals(&out, mant, 16, rawE, groups);
+    }
+}
+
+/* Zero groups never set E_acc: loss [2, 4] in groups of 4, batch row 0 all
+ * zero in the zero state (E = 0), row 1 live at E = -28. Bias raw: every
+ * feature's sum is row 1's code, exactly; dW = loss^T x (x per tensor at
+ * E = 0; the transposed loss is the strided operand-wide max): exact too. */
+void testLinearBfpRawGradsZeroLossGroupDoesNotSetTheAccumulator(void) {
+    int32_t loss[8] = {0, 0, 0, 0, 113, -77, 91, -59};
+    uint8_t lossE[] = {127, 127 - 28};
+    bfpScratchFixture_t lossF;
+    size_t lossDims[] = {2, 4};
+    bfpScratchInit(&lossF, 2, lossDims, loss, lossE, 2, 4, 8, 8);
+
+    bfpRawFixture_t bias;
+    size_t biasDims[] = {4};
+    bfpRawInit(&bias, 1, biasDims, 1, 0);
+    linearCalcBiasGradsBfpRaw(&lossF.tensor, &bias.tensor);
+    for (size_t f = 0; f < 4; f++) {
+        assertBfpValueExact(bias.mant[f], bias.exps[0], loss[4 + f], -28, f);
+    }
+
+    int32_t x[6] = {101, -67, 45, 13, -99, 87};
+    uint8_t xE[] = {127};
+    bfpScratchFixture_t xF;
+    size_t xDims[] = {2, 3};
+    bfpScratchInit(&xF, 2, xDims, x, xE, 1, 0, 8, 8);
+    bfpRawFixture_t dw;
+    size_t dwDims[] = {4, 3};
+    bfpRawInit(&dw, 2, dwDims, 1, 0);
+    linearCalcWeightGradsBfpRaw(&lossF.tensor, &xF.tensor, &dw.tensor);
+    for (size_t f = 0; f < 4; f++) {
+        for (size_t i = 0; i < 3; i++) {
+            int64_t exact = (int64_t)loss[f] * x[i] + (int64_t)loss[4 + f] * x[3 + i];
+            assertBfpValueExact(dw.mant[f * 3 + i], dw.exps[0], exact, -28, f * 3 + i);
+        }
+    }
+}
+
+/* Bias raw from the data: feature 0's loss codes are zeros in the zero state
+ * (one group per code, E = 0, the bound's top), features 1-3 hold codes 25-30
+ * binades lower. By the bound feature 0 would place the per-tensor raw grid
+ * and the real sums would be re-gridded to a few bits; from the data they set
+ * it and keep every bit (nothing re-gridded, nothing rounded). */
+void testLinearCalcBiasGradsBfpRawExponentFollowsTheDataNotTheBound(void) {
+    uint32_t s = 1414u;
+    int32_t loss[12];
+    uint8_t lossE[12];
+    lbFillCodes(&s, 8, loss, 12, lossE, 12, -30, -25);
+    for (size_t n = 0; n < 3; n++) {
+        loss[n * 4] = 0;
+        lossE[n * 4] = 127;
+    }
+    bfpScratchFixture_t lossF;
+    size_t lossDims[] = {3, 4};
+    bfpScratchInit(&lossF, 2, lossDims, loss, lossE, 12, 1, 8, 8);
+    bfpRawFixture_t out;
+    size_t outDims[] = {4};
+    bfpRawInit(&out, 1, outDims, 1, 0);
+
+    linearCalcBiasGradsBfpRaw(&lossF.tensor, &out.tensor);
+
+    bfpRefOperand_t lossRef = {loss, lossE, 1, 8, 8};
+    bfpRefGeom_t G = {.batch = 3, .cout = 4, .outLength = 1};
+    int64_t sum[4];
+    int eAcc[4];
+    int32_t mant[4];
+    int16_t rawE[1];
+    bfpRefStats_t st = {.fitsInt32 = true};
+    bfpRefConv1dBiasGradSums(&G, &lossRef, sum, eAcc, &st);
+    bfpRefRawFromRows(sum, eAcc, 4, 0, mant, rawE, &st);
+    assertRawEquals(&out, mant, 4, rawE, 1);
+    TEST_ASSERT_EQUAL_size_t(0, st.rounded);
+    TEST_ASSERT_EQUAL_size_t(0, st.realigned);
+    TEST_ASSERT_EQUAL_INT32(0, out.mant[0]);
+    TEST_ASSERT_TRUE(out.exps[0] < -40); /* the low features' grid, not the zero state's */
+}
+
+/* ---- dx into a BFP wire ---- */
+
+typedef struct lbDxCase {
+    size_t batch, inF, outF;
+    uint8_t m;          /* loss and weight mantissa bits */
+    size_t lossGs, wGs; /* 0 = per tensor */
+    uint8_t wireM;
+    size_t wireGs; /* 0 = per tensor */
+} lbDxCase_t;
+
+typedef struct lbDxResult {
+    int32_t codes[LB_MAX], refCodes[LB_MAX];
+    uint8_t stored[LB_MAX], refStored[LB_MAX];
+    size_t n, numGroups;
+    bfpRefStats_t st;
+    roundingMode_t wireModeAfter;
+} lbDxResult_t;
+
+/* linearBackward (frozen: dx only) with BFP-stored loss and weights into a
+ * BFP dx wire whose template rounds HALF_AWAY; the op rounds by `opMode`,
+ * exec keyed by `seed` (the SR stream), NULL for HALF_AWAY. */
+static void lbDxRun(const lbDxCase_t *c, const int32_t *lossCodes, const uint8_t *lossExps,
+                    const int32_t *wCodes, const uint8_t *wExps, roundingMode_t opMode,
+                    uint64_t seed, lbDxResult_t *r) {
+    r->n = c->batch * c->inF;
+    r->numGroups = lbGroups(r->n, c->wireGs);
+    TEST_ASSERT_TRUE(r->n <= LB_MAX);
+    size_t wDims[] = {c->outF, c->inF};
+    parameter_t *weights = parameterInit(lbStored(2, wDims, wCodes, wExps, c->m, c->wGs), NULL);
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *layer = buildBorrowedLinearLayer(weights, NULL, floatQ);
+    layer->config->linear->frozen = true;
+    layer->config->linear->propLossMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = opMode};
+
+    size_t xDims[] = {c->batch, c->inF};
+    size_t lossDims[] = {c->batch, c->outF};
+    tensor_t *loss = lbStored(2, lossDims, lossCodes, lossExps, c->m, c->lossGs);
+    tensor_t *x = makeFloatTensor(xDims, 2, NULL); /* frozen: dx reads only the shape */
+    int32_t zeros[LB_MAX] = {0};
+    uint8_t zeroExps[LB_MAX] = {0};
+    tensor_t *dx = lbStored(2, xDims, zeros, zeroExps, c->wireM, c->wireGs);
+
+    layerExec_t exec = {.key = rngKeyFromSeed(seed)};
+    linearBackward(layer, x, loss, dx, opMode == SR_HALF_AWAY ? &exec : NULL);
+
+    bfpQConfig_t *dxQC = dx->quantization->qConfig;
+    unpackSignExtend(dx->data, c->wireM, 0, r->codes, r->n);
+    memcpy(r->stored, dxQC->exponents, r->numGroups);
+    r->wireModeAfter = dxQC->roundingMode;
+    freeLinearLayer(layer);
+    freeTensor(dx);
+    freeTensor(x);
+    freeTensor(loss);
+    freeQuantization(floatQ);
+
+    bfpRefOperand_t lossRef = {lossCodes, lossExps, c->lossGs, c->m, 8};
+    bfpRefOperand_t wRef = {wCodes, wExps, c->wGs, c->m, 8};
+    int32_t rawMant[LB_MAX];
+    int16_t rawE[LB_MAX];
+    r->st = (bfpRefStats_t){.fitsInt32 = true};
+    bfpRefLinearBackwardRaw(BFP_REF_LIN_DX, c->batch, c->inF, c->outF, &lossRef, &wRef, c->wireGs,
+                            rawMant, rawE, &r->st);
+    rngStream_t out = lbOpStream(exec.key, 3u, RNG_TAG_OUT);
+    bfpRefReblockRaw(rawMant, rawE, r->n, c->wireGs, c->wireM, 8,
+                     opMode == SR_HALF_AWAY ? &out : NULL, r->refCodes, r->refStored);
+}
+
+static void lbDxOperands(uint32_t seed, size_t lossN, size_t lossGroups, size_t wN, size_t wGroups,
+                         uint8_t m, int32_t *lossCodes, uint8_t *lossExps, int32_t *wCodes,
+                         uint8_t *wExps) {
+    uint32_t s = seed;
+    uint32_t span = 1u << m;
+    for (size_t i = 0; i < lossN; i++) {
+        lossCodes[i] = (int32_t)(lbLcg(&s) % span) - (int32_t)(span / 2);
+    }
+    for (size_t i = 0; i < wN; i++) {
+        wCodes[i] = (int32_t)(lbLcg(&s) % span) - (int32_t)(span / 2);
+    }
+    for (size_t i = 0; i < lossGroups; i++) {
+        lossExps[i] = (uint8_t)(127 - 12 + (int)(lbLcg(&s) % 25u));
+    }
+    for (size_t i = 0; i < wGroups; i++) {
+        wExps[i] = (uint8_t)(127 - 6 + (int)(lbLcg(&s) % 13u));
+    }
+}
+
+/* batch 2, [6, 8], m8: loss groups of 4 straddle the loss rows (24-binade
+ * spread), weight groups of 4 split every weight row in halves, so a weight
+ * COLUMN (dx's strided reduction line) sees only half the groups -- the
+ * documented E_top takes the weight's operand-wide max there, the loss row's
+ * own max. Into an m6 wire: raw groups of 4 (inside a row), 8 (one row) and
+ * per tensor. Codes and stored exponents exact against the int64 GEMM + the
+ * section-13 re-block. */
+void testLinearBackwardBfpDxIntoBfpWireMatchesIntegerReference(void) {
+    static const size_t wireGroupSizes[] = {4, 8, 0};
+    for (size_t v = 0; v < 3; v++) {
+        lbDxCase_t c = {.batch = 2,
+                        .inF = 8,
+                        .outF = 6,
+                        .m = 8,
+                        .lossGs = 4,
+                        .wGs = 4,
+                        .wireM = 6,
+                        .wireGs = wireGroupSizes[v]};
+        int32_t lossCodes[12];
+        int32_t wCodes[48];
+        uint8_t lossExps[3];
+        uint8_t wExps[12];
+        lbDxOperands(31337u, 12, 3, 48, 12, 8, lossCodes, lossExps, wCodes, wExps);
+        lbDxResult_t r;
+        lbDxRun(&c, lossCodes, lossExps, wCodes, wExps, HALF_AWAY, 0, &r);
+
+        TEST_ASSERT_TRUE(r.st.fitsInt32);
+        TEST_ASSERT_TRUE(r.st.rounded > 0);
+        TEST_ASSERT_EQUAL_UINT8_ARRAY(r.refStored, r.stored, r.numGroups);
+        TEST_ASSERT_EQUAL_INT32_ARRAY(r.refCodes, r.codes, r.n);
+    }
+}
+
+/* Worst case at m16 into an m16 wire: every code -2^15 (products 2^30, the
+ * segment limit is one product, g = 1 at outF = 3). Exact against the
+ * reference: 3 products of 2^30 * 2^-2 = 3 * 2^28 -> m16 code 24576 under
+ * stored E = 15. */
+void testLinearBackwardBfpDxWorstCaseM16IntoBfpWireIsExact(void) {
+    lbDxCase_t c = {
+        .batch = 2, .inF = 4, .outF = 3, .m = 16, .lossGs = 0, .wGs = 0, .wireM = 16, .wireGs = 4};
+    int32_t lossCodes[6];
+    int32_t wCodes[12];
+    for (size_t i = 0; i < 6; i++) {
+        lossCodes[i] = -32768;
+    }
+    for (size_t i = 0; i < 12; i++) {
+        wCodes[i] = -32768;
+    }
+    uint8_t lossExps[] = {127 + 3};
+    uint8_t wExps[] = {127 - 5};
+    lbDxResult_t r;
+    lbDxRun(&c, lossCodes, lossExps, wCodes, wExps, HALF_AWAY, 0, &r);
+
+    TEST_ASSERT_TRUE(r.st.fitsInt32);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(r.refStored, r.stored, r.numGroups);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(r.refCodes, r.codes, r.n);
+    TEST_ASSERT_EQUAL_INT32(24576, r.codes[0]);
+    TEST_ASSERT_EQUAL_UINT8(127 + 15, r.stored[0]);
+}
+
+/* The training-side seam: the dx wire rounds by the OP's mode (SR), not by
+ * the wire template's (HALF_AWAY, restored afterwards), drawing from the op's
+ * RNG_TAG_OUT stream one draw per element in element order. Exact against
+ * the reference fed the same stream; non-vacuous: SR differs from HALF_AWAY. */
+void testLinearBackwardBfpDxIntoBfpWireSrFollowsTheOpModeAndTheOutStream(void) {
+    lbDxCase_t c = {
+        .batch = 2, .inF = 8, .outF = 6, .m = 8, .lossGs = 4, .wGs = 4, .wireM = 6, .wireGs = 8};
+    int32_t lossCodes[12];
+    int32_t wCodes[48];
+    uint8_t lossExps[3];
+    uint8_t wExps[12];
+    lbDxOperands(4711u, 12, 3, 48, 12, 8, lossCodes, lossExps, wCodes, wExps);
+    lbDxResult_t sr;
+    lbDxRun(&c, lossCodes, lossExps, wCodes, wExps, SR_HALF_AWAY, 2026u, &sr);
+    lbDxResult_t ha;
+    lbDxRun(&c, lossCodes, lossExps, wCodes, wExps, HALF_AWAY, 0, &ha);
+
+    TEST_ASSERT_EQUAL_INT(HALF_AWAY, sr.wireModeAfter);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(sr.refStored, sr.stored, sr.numGroups);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(sr.refCodes, sr.codes, sr.n);
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(sr.codes, ha.codes, sr.n * sizeof(int32_t)) == 0,
+                              "SR and HALF_AWAY agree: the SR test is vacuous");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConvertInt32ToSymInt32UserTensorStaysCloneable);
@@ -4105,5 +4917,20 @@ int main(void) {
     RUN_TEST(testLinearBiasGradSymStampsTheSumWidth);
     RUN_TEST(testLinearBiasGradSymStampIs32WhenTheSumIsUnprovable);
     RUN_TEST(testLinearWeightGradSymIsStampedByTheMatmul);
+    RUN_TEST(testLinearBfpGradsIntoBfpStorageMatchIntegerReferenceOverMicroBatches);
+    RUN_TEST(testLinearBfpGradsIntoGroupedBfpStorageStraddlingRowsMatchReference);
+    RUN_TEST(testLinearBfpGradsIntoSrBfpStorageDrawFromTheAccStream);
+    RUN_TEST(testLinearBfpGradsCancelToTheZeroState);
+    RUN_TEST(testLinearBfpGradsExponentExtremes);
+    RUN_TEST(testLinearBfpBiasGradSegmentsFoldExactlyUnderTheSumGuard);
+    RUN_TEST(testLinearBfpGradsFixedScaleKeepTheFloatBridge);
+    RUN_TEST(testLinearCalcBiasGradsBfpRawRejectsANonRawOutput);
+    RUN_TEST(testLinearCalcWeightGradsBfpRawMatchesTheGemmReference);
+    RUN_TEST(testLinearCalcPropLossBfpEmitsTheGemmRaw);
+    RUN_TEST(testLinearCalcBiasGradsBfpRawExponentFollowsTheDataNotTheBound);
+    RUN_TEST(testLinearBfpRawGradsZeroLossGroupDoesNotSetTheAccumulator);
+    RUN_TEST(testLinearBackwardBfpDxIntoBfpWireMatchesIntegerReference);
+    RUN_TEST(testLinearBackwardBfpDxWorstCaseM16IntoBfpWireIsExact);
+    RUN_TEST(testLinearBackwardBfpDxIntoBfpWireSrFollowsTheOpModeAndTheOutStream);
     return UNITY_END();
 }

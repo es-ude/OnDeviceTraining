@@ -1,0 +1,27 @@
+# BFP forward roots: <source file> <function base name>
+# The census follows direct calls from each root (same object first, then any
+# unique definition in another object). Static helpers split by the compiler
+# (.constprop/.isra/.part) are matched by base name.
+Matmul.c        matmulBfpRawTensors
+Conv1dKernel.c  conv1dKernelBfpRaw
+ConvTranspose1dKernel.c  convTranspose1dKernelBfpGather
+Conv1d.c        forwardKernelBfpRaw
+Conv1dTransposed.c  forwardKernelBfp
+Linear.c        linearForwardKernelBfpRaw
+Linear.c        linearForwardBfpRaw
+MaxPool1d.c     maxPool1dForwardKernelBfpRaw
+AvgPool1d.c     avgPool1dForwardKernelBfpRaw
+Softmax.c       softmaxForwardKernelBfp
+Softmax.c       softmaxForwardBfpRaw
+Relu.c          reluForward      self
+Relu.c          reluForwardBfp
+LayerNorm.c     layerNormForwardKernelBfp
+Reduce.c        meanOverTrailingAxesBfp
+Reduce.c        varianceBiasedOverTrailingAxesBfp
+Comparison.c    gteBfpZero
+BfpSoftmaxExp.c bfpIExpQ
+BfpSoftmaxExp.c bfpShiftRightRounded
+TensorConversion.c  requantBfpTensor
+TensorConversion.c  convertBfpTensorToSymInt32Tensor
+TensorConversion.c  convertSymInt32TensorToBfpTensor
+TensorConversion.c  reblockBfpRawTensor

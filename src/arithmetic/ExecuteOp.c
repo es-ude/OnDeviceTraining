@@ -243,6 +243,12 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
          * construction (initBfpQConfigGrouped), so a re-check would be dead
          * code. FIXED_SCALE carries the per-group exponents and aborts on
          * mantissa overflow; DYNAMIC_RESCALE re-derives them per store. */
+        if (intermediate->quantization->type == BFP_RAW) {
+            /* BFP_RAW_BACKWARD_ACC (validated DYNAMIC_RESCALE before the
+             * kernel): the integer engine, no float. */
+            accumulateBfpRawIntoBfpRescale(target, intermediate, acc0);
+            return;
+        }
         if (intermediate->quantization->type == FLOAT32) {
             if (mode == OUT_ACC_FIXED_SCALE) {
                 accumulateFloatIntoBfpTensorFixedGrid(target, (const float *)intermediate->data, n,
@@ -300,6 +306,19 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
              * operand is unpacked/staged into int32 scratch (Task 3-5 kernels
              * consume the unpacked-BFP scratch form only). */
             matches = false;
+            /* The integer forward into a BFP wire is float-free after the
+             * model's input quantization layer: a FLOAT32 operand here is a
+             * wiring bug, not a staging request. Arm A (FLOAT32 wires) and
+             * every backward op (BFP_RAW_BACKWARD_DX / _ACC included) keep staging. */
+            if (inputs[i]->quantization->type == FLOAT32 && spec->bfpRawOut == BFP_RAW_FORWARD &&
+                target->quantization->type == BFP) {
+                PRINT_ERROR("executeOp: FLOAT32-stored operand %zu in an integer BFP forward "
+                            "into a BFP wire -- the forward must see BFP operands only; "
+                            "quantize the model input with a Quantization layer "
+                            "(docs/conventions/arithmetic-bfp.md)",
+                            i);
+                exit(1);
+            }
             if (inputs[i]->quantization->type == FLOAT32 && spec->bfpStage[i] != NULL) {
                 const bfpQConfig_t *stage = spec->bfpStage[i];
                 size_t n = calcNumberOfElementsByTensor(inputs[i]);
@@ -525,6 +544,64 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             }
         }
     }
+    /* Integer raw (opSpec_t.bfpRawOut): geometry copied from the target --
+     * the raw exponent is per TARGET group by contract -- and exponent
+     * backing on the funnel's stack, like stageExponents. Validated before
+     * the VLAs so a misuse dies with a message, not a bad size. */
+    bfpRawQConfig_t rawBfpQC = {.exponents = NULL, .numGroups = 0, .groupSize = 0};
+    if (spec->bfpRawOut != BFP_RAW_NONE) {
+        if (spec->bfpRawOut != BFP_RAW_FORWARD && spec->bfpRawOut != BFP_RAW_BACKWARD_DX &&
+            spec->bfpRawOut != BFP_RAW_BACKWARD_ACC) {
+            PRINT_ERROR("executeOp: unknown bfpRawOut contract %d", (int)spec->bfpRawOut);
+            exit(1);
+        }
+        if (arithmetic.type != ARITH_BFP) {
+            PRINT_ERROR("executeOp: bfpRawOut is an ARITH_BFP contract (arithmetic "
+                        "dtype %d) -- a fake-quant pin must not set it",
+                        (int)arithmetic.type);
+            exit(1);
+        }
+        if (spec->bfpRawOut == BFP_RAW_BACKWARD_ACC) {
+            /* The grad contract: the integer engine is the DYNAMIC_RESCALE
+             * arm into BFP storage; the fixed grid and FLOAT32 grads keep
+             * the FLOAT32 raw (the layer selects NONE there). */
+            if (spec->mode != OUT_ACC_DYNAMIC_RESCALE) {
+                PRINT_ERROR("executeOp: BFP_RAW_BACKWARD_ACC needs OUT_ACC_DYNAMIC_RESCALE "
+                            "(mode %d) -- the fixed grid keeps the FLOAT32 raw",
+                            (int)spec->mode);
+                exit(1);
+            }
+            if (target->quantization->type != BFP) {
+                PRINT_ERROR("executeOp: BFP_RAW_BACKWARD_ACC accumulates into BFP storage "
+                            "only (target dtype %d) -- a FLOAT32 grad keeps the FLOAT32 raw",
+                            (int)target->quantization->type);
+                exit(1);
+            }
+        } else if (spec->mode != OUT_WRITE) {
+            PRINT_ERROR("executeOp: bfpRawOut needs the OUT_WRITE epilogue (mode %d) -- "
+                        "accumulating ops use BFP_RAW_BACKWARD_ACC or the FLOAT32 raw",
+                        (int)spec->mode);
+            exit(1);
+        }
+        switch (target->quantization->type) {
+        case BFP: {
+            const bfpQConfig_t *targetQC = target->quantization->qConfig;
+            rawBfpQC.numGroups = targetQC->numGroups;
+            rawBfpQC.groupSize = targetQC->groupSize;
+            break;
+        }
+        case FLOAT32:
+            rawBfpQC.numGroups = 1;
+            rawBfpQC.groupSize = 0;
+            break;
+        default:
+            PRINT_ERROR("executeOp: bfpRawOut has no epilogue into target dtype %d (BFP re-block "
+                        "or FLOAT32 dequant only)",
+                        (int)target->quantization->type);
+            exit(1);
+        }
+    }
+    int16_t rawExponents[rawBfpQC.numGroups > 0 ? rawBfpQC.numGroups : 1];
     /* outElems == 0 with aliasing: raw.data may be NULL for N=0 tensors
      * (target->data straight from a calloc(1,0), #160) — safe because the
      * kernel below iterates 0 elements. */
@@ -545,7 +622,16 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
         initSymInt32Quantization(&rawQC, &rawQ);
         break;
     case ARITH_BFP:
-        /* BFP D7: BFP kernels fold same-exponent segments into a float
+        if (spec->bfpRawOut != BFP_RAW_NONE) {
+            for (size_t g = 0; g < rawBfpQC.numGroups; g++) {
+                rawExponents[g] = 0;
+            }
+            rawBfpQC.exponents = rawExponents;
+            initBfpRawQuantization(&rawBfpQC, &rawQ);
+            break;
+        }
+        /* BFP D7 as amended (docs/conventions/arithmetic-bfp.md §13): without
+         * the opt-in, BFP kernels fold same-exponent segments into a float
          * accumulator (ldexpf) and never round — the raw intermediate stays
          * FLOAT32; any width-restore/pack is the OUT_WRITE epilogue's job. */
         initFloat32Quantization(&rawQ);

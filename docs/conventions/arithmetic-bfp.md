@@ -293,13 +293,22 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
   `acc += ldexpf((float)partial, Ea + Eb − biasA − biasB)`. The power-of-two
   multiply is exact (D7) — the only rounding this step introduces is
   ordinary float32 addition across blocks, plus the two exceptions in §§7–8.
+  Kernels write the fold as `bfpLdexpInt32(partial, e)` (BfpKernelSupport.h):
+  bit-identical to that ldexpf, a plain multiply by an exact 2^e on the hot path.
+  Amended for the forward by §13: an op that opts into the integer raw
+  (`opSpec_t.bfpRawOut`) emits `BFP_RAW` and the epilogue re-blocks in
+  integers; without the opt-in (every backward op) this bullet stands.
 - **Kernels are rounding-free** (Decision 7). Every `roundByMode` call in
   the BFP path (`HALF_AWAY` and `SR_HALF_AWAY` are defined once, in
   [arithmetic-sym.md](arithmetic-sym.md) "Rounding modes, the SYM_INT32 grid,
   encode and requant") lives at exactly two seams: staging (quantizing a FLOAT32
   operand into scratch) and the `OUT_WRITE` epilogue (packing the raw FLOAT32
   kernel output back into a BFP target). Nothing inside a kernel's reduction
-  loop rounds.
+  loop rounds. Exception, forward only (§13 "The integer fold"): an
+  integer-raw kernel aligns each finished segment to the accumulation
+  exponent with a HALF_AWAY right shift (never SR, never the op's mode), and
+  the integer Softmax forward rounds its normalisation HALF_AWAY (§5.9 step
+  5) — the re-block still owns the op's rounding mode.
 - **Headroom, exact form.** A same-exponent `int32` partial is sound only up
   to `bfpSegmentLimit(ma, mb) = INT32_MAX >> (ma+mb−2)`
   (`src/arithmetic/include/BfpKernelSupport.h`; `shift >= 31` clamps to `1` —
@@ -359,7 +368,10 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
   BFP instead (§5.5) and never reaches this path. **Explicitly marked
   revisable**: nothing in the funnel or the kernels assumes per-tensor
   staging specifically — a future PR could stage at a grouped template
-  without touching the kernel contract.
+  without touching the kernel contract. Since 2026-11-04 the FORWARD stages
+  only into FLOAT32 targets: an integer forward into a BFP wire rejects a
+  FLOAT32 operand, and the model input goes through a Quantization layer
+  (§13, "No float in the forward after the input layer").
 - **Decision 1 covers backward identically (epic PR3).** Every layer's
   backward dispatch builds the SAME per-tensor `{1,0}` staging template, at
   the weight operand's own `(mantissaBits, exponentBits)`, once before its
@@ -444,11 +456,13 @@ hand a float kernel unpacked int32 mantissa scratch through a `float*` cast —
 silent wrong arithmetic, not a crash.
 
 - **`weightGrad` is an output-centric walk**, not the forward's input-centric
-  one. Linear reuses `matmulBfpTensors` directly — the kernel is
+  one. Linear reuses the GEMM entries directly — the kernels are
   orientation-agnostic (per-element group lookup honors `orderOfDimensions`),
-  so `linearCalcWeightGradsBfp` is a thin transpose-view wrapper
-  (`transposeTensor(loss, 0, 1)` around the same GEMM entry the forward and
-  `dx` both call). Conv1d/Conv1dTransposed instead walk `(outChannel,
+  so `linearCalcWeightGradsBfp` (float fold, `matmulBfpTensors`) and
+  `linearCalcWeightGradsBfpRaw` (integer, `matmulBfpRawTensors`, into BFP
+  grads, §14) are thin transpose-view wrappers (`transposeTensor(loss, 0,
+  1)` around the same GEMM walk the forward and `dx` use). Conv1d runs the FLOAT32 weightGrad loop on integer
+  accumulators (§14). Conv1dTransposed instead walks `(outChannel,
   inChannel, kernelTap)` as the OUTER loops and `(batch, outputPosition)` as
   the reduction — each `(oc, ic, k)` cell accumulates its own same-exponent
   `int32` partial across every contributing `(b, outPos)` pair, folding on
@@ -469,19 +483,23 @@ silent wrong arithmetic, not a crash.
   group than its `groupSize`" argument the product guard uses. All three
   layers' `biasGrad` share this one bound
   (`linearCalcBiasGradsBfp`/`conv1dCalcBiasGradsBfp`/
-  `conv1dTransposedCalcBiasGradsBfp`).
+  `conv1dTransposedCalcBiasGradsBfp`). Into BFP grads Conv1d and Linear
+  fold the segment partials in integers instead of `ldexpf` (§14).
 - **`dx` (`propLoss`) reuses the OTHER family's own forward kernel — the D9
-  gather adjoint (§6), not a dedicated backward kernel.** Conv1d's `dx` is
-  mathematically a Conv1dTransposed op, so its `propLossKernelBfp` funnel
-  adapter dispatches straight to the forward's own
-  `convTranspose1dKernelBfpGather`; Conv1dTransposed's `dx` is mathematically
+  gather adjoint (§6), not a dedicated backward kernel** — except Conv1d.
+  Conv1d's `dx` is mathematically a Conv1dTransposed op; its
+  `propLossKernelBfp` adapter runs `convTranspose1dKernelBfpScatter`, the
+  FLOAT32 ConvT scatter loop on integer accumulators (§14), not the gather.
+  Conv1dTransposed's `dx` is mathematically
   a Conv1d op, so ITS `propLossKernelBfp` dispatches to `conv1dKernelBfp`.
   Linear's `dx` (`linearCalcPropLossBfp`) is
-  `matmulBfpTensors(loss, weights, NULL, propLoss)` — the same
-  orientation-agnostic GEMM the forward and `weightGrad` both call, with
-  `weights` as the second operand instead of the forward input.
+  `matmulBfpRawTensors(loss, weights, NULL, propLoss)` — the same
+  orientation-agnostic integer GEMM the forward calls, with `weights` as
+  the second operand instead of the forward input (integer end to end,
+  §14).
 - **BFP-stored operands entering any backward op go through the EXACT SAME
-  fold contract as the forward (§5.3), never a re-quantize.** Every operand
+  fold contract as the forward (§5.3), never a re-quantize** — except Conv1d
+  `dx` and `weightGrad`, which align every product on its own (§14). Every operand
   is looked up per-element (`bfpGroupOf`); the running `int32` partial folds
   into the `float32` accumulator via a lossless `ldexpf` power-of-two shift
   on ANY group-boundary crossing (either operand) and once more at the tail
@@ -700,17 +718,17 @@ per-tensor `{1,0}`; only the anchor's `mantissaBits`/`exponentBits` are read.
 A BFP-STORED operand is borrowed zero-copy as everywhere (D8) and never
 re-blocked.
 
-**Pool numerics (R-P4).** MaxPool compares DEQUANTIZED values
-(`ldexpf(mantissa, E − bias)`, exact) — raw mantissas are not comparable
-across groups; argmax/auxOut semantics and the −1 empty-window sentinel are
-unchanged. AvgPool sums int32 partials within same-group segments, folds on
-every group crossing plus the tail, and divides by K in the FLOAT32 raw: the
-SYM `s/K` scale fold has NO BFP analog, because a BFP scale is `2^E` and K is
-not a power of two in general. AdaptiveAvgPool does the same with each
-window's own count (the SYM arm's rounded integer division has no role — the
-BFP raw is float). Forward window sums carry `bfpValidateSumHeadroom`; the
-backwards do NOT, because contributions accumulate directly in the FLOAT32 raw
-with no int32 partials.
+**Pool numerics (R-P4).** Raw mantissas are not comparable across groups,
+so MaxPool compares exact `(code, E)` values; argmax/auxOut semantics and the
+−1 empty-window sentinel are unchanged. AvgPool sums int32 partials within
+same-group segments and folds on every group crossing plus the tail. Both
+FORWARDS are integer-only (`BFP_RAW`, §13 "The pool forwards"): the fold is
+an integer shift and the `/K` is an exponent shift: BFP math takes a
+power-of-two K only (ruling R1, §14). AdaptiveAvgPool still folds in float and
+divides by each window's own count in the FLOAT32 raw (the SYM `s/K` scale
+fold has no BFP analog: a BFP scale is `2^E`). Forward window sums carry
+`bfpValidateSumHeadroom`; the backwards do NOT, because contributions
+accumulate directly in the FLOAT32 raw with no int32 partials.
 
 **Packed-domain transparency (R-P2, R-P5).** Relu and Flatten carry the
 per-group exponents VERBATIM and stay outside the funnel: routing them through
@@ -1162,8 +1180,10 @@ mirroring `docs/conventions/arithmetic-sym.md` §"Grouped backward").**
 Native `ARITH_BFP` ships on BOTH sides. The forward runs an INTEGER pipeline —
 I-BERT's Algorithm 3 (`bfpIExpQ`, `src/arithmetic/BfpSoftmaxExp.c`) on a fixed
 dyadic work grid `2^-14`, fed by a block-alignment step that has no I-BERT
-analog (`softmaxValuesBfp`, `src/layer/Softmax.c`) — and the backward is ONE
-`executeOp` op that recomputes the forward through the same helper. Both are
+analog (`softmaxExpCodesBfp`, `src/layer/Softmax.c`) and closed by an
+integer normalisation into the `BFP_RAW` raw (`softmaxForwardBfpRaw`, §13)
+— and the backward is ONE `executeOp` op that recomputes steps 1-4 through
+the same helper and normalises in float32 (`softmaxValuesBfp`). Both are
 funnel-routed, so **the §5.7 packed-walk reviewer inventory does NOT grow**:
 the kernels consume the funnel's unpacked-BFP scratch (borrowed or staged,
 §5.3) and produce through the OUT_WRITE epilogue; a raw `->data` walk over
@@ -1196,8 +1216,11 @@ that one template. Pinned by `unitTestSoftmaxForwardBfpStagedWidths` /
 with `E_i` the element's unbiased block exponent and `EMax` the exponent of
 the block holding the SIGNED max:
 
-1. *Max* — one pass of `ldexpf((float)m_i, E_i)` compares, strict `>` keeps
-   the FIRST max (exact dequants, no rounding).
+1. *Max* — one pass of the exact `(code, E)` compare `bfpValueGreater`
+   (§13 "The pool forwards" item 1; needs `m <= 16`, checked), strict `>`
+   keeps the FIRST max, ties across blocks included. Until 2026-11-04 this
+   was an `ldexpf` compare, equal on every input where the dequant stays a
+   finite normal float32 (it overflowed to `inf` above `2^128` at e = 8).
 2. *Align* onto the work-grid-or-coarser common grid: `sigma = EMax + 14`,
    `down = max(0, -sigma)`, net shift `s_i = (EMax - E_i) + down`. `s_i >= 0`
    is a **rounded right shift** (`bfpShiftRightRounded`, exact at `s_i == 0`)
@@ -1213,8 +1236,28 @@ the block holding the SIGNED max:
    stays inside int32; `sigma < 0` ⇒ `qT` already IS on the work grid).
 4. *i-exp* `bfpIExpQ(qW_i, mode)` — its `>> z` renormalization is the THIRD
    lossy site.
-5. *Float boundary* `e_i = ldexpf((float)qe_i * 0.3585f, -28)`, float32 sum in
-   index order, divide (R-S3).
+5. *Normalise.* FORWARD (integer, 2026-11-04, `softmaxNormalizeRaw`):
+   the common scale `0.3585 · 2^-28` cancels, so `s_i = qe_i / Σ qe`
+   directly. `Σ qe` reaches `n · QE_MAX` (`QE_MAX = QB² + QC = 748 954 122`,
+   the i-exp's largest output) and leaves int32 for `n >= 3`, so the sum
+   is kept as `T = hi · 2^p + lo` (`lo < 2^p`, one carry per term) with `p`
+   the smallest `p >= 0` such that `n · QE_MAX <= INT32_MAX · 2^p` (a
+   compile-time table; HAR's `n = 6`: `p = 2`) — `hi` fits by that choice —
+   and the divisor is `S = round_half_up(T / 2^p)`. Then
+   `mant_i = round_half_up(qe_i · 2^(30-p) / S)` by a 32-step restoring
+   division (no hardware divide; `30 = BFP_SOFTMAX_RAW_FRAC_BITS`), at raw
+   exponent `-30` in EVERY raw group (the output geometry does not matter:
+   all elements share one scale). The division starts at
+   `r = qe_i >> (p+1)`, which must be `< S` for the quotient to fit 32
+   bits; `S >= T/2^p - 1/2` and `T > 2^p` (the argmax's `qe` is `≈ QE_MAX`)
+   give it, and it is CHECKED once per call (fail-fast). `|mant| <= 2^30 (1
+   + 2^(p-1)/T) + 1 < 2^31`. Rounding is HALF_AWAY (all values `>= 0`, so
+   half up), never SR and never the knob's: it is a fourth rounding site,
+   outside the knob, and the re-block owns the op's mode. Error per output
+   `<= 2^-31` from the division plus a common relative `<= 2^(p-1) / T <=
+   2^(p-30)` from `S`; `|Σ mant − 2^30| <= n/2 + 2^p + 1`.
+   BACKWARD recompute (R-S4, float32 as before): `e_i = ldexpf((float)qe_i *
+   0.3585f, -28)`, float32 sum in index order, divide (R-S3).
 
 The `min(qT, 0)` clamp is load-bearing under SR only: the deterministic modes
 are monotone, but an SR draw can jitter to `+1`, which would enter `bfpIExpQ`
@@ -1225,10 +1268,10 @@ sentinel (part 4 bounds its true weight), and a ZERO mantissa with `up >= 31`
 returns its exact `0` through an explicit clause, because `0 << 32` is
 shift-count UB (C11 6.5.7p3), not merely a value question.
 
-**No int32 accumulator exists on any softmax path**, so neither
-`bfpValidateBlockHeadroom` nor `bfpValidateSumHeadroom` has a role here —
-unlike every other BFP kernel family. The ONLY int32 headroom argument is the
-polynomial's, and it is what fixes `F = 14`: `q_p ∈ (-QLN2, 0]` gives
+**The only int32 accumulator is the forward's step-5 sum**, whose headroom
+is the static `p` of step 5 (no `bfpValidate*Headroom` has a role here —
+unlike every other BFP kernel family). The other int32 headroom argument is
+the polynomial's, and it is what fixes `F = 14`: `q_p ∈ (-QLN2, 0]` gives
 `|q_p + q_b| <= q_b = 22167`, so `qL <= 22167² + QC = 748 954 122 < 2^31`; at
 `F = 15` the square alone is ≈ 1.97e9 and overflows. The constants
 (`QLN2 = 11356`, `QB = 22167`, `QC = 257 578 233`, `QFLOOR = -363 392`) are
@@ -1236,7 +1279,10 @@ COMPILE-TIME floors of their real values, re-derived by the goldgen and pinned
 in C against a double-precision recomputation (`testShiftConstantsMatchDerivation`).
 
 **The knob (`bfpExpShiftRounding`).** `BFP_SHIFT_TRUNC` (default,
-I-BERT-faithful `>>`), `BFP_SHIFT_HALF_AWAY`, `BFP_SHIFT_SR` — set through
+I-BERT-faithful `>>`), `BFP_SHIFT_HALF_AWAY`, `BFP_SHIFT_SR` (the integer
+draw since 2026-11-04: lift iff the draw's top `k` bits `<` the `k` dropped
+bits, one `rngNextU32` per shift — for `k <= 24` the decision the 24-bit
+float draw took from the same word, for `25 <= k <= 31` the exact one) — set through
 `softmaxSetBfpExpShiftRounding` (`SoftmaxApi.h`). It governs the three
 INTEGER shift sites above and NOTHING else: it is ORTHOGONAL to every
 `roundingMode_t` in the config, never derives from one, and staging plus the
@@ -1249,13 +1295,15 @@ at whatever its factory set (`BFP_SHIFT_TRUNC`); a sweep that varies the knob
 must re-apply the setter after loading.
 
 **R-S3 — the float32 boundary (what "native" means here).** Exact:
-the dequants for the max compare, the alignment/promotion arithmetic, the
-`dLds` dequant in the backward. Float32: the exp weights `e_i` after
+the max compare, the alignment/promotion arithmetic, the `dLds` dequant in
+the backward. The FORWARD has no float32 left (2026-11-04): step 5 is the
+integer normalisation and the raw is `BFP_RAW` (§13), re-blocked in
+integers. Float32 on the BACKWARD only: the exp weights `e_i` after
 `(float)qe_i`, the cross-element sum, the normalize divide, and the whole
-backward elementwise/dot arithmetic. The block structure re-enters at exactly
-ONE point per op — the produced wire's OUT_WRITE pack, i.e. §10's
-"native OPERAND handling plus a natively derived produced grid" boundary in
-softmax's shape (§11 records it). The raw is FLOAT32 (D7).
+elementwise/dot arithmetic; its raw stays FLOAT32 (D7). The block structure
+re-enters at exactly ONE point per op — the produced wire's OUT_WRITE pack,
+i.e. §10's "native OPERAND handling plus a natively derived produced grid"
+boundary in softmax's shape (§11 records it).
 
 **R-S4 — backward = ONE funnel op that recomputes from the LOGITS.** The
 `ARITH_BFP` arm issues a single `executeOp` (`OUT_WRITE` into `propLoss`,
@@ -1264,7 +1312,10 @@ the logits via `softmaxValuesBfp` with the layer's OWN knob, dequantizes
 `dLds` exactly, accumulates `dot = Σ s·dLds` in float32 index order and emits
 `s·(dLds - dot)`. The recompute means the backward differentiates the
 UNPACKED forward values — the packed forward wire differs from them by one
-pack rounding — which is the norms' R-N4 cost note verbatim, and it is what
+pack rounding — which is the norms' R-N4 cost note verbatim (since the
+integer forward, the backward's `s` is the float32 normalisation of the
+SAME `qe` codes, so it differs from the forward's raw by at most
+`2^-31 + 2^-22 · s` — the goldgen asserts it per fixture), and it is what
 makes the layer stateless between passes. Two gates: the operand grid
 (`validateBfpQConfigShape`) and the loss ELEMENT COUNT (the #436 OOB class —
 both walks run `x`'s flat `n`, and a shorter per-tensor `{1,0}` loss passes
@@ -1377,12 +1428,14 @@ backward check sits after the `propLoss == NULL` return, R-S4's ordering).
    PROBABILITY, i.e. §5.8 part 2 verbatim, the same mantissa-width sweep axis.
    `SR_HALF_AWAY` rounds to one of the two neighbouring grid points. This is the ONE BFP-specific
    rounding of the whole path (backward: of `dx`).
-6. *Float32 dust.* `(float)qe_i` rounds above `2^24` (`qe` reaches
-   ≈`7.49e8`) — §7's documented `int32→float` conversion class at a different
-   site, relative `2^-24`, absorbed by the `2.5e-3` bound. The `N`-term sum in
-   index order carries the usual `<= (N-1)·2^-24` relative worst case, the
-   divide one rounding, and the backward's `dot` the same shape. All of it is
-   orders of magnitude below parts 4 and 5 at any practical width.
+6. *Normalisation dust.* Forward: the integer step 5's `<= 2^-31` per
+   output plus the common `<= 2^(p-30)` relative of `S` (step 5). Backward:
+   `(float)qe_i` rounds above `2^24` (`qe` reaches ≈`7.49e8`) — §7's
+   documented `int32→float` conversion class at a different site, relative
+   `2^-24`, absorbed by the `2.5e-3` bound; the `N`-term sum in index order
+   carries the usual `<= (N-1)·2^-24` relative worst case, the divide one
+   rounding, and the backward's `dot` the same shape. All of it is orders of
+   magnitude below parts 4 and 5 at any practical width.
 7. *Dominant term.* Worked at `m = 8` on both wires with logits of order 1
    (argmax block absmax `a = 2` ⇒ `EMax = -5`): the alignment band is
    `u = 2^-5 ≈ 3.1e-2` on the ARGUMENT, i.e. up to ≈3% of a rounded element's
@@ -1710,9 +1763,9 @@ in the repository are listed.
 | D4 | Native `ARITH_BFP` everywhere, Softmax and norms included — except by decision: Dropout is non-native (float bridge), Flatten is a passthrough, losses are fake-quant (native CE/MSE an optional stretch). | §5.7–§5.9; `Dropout.c`, `MSE.c`, `CrossEntropy.c` |
 | D5 | Wires are fully blocked; the wire-block size is independent of the weight-block size; per-tensor (`numGroups = 1`) is the degenerate sweep point. | §5.5, wire allocators |
 | D6 | Exponent saturation, not abort: the shared exponent clamps to its representable range; at the top mantissas saturate to the grid `[-2^(m-1), qMax]`, at the bottom they flush toward zero. Deliberate deviation from the `#227` abort discipline — saturation is what the `exponentBits` sweep axis measures. Doc aligned to the shipped clamp 2026-10-31 (positive cap `qMax`, negative floor `-2^(m-1)`; clamp code unchanged). | §1, §2; `deriveBfpStoredExponent`, BFP cells of `TensorConversion.c` |
-| D7 | The raw intermediate under `ARITH_BFP` is FLOAT32: kernels MAC mantissa products in `int32` within a block, fold each block partial with an exact `·2^(Ea+Eb)` float multiply, and accumulate in float32 across blocks. No `int64`. | §5.3; every BFP kernel, `ExecuteOp.c`'s BFP arms |
+| D7 | The raw intermediate under `ARITH_BFP` is FLOAT32: kernels MAC mantissa products in `int32` within a block, fold each block partial with an exact `·2^(Ea+Eb)` float multiply, and accumulate in float32 across blocks. No `int64`. **Amended 2026-11-04 (integer-only forward, §13):** a forward op that sets `opSpec_t.bfpRawOut` emits `BFP_RAW` instead (int32 mantissas + one unbiased int16 exponent per TARGET group) and the OUT_WRITE epilogue re-blocks in integers; ops without the flag — every backward op — keep the FLOAT32 raw. | §5.3, §13; every BFP kernel, `ExecuteOp.c`'s BFP arms, `reblockBfpRawTensor` |
 | D8 | Op-local blocking: compute blocking belongs to the op, storage blocking to the tensor. Amended 2026-09-02 (PR3): an already BFP-stored operand is never re-blocked — op-local blocking realizes as the exact fold-segmentation contract (fold whenever either operand's group changes); fresh blocking happens only on the FLOAT32-staging path. | §5.3, §9; GEMM kernels, pools, Relu/Dropout |
-| D9 | Every ConvT1d op under `ARITH_BFP` is gather-formulated (output-centric: each output is a dot product over its contributors), restoring the int32 block-partial contract; the SYM scatter core stays SYM-only. | §6; `convTranspose1dKernelBfpGather`, `convTranspose1dTapsAt` |
+| D9 | Every ConvT1d op under `ARITH_BFP` is gather-formulated (output-centric: each output is a dot product over its contributors), restoring the int32 block-partial contract; the SYM scatter core stays SYM-only. Amended 2026-11-05 (§14, experiment): the Conv1d dx (a ConvT1d op) scatters on integer accumulators instead. | §6, §14; `convTranspose1dKernelBfpGather`, `convTranspose1dTapsAt` |
 | D12 | Sequencing: the epic starts after group-quant PR3; group-quant PR4 (ASYM groups) runs in parallel with a single coordinated ODTS version bump (v5); the group-quant HAR sweep is the vehicle the BFP sweep extends. | `Serialize.c` (v5) |
 | deviations register 5 | Dropout handles mantissas through a float bridge (non-native by decision, D4). | §5.7 "Dropout bridge" |
 | deviations register 6 | ReLU is block-transparent: exponents are kept, the mantissa-utilization drop is accepted. | §5.7 "Packed-domain transparency" |
@@ -1725,7 +1778,7 @@ in the repository are listed.
 | Decision 2 | Bias is staged uniformly like any other operand (FLOAT32 bias → per-tensor BFP scratch; BFP bias → unpacked and borrowed); no funnel special case. | §5.4 |
 | Decision 3 | v1 operand-dtype scope: under `ARITH_BFP` only FLOAT32-stored (staged) and BFP-stored operands are legal; SYM/ASYM/INT32/BOOL-stored operands fail fast ("insert a Quantization layer"). | §5.4 |
 | Decision 5 | Wire geometry: a per-tensor template gives a per-tensor wire; a grouped template gives `{N/groupSize, groupSize}` from the template's `groupSize`, ignoring its `numGroups`; `N % groupSize != 0` fails fast; exponents start zero-state. | §5.5; `initLayerOutputs`, `CalculateGradsSequential.c`, `InferenceApi.c`, norm-factory BFP params |
-| Decision 7 | `ARITH_BFP` kernels are rounding-free: all rounding happens at staging (quantize) and at the OUT_WRITE epilogue (pack). | §5.3 |
+| Decision 7 | `ARITH_BFP` kernels are rounding-free: all rounding happens at staging (quantize) and at the OUT_WRITE epilogue (pack). Amended 2026-11-04 (§13): for an op with `bfpRawOut` the OUT_WRITE rounding is the integer re-block (shift + HALF_AWAY magnitude form or integer SR), one draw per element as before. | §5.3, §13 |
 | Decision 8 | The `ARITH_BFP` derivation flip lands last: after it, `layerQuantInitUniform(bfp)` derives `ARITH_BFP` in all four math slots (backward slots had to be pinned to FLOAT32 until epic PR3). | §5.1, `ArithmeticType.c` |
 | Decision 9 | The PR2 native end-to-end model keeps its final (loss-facing) wire FLOAT32, because losses had no BFP arms before PR4. | `UnitTestMultiLayerTraining.c` |
 | Decision 11 | A BFP-stored operand under `ARITH_SYM_INT32` is denied (guided fail-fast in the funnel's SYM prologue): converting it would silently collapse its group structure to one scalar grid. Legal: BFP storage under `ARITH_FLOAT32` (fake-quant) or `ARITH_BFP` (native). | §5.4; `ExecuteOp.c`, `Softmax.c` |
@@ -1737,8 +1790,944 @@ in the repository are listed.
 | P6-1 | Softmax backward recomputes the softmax from the logits it actually receives (the layer input, per the training-loop contract) in every arm; the old code treated its input as the softmax output. | §11 Correction 1; `Softmax.c` |
 | P6-2 | Pure-integer alignment onto the max element's block grid, with a shift-rounding knob (`BFP_SHIFT_TRUNC` default, `HALF_AWAY`, `SR`) as a `softmaxConfig_t` field; `layerQuant_t` does not grow. | §5.9 R-S2; `softmaxSetBfpExpShiftRounding` |
 | P6-3 | Fixed dyadic work grid `2^-14`, so the i-exp constants are compile-time integers. | §5.9; `BfpSoftmaxExp.c` |
-| P6-4 | The max search is an exact float compare of dequantized values (first max wins); no rounding introduced. | §5.9 |
-| P6-5 | The cross-element sum and the normalizing divide run in float32 (D7); the only BFP rounding is the OUT_WRITE pack. | §5.9 R-S3 |
+| P6-4 | The max search is an exact float compare of dequantized values (first max wins); no rounding introduced. Amended 2026-11-04: the exact integer `(code, E)` compare `bfpValueGreater`, same tie rule. | §5.9 |
+| P6-5 | The cross-element sum and the normalizing divide run in float32 (D7); the only BFP rounding is the OUT_WRITE pack. Amended 2026-11-04 (integer-only forward): the FORWARD normalises in integers (HALF_AWAY, raw `BFP_RAW` at `2^-30`); the backward recompute keeps this row. | §5.9 R-S2 step 5, R-S3 |
 | P6-6 | Backward is one funnel OUT_WRITE op anchored on `propLossQ`, recomputing the softmax in-kernel from the logits; `propLoss == NULL` is an early no-op. | §5.9 R-S4 |
 | P6-7 | SYM_INT32 softmax stays fake-quant (float kernel); only `ARITH_BFP` gets native semantics. | `Softmax.c` dispatch |
 | P6-8 | Silent behavioural flip, documented: a uniform-BFP profile now runs the native forward and backward; pin the math slots to `ARITH_FLOAT32` to opt out. | §5.9 R-S6 |
+
+## 13. Integer raw intermediate (`BFP_RAW`) and the integer re-block rule (integer-only forward)
+
+D7 made every BFP kernel emit a FLOAT32 raw that the OUT_WRITE epilogue
+re-packed with float (per element `fdiv` + `roundf` / float SR, per group
+`frexpf`) — on a core without an FPU that pack alone costs more than the
+integer MACs it follows. This section records the integer replacement for the
+FORWARD path (2026-11-04). The backward keeps D7's FLOAT32 raw, except the
+Conv1d and Linear dx (§14, `BFP_RAW_BACKWARD_DX`, 2026-11-05) and the Conv1d
+and Linear weightGrad / biasGrad into BFP grad storage (§14,
+`BFP_RAW_BACKWARD_ACC`, 2026-11-05).
+
+**The raw.** `qtype_t BFP_RAW` with `bfpRawQConfig_t {int16_t *exponents;
+numGroups; groupSize}` (`Quantization.h`): int32 mantissas in the tensor data
+plus ONE **unbiased** int16 exponent per TARGET group, `value = mant · 2^E`
+(unbiased because an accumulation exponent is the sum of two unbiased operand
+exponents plus a fold guard, which exceeds int8). It is transient by design:
+it exists on the funnel's stack for one op, is never storage, never
+serialized, copied or cloned, and every other dtype switch rejects it; the
+enum value is appended last so stored tags stay stable. An op opts in per
+call with `opSpec_t.bfpRawOut` (`ExecuteOp.h`, `bfpRawContract_t`):
+`BFP_RAW_FORWARD` for the integer forward, `BFP_RAW_BACKWARD_DX` for a
+backward op writing a dx wire (the Conv1d and Linear dx, §14). Both are `ARITH_BFP` and
+`OUT_WRITE` only, raw geometry copied from the target (a BFP target's
+`{numGroups, groupSize}`; a FLOAT32 target has no groups, so `{1,0}` — one
+exponent over the whole output); any other target dtype, arithmetic type,
+epilogue or contract value fails fast. The third value,
+`BFP_RAW_BACKWARD_ACC`, is a grad op accumulating into BFP grad STORAGE (the
+Conv1d and Linear weightGrad / biasGrad, §14): `ARITH_BFP`, `OUT_ACC_DYNAMIC_RESCALE`
+and a BFP target only (raw on the grad's geometry); the epilogue is the
+integer engine of §15 (`accumulateBfpRawIntoBfpRescale`), which rounds by
+the grad's own storage mode — the ACC rule (#282) — drawing from the op's
+`RNG_TAG_ACC` stream 0. A FLOAT32 grad or the fixed grid
+(`OUT_ACC_FIXED_SCALE`) with this value fails fast; the layer keeps
+`BFP_RAW_NONE` (the FLOAT32 raw) for both. The explicit per-op value is the raw
+contract: a backward adapter that shares forward kernel code never switches
+raw format by accident — Softmax's leaves it `BFP_RAW_NONE`, Linear's set
+their own backward value (§14). A kernel that is given a `BFP_RAW` MUST write every group's
+exponent.
+
+**The re-block** (`conversionMatrix[BFP_RAW][BFP]`, `reblockBfpRawTensor`,
+`TensorConversion.c`), per target group:
+
+1. `absmax` of the int32 mantissas in `uint32` (`|INT32_MIN| = 2^31` is a
+   legal magnitude).
+2. Stored exponent by §3's rule in integer form — the smallest `E` with
+   `absmax <= qMax · 2^E`: `s = bitlen(absmax) − (m − 1)`, plus one when
+   `s >= 1` and `absmax > qMax << s` (`qMax = 2^(m−1) − 1` is one below a
+   power of two, so the top of each octave needs one more; for `s <= 0` the
+   correction never fires). `stored = rawE + s + bias`, then the D6 clamp to
+   `[0, min(2^e − 1, bias + 127)]` — the same cap as `deriveBfpStoredExponent`,
+   since a stored exponent is still decoded by `bfpGroupScale` on the float
+   side. `absmax == 0` is the zero state (`stored = bias`); `n == 0` writes
+   the zero state for every group and no payload (R7 parity).
+3. ONE shift per group, `k = stored − bias − rawE` (right; negative = left).
+   `k` in `[1, 31]`: HALF_AWAY in magnitude form (`t = mag >> k;
+   t += (mag & (2^k − 1)) >= 2^(k−1)`) or integer SR (`t += (draw >> (32 − k))
+   < rem`, `rem` = the `k` dropped bits) — the shipped law "lift iff u < frac"
+   with `u` = the draw's top `k` bits on a `k`-bit grid; for `k <= 24` this is
+   the SAME decision the float path takes from the same draw (`u` on the 24-bit
+   grid), which the float-authority tests pin. `k >= 32` flushes to 0.
+   `k <= 0` is an exact left shift that saturates at the sign's bound. Codes
+   clamp to `[−2^(m−1), qMax]`, which binds only in the D6 cap regime. The
+   sign is applied after the magnitude rounding, so SR stays odd per draw
+   (`SR(−x) = −SR(x)`) as the law requires.
+4. Under SR exactly ONE draw per element in element order, on every path
+   (exact, flushed, zero group included) — the same stream position as the
+   float re-pack it replaces (`roundByMode` draws for integer-valued quotients
+   too), so pinned-draw tests and the Python mirrors keep their positions.
+5. Packed through `packChunkGuarded`; the 32 → 8/16 byte/halfword fast path in
+   `byteConversion` (`Tensor.c`) serves every `m = 8/16` pack site (SYM and
+   BFP; Relu/Dropout/Comparison too). It is bit-identical to the bit walker by
+   construction: the walker emits a code's low 8/16 bits LSB-first, which is
+   the int32 word's first one or two bytes in memory order.
+
+**The integer fold** (Conv1d forward, `conv1dKernelBfpRaw`, `Conv1dKernel.c`;
+the helpers in `BfpKernelSupport.h`). The kernel keeps conv1dKernelBfp's walk
+unchanged — loop skeleton, loop order, MAC count, `windowSlice1dAt`, index
+math, the per-tap group tracking of BOTH operands — and replaces only the
+float fold:
+
+1. ONE `int32` accumulator per output element, in units of `2^E_acc`, with
+   `E_acc` shared by every element of a raw TARGET group (the output wire's
+   blocking; `{1,0}` for a FLOAT32 target).
+2. `E_acc = E_top + g`. `E_top` of a target group is the max over the output
+   rows `(b, oc)` it covers (a group may straddle channels and batches) of
+   `max_ic(rowmax E_in) + rowmax E_w`, max'ed with the channel's unbiased
+   bias exponent — the row maxima are per input row `(b, ic)` of the conv
+   group and per weight row `oc`, computed once per call over the groups
+   holding a NONZERO code of the row (cursors, no division; a zero bias code
+   sets nothing — see "Zero groups never set `E_acc`" below). This is a cheap
+   over-approximation of the max segment exponent (a row, not a window).
+3. `g` is the static headroom proof (`bfpFoldGuardBits`), the
+   **product-bound rule**: with `N = inChannels/groups · kernelSize`, in
+   units of `2^E_acc` every term of the accumulator is bounded in absolute
+   value, so every intermediate sum is, whatever the signs or the fold
+   order:
+   - product segments: `|partial_s| · 2^(E_s − E_acc) <= count_s · 2^(ma+mb−2)
+     · 2^−g` (every `|code| <= 2^(m−1)`, `E_s <= E_top` for every NONZERO
+     segment; a zero segment adds 0 at any alignment); run splitting only
+     partitions the `N` products (`Σ count_s <= N`), so all product segments
+     together contribute `<= P · 2^−g`, `P = N · 2^(ma+mb−2)`. Each UNALIGNED
+     partial separately stays within int32 because a segment holds at most
+     `bfpSegmentLimit(ma, mb)` products;
+   - the bias segment: `|b| · 2^(E_b − E_acc) <= Bb · 2^−g`, `Bb = 2^(mBias−1)`
+     (0 without bias), because `E_top` max'es the bias exponent in; when the
+     bias exponent exceeds every product's, `E_top = E_b` and the products are
+     shifted further right (they only shrink) while the bias is the term at
+     `2^−g`;
+   - rounding: a HALF_AWAY right shift adds at most one half, a left shift
+     nothing; at most `N` product segments (a split never makes an empty one)
+     plus the bias, so `<= (N + 1)/2`; the rule reserves one unit per fold,
+     `N + 1`.
+   `g` is the smallest integer in `[−30, 31]` with
+   `(P + Bb) · 2^−g + (N + 1) <= INT32_MAX`. It is NEGATIVE whenever the
+   reduction sits below the int32 limit (m = 8, N = 80: `g = −10`): the
+   max-exponent partials are then shifted LEFT exactly (their `2^−g` images
+   stay within the bound, so no overflow) and only segments more than `−g`
+   binades below `E_top` are rounded; it is `>= 2` for m = 16 reductions
+   beyond a few products (m16 × m16: 2 at N = 4, 6 at N = 80; m16 × m8: 3 at
+   N = 2400). The design's `g = 1 + ceil(log2 S)` is the same proof with the
+   int32 bound on a partial in place of the product bound; the product bound
+   is tighter at every width (ruling 2026-11-04: kept, with negative `g`).
+   A kernel that rescales or rounds partials BEFORE folding must add that
+   error and its changed magnitude bound to this proof.
+4. Alignment (`bfpAlignPartial`): a finished segment enters as
+   `partial · 2^−k`, `k = E_acc − (E_in + E_w)`. `k < 0` is an exact left
+   shift (no overflow, by 3.); `k > 0` is HALF_AWAY in the overflow-safe
+   magnitude form `t = mag >> (k−1); r = (t >> 1) + (t & 1)`; `k >= 32`
+   drops the partial (it is below one half). Never SR: the re-block owns the
+   op's rounding mode, the fold rounds HALF_AWAY whatever the mode. This is
+   the forward's exception to "kernels are rounding-free" (§5.3).
+5. A segment closes on EITHER operand's group change (as before) AND when it
+   holds `bfpSegmentLimit(ma, mb)` products: over-long same-exponent runs
+   are SPLIT at the int32 limit, not rejected — the forward has no
+   `bfpValidateBlockHeadroom` (m = 16 × 16 runs with one product per
+   segment). The backward keeps the fail-fast.
+6. The bias is one more segment: `bfpAlignPartial(code, E_acc − E_bias)`
+   seeds the accumulator, hoisted per channel and target group.
+7. Absolute fold error per output: `<= ½ (S + 1) · 2^E_acc`, `S` = segments
+   folded (bias included). Relative to the output it is `2^−24`-class only
+   near the static bound; a target group whose values sit far below the
+   bound sees more — the price of one static exponent per group.
+
+A FLOAT32 target gets ONE `E_acc` over the whole output (the `{1,0}` raw):
+outputs more than `~31 + g` binades below the global row max lose mantissa
+bits, and `(float)mant` rounds above `2^24`. The BFP-wire path (the proof
+config) is per group and unaffected.
+
+**Zero groups never set `E_acc` (2026-11-05).** Every pre-pass max of §13
+and §14 — the row / line maxima of both operands, the operand-wide max of a
+strided operand, the bias exponent, and the dx raw's max-`E_acc` re-grid
+across rows — runs over the groups holding a NONZERO code of the run, never
+over a group whose codes there are all zero: a zero code adds nothing to any
+sum, so it bounds nothing, and the proof of item 3 only needs every nonzero
+segment below `E_top`. An all-zero group stores the zero state (`stored =
+bias`, `E = 0`), typically far ABOVE the live data next to it (a
+ReLU-zeroed loss row beside gradients at `E ≈ −25`); counting it lifted
+`E_acc` by up to ~20 binades and rounded live partials HALF_AWAY before the
+final SR or re-block — a dead zone where the float fold had been exact.
+Mechanics: `bfpRowMaxExponent` takes the operand's codes and returns the
+marker `BFP_NO_LIVE_EXP` for a run without a nonzero code; a product pairs
+to nothing if either factor's run is marked (`bfpLiveExpSum`); a unit (raw
+target group, `E_acc` row) with nothing set takes the zero state's top 0,
+i.e. `0 + g` — what an all-zero operand produced before. The pre-pass reads
+each operand code at most once per call (O(elements), never per MAC; a group
+whose exponent cannot raise the max is not read). A zero partial whose group
+sits any distance above `E_acc` aligns to 0 (`bfpAlignPartial`: `−k >= 32`
+returns 0 instead of the out-of-range shift). Measured, HAR 1 epoch seed 1,
+bfp8 `BFP_GRADS=1 BFP_STATE=0`: live partials right-shifted inexactly
+before → after the rule — Conv1d dx 203.8 M → 0 (829 M dropped bits, 3.0 M
+partials flushed to 0), Conv1d weightGrad 6.02 M → 0.12 M, Conv1d biasGrad
+23 → 0, Conv1d forward 100.1 M → 99.5 M (the rest is the live exponent
+spread), Linear forward 345 → 344, Linear backward and AvgPool 0 both. The `*_zero_*` differential
+cells mismatch under a kernel or a mirror that counts zero groups.
+
+**Relation to the float authority.** On data where the float path is exact
+(`|mant| < 2^24`, a power-of-two scale, `k <= 24`) the integer rule
+reproduces `deriveBfpStoredExponent`'s stored exponents and the float
+re-pack's codes bit for bit, under HALF_AWAY and under SR from the same key.
+Above `2^24` the two legitimately diverge: `(float)mant` rounds the magnitude
+(§7); the integer form is the exact one. Non-finite values cannot arise in
+the integer domain, so R9's fail-fast has no integer twin.
+
+**Loss-facing dequant** (`conversionMatrix[BFP_RAW][FLOAT32]`,
+`convertBfpRawTensorToFloat32Tensor`): `ldexpf((float)mant, E)` per element,
+not a hoisted `2^E` multiply — `E` is an uncapped int16, and `0 · 2^200` must
+stay `0`, not `NaN`. One of the two permitted float boundaries of the
+integer-only forward (allow-listed in the census).
+
+**Cost shape.** No division anywhere: group runs use an incrementing cursor
+(groups are contiguous), `bitlen` is a five-step binary search (no libgcc
+`__clzsi2` on a core without CLZ). The census reports zero float / libm /
+division helpers for the re-block; its one `mem` hit is `byteConversion`'s
+`memset` on the non-8/16 width branch.
+
+**The pool forwards** (`maxPool1dForwardKernelBfpRaw`, `MaxPool1d.c`;
+`avgPool1dForwardKernelBfpRaw`, `AvgPool1d.c`). Both keep the FLOAT32 arm's
+walk (windows, order, `windowSlice1dAt`, the per-element `bfpGroupAt`) and
+emit `BFP_RAW` on the target's geometry.
+
+1. MaxPool compare (`bfpValueGreater`, `BfpKernelSupport.h`): exact, no
+   float. Same exponent: code compare. Gap `d = Ea − Eb` in `[1, 15]`: the
+   code under the larger exponent is shifted left by `d` in uint32
+   (`|code| · 2^15 <= 2^30`, needs `m <= 16`, checked). `d >= 16`: the
+   shifted side's magnitude is `>= 2^16 > |other|` unless it is zero, so its
+   sign decides, and a zero there beats only a negative other. First strict
+   greater wins, ties across groups included, so the argmax is the FLOAT32
+   arm's on the dequantized input, bit for bit (the old `ldexpf` compare was
+   exact too).
+2. MaxPool winners: `E_acc` of a raw target group = (max exponent over the
+   group's NONZERO winners) `− 15`, unbiased; a group without one gets 0
+   (all its mantissas are 0). A zero winner never sets `E_acc`: it aligns
+   losslessly at any exponent and would only push the others down. Each
+   winner enters as `bfpAlignPartial(code, E_acc − E_w)`: a left shift by at
+   most 15 (exact, `<= 2^30`), or — for a winner more than 15 binades below
+   its group's top — a HALF_AWAY right shift. That is the one lossy step:
+   MaxPool is no longer a pure select when a raw group spans more than 15
+   binades of winners. The re-block then rounds by the op's mode (SR
+   included). The target group's absmax is at least `2^E_top`, so its last
+   code bit is at least `2^(E_top − m_out + 1)` and the alignment rounding
+   (at `2^(E_top − 15)`) sits `>= 16 − m_out` binades below it: 8 at
+   `m_out = 8`, but 0 at `m_out = 16`, where the two roundings can stack
+   (bounded by one unit of `2^E_acc`). With a FLOAT32 target the raw
+   is per tensor (`{1,0}`), so the 15-binade window spans the whole output.
+   Pass 1 (the select) collects the per-group max in the raw exponent array;
+   pass 2 re-reads each winner's exponent through its argmax — O(outputs),
+   no output-sized table.
+3. AvgPool fold: the Conv1d fold with codes in place of products. `E_acc` of
+   a raw target group = the max group exponent over the nonzero codes of the
+   input ROWS its outputs read (row `r` of the output reads input row `r`;
+   cursors, no division; none: 0) `+ g`, `g = bfpSumFoldGuardBits(K, m)` — item 3's proof with
+   the second factor bounded by 1: the smallest `g` with
+   `K · 2^(m−1) · 2^−g + (K + 1) <= INT32_MAX` (HAR m = 8, K = 32: `g = −18`).
+   One int32 partial per same-group segment (`bfpValidateSumHeadroom` bounds
+   each), aligned by `bfpAlignPartial` (left exact, right HALF_AWAY, never SR).
+4. AvgPool mean: `−log2 K` moves into the raw exponent (exact, no
+   division; HAR's K = 32). BFP math takes a power-of-two K only (ruling R1,
+   §14: `avgPool1dBfpLog2Divisor` fails fast at the factory and at both
+   integer kernels). Error per output `<= S/(2K) · 2^E_acc`, `S` = segments
+   folded. `count_include_pad` stays true: the divisor is K. The remaining
+   division sites of both roots are `bfpGroupAt`'s per-group-change
+   recomputes and the window geometry.
+
+**The Linear forward** (`matmulBfpRawTensors`, `Matmul.c`, behind
+`linearForwardBfpRaw`'s transpose dance). `matmulBfpTensors`' walk verbatim —
+row, column, reduction loops, `calcElementIndexByIndices` per MAC,
+`bfpGroupAt` on both operands — with the Conv1d fold:
+
+1. `E_top` of output `(r, c)` = max group exponent over the nonzero codes
+   of the reduction LINE of input row `r` + over weight row `c` (the line
+   output column `c` reduces over), max'ed with column `c`'s bias exponent
+   when its code is nonzero (zero groups never set `E_acc`, above); `E_acc` of a raw
+   target group = max `E_top` over its outputs (walked in output order,
+   O(outputs)) `+ g`, `g = bfpFoldGuardBits(inFeatures, ...)` (HAR m8,
+   N = 64, bias m8: `g = −10`). A line is one contiguous storage run when
+   the reduction axis is the physically innermost dimension — the Linear
+   layer's identity-ordered input and its transposed weight view — and one
+   forward cursor walks all lines without a division. Any other view (a
+   permuted operand handed to the kernel directly) gets the operand-wide
+   max over all groups: coarser, still an upper bound.
+2. Items 3-7 above unchanged; the bias segment is aligned per OUTPUT (the
+   column changes every output, so there is no per-channel hoist).
+3. The backward runs the same entry since 2026-11-05 (§14: the dx and the
+   weightGrad into BFP grads, on the backward operands' views); only the
+   weightGrad into FLOAT32 grads and under the fixed grid keeps
+   `matmulBfpTensors`' FLOAT32 raw and `bfpValidateBlockHeadroom`'s
+   fail-fast.
+4. Cost: the index math stays per MAC (the same-algorithm rule), and
+   `calcElementIndexByIndices` divides once per dimension per call, i.e.
+   per MAC on the M0+ in BOTH arms (allow-listed in the census); every
+   other division in the root is a `bfpGroupAt` recompute.
+
+**The Softmax forward** (`softmaxForwardBfpRaw`, `Softmax.c`): §5.9 R-S2
+steps 1-4 (`softmaxExpCodesBfp`, shared with the backward's recompute) and
+the integer step 5 into a `BFP_RAW` at exponent `−30` in every raw group.
+The one division left in the root besides `bfpGroupAt` is the i-exp's
+`z = −qW / QLN2`, per ELEMENT (steps 2-4 unchanged; allow-listed).
+
+**FLOAT32 targets of the two ops.** On the HAR proof path both head wires
+(6 elements) are per-tensor BFP (`resolveWireShape` falls back to `{1,0}`
+under `BFP_WIRE_BLOCK=16`), so no raw of these ops goes to a FLOAT32 target
+there; under the bfp head the loss reads the packed Softmax wire (the float
+head keeps `p` FLOAT32, §14 "The model head"). Under `BFP_WIRE_BLOCK=float`
+(arm A) the Linear raw is `{1,0}` and the item-7 precision class above
+applies (the differential spread cell rounds 65 folds per-tensor against 32
+under raw groups of 3, float64 error `1.1e-2` vs `6e-6`, both inside the
+bound). The Softmax raw loses nothing there: every element shares the
+scale `2^-30` by construction, and `qe`'s own grid is already coarser.
+
+**Status.** The Conv1d forward emits `BFP_RAW` (`conv1dKernelBfpRaw`, the
+fold above); `conv1dKernelBfp` (FLOAT32 raw) remains for the ConvT1d dx
+adjoint. The MaxPool, AvgPool, Linear and Softmax forwards emit `BFP_RAW`
+too; their backwards keep the FLOAT32 raw (MaxPool's argmax meaning is
+unchanged, Softmax's backward recomputes with the float32 step 5) except
+Linear's, which runs the integer GEMM since 2026-11-05 (§14). Every other op keeps the
+FLOAT32 raw. Numbers of native BFP configs changed with these forwards by
+design; fake-quant and FLOAT32 paths are untouched.
+
+**No float in the forward after the input layer (2026-11-04).** On BFP wires
+the integer forward starts at ONE input `Quantization` layer (FLOAT32 → the
+first BFP wire, rounded by the wire template's own mode); after it, every
+operand of an integer forward op is BFP-stored. The funnel enforces it: an
+op with `bfpRawOut` writing a BFP target fails fast on a FLOAT32-stored
+operand instead of staging it (`ExecuteOp.c`, the `ARITH_BFP` prologue).
+`bfpRawOut == BFP_RAW_FORWARD` is the forward marker (backward ops leave it
+`BFP_RAW_NONE` or set `BFP_RAW_BACKWARD_DX` / `BFP_RAW_BACKWARD_ACC`, which
+keep staging), and the
+target dtype is the wire marker, so the rule leaves two cases staging as
+before: FLOAT32 wires (the HAR arm A, `BFP_WIRE_BLOCK=float`: forward targets
+are FLOAT32) and every backward op. Decision 1's per-tensor staging is
+therefore reachable in the forward only under FLOAT32 wires; under BFP wires
+the first layer's input arrives grouped at the wire's block size instead of
+per-tensor at the weight widths. Softmax's forward always writes its BFP
+anchor wire, so its R-N1 input staging is unreachable now. The HAR trainer
+(`train_c_bfp.c`) inserts the input layer iff the wires are BFP and the math
+is native; `BFP_MATH=fq` keeps the 12-layer model (its GEMMs run
+`ARITH_FLOAT32`, the rule does not reach them) so it stays the unchanged
+fake-quant reference. The static side is the M0+ census
+(`tools/bfp-census/`, `har_forward_roots.txt --strict`; the whole step: §15.8): zero float, double,
+libm and int64 calls in the HAR forward kernels, the re-block and the operand
+unpack, and only per-call, per-group-change, per-output and shared-index-math
+divisions, each allow-listed for its one root.
+
+## 14. Integer backward: Conv1d dx and weightGrad scatter (experiment), Linear GEMM, pools, loss boundary
+
+Rule: an `ARITH_BFP` kernel runs the same algorithm as its FLOAT32 twin —
+loops, loop order, MAC count, index math. The Conv1d dx (`propLoss`) and
+weightGrad kernels broke it: FLOAT32 scatters, BFP gathered (§5.6, §6). Since
+2026-11-05 they scatter, as an experiment measured on its own; it changes the
+summation order and therefore the numbers.
+
+- **Loops:** `convTranspose1dKernelBfpScatter` is `convTranspose1dKernelFloat32`
+  line for line; `weightGradKernelBfp` (`Conv1d.c`) is `weightGradKernelFloat`
+  line for line, including the memset of the raw.
+- **Accumulator:** one `int32` per destination, in the raw buffer itself.
+  Consecutive products land in different destinations, so every product is
+  its own one-product segment; there is no run to split.
+- **Accumulation exponent, fixed before the walk:** `E_acc = E_top + g` per
+  destination row group. dx: per (batch, conv group), `E_top` = max over the
+  group's loss channels of (loss-row max exponent + weight-row max exponent).
+  weightGrad: per output channel, `E_top` = max over the batch of (loss-row
+  max + max over the conv group's input rows). `E_top` bounds every nonzero
+  product exponent that reaches the row (the row-maxima pairing of §13, each
+  maximum over the row's nonzero codes; a (batch, conv group) whose products
+  are all zero sets nothing and does not take part in the dx raw's re-grid).
+- **Headroom:** `g = bfpFoldGuardBits(N, ma, mb, 0)` (§13), N = the most
+  products one destination can receive from the actual geometry. dx:
+  `Cout/groups` × the most taps that meet on one position (taps k, k' meet
+  when `(k - k') · dilation` is a multiple of stride; with stride 1 that is
+  K). weightGrad: batch × the most output positions one tap reaches. The
+  proof of §13 then bounds every intermediate sum; nothing fails fast except
+  a reduction no `g ≤ 31` can hold. The old segment-headroom refusal
+  (`bfpValidateBlockHeadroom`) no longer applies to these two ops.
+- **Product entry:** `acc += bfpAlignPartial(a · b, E_acc − Ea − Eb)` —
+  exact left shift, or a HALF_AWAY right shift (independent of the op's
+  `roundingMode`, as in the forward fold). Rounding error ≤ ½·2^E_acc per
+  product.
+- **dx output: the raw, integer end to end (2026-11-05).** The dx op sets
+  `opSpec_t.bfpRawOut = BFP_RAW_BACKWARD_DX` (§13), so the kernel writes a
+  `BFP_RAW` on the dx wire's geometry. The scatter keeps its per-(batch,
+  conv group) `E_acc`; a post-pass (O(outputs), cursors, no division)
+  replaces the float bridge:
+  - each raw target group's exponent `E_t` = the max `E_acc` over the dx
+    rows it covers (§13 item 2's rule: a group may straddle channels, conv
+    groups and the batch);
+  - a sum on a lower row is re-gridded once: `bfpAlignPartial(acc, E_t −
+    E_acc)`, a HALF_AWAY right shift of the FINISHED sum (it only shrinks;
+    the headroom proof is untouched). Error per element `≤ N/2 · 2^E_acc +
+    ½ · 2^E_t` — never worse than aligning every product to `E_t` directly
+    (`N/2 · 2^E_t`), and without a per-MAC destination-group lookup.
+  At m = 8 the guard is negative (`g ≈ −9…−16`), so every sum carries `−g`
+  zero low bits on its own grid and only gaps beyond `−g` binades round.
+  HAR (micro-batch 1, conv groups 1) has ONE `E_acc` per call: every shift
+  is 0. A FLOAT32 dx target gets the `{1,0}` raw (§13): one `E_t` over the
+  whole dx, then the exact `ldexpf` dequant (arm A, `BFP_WIRE_BLOCK=float`;
+  with batch or conv groups > 1 the lower rows lose low bits there).
+- **dx wire: the integer re-block, by the op's mode.** The OUT_WRITE
+  epilogue is `conversionMatrix[BFP_RAW][BFP]` (§13) under the #282 swap, so
+  it rounds by `propLossMath.roundingMode` — SR for the HAR proof config
+  (training-side seam: dx packs are SR, forward wires HALF_AWAY). Under SR it
+  draws ONE `rngNextU32` per element in element order from the op's
+  `RNG_TAG_OUT` stream (`rngFold(op key, RNG_TAG_OUT, 0)`, op key =
+  `CONV1D_OP_PROP_LOSS` under `RNG_TAG_BACKWARD`) — the stream and position
+  the float re-pack it replaces drew from, so pinned-draw tests keep their
+  positions. Where the float path was exact (`|acc| < 2^24`, `k <= 24`) the
+  codes are the float re-pack's bit for bit; above `2^24` the integer form
+  is the exact one (§7) and native BFP numbers change by design.
+- **weightGrad output into FLOAT32 grads (bridge), and under the fixed
+  grid:** each weightGrad accumulator becomes `float(acc) · 2^E_acc` in
+  place (`weightGradKernelBfp`, `bfpLdexpInt32`; the cast rounds to nearest
+  even above 2^24, §7), accumulated by the float ACC arms.
+- **Grad raw into BFP grads (2026-11-05, `BFP_RAW_BACKWARD_ACC`):** with a
+  BFP grad under `OUT_ACC_DYNAMIC_RESCALE` (the HAR `BFP_GRADS=1` path) the
+  layer picks `weightGradKernelBfpRaw`, which runs the same scatter
+  (`weightGradBfpScatter`, shared with the bridge kernel) and emits a
+  `BFP_RAW` on the grad's geometry (`bfpRawEmitFromRows`,
+  `BfpKernelSupport.h`); the funnel adds it to the stored grad with §15's
+  integer engine. No 8-bit temporary sits between the two reductions (the
+  in-call sum and the across-call accumulate). The raw exponent comes from
+  the DATA, not from the rows' `E_acc` bounds: per raw group `E_t` = max over
+  its nonzero sums of `E_acc + bitlen(|sum|)`, minus 31. The sum that sets
+  it has `bitlen <= 31` (the guard keeps every sum below `INT32_MAX`), so it
+  moves left by `31 − bitlen <= 30`, exactly; every other left move has a
+  lower top and fits; a right move ends below `2^30`, so the half-away lift
+  cannot reach `2^31`. Only a sum more than 31 binades below its group's top
+  loses bits (HALF_AWAY: at most `½ · 2^E_t`, i.e. `< 2^(m−33)` of the
+  grad's code step when the group's largest sum sets the grid — `2^-25` at
+  m = 8; a documented deterministic rounding before the SR, next to the
+  engine's own `2^-32` SR cutoff and the in-loop product alignment, which
+  is coarser). An all-zero group writes exponent 0 (the engine ignores the exponent
+  of an all-zero raw); zero sums are never shifted. Why not dx's max-`E_acc`
+  rule: `E_acc` is a bound, and a loose N (or, before zero groups were
+  excluded from every pre-pass, §13, an all-zero loss group in the zero
+  state) inflates a row's bound far above its data; under a per-tensor grad that inflated row would re-grid every other
+  row HALF_AWAY to a few bits. Measured on HAR bfp8 `BFP_GRADS=1` (1 epoch,
+  18,000 weightGrad calls): with the max-`E_acc` rule 12.6 % of calls kept
+  fewer than 9 bits at the tensor top (a rounding at or above the 8-bit grad
+  step BEFORE the SR) and 3.6 % of the nonzero sums flushed to 0; the
+  differential cell `b4_conv_dw_grad_bfp_zero_rows_m8` shows 28 of 64 codes
+  differ. The dx raw keeps its rule (HAR dx has one `E_acc` per call; for
+  batch or conv groups > 1 the same change would apply there).
+- **biasGrad:** walks like FLOAT32 (channel outer, batch, position). Into
+  FLOAT32 grads (and under the fixed grid) it keeps its float fold
+  (`biasGradKernelBfp`). Into BFP grads under DYNAMIC_RESCALE,
+  `biasGradKernelBfpRaw` keeps the walk and the segments (consecutive codes
+  of one loss group, an exact int32 partial, `bfpValidateSumHeadroom`) and
+  folds each segment partial into an int32 destination:
+  `sum += bfpAlignPartial(partial, E_acc − E_segment)`, `E_acc` per output
+  channel = max over the batch of the loss row's max exponent over its
+  nonzero codes (none: 0) + `g`, `g =
+  bfpSumFoldGuardBits(batch · outputLength, m)` (the §13 proof for a pure
+  SUM, `N · 2^(m−1)`): rounding `<= ½ · 2^E_acc` per segment, only for
+  segments more than `−g` binades below the top. Then the same raw emit
+  (rows of one sum).
+- **Grad accumulate: rounding and RNG.** The engine rounds by the grad's
+  STORAGE mode (SR for the HAR grad template, `trainingSideRounding()`), one
+  `rngNextU32` per element in flat grad order (element order of the stored
+  grad, every element on every path) from `rngFold(op key, RNG_TAG_ACC, 0)`
+  — the stream and positions the float rescale walk it replaces drew from.
+  The weightGrad and biasGrad ops have their own op keys. Fresh grads (zero
+  codes, any stored exponent) take the increment's grid; the bound and the
+  grid are re-derived on every micro-batch call; old exponents are published
+  only after their group's last read (§15).
+- **Unchanged:** the Conv1dTransposed forward and its weightGrad keep the
+  gather (§6); Linear keeps its GEMM walk (integer since 2026-11-05, below).
+
+**Linear dx / weightGrad / biasGrad (2026-11-05).** Linear's backward has no
+scatter to adopt: its BFP kernels already walk like FLOAT32 (one GEMM per op,
+output-major, reduction inner, both operands group-tracked). The integer
+twin is the forward's §13 fold on the same walk — `matmulBfpRawTensors`,
+called by the backward cores exactly where the float fold
+(`matmulBfpTensors`) was called:
+
+- **dx** (`linearCalcPropLossBfp`): `loss [B, outF] · W` with the weight AS
+  STORED `[outF, inF]`; every `ARITH_BFP` dx sets `BFP_RAW_BACKWARD_DX`
+  (§13), so the dx is the raw on the dx wire's geometry, then the integer
+  re-block by the op's mode (SR for HAR, one draw per element in element
+  order from `rngFold(op key, RNG_TAG_OUT, 0)`, op key `LINEAR_OP_PROP_LOSS`)
+  or, onto a FLOAT32 dx, the `{1,0}` raw + exact dequant.
+- **weightGrad** (`linearCalcWeightGradsBfpRaw`): `loss^T · x` through the
+  zero-copy transpose view; into BFP grads under `OUT_ACC_DYNAMIC_RESCALE`
+  (`BFP_RAW_BACKWARD_ACC`), the raw on the grad's geometry. FLOAT32 grads
+  and the fixed grid keep `linearCalcWeightGradsBfp` (the float fold,
+  unchanged).
+- **The accumulation exponent of a backward GEMM.** §13's rule: `E_acc` of a
+  raw target group = the max over its outputs of `rowTop + colTop`, plus `g =
+  bfpFoldGuardBits(K, ma, mb, 0)` over the reduction length `K` (dx: `outF`;
+  weightGrad: the batch). `rowTop` / `colTop` is the max group exponent over
+  the nonzero codes of the output's reduction LINE when the reduction runs along
+  the operand's physically innermost axis — the dx loss rows — and the
+  operand-wide max otherwise: the dx weight columns (strided by `inF`) and
+  both weightGrad operands (the batch is the outer axis of the loss and of
+  `x`). The operand-wide max is coarser and still sound (it bounds every
+  group a line can visit). Over-long same-exponent runs split at the segment
+  limit (no fail-fast): the m16 weightGrad, whose float fold refused a batch
+  of 2 at `bfpValidateBlockHeadroom`, now runs.
+- **No data rule for the GEMM raw.** Conv1d's grad raw takes its exponent
+  from the data (above) because the scatter keeps one `E_acc` per ROW and the
+  emit re-grids every row of a raw group onto one exponent — an inflated row
+  would round the others. The GEMM has no such step: `E_acc` is chosen per
+  raw target group BEFORE the MAC loop and the finished sums are never
+  re-gridded. A looser raw exponent only adds zero low bits, which neither
+  consumer sees: the engine (§15) takes its working grid from `E_r +
+  bitlen(A_r)`, the re-block (§13) from the mantissa absmax. The remaining
+  deterministic loss is the in-loop alignment: a segment more than `−g`
+  binades below its group's bound rounds HALF_AWAY (at most ½·2^E_acc per
+  segment). A loose bound moves that line up: the operand-wide max of a
+  strided operand counts live groups the line never visits (an all-zero
+  group no longer counts anywhere, §13).
+- **biasGrad** (`linearCalcBiasGradsBfpRaw`): the Conv1d bias rule on the
+  `[B, outF]` loss (one position per row): feature outer, batch inner,
+  consecutive codes of one loss group form a segment (exact int32 partial,
+  `bfpValidateSumHeadroom`), `sum += bfpAlignPartial(partial, E_acc −
+  E_segment)`, `E_acc` per feature = max over the batch of its codes' group
+  exponents + `bfpSumFoldGuardBits(B, m)`, then `bfpRawEmitFromRows` (rows
+  of one sum, exponent from the data: each feature has its own `E_acc`).
+  FLOAT32 grads and the fixed grid keep the float fold.
+- **Accumulate:** the engine above (§15) with the op's ACC(0) stream, op
+  keys `LINEAR_OP_WEIGHT_GRAD` / `LINEAR_OP_BIAS_GRAD`. Linear's factory
+  default bias mode is `OUT_ACC_FIXED_SCALE` (Conv1d's too): a BFP bias grad
+  there keeps the float bridge and the float fixed grid; the HAR trainer
+  sets `OUT_ACC_DYNAMIC_RESCALE` for both grads of every GEMM layer.
+
+**Pools, ReLU, Flatten, input layer and the loss boundary (2026-11-05).**
+After this step the only float of a BFP training step (BFP wires, native
+math) is the float head's loss island, and under the bfp head there is none
+on the gradient path (below); `tools/bfp-census/har_backward_roots.txt`
+gates both (the whole step with the optimizer: §15.8).
+
+- **MaxPool1d dx** (`maxPool1dBackwardKernelBfpRaw`): the FLOAT32 arm's loop
+  (rows, outputs, the saved argmax, the `-1` sentinel) and scatter-add. One
+  `E_acc` per dx row (one (batch, channel)) = the loss row's max exponent
+  over its NONZERO codes (none: 0) + `g`, `g = bfpSumFoldGuardBits(C, m)`, `C
+  = (effK − 1) / stride + 1` the windows whose span covers one cell. A cell
+  can only win windows covering it, so a stale argmax inside the input but
+  outside its window's span would break that bound: it fails fast (span
+  check, no division). A code enters `acc += bfpAlignPartial(code, E_acc −
+  E_group)` (left exact; HALF_AWAY right only for a code more than `−g`
+  binades below its row's top, `−g = 23` at m = 8, C = 1). The raw is
+  `bfpRawEmitFromRows` (the data rule above) on the dx wire's geometry, then
+  the integer re-block by the op's mode (SR under SR, one draw per element in
+  element order from `rngFold(op key, RNG_TAG_OUT, 0)`, op key
+  `MAXPOOL1D_OP_PROP_LOSS`: the float re-pack's stream and positions).
+- **AvgPool1d dx** (`avgPool1dBackwardKernelBfpRaw`): the FLOAT32 loop (one
+  contribution per output, added to every valid window member; padded
+  positions are not visited and the divisor stays `K`, as in FLOAT32). The
+  same per-row grid and guard (C terms). `−log2 K` folds into the row's
+  exponent (exact; HAR's K = 32), so the mean adds no rounding; the only
+  rounding onto a wire grid is the re-block, SR under SR.
+- **AvgPool1d under BFP math: power-of-two K only (ruling R1, 2026-11-05).**
+  The mean is always an exponent shift. Any other kernel size fails fast
+  (`avgPool1dBfpLog2Divisor`: at `avgPool1dLayerInit` /
+  `avgPool1dLayerInitOwning` when either math slot is `ARITH_BFP`, and again
+  at both integer kernels for a config built without the factory). Padding
+  cannot make an edge divisor differ: the layer is `count_include_pad =
+  true` in every arm (FLOAT32 divides by `K`, SYM folds `s / K`, BFP folds
+  `−log2 K`), padded positions are only skipped in the sum, never counted
+  out of the divisor, so `K` is the divisor of every output. The former
+  non-power-of-two path (one `roundedDivHalfAwayInt32` per output) is gone;
+  the FLOAT32 and SYM arms still take any `K`.
+- **Granularity (both pools): the row-grid flush, precisely.** One `E_acc
+  = top_r + g` per dx row `r` (`top_r` the max exponent over the loss row's
+  nonzero codes; `g = bfpSumFoldGuardBits(C, m)`: `−23` at m = 8 and `−15`
+  at m = 16 for `C = 1`, the HAR pools). A loss code `c` of a group at `E_q`,
+  `d = top_r − E_q` binades below the row top, enters with the shift `k = d +
+  g` (AvgPool: on the grid `E_acc + log2 K`, the same `k`):
+  - `d <= −g`: exact (left shift); this is every code on HAR (identity);
+  - `−g < d`: the low `k` bits of `c` are rounded HALF_AWAY on the row grid
+    (error `<= ½ · 2^E_acc` per contribution), deterministically and BEFORE
+    the re-block's SR -- a dead zone for those bits whatever the op's mode;
+  - `d >= m + 1 − g` (32 at m = 8, C = 1): `|c| <= 2^(m−1) < 2^(k−1)`, the
+    contribution flushes to 0.
+  The lost unit is `2^E_acc = 2^(top_r + g)`. A dx wire group whose code
+  step is `2^E_w` with `E_w >= top_r` (any group holding a cell near the row
+  top: its absmax is `~2^(m−1) · 2^top_r`) drops those bits in its own
+  re-block anyway; the deterministic pre-rounding then biases its SR by at
+  most `2^(g − 1)` of a code step (`2^−24` at m = 8). It matters only for a
+  wire group whose cells all come from loss groups more than `−g` binades
+  below the row top (its step is then finer than the lost unit's `2^−g`
+  margin): there the float scatter it replaced was exact. Per-target-group
+  exponents would need a destination-group
+  lookup per scatter (an open follow-up; no algorithm change here).
+  The row table is one `int` per (batch, channel) on the stack. (The former
+  AvgPool non-power-of-two quotient and its row-top-relative margin are gone
+  with ruling R1.)
+- **ReLU dx:** already integer (R-P2, above): the code-domain sign mask, exponents
+  carried. **Flatten dx:** payload and exponent copy.
+- **Input layer dx** (`quantizationBackward`): straight-through. Between two
+  BFP grids it is integer (`quantizationBackwardKernelBfp`, one funnel op,
+  `BFP_RAW_BACKWARD_DX`): each loss code is a row of its source group (the
+  row exponents read straight from the loss's biased group bytes,
+  `bfpRawEmitFromGroupExponents`: no per-group table on the stack), the raw
+  is the data rule on the target geometry (exact unless a code sits more
+  than 31 binades below its target group's top), the re-block rounds by the
+  target template's mode (the conversion cell's rule) and draws (SR) from the
+  op's OUT stream (op key `QUANTIZATION_OP_PROP_LOSS`) instead of the
+  convert purpose stream. Every other pair (a FLOAT32 input-gradient export,
+  SYM) keeps `executeConvert`. HAR never runs it (no dx below conv1).
+- **The loss boundary** (`crossEntropySoftmaxBackward`): the combined
+  Softmax + CrossEntropy gradient `p − y`, seeded onto the Softmax's dx wire.
+  Which arithmetic computes it is the model head's (below); the arm follows
+  `p`'s dtype, validated against the declared head at init. A FLOAT32 `p` is
+  the float island -- `p − y` in float, then ONE conversion into the grad
+  wire (`convertTensor` on the `RNG_TAG_LOSS` stream, by the wire template's
+  mode). The float arm raw-casts its operands, so it runs only when output,
+  label and grad wire are ALL FLOAT32; any other mix (a FLOAT32 output into a
+  BFP grad wire, a quantized label) takes the converting arm. A BFP `p` is
+  the integer head. The training loop skips the model's last layer exactly
+  once under CrossEntropy (`rematBackwardRange`), and that layer must be the
+  Softmax: any other last layer (or an empty model) fails fast, so no
+  layer's backward is dropped silently -- checked when a backward runs (an
+  all-frozen, eval-only model skips nothing and is not checked).
+
+**The model head: an explicit choice (ruling R2, 2026-11-05).** The head is
+the Softmax forward plus CrossEntropy's combined `p − y` (the Softmax
+backward is skipped under CE). There is no default: the last Softmax's
+config IS the declaration, and the mechanism adds no new field -- the slots
+every layer declares arithmetic with are read as the head:
+`forwardMath` (the Softmax forward), `propLossMath` (the combined gradient:
+it replaces exactly this layer's backward), `outputQ` (`p`'s wire) and
+`propLossQ` (the loss-grad wire: on a head with any BFP the seed GRAD n IS
+the Softmax's dx, so the remat wire table gives it the Softmax's
+`propLossQ`, type-derived -- `crossEntropyHeadDeclaresBfp`; on a FLOAT32 or
+SYM head, and under MSE, the seed still inherits the model output's config
+and `propLossQ` stays unused, exactly as before the heads existed).
+`requireCrossEntropyHead` (`LayerConfigAccess.c`, called by
+`rematBackwardRange`) accepts a head without any BFP unchanged (FLOAT32 and
+SYM models), and with any BFP exactly two tuples:
+
+| head | forwardMath | propLossMath | outputQ (`p`) | propLossQ (loss grad) |
+|---|---|---|---|---|
+| bfp | `ARITH_BFP` | `ARITH_BFP` | BFP | BFP |
+| float | `ARITH_FLOAT32` | `ARITH_FLOAT32` | FLOAT32 | any (BFP: one conversion) |
+
+Any other mix fails fast at init -- in particular an integer Softmax with a
+float CE gradient (the numerics before the ruling) and a float Softmax whose
+`p` is packed onto a BFP wire (two conversions). The HAR trainer exposes it
+as the required knob `BFP_HEAD=float|bfp`.
+
+- **float head:** the Softmax's FLOAT32 arm dequantizes the logits; `p`
+  stays FLOAT32; CE value and `p − y` in float; ONE float → BFP conversion
+  onto the loss-grad wire. The loss island is the census's only allowed
+  float on that path.
+- **bfp head: the integer `p − y`** (`crossEntropySoftmaxBackwardKernelBfp`,
+  one funnel op, `BFP_RAW_BACKWARD_DX`, op key `CROSS_ENTROPY_OP_GRAD = 0` at
+  the layer position after the last layer). `p` is borrowed as unpacked
+  codes; a FLOAT32 one-hot label rides in the kernel context (not staged),
+  read by BIT PATTERN (`1.0f` = the class, `±0.0f` not, anything else fails
+  fast: soft labels need the float head) -- no float compare; a BFP one-hot
+  label (a dataset converted offline) is the op's second operand, unpacked
+  like `p`: element `i` is the class iff its code `c` on its group's `2^E` is
+  exactly 1 (`E <= 0`, `c = 2^−E`), not the class iff `c = 0`, anything else
+  fails fast. Either label must also hold exactly one 1.0 per class row --
+  the Softmax's row (`tensorRowGeometry`: axis 0, spanning every trailing
+  dim; rank 1 = one row; several rows each with their own): a two-hot or
+  zero-hot row fails fast. Each element is an int32 term on its own grid: a non-label
+  element is its code `c` on its `p` group's exponent `E_g`; the label
+  subtracts `1.0 = 2^−E` on `E = clamp(E_g, −30, 0)`: exact for every `E_g`
+  in `[−30, 0]`, also when 1.0 needs the code `2^(m−1)`, one beyond the
+  m-bit maximum (`p` near 1 at `E = −(m−1)`); `|term| <= 2^30 + 2^15`. A `p`
+  group below `2^−30` (a confidently wrong prediction in a grouped `p`)
+  holds the label exactly only if its `p` lies ON the `2^−30` grid (the
+  code's low `−30 − E_g` bits zero), which every integer-Softmax `p` does
+  (Q30, re-blocked onto a finer group by exact left shifts): it is shifted
+  there exactly; a finer fraction fails fast rather than being dropped
+  before the SR re-block; `E_g > 0` with a nonzero code is `p > 1` and
+  fails fast. Per raw target group (the loss-grad wire's geometry) the
+  exponent is the data rule of `bfpRawEmitFromRows` (`E_t = max(E +
+  bitlen|term|) − 31`, two passes recomputing the terms, no table, `p`'s
+  groups by cursor, no division); a term more than 31 binades below its
+  group's top rounds half away. Then the funnel's integer re-block onto the
+  loss-grad wire by the WIRE's mode (its template; SR under SR, one draw per
+  element in element order from the op's `RNG_TAG_OUT` stream) -- the
+  training-side seam rule of every dx wire. A BFP `p` without a BFP grad
+  wire or a FLOAT32 label fails fast.
+- **The loss value** (`crossEntropyForward`) stays float on both heads: it
+  is monitoring (the logged loss, the divergence check), computed off the
+  gradient path.
+
+**Standalone Softmax backward: the integer VJP (2026-11-05).** Not on the
+HAR path (CrossEntropy skips the Softmax), implemented for every other loss.
+`dx_i = p_i (g_i − d)`, `d = Σ_j p_j g_j`, in the FLOAT32 arm's order, from
+the LOGITS: `p` is the integer forward's Q30 raw (`softmaxExpCodesBfp` +
+`softmaxNormalizeRaw`, replaying the forward's shift draws), no float
+recompute. Precision is cut explicitly before every multiply:
+- `p'_j = p_j >> 15` half away (`<= 2^15 + 1`), so `|p'_j g_j| < 2^31` for any
+  `m_g <= 16`; the dot runs on `E_d = E_top − 15 + G`, `E_top` the max
+  exponent over `g`'s NONZERO codes, `G = bfpFoldGuardBits(n + 1, 17, m_g)`,
+  each product entering by `bfpAlignPartial` in index order;
+- `D_i = g_i` aligned to `E_d`, minus `d`: the `n + 1` terms of `G`'s proof
+  bound every `|D_i|`;
+- per raw target group (`BFP_RAW_BACKWARD_DX`) both factors are cut to 15
+  bits relative to the group's maximum (`s_p`, `s_D = bitlen(max) − 15`, half
+  away) and multiplied, raw exponent `E_d + s_D + s_p − 30`; an all-zero `g`
+  (or group) is `dx = 0`.
+The error is about `2^-15` of the group's largest `|dx|` (the two cuts, the
+dot's alignments, `p`'s Q30 rounding): below the step of any `m <= 15` wire,
+about one step at m = 16. The re-block rounds by the op's mode (SR under SR,
+the op's OUT stream). On the test fixtures the m = 8 codes equal the former
+float VJP's. Single row only (#152).
+
+**The Softmax max grid and zero groups.** The forward's (and the backward's
+recompute's) max compare is value-exact, but the winner's exponent is the
+alignment grid. A code of an all-zero group never decides it (the zero-group
+rule of §13): when such a group's 0 beats every live (negative) value, the max
+is 0 on the TOP live group's grid -- otherwise the zero state's `E = 0` would
+align live logits many binades lower onto `2^0` (the test fixture: logits
+`−0.16 … −0.94` at `E = −6` lost every fraction bit). HAR's logits are one
+group of 6, which cannot hold an all-zero group next to live codes: HAR is
+unaffected (identity below).
+
+## 15. Integer training primitives: scalar, add-and-round, integer rescale accumulate
+
+The integer backward, gradient accumulation and optimizer (full-BFP training)
+build on three primitives. They are added first, unused by any layer; the
+rows below are the contract later steps rely on.
+
+**Scalar** (`bfpScalar_t {int32_t q; int16_t e;}`, `BfpKernelSupport.h`):
+value `q · 2^e` with a normalized significand `2^14 <= |q| <= 2^15 − 1`, or
+`{0, 0}`. A floating exponent, not one global Q15 grid, so a small learning
+rate keeps all 15 bits. `bfpScalarFromFloat` encodes once at configuration
+time (`frexpf`, significand rounded half away from zero, a round-up to
+`2^15` renormalizes; relative error `<= 2^-15`; exact for 0, 1, every power
+of two including subnormals; non-finite fails fast). `bfpScalarMulMant`:
+a 16-bit code times `q` is `<= 2^30 − 2^15` in magnitude, exact in `int32`.
+
+**Quotient/remainder form** (`bfpQr_t {q, frac, sticky}`): a value on a grid
+`2^G` as `q + (frac + t)/2^32`, `q` the floor quotient, `frac` the top 32
+bits of the remainder, `sticky = (t != 0)`. `bfpQrOfTerm` aligns a term
+(right shifts keep every dropped bit in `frac`/`sticky`, at any distance;
+left shifts are exact, the caller bounds them), `bfpQrAdd` adds two (exact
+when at most one is sticky; two sticky operands fail fast -- a checked rule,
+not a comment), `bfpQrShr` re-grids coarser by any distance,
+exactly. Floors use `~(~v >> k)` for negative `v`, never a signed right
+shift.
+
+**Rounding** (`bfpQrRound`, `bfpAddAndRound`): on the magnitude, sign after
+(SR odd per draw, the `Rounding.h` law); a negative value converts exactly
+via `sticky` (`floor((1 − f)·2^32)` is `~frac` with a tail, `2^32 − frac`
+without). With `F` = the magnitude remainder's top 32 bits: HALF_AWAY lifts
+iff `F >= 2^31`; SR lifts iff `u < F` (one draw). For a remainder of at most
+32 bits this is exact and draw-for-draw the decision of `reblockBfpRawTensor`
+(`(u >> (32 − k)) < rem` ⇔ `u < rem · 2^(32 − k)`). **Cutoff:** beyond 32
+remainder bits the probability is truncated to `F/2^32` — low by less than
+`2^-32` — so a magnitude remainder below `2^-32` of a code step never lifts.
+That is the price of exactly one draw per element; an exact probability
+would need more random words. Unlike the re-block's `k >= 32` flush, nothing
+above the cutoff is lost, at any exponent gap. Note: the xorshift32 backend
+never draws `u = 0`, so in practice `F = 1` (a remainder in
+`[2^-32, 2^-31)`) does not lift either — the effective resolution is
+`2^-31`, a property of the RNG backend shared by every integer SR site.
+
+**Integer rescale accumulate** (`accumulateBfpRawIntoBfpRescale`,
+`TensorConversion.c`): BFP target `+=` BFP_RAW increment on the target's
+geometry, the integer replacement of `accumulateTensorIntoBfpRescale` for
+gradient accumulation (wired in through `BFP_RAW_BACKWARD_ACC`, §13: today
+the Conv1d weightGrad / biasGrad, §14). Per target group,
+`E_o` the old stored exponent minus bias, `E_r` the raw exponent:
+
+1. Working grid (addition bound): `A_o`, `A_r` = actual absmax of the old
+   codes and raw mantissas; `E_c = max(E_o + bitlen A_o, E_r + bitlen A_r) − 30`
+   (a zero side has no top). Every aligned term is then `< 2^30` on `2^E_c`,
+   so the `int32` sum cannot overflow; the bound is re-derived from the data
+   on every call (independent of the number of micro-batches). A fresh
+   accumulator (all old codes zero) never lets its stored exponent dominate.
+   The term that sets `E_c` drops at most 2 bits, so at most one term is
+   sticky and the sum is exact.
+2. Exponent from the SUM: the per-element sum rounded UP to `2^E_c`, group
+   absmax, the integer exponent rule (§13), floored at `E_c`, D6 clamp. As
+   `qMax · 2^E` is a grid multiple for `E >= E_c`, this is the exact rule's
+   exponent of the true sum, floored at `E_c`: cancellation down to
+   `~31 − m` binades below the operands gets its exact fresh exponent, a
+   sum cancelled further keeps `E_c` (codes below `2^(m−1)`, still SR-rounded
+   unbiased). An all-zero sum (zero sides or exact cancellation) is the zero
+   state; `n == 0` too (R7).
+3. Emit: the same exact sum re-gridded `E_d − E_c >= 0` steps (any
+   distance: the D6 flush regime SRs values far below the smallest step with
+   their probability), rounded once by the target config's `roundingMode`,
+   clamped to `[−2^(m−1), qMax]`; one draw per element in element order on
+   every path (zero, exact, saturated) under SR.
+4. Cap regime: `E_c` is capped at the largest storable exponent. The old
+   term then stays `<= 2^15` on the grid, so a raw term reaching `2^30`
+   there — the only one that could overflow — saturates its element with the
+   raw's sign, exactly (`|sum| > 2^30 − 2^15`); neighbours compute exactly.
+5. In place: passes 1–2 run one group boundary ahead of the emit (the #421 U6
+   window), the old exponent stays in the config until the group's last
+   element is read, per-group state lives in two fixed rings of
+   `ODT_RESCALE_FRESH_WINDOW` slots (≈1.3 KB). Three reads of the data per
+   call (absmax, sum absmax, emit); no float, no division in the element
+   loops, no `int64`.
+
+Fixed-grid accumulation stays a separate mode (it needs a whole-macro-batch
+bound, not a per-call one) and has no integer twin yet.
+
+### 15.6 Integer macro-batch mean scale
+
+The training loop scales the accumulated gradients by `1/D` exactly once per
+macro-batch — after the last micro-batch's accumulation, before
+`optimizerStep`, never folded into the learning rate (that would change how
+momentum treats its history) — and `optimizerZeroGrad` after the step makes the
+next batch start from zero. `D` comes from the loss family as an INTEGER
+(`computeMeanDivisor`: CE `batch->size`, MSE `batch->size × F`; `batch->size`
+is the batch's actual sample count), and `scaleOptimizerGradientsMean` takes it:
+non-BFP grads keep the float fold with `1.0f / (float)D` (bit-identical to
+`computeMeanScale`), BFP grads take the integer path.
+
+**`bfpScalarFromCount(D)`**: a power of two is exact (`{2^14, −14 − log2 D}`);
+otherwise `q = round(2^(14+L) / D)`, `L = bitlen(D)`, by a 16-step restoring
+division (no divide helper; no ties for a non-power-of-two `D`), relative error
+`<= 2^-15`. `1 <= D < 2^31`, else fail fast.
+
+**`scaleBfpTensorByScalarInPlace(t, s)`**, `s = q · 2^e` in `(0, 1]`: per group
+`A` = absmax code; `A == 0` → zero state (stored = bias). Otherwise `code · q`
+(int32-exact, `< 2^30`) is a raw mantissa on `2^(E+e)`; the fresh exponent is
+the integer exponent rule on `q · A` (the float walker's rule), clamped to
+`[0, cap]`; the emit shift `d = E' − E − e >= 0` (`q · A` has at least 15
+bits). Paths:
+1. Exponent only: `q == 2^14` and `d == 14` — a power-of-two `D` on a tight
+   grid above the floor. Codes untouched, no draws. This is HAR's path
+   (`D = 64`).
+2. Re-emit: everything else (non-power-of-two `D`, a non-tight grid that
+   renormalizes, the exponent floor): `code' = round(code · q / 2^d)` by the
+   config's `roundingMode` through `bfpQrRound` (the whole remainder reaches
+   the rounding, so a code driven below one step at the floor still lifts
+   with its exact probability), one draw per element of the group in element
+   order under SR. The cap is reachable only by the negative code bound at
+   `s ≈ 1`, and clamps.
+
+The draw count depends on the path, which is safe because each parameter's
+scale draws come from its own `(PARAM, p) → (SCALE, 0)` stream that nothing
+else reads. Same window structure as §15's accumulate (one group boundary
+ahead, two fixed 257-slot rings, ≈2.3 KB frame); a chunk of unchanged groups is
+neither unpacked nor packed, so path 1 costs one read of the codes. Power-of-two
+results equal the float `scaleBfpTensorInPlace` (exact there too) wherever the
+float walker does not overflow `mant · 2^E` near the top of the float range.
+
+### 15.7 Integer SGD step: momentum store and parameter update
+
+With a BFP gradient AND a BFP momentum state, `sgdStepM`'s state op is
+`momentumStoreBfpInPlace(state, grad, mu, rm, rs)`: `v' = mu · v + g`, the float
+op's formula and order (no dampening, no Nesterov); for a BFP parameter its
+param op is then `paramUpdateBfpInPlace(param, state, lr, rm, rs)`: `w' = w −
+lr · v'`, reading the STORED `v'` (after the state op's own rounding), the float
+op's order. Without momentum (`momentumFactor == 0`, the stateless path) a BFP
+parameter on a BFP gradient is `paramUpdateBfpInPlace(param, grad, lr, …)`: `w'
+= w − lr · g`. With BFP_GRADS=1 BFP_STATE=1 and BFP parameters the whole step is
+integer. Nonzero weight decay, a momentum outside `(0, 1]` (momentum store) and
+a non-finite learning rate (parameter update) fail fast, at `sgdMCreateOptim`
+and again at the step; there is no float fallback. Every other dtype
+combination (a FLOAT32 state or gradient, a non-BFP parameter) keeps the float
+ops unchanged. `mu` is encoded once at `sgdInit`, `lr` at `sgdInit` and at
+every `sgdSetLr` (`bfpScalarFromFloat`, §15; float allowed at configuration
+only) into `sgd_t.momentumQ / momentumE` and `learningRateQ / learningRateE`;
+the step's own branches test bools decided at `sgdInit` (no soft-float
+compare). The integer path is selected by the STORAGE dtypes; `updateMath`
+stays `ARITH_FLOAT32` and names the arithmetic of the funnel ops that remain.
+
+Both ops are one engine, the in-place scaled sum `t' = a · t + b · s`
+(`a ∈ [0, 1]` on the in-place target, `b` any normalized signed scalar on the
+read-only source): momentum `a = mu, b = 1`; parameter update `a = 1, b = −lr`.
+Per TARGET group (the target's own geometry: per-channel weights keep one
+exponent per channel), each operand under its OWN exponent: `t_i · a.q` on
+`2^(E_t + a.e)` and `s_i · b.q` on `2^(E_s + b.e)` (both int32, `< 2^30`); the
+source is per-tensor (its one exponent for every target group) or in the
+target's geometry. `E_c = max(E_t + a.e + bitlen(a.q · A_t), E_s + b.e +
+bitlen(|b.q| · A_s)) − 30`, capped at the target's top exponent: the term that
+sets `E_c` lands with a shift `<= 0`, exact, so at most one operand of
+`bfpQrAdd` carries a tail. The exact sum's absmax gives the fresh exponent by
+the integer rule, floored at `E_c`, D6-clamped; the exact sum is then
+re-gridded and rounded ONCE by `rm` (the optimizer's write-back mode, #282 --
+not the storage mode), the discarded tail carried to that rounding, so a small
+update is never erased before SR (dead-zone tests: `v = 64Δ`, `g = −Δ/256`
+reaches `63Δ` with probability `1/256`; `w = 64Δ`, `lr · u = Δ/256` the same).
+Cap regime: only the source can push `E_c` past the cap (`E_t <= capE` and `a
+<= 1`, so `a.e <= −14`, keep the target's term `< 2^16` there); a source term
+reaching `2^30` on the capped grid (only for a left shift) saturates its
+element with that term's sign (for the parameter update: the sign of `−lr ·
+u`). Widths and exponent biases of the two operands may differ.
+
+**Disjoint storage (2026-11-05).** The engine rewrites the target's payload
+chunk by chunk and publishes each target group's new exponent once that group
+is done, while still reading the source: the two operands must share NO byte
+-- neither payload with payload, nor exponent array with exponent array, nor
+one's payload with the other's exponents (`rejectOverlappingOperands`,
+`uintptr_t` range compare; the accumulate engines' `rejectAliasedIncrement`
+uses the same check). Pointer identity alone missed partial overlaps: a state
+one byte into the gradient's payload (512 per-tensor m8 codes of 64, `mu =
+0.5`) overwrote not-yet-read gradient codes, and a per-tensor update whose
+exponent byte was the parameter's first exponent moved the update's grid
+after group 0 (`[100, 100]` on `E = [0, 0]` minus `lr = 1` times `[50, 50]`
+gave `[50, 63.5]`). Both fail fast now; adjacent storage is legal.
+`paramUpdateBfpInPlace` validates `lr`'s significand (normalized, `|q| <=
+2^15 − 1`) BEFORE it negates it, so `lr.q = INT32_MIN` fails fast instead
+of overflowing.
+
+**RNG.** The OUT stream of each op's key, `(PARAM, p) → (OP, k) → (OUT, 0)`
+(state op `k = 0`, param op `k = 1`, on both paths), one draw per element in
+element order on every path (zero group, exact, saturated) -- the stream and
+draw count of the float op's OUT_WRITE re-pack it replaces, so every other
+stream is unchanged. Same window structure as the accumulate engine (scan one
+group boundary ahead, two fixed 257-slot rings, two fixed 256-element chunk
+buffers, ≈3.3 KB frame, no VLA); the per-element emit runs in its own small
+out-of-line frame. Differs from the float ops only by the 15-bit `mu` / `lr`
+(relative error `<= 2^-15`) and the exact tails; on HAR bfp8 the float staging
+of the state op (whole tensors on the stack) and of the param op (the BFP state
+as float in `executeOp`'s prologue scratch) is gone.
+
+### 15.8 The whole training step (bfp8full)
+
+With BFP wires, native math, `BFP_GRADS=1` and `BFP_STATE=1` (the HAR configs
+`bfp8full_hflt` / `bfp8full_hbfp`) every phase of a training step runs the
+integer kernels: forward (§13), backward (§14), grad accumulation into BFP
+storage (§15, integer rescale accumulate), the macro-batch mean scale (§15.6),
+momentum store and parameter update (§15.7). What stays float:
+- the float head's loss island (`BFP_HEAD=float`): the FLOAT32 Softmax forward
+  on the dequantized logits, float `p − y`, ONE float → BFP conversion onto the
+  loss-grad wire; the bfp head has none on the gradient path;
+- the loss VALUE on both heads (monitoring): CrossEntropy's float core, the
+  dequant of `p` and of the label it reads, the training loop's loss sums and
+  means.
+
+The data enters as BFP: the samples are converted once, before training, into
+the input wire's own format (the library's FLOAT32 → BFP cell, HALF_AWAY, the
+cell the input layer would run online -- the stored codes are identical), and
+the input Quantization layer passes a BFP input of its output's exact format
+(widths, group shape) straight through: payload and exponents copied, no
+conversion, no draw. The one-hot labels are BFP too; the integer `p − y` reads
+them as above, the float head dequantizes them inside its island. The trainer's
+FULL gate checks every sample's format and every label's exactness at load.
+
+The static proof is the M0+ census over the whole step,
+`tools/bfp-census/har_train_step_roots.txt --strict` (the forward and backward
+sets plus the step's driver: epoch and batch loops, the calculate-grads
+interpreter, the loss value, the optimizer step, the grad reset, the RNG keys),
+closed over calls through pointers: every address-taken function of the build
+is rooted or excluded with a reason, and every pointer call the roots make is
+declared (`har_train_step_indirect.txt`), so the remat scheduler's rows, the
+layers' `calcOutputShape` and the loader's `getBatch` are checked too; closed
+statically over the direct calls of its dispatcher (`self`) roots: each callee
+is walked by a root or declared a boundary the step does not take; functions
+are keyed by (translation unit, name) throughout; and cross-checked against an
+instrumented host run of both heads (`har_train_step_trace.txt`, generated by
+`trace_step.py`, stale when the sources change). The division entries certify
+call sites, not frequency: the shared index math still divides once per MAC.
+Its allow-list holds no float outside the two items above (the input layer is a
+`self` root whose converting arm for FLOAT32 samples is a declared boundary); the divisions it
+allows run per call, per group change, per output element (shared index math),
+per wire of the per-call remat table, per layer of the per-call output-shape
+pass (the window geometry), or per RNG key fold. The run-time side is
+the trainer's FULL gate (`train_c_bfp.c`): on this path it checks at init that
+every layer declares the integer path -- each math slot `ARITH_BFP`, each wire
+BFP, both GEMM grads under `OUT_ACC_DYNAMIC_RESCALE` (the fixed-scale mode keeps
+the float bridge), the head per `BFP_HEAD` -- and that the SGD step takes its
+integer ops; any other value fails at init (exit 2) instead of running a float
+kernel silently.

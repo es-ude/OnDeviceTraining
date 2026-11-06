@@ -211,6 +211,16 @@ static void validateLayerQuantForAvgPool1d(layerQuant_t *lq) {
     }
 }
 
+/* Ruling R1: under BFP math (either slot) the mean is an exponent shift, so
+ * the kernel size -- the divisor of every output, count_include_pad -- must
+ * be a power of two. Checked at creation; the integer kernels check again
+ * (a config built without the factory). */
+static void validateAvgPool1dBfpDivisor(avgPool1dInit_t *init, layerQuant_t *lq) {
+    if (lq->forwardMath.type == ARITH_BFP || lq->propLossMath.type == ARITH_BFP) {
+        (void)avgPool1dBfpLog2Divisor(init->kernelSize, "avgPool1dLayerInit");
+    }
+}
+
 static layer_t *buildAvgPool1dLayerSkeleton(avgPool1dInit_t *init) {
     size_t stride = init->stride == 0 ? init->kernelSize : init->stride;
 
@@ -232,6 +242,7 @@ static layer_t *buildAvgPool1dLayerSkeleton(avgPool1dInit_t *init) {
 layer_t *avgPool1dLayerInit(avgPool1dInit_t *init, layerQuant_t *lq) {
     validateAvgPool1dInit(init);
     validateLayerQuantForAvgPool1d(lq);
+    validateAvgPool1dBfpDivisor(init, lq);
 
     layer_t *layer = buildAvgPool1dLayerSkeleton(init);
     avgPool1dConfig_t *cfg = layer->config->avgPool1d;
@@ -246,6 +257,7 @@ layer_t *avgPool1dLayerInit(avgPool1dInit_t *init, layerQuant_t *lq) {
 layer_t *avgPool1dLayerInitOwning(avgPool1dInit_t *init, layerQuant_t *lq) {
     validateAvgPool1dInit(init);
     validateLayerQuantForAvgPool1d(lq);
+    validateAvgPool1dBfpDivisor(init, lq);
 
     layer_t *layer = buildAvgPool1dLayerSkeleton(init);
     avgPool1dConfig_t *cfg = layer->config->avgPool1d;

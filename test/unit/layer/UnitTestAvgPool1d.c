@@ -1,5 +1,7 @@
 #define SOURCE_FILE "UNIT_TEST_AVG_POOL_1D"
 
+#include <math.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +18,12 @@
 #include "TensorConversion.h"
 #include "expected_avg_pool_1d.h"
 #include "unity.h"
+
+#include "BfpRawFixture.h"
+#include "BfpScatterRef.h"
+#include "LayerExec.h"
+#include "RNG.h"
+#include "SlidingWindow1d.h"
 
 typedef struct avgPool1dRunResult {
     layer_t *layer;
@@ -704,10 +712,10 @@ static layer_t *avgPool1dBuildBfpLayer(avgPool1dConfig_t *cfgStore, kernel_t *ke
     return layerStore;
 }
 
-/* Borrowed BFP-stored grouped input (BFP D8: never re-blocked): the kernel folds
- * same-group segments with ldexpf into the FLOAT32 raw (BFP D7) and divides by K
- * there. A FLOAT32 output wire makes the OUT_WRITE epilogue a memmove, so the
- * comparison is BIT-exact against the np.float32 reference. */
+/* Borrowed BFP-stored grouped input (BFP D8: never re-blocked): the integer
+ * kernel folds same-group segments into the per-tensor BFP_RAW (a FLOAT32
+ * target has no groups) and folds -log2 K into the exponent; the epilogue
+ * dequantizes ldexpf((float)mant, E). Bit-exact against the integer mirror. */
 void testAvgPool1dForwardBfpBorrowedGroupedInput(void) {
     size_t inputDims[] = {1, 2, 8};
     size_t outputDims[] = {1, 2, 4};
@@ -726,15 +734,15 @@ void testAvgPool1dForwardBfpBorrowedGroupedInput(void) {
     avgPool1dConfig_t cfg;
     layerConfig_t lc;
     layer_t layer;
-    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
+    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, SAME,
                            (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
 
     avgPool1dForward(&layer, input, output, NULL);
 
     TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpAvgPoolExpectedForward, output->data,
                                      kBfpAvgPoolExpectedForward_len * sizeof(float),
-                                     "ARITH_BFP raw is FLOAT32 (BFP D7) and the FLOAT32 OUT_WRITE "
-                                     "is a memmove -- the output must be bit-exact");
+                                     "the FLOAT32 target is the exact dequant of the integer "
+                                     "BFP_RAW");
     freeQuantization(wireQ);
     freeTensor(output);
     freeTensor(input);
@@ -755,7 +763,7 @@ void testAvgPool1dForwardBfpStagesFloat32InputAtWireWidths(void) {
     avgPool1dConfig_t cfg;
     layerConfig_t lc;
     layer_t layer;
-    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
+    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, SAME,
                            (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
 
     avgPool1dForward(&layer, input, output, NULL);
@@ -769,8 +777,8 @@ void testAvgPool1dForwardBfpStagesFloat32InputAtWireWidths(void) {
     freeTensor(input);
 }
 
-/* OUT_WRITE onto a BFP wire: the epilogue derives the target's per-group
- * exponents (packFloatBufferAsBfp) with the OP's rounding (#282). */
+/* OUT_WRITE onto a BFP wire: the raw takes the target's blocking and the
+ * epilogue re-blocks it in integer with the OP's rounding (#282). */
 void testAvgPool1dForwardBfpPacksOutputWire(void) {
     size_t inputDims[] = {1, 2, 8};
     size_t outputDims[] = {1, 2, 4};
@@ -793,7 +801,7 @@ void testAvgPool1dForwardBfpPacksOutputWire(void) {
     avgPool1dConfig_t cfg;
     layerConfig_t lc;
     layer_t layer;
-    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
+    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, SAME,
                            (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
 
     avgPool1dForward(&layer, input, output, NULL);
@@ -812,10 +820,586 @@ void testAvgPool1dForwardBfpPacksOutputWire(void) {
     freeTensor(input);
 }
 
+/* ---- Integer-only forward at the kernel (arithmetic-bfp.md section 13) ----
+ * avgPool1dForwardKernelBfpRaw on stack operands (BfpRawFixture.h), checked
+ * bit for bit against a reference written from the definition in int64:
+ * guard g = the smallest g with K 2^(m-1) 2^-g + (K + 1) <= INT32_MAX;
+ * E_acc of a raw group = max input exponent over the input rows its outputs
+ * read, + g; per window one partial per same-group segment, aligned
+ * (left exact, right HALF_AWAY); then a power-of-two K folds -log2 K into
+ * the exponent, any other K is ONE half-away division per output. */
+
+typedef struct bfpAvgCase {
+    const int32_t *codes;
+    const uint8_t *exps; /* biased, e = 8 */
+    size_t numGroups;
+    size_t groupSize;
+    uint8_t mantissaBits;
+    size_t rows; /* batch 1, `rows` channels */
+    size_t len;
+    size_t k;
+    size_t dilation;
+    size_t stride;
+    size_t rawNumGroups;
+    size_t rawGroupSize;
+} bfpAvgCase_t;
+
+static size_t bfpAvgOutLen(const bfpAvgCase_t *c) {
+    return (c->len - c->dilation * (c->k - 1) - 1) / c->stride + 1;
+}
+
+static size_t bfpAvgGroup(const bfpAvgCase_t *c, size_t idx) {
+    return c->groupSize == 0 ? 0 : idx / c->groupSize;
+}
+
+static int bfpAvgE(const bfpAvgCase_t *c, size_t idx) {
+    return (int)c->exps[bfpAvgGroup(c, idx)] - 127;
+}
+
+static int64_t refDivHalfAway(int64_t v, int64_t d) {
+    int64_t mag = v < 0 ? -v : v;
+    int64_t q = mag / d;
+    if (2 * (mag - q * d) >= d) {
+        q++;
+    }
+    return v < 0 ? -q : q;
+}
+
+static int64_t refAlign(int64_t v, int k) {
+    if (v == 0) {
+        return 0; /* a zero group may sit any distance above E_acc */
+    }
+    if (k <= 0) {
+        return v * ((int64_t)1 << -k);
+    }
+    return k > 62 ? 0 : refDivHalfAway(v, (int64_t)1 << k);
+}
+
+static int refSumGuard(size_t k, uint8_t m) {
+    uint64_t total = (uint64_t)k << (m - 1u);
+    uint64_t room = (uint64_t)INT32_MAX - (k + 1u);
+    for (int g = -30; g <= 31; g++) {
+        bool holds = g < 0 ? (total << (unsigned)(-g)) <= room : total <= (room << (unsigned)g);
+        if (holds) {
+            return g;
+        }
+    }
+    TEST_FAIL_MESSAGE("refSumGuard: no g");
+    return 0;
+}
+
+static void refAvgPool(const bfpAvgCase_t *c, int32_t *mant, int16_t *rawE) {
+    size_t outLen = bfpAvgOutLen(c);
+    size_t n = c->rows * outLen;
+    size_t gsz = c->rawGroupSize == 0 ? n : c->rawGroupSize;
+    int g = refSumGuard(c->k, c->mantissaBits);
+    int log2K = -1;
+    for (int b = 0; b < 31; b++) {
+        if ((size_t)1 << b == c->k) {
+            log2K = b;
+        }
+    }
+    for (size_t t = 0; t < c->rawNumGroups; t++) {
+        int top = INT32_MIN;
+        for (size_t j = t * gsz; j < (t + 1) * gsz; j++) {
+            size_t row = j / outLen;
+            for (size_t i = 0; i < c->len; i++) {
+                if (c->codes[row * c->len + i] == 0) {
+                    continue; /* zero groups never set E_acc */
+                }
+                int e = bfpAvgE(c, row * c->len + i);
+                top = e > top ? e : top;
+            }
+        }
+        int eAcc = (top == INT32_MIN ? 0 : top) + g;
+        rawE[t] = (int16_t)(log2K >= 0 ? eAcc - log2K : eAcc);
+        for (size_t j = t * gsz; j < (t + 1) * gsz; j++) {
+            size_t row = j / outLen, o = j % outLen;
+            int64_t acc = 0, partial = 0;
+            size_t segGroup = SIZE_MAX;
+            size_t segments = 0;
+            double exact = 0.0;
+            for (size_t i = 0; i < c->k; i++) {
+                size_t idx = row * c->len + o * c->stride + i * c->dilation;
+                if (segGroup != SIZE_MAX && bfpAvgGroup(c, idx) != segGroup) {
+                    acc += refAlign(partial, eAcc - ((int)c->exps[segGroup] - 127));
+                    TEST_ASSERT_TRUE(acc >= INT32_MIN && acc <= INT32_MAX);
+                    partial = 0;
+                    segments++;
+                }
+                segGroup = bfpAvgGroup(c, idx);
+                partial += c->codes[idx];
+                exact += ldexp((double)c->codes[idx], bfpAvgE(c, idx));
+            }
+            acc += refAlign(partial, eAcc - ((int)c->exps[segGroup] - 127));
+            segments++;
+            TEST_ASSERT_TRUE(acc >= INT32_MIN && acc <= INT32_MAX);
+            mant[j] = (int32_t)(log2K >= 0 ? acc : refDivHalfAway(acc, (int64_t)c->k));
+            /* The documented error bound: S folds of at most 1/2 each, over K,
+             * plus the division's 1/2 -- all in units of 2^E_acc. */
+            double got = ldexp((double)mant[j], rawE[t]);
+            double bound = ldexp(0.5 * (double)segments / (double)c->k + 0.5, eAcc);
+            TEST_ASSERT_TRUE(fabs(got - exact / (double)c->k) <= bound + 1e-12 * fabs(exact));
+        }
+    }
+}
+
+static void checkAvgPoolBfpRaw(const bfpAvgCase_t *c) {
+    size_t inDims[3] = {1, c->rows, c->len};
+    size_t outLen = bfpAvgOutLen(c);
+    size_t outDims[3] = {1, c->rows, outLen};
+    bfpScratchFixture_t in;
+    bfpScratchInit(&in, 3, inDims, c->codes, c->exps, c->numGroups, c->groupSize, c->mantissaBits,
+                   8);
+    bfpRawFixture_t raw;
+    bfpRawInit(&raw, 3, outDims, c->rawNumGroups, c->rawGroupSize);
+    kernel_t kern;
+    initKernel(&kern, c->k, VALID, c->dilation, c->stride);
+    avgPool1dConfig_t cfg = {0};
+    cfg.kernel = &kern;
+    tensor_t *ops[1] = {&in.tensor};
+
+    avgPool1dForwardKernelBfpRaw(ops, 1, &raw.tensor, NULL, &cfg, NULL);
+
+    int32_t mant[64];
+    int16_t rawE[16];
+    refAvgPool(c, mant, rawE);
+    assertRawEquals(&raw, mant, c->rows * outLen, rawE, c->rawNumGroups);
+}
+
+/* K = 4 is a power of two: the mean is the aligned sum under E_acc - 2,
+ * EXACT here (every window within -g binades of its row max), so the raw
+ * equals sum / 4 exactly -- checked against hand values too. */
+void testAvgPool1dBfpRawPow2KFoldsIntoTheExponent(void) {
+    int32_t codes[16] = {12, -7, 0, 31, -128, 5, -1, 20, 3, -14, 22, -1, 8, 0, 127, 6};
+    uint8_t exps[8] = {130, 127, 133, 125, 128, 128, 120, 127};
+    bfpAvgCase_t c = {codes, exps, 8, 2, 8, 2, 8, 4, 1, 2, 1, 0};
+    checkAvgPoolBfpRaw(&c);
+
+    /* Row 0, output 0 = (12 * 2^3 - 7 * 2^3 + 0 + 31) / 4 = 71 / 4, exactly:
+     * the raw holds it as mant * 2^E with no rounding. */
+    size_t inDims[3] = {1, 2, 8};
+    size_t outDims[3] = {1, 2, 3};
+    bfpScratchFixture_t in;
+    bfpScratchInit(&in, 3, inDims, codes, exps, 8, 2, 8, 8);
+    bfpRawFixture_t raw;
+    bfpRawInit(&raw, 3, outDims, 1, 0);
+    kernel_t kern;
+    initKernel(&kern, 4, VALID, 1, 2);
+    avgPool1dConfig_t cfg = {0};
+    cfg.kernel = &kern;
+    tensor_t *ops[1] = {&in.tensor};
+    avgPool1dForwardKernelBfpRaw(ops, 1, &raw.tensor, NULL, &cfg, NULL);
+    TEST_ASSERT_EQUAL_FLOAT(71.0f / 4.0f, ldexpf((float)raw.mant[0], raw.exps[0]));
+}
+
+/* K = 2 with dilation 4 (dilated windows that cross groups), per-tensor raw
+ * and a raw group straddling the rows. */
+void testAvgPool1dBfpRawDilatedPow2KAcrossGroups(void) {
+    int32_t codes[16] = {12, -7, 0, 31, -32, 5, -1, 20, 3, -14, 22, -1, 8, 0, -30, 6};
+    uint8_t exps[4] = {130, 127, 133, 125};
+    bfpAvgCase_t per = {codes, exps, 4, 4, 6, 2, 8, 2, 4, 1, 1, 0};
+    checkAvgPoolBfpRaw(&per);
+    bfpAvgCase_t grouped = {codes, exps, 4, 4, 6, 2, 8, 2, 4, 1, 2, 4};
+    checkAvgPoolBfpRaw(&grouped);
+    bfpAvgCase_t eight = {codes, exps, 4, 4, 6, 2, 8, 8, 1, 1, 1, 0};
+    checkAvgPoolBfpRaw(&eight);
+}
+
+/* Ruling R1: under BFP math the divisor K must be a power of two, so the
+ * mean is always an exponent shift. count_include_pad = true makes the
+ * divisor K at every output, padded edges included, so the kernel size is
+ * the only divisor to check. Both integer kernels and the factory refuse
+ * K = 3 (and the FLOAT32 and SYM arms keep accepting it). */
+static void apForwardNonPow2Body(size_t k) {
+    int32_t codes[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    uint8_t exps[1] = {127};
+    size_t inDims[3] = {1, 1, 8};
+    kernel_t kern;
+    initKernel(&kern, k, VALID, 1, 1);
+    size_t outDims[3] = {1, 1, windowGeometry1dCalc(8, &kern).outputLength};
+    bfpScratchFixture_t in;
+    bfpScratchInit(&in, 3, inDims, codes, exps, 1, 0, 8, 8);
+    bfpRawFixture_t raw;
+    bfpRawInit(&raw, 3, outDims, 1, 0);
+    avgPool1dConfig_t cfg = {0};
+    cfg.kernel = &kern;
+    tensor_t *ops[1] = {&in.tensor};
+    avgPool1dForwardKernelBfpRaw(ops, 1, &raw.tensor, NULL, &cfg, NULL);
+}
+
+static void apBackwardNonPow2Body(size_t k) {
+    int32_t gy[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    uint8_t exps[1] = {127};
+    kernel_t kern;
+    initKernel(&kern, k, SAME, 1, 1);
+    size_t gyDims[3] = {1, 1, windowGeometry1dCalc(8, &kern).outputLength};
+    size_t dxDims[3] = {1, 1, 8};
+    bfpScratchFixture_t g;
+    bfpScratchInit(&g, 3, gyDims, gy, exps, 1, 0, 8, 8);
+    bfpRawFixture_t raw;
+    bfpRawInit(&raw, 3, dxDims, 1, 0);
+    avgPool1dConfig_t cfg = {0};
+    cfg.kernel = &kern;
+    tensor_t *ops[1] = {&g.tensor};
+    avgPool1dBackwardKernelBfpRaw(ops, 1, &raw.tensor, NULL, &cfg, NULL);
+}
+
+void testAvgPool1dBfpRejectsANonPowerOfTwoKernel(void) {
+    static const size_t bad[3] = {3, 6, 33};
+    for (size_t i = 0; i < 3; i++) {
+        ASSERT_EXITS_WITH_OUTPUT(1, "AvgPool1d forward BFP: BFP math needs a power-of-two kernel",
+                                 apForwardNonPow2Body(bad[i]));
+        ASSERT_EXITS_WITH_OUTPUT(1, "AvgPool1d backward BFP: BFP math needs a power-of-two kernel",
+                                 apBackwardNonPow2Body(bad[i]));
+    }
+}
+
+/* The power-of-two helper itself: log2 K for K = 1, 2, 32, 2^20. */
+void testAvgPool1dBfpLog2DivisorOfPowersOfTwo(void) {
+    TEST_ASSERT_EQUAL_INT(0, avgPool1dBfpLog2Divisor(1, "t"));
+    TEST_ASSERT_EQUAL_INT(1, avgPool1dBfpLog2Divisor(2, "t"));
+    TEST_ASSERT_EQUAL_INT(5, avgPool1dBfpLog2Divisor(32, "t"));
+    TEST_ASSERT_EQUAL_INT(20, avgPool1dBfpLog2Divisor((size_t)1 << 20, "t"));
+}
+
+/* Worst cases: every code at the floor -2^(m-1), at the ceiling, or mixed,
+ * over exponent gaps 0, 15, 16, 17 and 40 between neighbouring groups (the
+ * low segments are rounded or flushed), K in {2, 4, 8} with m = 16 and 8,
+ * per-tensor and grouped raws. The reference asserts int32 range at every
+ * fold and the documented error bound. */
+void testAvgPool1dBfpRawWorstCaseCodesAcrossExponentGaps(void) {
+    uint8_t exps[12] = {127, 127, 142, 158, 175, 135, 120, 136, 176, 136, 121, 104};
+    static const uint8_t widths[2] = {16, 8};
+    static const size_t ks[3] = {2, 4, 8};
+    for (size_t w = 0; w < 2; w++) {
+        int32_t lo = -(1 << (widths[w] - 1)), hi = (1 << (widths[w] - 1)) - 1;
+        int32_t floorCodes[24], ceilCodes[24], mixed[24];
+        for (size_t i = 0; i < 24; i++) {
+            floorCodes[i] = lo;
+            ceilCodes[i] = hi;
+            mixed[i] = i % 3 == 0 ? lo : (i % 3 == 1 ? hi : (int32_t)(i % 5) - 2);
+        }
+        const int32_t *sets[3] = {floorCodes, ceilCodes, mixed};
+        for (size_t s = 0; s < 3; s++) {
+            for (size_t ki = 0; ki < 3; ki++) {
+                size_t outLen = 12 - ks[ki] + 1;
+                bfpAvgCase_t per = {sets[s], exps, 12, 2, widths[w], 2, 12, ks[ki], 1, 1, 1, 0};
+                checkAvgPoolBfpRaw(&per);
+                bfpAvgCase_t byRow = {sets[s], exps,   12, 2, widths[w], 2,
+                                      12,      ks[ki], 1,  1, 2,         outLen};
+                checkAvgPoolBfpRaw(&byRow);
+            }
+        }
+    }
+}
+
+static void avgPoolBfpRawIntoFloatRawBody(void) {
+    int32_t codes[4] = {1, 2, 3, 4};
+    uint8_t exps[1] = {127};
+    size_t inDims[3] = {1, 1, 4};
+    size_t outDims[3] = {1, 1, 3};
+    bfpScratchFixture_t in;
+    bfpScratchInit(&in, 3, inDims, codes, exps, 1, 0, 8, 8);
+    tensor_t *notRaw = makeFloatTensor(outDims, 3, NULL);
+    kernel_t kern;
+    initKernel(&kern, 2, VALID, 1, 1);
+    avgPool1dConfig_t cfg = {0};
+    cfg.kernel = &kern;
+    tensor_t *ops[1] = {&in.tensor};
+    avgPool1dForwardKernelBfpRaw(ops, 1, notRaw, NULL, &cfg, NULL);
+}
+
+/* Zero groups never set E_acc: input [1, 1, 8] in groups of 4, group 0 all
+ * zero in the zero state (E = 0), group 1 live at E = -28; K = 2, stride 2
+ * (a power of two: the raw is the exact window sum under E - 1). Every
+ * output equals its exact value. */
+void testAvgPool1dBfpRawZeroGroupDoesNotSetTheAccumulator(void) {
+    int32_t codes[8] = {0, 0, 0, 0, 113, -77, 91, -59};
+    uint8_t exps[2] = {127, 127 - 28};
+    size_t inDims[3] = {1, 1, 8};
+    size_t outDims[3] = {1, 1, 4};
+    bfpScratchFixture_t in;
+    bfpScratchInit(&in, 3, inDims, codes, exps, 2, 4, 8, 8);
+    bfpRawFixture_t raw;
+    bfpRawInit(&raw, 3, outDims, 1, 0);
+    kernel_t kern;
+    initKernel(&kern, 2, VALID, 1, 2);
+    avgPool1dConfig_t cfg = {0};
+    cfg.kernel = &kern;
+    tensor_t *ops[1] = {&in.tensor};
+
+    avgPool1dForwardKernelBfpRaw(ops, 1, &raw.tensor, NULL, &cfg, NULL);
+
+    for (size_t o = 0; o < 4; o++) {
+        int64_t sum = (int64_t)codes[2 * o] + codes[2 * o + 1];
+        assertBfpValueExact(raw.mant[o], raw.exps[0], sum, -28 - 1, o);
+    }
+}
+
+void testAvgPool1dBfpRawRejectsANonRawOutput(void) {
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "AvgPool1d forward BFP: needs a BFP (unpacked scratch) input and a BFP_RAW",
+        avgPoolBfpRawIntoFloatRawBody());
+}
+
+/* ---- Integer-only backward at the kernel (arithmetic-bfp.md section 14) ----
+ * avgPool1dBackwardKernelBfpRaw against a reference written from the
+ * definition (BfpScatterRef.h helpers, output-centric): the FLOAT32 arm
+ * scatters gy / K into every valid member of the window (count_include_pad:
+ * the divisor stays K). Per dx row (one (batch, channel)): E(r) = (max
+ * exponent over the loss row's NONZERO codes, 0 if none) + g, g = the guard
+ * of C terms of m-bit codes, C = the windows covering one cell. A loss code
+ * enters aligned to E(r) (left exact, right half away); a power-of-two K
+ * folds -log2 K into the row's exponent, any other K divides the aligned
+ * code ONCE per output, half away. The BFP_RAW is the data rule over the
+ * sums (bfpRefRawFromRows). */
+
+typedef struct apBwdCase {
+    const int32_t *gy;
+    const uint8_t *gyExps;
+    size_t gyNumGroups, gyGroupSize;
+    uint8_t m;
+    size_t rows, len, k, dilation, stride;
+    paddingType_t padding;
+    size_t rawNumGroups, rawGroupSize;
+} apBwdCase_t;
+
+static uint32_t apLcg(uint32_t *s) {
+    *s = *s * 1664525u + 1013904223u;
+    return *s >> 8;
+}
+
+static void apRandomCodes(uint32_t seed, int32_t *codes, size_t n, uint8_t m) {
+    uint32_t s = seed;
+    uint32_t span = 1u << m;
+    for (size_t i = 0; i < n; i++) {
+        codes[i] = (int32_t)(apLcg(&s) % span) - (int32_t)(span / 2); /* -2^(m-1) included */
+    }
+}
+
+static bfpRefStats_t refAvgPoolBackwardRaw(const apBwdCase_t *c, const windowGeometry1d_t *geom,
+                                           int32_t *mant, int16_t *rawE) {
+    bfpRefStats_t st = {.fitsInt32 = true};
+    bfpRefOperand_t gy = {c->gy, c->gyExps, c->gyGroupSize, c->m, 8};
+    size_t outLen = geom->outputLength;
+    size_t cover = (c->dilation * (c->k - 1)) / c->stride + 1;
+    int g = bfpRefGuard(cover, c->m, 1);
+    int log2K = -1;
+    for (int b = 0; b < 31; b++) {
+        if ((size_t)1 << b == c->k) {
+            log2K = b;
+        }
+    }
+    int64_t sum[BFP_RAW_FIXTURE_MAX_OUT];
+    int eAcc[BFP_RAW_FIXTURE_MAX_OUT];
+    for (size_t r = 0; r < c->rows; r++) {
+        int eRow = bfpRefEAcc(bfpRefMaxExp(&gy, r * outLen, outLen), g);
+        for (size_t i = 0; i < c->len; i++) {
+            sum[r * c->len + i] = 0;
+            eAcc[r * c->len + i] = log2K >= 0 ? eRow - log2K : eRow;
+        }
+        for (size_t o = 0; o < outLen; o++) {
+            size_t oi = r * outLen + o;
+            int64_t term = bfpRefAlign(c->gy[oi], eRow - bfpRefExp(&gy, oi), &st);
+            if (log2K < 0) {
+                term = refDivHalfAway(term, (int64_t)c->k);
+            }
+            long long start = (long long)(o * c->stride) - (long long)geom->padLeft;
+            for (size_t j = 0; j < c->k; j++) {
+                long long idx = start + (long long)(j * c->dilation);
+                if (idx >= 0 && idx < (long long)c->len) {
+                    sum[r * c->len + (size_t)idx] += term;
+                }
+            }
+        }
+    }
+    bfpRefRawFromRows(sum, eAcc, c->rows * c->len, c->rawGroupSize, mant, rawE, &st);
+    return st;
+}
+
+static bfpRefStats_t checkAvgPoolBackwardBfpRaw(const apBwdCase_t *c) {
+    kernel_t kern;
+    initKernel(&kern, c->k, c->padding, c->dilation, c->stride);
+    windowGeometry1d_t geom = windowGeometry1dCalc(c->len, &kern);
+    size_t outLen = geom.outputLength;
+    size_t gyDims[3] = {1, c->rows, outLen};
+    size_t dxDims[3] = {1, c->rows, c->len};
+    TEST_ASSERT_EQUAL_size_t(
+        c->rows * outLen, c->gyGroupSize == 0 ? c->rows * outLen : c->gyNumGroups * c->gyGroupSize);
+    bfpScratchFixture_t gy;
+    bfpScratchInit(&gy, 3, gyDims, c->gy, c->gyExps, c->gyNumGroups, c->gyGroupSize, c->m, 8);
+    bfpRawFixture_t raw;
+    bfpRawInit(&raw, 3, dxDims, c->rawNumGroups, c->rawGroupSize);
+    avgPool1dConfig_t cfg = {0};
+    cfg.kernel = &kern;
+    tensor_t *ops[1] = {&gy.tensor};
+
+    avgPool1dBackwardKernelBfpRaw(ops, 1, &raw.tensor, NULL, &cfg, NULL);
+
+    int32_t mant[BFP_RAW_FIXTURE_MAX_OUT];
+    int16_t rawE[BFP_RAW_FIXTURE_MAX_GROUPS];
+    bfpRefStats_t st = refAvgPoolBackwardRaw(c, &geom, mant, rawE);
+    TEST_ASSERT_TRUE(st.fitsInt32);
+    assertRawEquals(&raw, mant, c->rows * c->len, rawE, c->rawNumGroups);
+    return st;
+}
+
+/* K 2 dilation 2 with overlap (stride 1, up to 3 windows per cell), K 4
+ * with SAME padding (the divisor stays K at the edges), HAR's global pool
+ * (K = stride = 32: one output per row, 32 cells each), and K 2 dilation 4
+ * at m 16 (5 windows cover a cell); loss groups spread over 21 binades; raw
+ * groups inside rows, across rows and per tensor. */
+void testAvgPool1dBackwardBfpRawMatchesTheIntegerReference(void) {
+    int32_t gy[64];
+    uint8_t exps[16];
+    uint32_t s = 5150u;
+    for (size_t i = 0; i < 16; i++) {
+        exps[i] = (uint8_t)(127 - 10 + (int)(apLcg(&s) % 21u));
+    }
+    apRandomCodes(1u, gy, 30, 8);
+    apBwdCase_t a = {gy, exps, 6, 5, 8, 3, 12, 2, 2, 1, VALID, 9, 4};
+    bfpRefStats_t st = checkAvgPoolBackwardBfpRaw(&a);
+    TEST_ASSERT_TRUE(st.leftShift > 0);
+    a.rawNumGroups = 4;
+    a.rawGroupSize = 9;
+    checkAvgPoolBackwardBfpRaw(&a);
+    a.rawNumGroups = 1;
+    a.rawGroupSize = 0;
+    checkAvgPoolBackwardBfpRaw(&a);
+
+    apRandomCodes(2u, gy, 18, 8); /* K 4, stride 2, SAME: 3 rows of 6 */
+    apBwdCase_t same = {gy, exps, 6, 3, 8, 3, 12, 4, 1, 2, SAME, 6, 6};
+    checkAvgPoolBackwardBfpRaw(&same);
+
+    apRandomCodes(3u, gy, 3, 8); /* HAR: 3 rows of 32, K = stride = 32 */
+    apBwdCase_t har = {gy, exps, 3, 1, 8, 3, 32, 32, 1, 32, VALID, 6, 16};
+    checkAvgPoolBackwardBfpRaw(&har);
+    har.gyNumGroups = 1;
+    har.gyGroupSize = 0;
+    har.rawNumGroups = 1;
+    har.rawGroupSize = 0;
+    checkAvgPoolBackwardBfpRaw(&har);
+
+    apRandomCodes(4u, gy, 32, 16); /* K 2, dilation 4, m 16: 4 rows of 8 */
+    apBwdCase_t dil = {gy, exps, 8, 4, 16, 4, 12, 2, 4, 1, VALID, 8, 6};
+    checkAvgPoolBackwardBfpRaw(&dil);
+}
+
+/* One E per dx row: row 0's second loss group 30 binades below its first
+ * rounds half away on the row's grid (beyond the guard). Row 2's first loss
+ * group is all zero in the zero state (stored = bias) 30 binades ABOVE its
+ * live second group: it must not set E (that row stays exact). K 2, and K 2
+ * dilated to span 3. */
+void testAvgPool1dBackwardBfpRawRowGridAndZeroGroups(void) {
+    int32_t gy[16];
+    apRandomCodes(21u, gy, 16, 8);
+    gy[8] = 0;
+    gy[9] = 0;
+    gy[2] = 1;
+    uint8_t exps[8] = {130, 100, 127, 126, 127, 97, 125, 125};
+    apBwdCase_t c = {gy, exps, 8, 2, 8, 4, 8, 2, 1, 2, VALID, 8, 4};
+    bfpRefStats_t st = checkAvgPoolBackwardBfpRaw(&c);
+    TEST_ASSERT_TRUE_MESSAGE(st.rounded > 0, "the 30-binade row rounds");
+    apBwdCase_t z = {gy + 8, exps + 4, 4, 2, 8, 2, 8, 2, 1, 2, VALID, 4, 4};
+    st = checkAvgPoolBackwardBfpRaw(&z);
+    TEST_ASSERT_EQUAL_size_t(0, st.rounded);
+    apBwdCase_t z3 = {gy + 8, exps + 4, 4, 2, 8, 2, 12, 2, 2, 3, VALID, 4, 6};
+    checkAvgPoolBackwardBfpRaw(&z3);
+
+    /* A power-of-two K folds -log2 K into the EXPONENT, not into the code
+     * grid: a loss group 22 binades below its row's top is still exact (g =
+     * -23); aligning on a grid log2 K coarser would round its odd codes. */
+    int32_t odd[8] = {101, -77, 5, -3, 63, 1, -9, 7};
+    uint8_t gap[4] = {130, 108, 127, 105};
+    apBwdCase_t k4 = {odd, gap, 4, 2, 8, 2, 16, 4, 1, 4, VALID, 2, 16};
+    st = checkAvgPoolBackwardBfpRaw(&k4);
+    TEST_ASSERT_EQUAL_size_t(0, st.rounded);
+}
+
+/* Layer level into a BFP dx wire: the integer raw re-blocked by the funnel's
+ * epilogue (BfpScatterRef.h's section-13 re-block) by the OP's rounding
+ * mode; under SR one draw per element in element order from the op's
+ * RNG_TAG_OUT stream (op key = AVGPOOL1D_OP_PROP_LOSS = 1 under
+ * RNG_TAG_BACKWARD). K 2 and K 4. */
+static void apLayerIntoBfpWire(size_t kSize, roundingMode_t opMode, uint64_t seed) {
+    kernel_t probe;
+    initKernel(&probe, kSize, VALID, 1, 1);
+    size_t outLen = windowGeometry1dCalc(12, &probe).outputLength;
+    size_t gyDims[3] = {1, 3, outLen};
+    size_t dxDims[3] = {1, 3, 12};
+    int32_t gy[36];
+    apRandomCodes(31u + (uint32_t)kSize, gy, 3 * outLen, 8);
+    uint8_t exps[3] = {120, 131, 127};
+    tensor_t *lossGrad = buildBfpWireWithCodes(gyDims, 3, 8, 8, 3, outLen, gy, exps);
+    tensor_t *dx = buildBfpWireWithCodes(dxDims, 3, 6, 8, 9, 4, NULL, NULL);
+    quantization_t *wireQ = quantizationInitBfpGrouped(6, 8, HALF_AWAY, 9, 4);
+    kernel_t k;
+    avgPool1dConfig_t cfg;
+    layerConfig_t lc;
+    layer_t layer;
+    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, kSize, VALID, 1, 1, wireQ);
+    cfg.propLossMath.roundingMode = opMode;
+
+    layerExec_t exec = {.key = rngKeyFromSeed(seed)};
+    avgPool1dBackward(&layer, NULL, lossGrad, dx, opMode == SR_HALF_AWAY ? &exec : NULL);
+
+    int32_t codes[36];
+    unpackSignExtend(dx->data, 6, 0, codes, 36);
+    windowGeometry1d_t geom = windowGeometry1dCalc(12, &k);
+    apBwdCase_t c = {gy, exps, 3, outLen, 8, 3, 12, kSize, 1, 1, VALID, 9, 4};
+    int32_t mant[BFP_RAW_FIXTURE_MAX_OUT];
+    int16_t rawE[BFP_RAW_FIXTURE_MAX_GROUPS];
+    refAvgPoolBackwardRaw(&c, &geom, mant, rawE);
+    rngStream_t out = rngOpen(
+        rngFold(rngFold(rngFold(exec.key, RNG_TAG_BACKWARD, 0u), RNG_TAG_OP, 1u), RNG_TAG_OUT, 0u));
+    int32_t refCodes[36];
+    uint8_t refStored[9];
+    bfpRefReblockRaw(mant, rawE, 36, 4, 6, 8, opMode == SR_HALF_AWAY ? &out : NULL, refCodes,
+                     refStored);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(refCodes, codes, 36);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(refStored, ((bfpQConfig_t *)dx->quantization->qConfig)->exponents,
+                                  9);
+    freeQuantization(wireQ);
+    freeTensor(dx);
+    freeTensor(lossGrad);
+}
+
+void testAvgPool1dBackwardBfpIntoBfpWireReblocksTheIntegerRaw(void) {
+    apLayerIntoBfpWire(2, HALF_AWAY, 0u);
+    apLayerIntoBfpWire(2, SR_HALF_AWAY, 811u);
+    apLayerIntoBfpWire(4, HALF_AWAY, 0u);
+    apLayerIntoBfpWire(4, SR_HALF_AWAY, 812u);
+}
+
+static void apFloatRawBody(void) {
+    int32_t gy[4] = {1, 2, 3, 4};
+    uint8_t exps[1] = {127};
+    kernel_t kern;
+    initKernel(&kern, 2, VALID, 1, 2);
+    size_t gyDims[3] = {1, 1, 4};
+    size_t dxDims[3] = {1, 1, 8};
+    bfpScratchFixture_t g;
+    bfpScratchInit(&g, 3, gyDims, gy, exps, 1, 0, 8, 8);
+    tensor_t *notRaw = makeFloatTensor(dxDims, 3, NULL);
+    avgPool1dConfig_t cfg = {0};
+    cfg.kernel = &kern;
+    tensor_t *ops[1] = {&g.tensor};
+    avgPool1dBackwardKernelBfpRaw(ops, 1, notRaw, NULL, &cfg, NULL);
+}
+
+void testAvgPool1dBackwardBfpRawRejectsAFloatRaw(void) {
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "AvgPool1d backward BFP: needs a BFP (unpacked scratch) lossGrad and a BFP_RAW",
+        apFloatRawBody());
+}
+
 /* BFP epic PR4 (R-P4 backward): the dx arm is FUNNEL-ROUTED, mirroring the
  * existing ARITH_SYM_INT32 arm — the prologue unpacks the BFP-stored lossGrad
- * and the OUT_WRITE epilogue writes propLoss. A FLOAT32 propLoss wire makes
- * that epilogue a memmove, so the comparison is bit-exact. */
+ * and the OUT_WRITE epilogue writes propLoss. Into a FLOAT32 propLoss the
+ * integer raw is per tensor ({1, 0}) and the epilogue dequantizes
+ * ldexpf((float)mant, E) -- compared bit for bit with the integer reference
+ * dequantized the same way. */
 void testAvgPool1dBackwardBfpScattersIntoFloat32Raw(void) {
     size_t inputDims[] = {1, 2, 8};
     size_t outputDims[] = {1, 2, 4};
@@ -835,7 +1419,7 @@ void testAvgPool1dBackwardBfpScattersIntoFloat32Raw(void) {
     avgPool1dConfig_t cfg;
     layerConfig_t lc;
     layer_t layer;
-    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
+    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, SAME,
                            (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
 
     /* Called TWICE on purpose. dx is OUT_WRITE, so a repeated backward must
@@ -849,9 +1433,35 @@ void testAvgPool1dBackwardBfpScattersIntoFloat32Raw(void) {
     avgPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL);
     avgPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL);
 
-    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpAvgPoolExpectedBackward, propLoss->data,
-                                     kBfpAvgPoolExpectedBackward_len * sizeof(float),
-                                     "the dx scatter accumulates directly in the FLOAT32 raw");
+    apBwdCase_t c = {gyCodes,
+                     kBfpAvgPoolGyExps,
+                     (size_t)kBfpAvgPoolOutNumGroups,
+                     (size_t)kBfpAvgPoolOutGroupSize,
+                     (uint8_t)kBfpAvgPoolMantissaBits,
+                     2,
+                     8,
+                     (size_t)kBfpAvgPoolKernelSize,
+                     (size_t)kBfpAvgPoolDilation,
+                     (size_t)kBfpAvgPoolStride,
+                     SAME,
+                     1,
+                     0};
+    windowGeometry1d_t geom = windowGeometry1dCalc(8, &k);
+    int32_t mant[BFP_RAW_FIXTURE_MAX_OUT];
+    int16_t rawE[BFP_RAW_FIXTURE_MAX_GROUPS];
+    refAvgPoolBackwardRaw(&c, &geom, mant, rawE);
+    const float *got = (const float *)propLoss->data;
+    float maxGold = 0.0f;
+    for (size_t i = 0; i < kBfpAvgPoolExpectedBackward_len; i++) {
+        maxGold = fmaxf(maxGold, fabsf(kBfpAvgPoolExpectedBackward[i]));
+    }
+    for (size_t i = 0; i < 16; i++) {
+        TEST_ASSERT_EQUAL_FLOAT_MESSAGE(ldexpf((float)mant[i], rawE[0]), got[i],
+                                        "the integer raw, dequantized");
+        TEST_ASSERT_TRUE_MESSAGE(fabsf(got[i] - kBfpAvgPoolExpectedBackward[i]) <=
+                                     ldexpf(maxGold, -22),
+                                 "within the raw grid of the float scatter");
+    }
     freeQuantization(wireQ);
     freeTensor(propLoss);
     freeTensor(lossGrad);
@@ -869,7 +1479,7 @@ void testAvgPool1dForwardBfpRequiresBfpOutputQ(void) {
     quantization_t *floatQ = quantizationInitFloat();
 
     kernel_t k;
-    initKernel(&k, (size_t)kBfpAvgPoolKernelSize, VALID, (size_t)kBfpAvgPoolDilation,
+    initKernel(&k, (size_t)kBfpAvgPoolKernelSize, SAME, (size_t)kBfpAvgPoolDilation,
                (size_t)kBfpAvgPoolStride);
     avgPool1dConfig_t nullCfg = {0};
     nullCfg.kernel = &k;
@@ -919,7 +1529,7 @@ void testAvgPool1dForwardBfpRejectsMismatchedOutputShape(void) {
     avgPool1dConfig_t cfg;
     layerConfig_t lc;
     layer_t layer;
-    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
+    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, SAME,
                            (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
 
     ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, input, badChannels, NULL));
@@ -1002,19 +1612,23 @@ void testAvgPool1dForwardBfpWireUnderPinnedFloat32(void) {
     avgPool1dConfig_t cfg;
     layerConfig_t lc;
     layer_t layer;
-    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
+    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, SAME,
                            (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
     cfg.forwardMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
 
     avgPool1dForward(&layer, input, output, NULL);
 
-    /* The native kernel folds int32 partials then divides; the fake-quant arm
-     * sums exact floats then divides. Both reduce the SAME exact values in the
-     * SAME order, so on this grid-exact fixture the results are identical. */
+    /* The fake-quant arm sums the exact floats and divides once in float32;
+     * the integer native kernel folds -log2 K into the exponent. K is a power
+     * of two (the only K BFP math takes), so both are exact and agree bit for
+     * bit. */
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpAvgPoolExpectedFloatBridge, output->data,
+                                     kBfpAvgPoolExpectedFloatBridge_len * sizeof(float),
+                                     "the fake-quant bridge is the float32 mean of the exact "
+                                     "dequantized values");
     TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpAvgPoolExpectedForward, output->data,
                                      kBfpAvgPoolExpectedForward_len * sizeof(float),
-                                     "the fake-quant bridge must reproduce the native result "
-                                     "on a grid-exact fixture");
+                                     "power-of-two K: the bridge equals the integer native result");
     freeQuantization(wireQ);
     freeTensor(output);
     freeTensor(input);
@@ -1044,14 +1658,14 @@ void testAvgPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
     layerConfig_t floatLc;
     layer_t floatLayer;
     avgPool1dBuildBfpLayer(&floatCfg, &kf, &floatLc, &floatLayer, (size_t)kBfpAvgPoolKernelSize,
-                           VALID, (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, floatQ);
+                           SAME, (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, floatQ);
     ASSERT_EXITS_WITH_FAILURE(
         avgPool1dBackward(&floatLayer, NULL, bfpLossGrad, floatPropLoss, NULL));
     ASSERT_EXITS_WITH_FAILURE(
         avgPool1dBackward(&floatLayer, NULL, floatLossGrad, bfpPropLoss, NULL));
 
     kernel_t kb;
-    initKernel(&kb, (size_t)kBfpAvgPoolKernelSize, VALID, (size_t)kBfpAvgPoolDilation,
+    initKernel(&kb, (size_t)kBfpAvgPoolKernelSize, SAME, (size_t)kBfpAvgPoolDilation,
                (size_t)kBfpAvgPoolStride);
     avgPool1dConfig_t bfpCfg = {0};
     bfpCfg.kernel = &kb;
@@ -1106,7 +1720,7 @@ void testAvgPool1dBfpRejectsRank2Operands(void) {
     avgPool1dConfig_t cfg;
     layerConfig_t lc;
     layer_t layer;
-    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, VALID,
+    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, SAME,
                            (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
 
     ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, badInput, output, NULL));
@@ -1193,6 +1807,17 @@ int main(void) {
     RUN_TEST(testAvgPool1dForwardBfpBorrowedGroupedInput);
     RUN_TEST(testAvgPool1dForwardBfpStagesFloat32InputAtWireWidths);
     RUN_TEST(testAvgPool1dForwardBfpPacksOutputWire);
+    RUN_TEST(testAvgPool1dBfpRawPow2KFoldsIntoTheExponent);
+    RUN_TEST(testAvgPool1dBfpRawDilatedPow2KAcrossGroups);
+    RUN_TEST(testAvgPool1dBfpRejectsANonPowerOfTwoKernel);
+    RUN_TEST(testAvgPool1dBfpLog2DivisorOfPowersOfTwo);
+    RUN_TEST(testAvgPool1dBfpRawWorstCaseCodesAcrossExponentGaps);
+    RUN_TEST(testAvgPool1dBfpRawRejectsANonRawOutput);
+    RUN_TEST(testAvgPool1dBackwardBfpRawMatchesTheIntegerReference);
+    RUN_TEST(testAvgPool1dBackwardBfpRawRowGridAndZeroGroups);
+    RUN_TEST(testAvgPool1dBackwardBfpIntoBfpWireReblocksTheIntegerRaw);
+    RUN_TEST(testAvgPool1dBackwardBfpRawRejectsAFloatRaw);
+    RUN_TEST(testAvgPool1dBfpRawZeroGroupDoesNotSetTheAccumulator);
     RUN_TEST(testAvgPool1dForwardBfpRequiresBfpOutputQ);
     RUN_TEST(testAvgPool1dForwardBfpRejectsMismatchedOutputShape);
     RUN_TEST(testAvgPool1dForwardBfpSumHeadroomGuardIsWired);

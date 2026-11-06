@@ -19,6 +19,13 @@
 #define BFP_SOFTMAX_A 0.3585f        /* S_out = A * 2^-28            */
 #define BFP_SOFTMAX_ZMAX 31
 #define BFP_SOFTMAX_QFLOOR (-(BFP_SOFTMAX_ZMAX + 1) * BFP_SOFTMAX_QLN2) /* -363392 */
+/* Largest bfpIExpQ output: qL at q_p = 0 and z = 0 (exp(0)); every other
+ * output is <= qL / 2 + 1. The integer normalisation's sum proof uses it. */
+#define BFP_SOFTMAX_QE_MAX 748954122
+_Static_assert(BFP_SOFTMAX_QE_MAX == BFP_SOFTMAX_QB * BFP_SOFTMAX_QB + BFP_SOFTMAX_QC,
+               "BFP_SOFTMAX_QE_MAX must be qL(0)");
+/* The integer forward's raw exponent: probabilities as int32 at 2^-30. */
+#define BFP_SOFTMAX_RAW_FRAC_BITS 30
 
 typedef enum bfpShiftRounding {
     BFP_SHIFT_TRUNC = 0, /* arithmetic >>: floor (two's complement). I-BERT-faithful default. */
@@ -34,8 +41,9 @@ typedef struct rngStream rngStream_t;
  *
  * k == 0 returns v unchanged (no draw). k >= 31 is clamped to 31
  * (documented; only reachable via extreme exponent spreads whose true
- * results round to 0 or ±1). SR draws exactly ONE unit float from `rs` per
- * call with k > 0 and stops with a named error when `rs` is NULL; a zero
+ * results round to 0 or ±1). SR draws exactly ONE rngNextU32 from `rs` per
+ * call with k > 0 (lift iff its top k bits < the k dropped bits) and stops
+ * with a named error when `rs` is NULL; a zero
  * remainder never increments (exact shifts stay exact under SR). TRUNC and
  * HALF_AWAY never draw and take NULL. HALF_AWAY requires |v| ≤ 2^30 (holds
  * at every call site) so the magnitude add cannot overflow. */

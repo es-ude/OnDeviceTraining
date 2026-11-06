@@ -26,9 +26,6 @@ size_t rematCheckNumWires(const rematScheduler_t *s) {
 void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, layer_t **model, size_t n,
                     lossFuncType_t lt, rematMode_t mode, uint32_t *producedGen) {
     size_t numWires = rematCheckNumWires(s);
-    size_t deepest;
-    ptrdiff_t top;
-    rematBackwardRange(model, n, lt, &deepest, &top);
     /* REFORWARD's step budget, 2n + 2 + n(n+1)/2: the minimum-memory
      * schedule's n(n+1)/2 recomputes on top of a plain stream. Computed here,
      * apart from the plan grammar's bound, so a mistake in one shows in the
@@ -43,6 +40,9 @@ void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, layer_t **model, size_
                     n);
         exit(1);
     }
+    size_t deepest;
+    ptrdiff_t top;
+    rematBackwardRange(model, n, lt, &deepest, &top);
     *c = (rematCheck_t){.sched = s,
                         .mode = mode,
                         .model = model,

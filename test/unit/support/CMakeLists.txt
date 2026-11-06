@@ -32,6 +32,12 @@ target_include_directories(odt_test_keyed_draw INTERFACE ${CMAKE_CURRENT_SOURCE_
 add_library(odt_test_rng_pin INTERFACE)
 target_include_directories(odt_test_rng_pin INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# Unpacked-BFP scratch operands and BFP_RAW outputs on the stack
+# (BfpRawFixture.h), for tests that call an integer-forward kernel directly.
+# Header-only; a consumer also links Quantization and Tensor.
+add_library(odt_test_bfp_raw_fixture INTERFACE)
+target_include_directories(odt_test_bfp_raw_fixture INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
 # Self-test of DeathTest.h. Explicit add_executable (not add_elastic_ai_unit_test):
 # odt_test_death does not follow the UnitTest<Lib> naming rule. Common supplies
 # the real PRINT_ERROR banner the output-matching macro must see. TIMEOUT turns
@@ -41,3 +47,10 @@ add_executable(UnitTestDeathTest UnitTestDeathTest.c)
 target_link_libraries(UnitTestDeathTest PRIVATE unity odt_test_death Common)
 __register_target_as_unit_test(UnitTestDeathTest)
 set_tests_properties(UnitTestDeathTest PROPERTIES TIMEOUT 60)
+
+# Int64 references of the integer BFP Conv1d dx / weightGrad / biasGrad and their
+# BFP_RAW (BfpScatterRef.h), written from the definition, output-centric, and the
+# exact 128-bit reference of the integer grad accumulate (BfpAccumulateRef.h).
+# Header-only.
+add_library(odt_test_bfp_scatter_ref INTERFACE)
+target_include_directories(odt_test_bfp_scatter_ref INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)

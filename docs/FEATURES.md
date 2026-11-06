@@ -266,7 +266,18 @@ Notes on the qualified cells:
   BatchNorm1d: 2 if `affine`, else 0; every other layer and every frozen layer: 0),
   dtype-aware `scaleOptimizerGradients` (O(1) scale fold for SYM_INT32/SYM/ASYM grads;
   O(n) value-domain repack for BFP via `scaleBfpTensorInPlace` — a non-finite factor
-  warns and propagates on every other dtype but hard-fails on BFP), and
+  warns and propagates on every other dtype but hard-fails on BFP), the macro-batch
+  mean `scaleOptimizerGradientsMean(optim, divisor, key)` from the loss family's integer
+  `computeMeanDivisor` (integer-only on BFP grads: `bfpScalarFromCount` +
+  `scaleBfpTensorByScalarInPlace`, a power-of-two divisor is an exponent shift), the
+  integer SGD step on BFP storage: the momentum store on a BFP state fed by a BFP
+  gradient (`momentumStoreBfpInPlace`: `v = μ·v + g`) and the parameter update of a BFP
+  parameter from that STORED state, or from the BFP gradient without momentum
+  (`paramUpdateBfpInPlace`: `p -= lr·v`, per parameter group -- per-channel weights keep
+  their own exponents), per group under each operand's own exponent, tail-preserving SR
+  at each write-back, 15-bit `μ`/`lr` encoded at `sgdInit` (`lr` again at every
+  `sgdSetLr`); nonzero weight decay, `μ` outside `(0, 1]` or a non-finite `lr` fail fast
+  (factory and step), and
   `optimizerZeroGrad` — shared across both rows. No bias-correction on SGD; AdamW
   has PyTorch-standard bias correction (`bc1`/`bc2`).
 - **Global-norm gradient clipping** (`optimizerClipGradNorm(optim, maxNorm)`, #382,
@@ -509,7 +520,8 @@ checkpointing, limitations, literature).
 - **Loss functions** — `MSE` (FLOAT32 + SYM_INT32 + BFP, fwd+bwd) and `CROSS_ENTROPY`
   (fwd FLOAT32 + SYM_INT32 + BFP; bwd FLOAT32 + SYM_INT32 + ASYM + BFP) — every
   non-FLOAT32 arm of both losses is fake-quant (#206; BFP since epic PR4): dequant,
-  float core, requant. `lossConfig_t {funcType, backwardReduction, classWeights}`;
+  float core, requant; except the CE backward on a BFP softmax output, which is the
+  integer head's `p - y` (arithmetic-bfp.md §14). `lossConfig_t {funcType, backwardReduction, classWeights}`;
   `reduction_t` is `REDUCTION_SUM | REDUCTION_MEAN`, `defaultLossConfig(funcType)`
   sets `backwardReduction = REDUCTION_MEAN`, `classWeights = NULL`; the forward
   reduction is a per-call argument (`trainingRun` hardcodes MEAN). CE backward is the **fused softmax+CE
@@ -519,7 +531,7 @@ checkpointing, limitations, literature).
   than one storage row must be identity-order) — the same `dims[0]` partition as CE's MEAN
   divisor, so the fused gradient is exact per row. Backward emits
   **raw per-element grads**; the mean divisor is deferred to
-  the optimizer via `computeMeanScale` × `scaleOptimizerGradients`. `crossEntropyForward`
+  the optimizer via `computeMeanDivisor` → `scaleOptimizerGradientsMean`. `crossEntropyForward`
   returns NaN (and prints one PRINT_ERROR per process) when any softmax element is
   non-finite; it no longer aborts (`#446`). Both losses fail fast unless the
   model output has rank >= 2 and at least one element and every operand has
@@ -693,7 +705,26 @@ checkpointing, limitations, literature).
   amendment, `docs/conventions/arithmetic-bfp.md` §9) — so a uniform-BFP model
   (`layerQuantInitUniform` over one BFP template) now trains its ENTIRE loop
   natively, no pins required; pinning the backward math slots to `ARITH_FLOAT32`
-  remains available as an explicit fake-quant-backward alternative. BFP grad and
+  remains available as an explicit fake-quant-backward alternative. Conv1d `dx` and
+  `weightGrad` (experiment, 2026-11-05) run the FLOAT32 scatter loop on `int32`
+  accumulators aligned to a precomputed exponent per row group
+  (`docs/conventions/arithmetic-bfp.md` §14); Conv1d `dx` is integer end to end
+  (it emits the `BFP_RAW` and the dx wire is the integer re-block, SR by the op's
+  mode, 2026-11-05), and so are its `weightGrad` / `biasGrad` into BFP grad storage
+  under `OUT_ACC_DYNAMIC_RESCALE` (a `BFP_RAW` with a data-derived exponent,
+  accumulated by the integer rescale engine, `BFP_RAW_BACKWARD_ACC`, 2026-11-05;
+  FLOAT32 grads and the fixed grid keep the float path). Linear's `dx`, `weightGrad`
+  and `biasGrad` follow the same contracts on its GEMM walk (`matmulBfpRawTensors`,
+  2026-11-05). MaxPool1d / AvgPool1d `dx` and the input Quantization layer's
+  BFP -> BFP `dx` are integer too (`BFP_RAW_BACKWARD_DX`; under BFP math AvgPool
+  takes a power-of-two kernel only, the mean is an exponent shift). The model
+  HEAD (Softmax forward + CrossEntropy's `p - y`) is an explicit choice declared
+  by the last Softmax's config and validated at init (two heads, no default):
+  **bfp** = integer Softmax and integer `p - y` (no float on the gradient path),
+  **float** = float Softmax and `p - y` with ONE conversion onto the loss-grad
+  wire (the Softmax's `propLossQ`); the loss value stays float (monitoring).
+  CrossEntropy requires the model's last layer to be the Softmax it skips (fail
+  fast otherwise, when a backward runs). BFP grad and
   optimizer-state storage (`gradInit`, `SgdApi`/`AdamWApi` momentum/moment
   cloning, PPCA replay state) is a **per-tensor-only** knob — a grouped BFP
   template is rejected at every one of those call sites ("per-tensor only, #300
@@ -840,7 +871,12 @@ checkpointing, limitations, literature).
   `kws_mfcc`, `kws_raw` (+ trace harness `trace_c_kws_raw`), `mixed_width_mlp`.
   `train_c_har_classifier_bfp` (epic #410 PR7) runs the HAR model end to end on
   BFP storage + `ARITH_BFP` compute with sweepable weight/wire blocks, widths,
-  rounding and grad/state storage.
+  rounding and grad/state storage. Its `bfp8full_hflt` / `bfp8full_hbfp` configs run the
+  whole training step integer (forward, backward, grad accumulation, mean scale,
+  momentum, update; float only in the float head's loss island and the logged loss value:
+  samples and one-hot labels are pre-converted to BFP before training, bit-identical to
+  online conversion), behind an init-time FULL gate and the M0+ census
+  `tools/bfp-census/har_train_step_roots.txt --strict`.
 
 ## Known gaps / partial features
 

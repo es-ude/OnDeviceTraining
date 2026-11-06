@@ -5,8 +5,9 @@
 #include "MSE.h"
 
 lossFunctions_t lossFunctions[] = {
-    [MSE] = {mseLossForward, mseLossBackward, computeMeanScaleMSE},
-    [CROSS_ENTROPY] = {crossEntropyForward, crossEntropySoftmaxBackward, computeMeanScaleCE},
+    [MSE] = {mseLossForward, mseLossBackward, computeMeanScaleMSE, computeMeanDivisorMSE},
+    [CROSS_ENTROPY] = {crossEntropyForward, crossEntropySoftmaxBackward, computeMeanScaleCE,
+                       computeMeanDivisorCE},
 };
 
 lossConfig_t defaultLossConfig(lossFuncType_t funcType) {

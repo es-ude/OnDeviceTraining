@@ -48,12 +48,12 @@ void linearForwardSymInt32(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *
  * weight is grouped SYM or ASYM — not a direct public entry point. */
 void linearForwardSymInt32Grouped(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output,
                                   const symGroupedWeight_t *groupedWeight, rngStream_t *rs);
-/* BFP epic PR2 (Task 7): the BFP twin of linearForwardSymInt32Grouped's role.
- * All operands are the executeOp prologue's unpacked-BFP scratch (int32
- * mantissa codes under a live bfpQConfig_t; `b` NULL-able) — same transpose
- * dance around matmulBfpTensors. Routed to by the funnel adapter — not a
- * direct public entry point. */
-void linearForwardBfp(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output);
+/* The integer-only BFP forward (arithmetic-bfp.md §13). All operands are the
+ * executeOp prologue's unpacked-BFP scratch (int32 mantissa codes under a
+ * live bfpQConfig_t; `b` NULL-able), `output` the funnel's BFP_RAW raw —
+ * same transpose dance around matmulBfpRawTensors. Routed to by the funnel
+ * adapter — not a direct public entry point. */
+void linearForwardBfpRaw(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output);
 // IMPORTANT: Used for mismatched quantizations
 void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output,
                    const layerExec_t *exec);
@@ -84,17 +84,30 @@ void linearCalcPropLossSymInt32(tensor_t *weights, tensor_t *loss, tensor_t *pro
 void linearCalcPropLossSymInt32Grouped(tensor_t *weights, tensor_t *loss, tensor_t *propLoss,
                                        const symGroupedWeight_t *groupedWeight, rngStream_t *rs);
 
-/* BFP epic PR3: backward raw-emit cores on the PR2 fold contract. All BFP
- * operands are the executeOp prologue's unpacked-BFP scratch (int32 mantissa
- * codes under a live bfpQConfig_t); outputs are the funnel's FLOAT32 raw
- * intermediate (accumulation/width-restore is the epilogue's job). Routed to
- * by the funnel adapters -- not direct public entry points.
- * weightGrad = loss^T @ x (zero-copy transpose view), propLoss = loss @ W
- * with W in RAW [outF, inF] storage, biasGrad = per-feature batch sum of the
- * loss mantissas (int32 partials, ldexpf folds; sum headroom fail-fast). */
+/* BFP backward cores. All BFP operands are the executeOp prologue's
+ * unpacked-BFP scratch (int32 mantissa codes under a live bfpQConfig_t);
+ * accumulation / re-block is the epilogue's job. Routed to by the funnel
+ * adapters -- not direct public entry points. weightGrad = loss^T @ x
+ * (zero-copy transpose view), propLoss = loss @ W with W in RAW [outF, inF]
+ * storage, biasGrad = per-feature batch sum of the loss mantissas (int32
+ * partial per same-group segment; sum headroom fail-fast).
+ *
+ * FLOAT32 raw (the float bridge, BFP_RAW_NONE): FLOAT32 grads and the fixed
+ * grid (OUT_ACC_FIXED_SCALE) -- matmulBfpTensors' float fold / the float
+ * segment fold. */
 void linearCalcWeightGradsBfp(tensor_t *loss, tensor_t *forwardInput, tensor_t *weightGrads);
 void linearCalcBiasGradsBfp(tensor_t *loss, tensor_t *biasGrad);
+/* Integer, BFP_RAW out (docs/conventions/arithmetic-bfp.md §14):
+ *  - propLoss: every ARITH_BFP dx (BFP_RAW_BACKWARD_DX), the raw on the dx
+ *    wire's geometry (or {1,0} for a FLOAT32 dx) via matmulBfpRawTensors;
+ *  - weightGrad / biasGrad ...Raw: BFP grads under OUT_ACC_DYNAMIC_RESCALE
+ *    (BFP_RAW_BACKWARD_ACC), the raw on the grad's geometry. weightGrad via
+ *    matmulBfpRawTensors; biasGrad folds each segment into an int32 sum per
+ *    feature on its own E_acc and emits with the data-derived raw exponent
+ *    (bfpRawEmitFromRows). */
 void linearCalcPropLossBfp(tensor_t *loss, tensor_t *weights, tensor_t *propLoss);
+void linearCalcWeightGradsBfpRaw(tensor_t *loss, tensor_t *forwardInput, tensor_t *weightGrads);
+void linearCalcBiasGradsBfpRaw(tensor_t *loss, tensor_t *biasGrad);
 
 void linearCalcOutputShape(layer_t *linearLayer, shape_t *inputShape, shape_t *outputShape);
 

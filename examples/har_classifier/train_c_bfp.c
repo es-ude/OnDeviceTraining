@@ -13,32 +13,51 @@
  *     weight widths, arithmetic-bfp.md §5.4); tensor|N builds ONE BFP template PER WIRE,
  *     forward and dx resolved independently by resolveWireShape (6-element
  *     head wires always fall back to per-tensor -- recorded in wires_resolved).
- *   - math: native = ARITH_BFP on the four GEMM slots; fq = those slots and
- *     Softmax's forward pinned ARITH_FLOAT32 (the GEMM fake-quant reference,
- *     NOT a whole-model twin: Relu/pools keep their BFP arms).
+ *     Under BFP wires + native math an input Quantization layer writes the
+ *     input.out wire first, so the integer forward never sees a float; on
+ *     the full-integer path the samples are pre-converted into that wire's
+ *     format (--write-bfp-data) and the layer passes them straight through.
+ *   - math: native = ARITH_BFP on the four GEMM slots; fq = those slots
+ *     pinned ARITH_FLOAT32 (the GEMM fake-quant reference, NOT a whole-model
+ *     twin: Relu/pools keep their BFP arms; the head is BFP_HEAD's).
+ *   - head (BFP_HEAD, REQUIRED, no default): the Softmax forward + the
+ *     combined CrossEntropy gradient p - y (Softmax's own backward is
+ *     skipped). float: FLOAT32 Softmax forward (logits dequantized), CE
+ *     value and p - y in float, ONE float -> BFP conversion onto the
+ *     loss-grad wire (the Softmax's propLossQ); bfp: the integer Softmax and
+ *     the integer p - y, no float on the gradient path (BFP wires only). The
+ *     loss VALUE is float on both heads (monitoring, off the gradient path).
  *   - rounding: OUT_WRITE rounds by the OPERATION's mode, so the
  *     carriers are the math slots: forward/weightGrad/biasGrad HALF_AWAY
  *     (deterministic inference + staging), propLossMath SR_HALF_AWAY under
  *     BFP_ROUNDING=sr (dx packs), grad/state templates and the optimizer
- *     write-back likewise. The CE loss-grad pack has no carrier and stays
- *     HALF_AWAY (documented exception, README "Block floating point").
+ *     write-back likewise. The CE loss-grad pack (both heads) rounds by the
+ *     loss-grad wire's template, built with the same training-side mode.
  *   - grads / momentum: FLOAT32 by default; BFP_GRADS=1 / BFP_STATE=1 opt
  *     into per-tensor BFP storage (grouped BFP grads are rejected upstream).
  *   - optimizer: SGD-M via optimizerStep; updateMath FLOAT32 (#310).
+ *   - the full-integer path (native math, BFP wires, BFP_GRADS=1 BFP_STATE=1;
+ *     the bfp8full configs): the FULL gate checks at init that every layer
+ *     and the SGD step declare the integer kernels (fullGateLayers /
+ *     fullGateOptimizer below).
  *
- * Knobs: BFP_MANTISSA_BITS BFP_EXPONENT_BITS BFP_WEIGHT_BLOCK BFP_WIRE_BLOCK
- * BFP_MATH BFP_GRADS BFP_STATE BFP_ROUNDING (examples/_shared/param_gate.h)
+ * Knobs: BFP_HEAD (required) BFP_MANTISSA_BITS BFP_EXPONENT_BITS
+ * BFP_WEIGHT_BLOCK BFP_WIRE_BLOCK BFP_MATH BFP_GRADS BFP_STATE BFP_ROUNDING
+ * (examples/_shared/param_gate.h)
  * + LR MOMENTUM EPOCHS SEED LR_SCHEDULE LR_MIN LOG_PATH
  * LOG_CODE_MOVEMENT (inherited). The SYM-only knobs are ignored with a WARN. */
 
+#include <errno.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #include "ArithmeticType.h"
+#include "AvgPool1d.h"
 #include "CalculateGradsSequential.h"
 #include "Common.h"
 #include "Conv1d.h"
@@ -54,15 +73,21 @@
 #include "LinearApi.h"
 #include "LossFunction.h"
 #include "LrScheduler.h"
+#include "MaxPool1d.h"
 #include "NPYLoaderApi.h"
 #include "Optimizer.h"
 #include "Pool1dApi.h"
+#include "QuantLayerApi.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
+#include "QuantizationLayer.h"
 #include "RNG.h"
+#include "Relu.h"
 #include "ReluApi.h"
 #include "Rounding.h"
+#include "Sgd.h"
 #include "SgdApi.h"
+#include "Softmax.h"
 #include "SoftmaxApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -71,6 +96,7 @@
 #include "TraceApi.h"
 #include "TrainingLoopApi.h"
 
+#include "bfp_dataset.h"
 #include "mem_instrument.h"
 #include "param_gate.h"
 
@@ -91,9 +117,17 @@
 #define C3_OUT 64
 #define C3_K 3
 
-/* 3 x (Conv1d + ReLU + Pool) + Flatten + Linear + Softmax = 12 layers */
+/* 3 x (Conv1d + ReLU + Pool) + Flatten + Linear + Softmax = 12 body layers,
+ * behind an optional input Quantization layer (FLOAT32 -> BFP wire; a straight
+ * pass for the full-integer path's pre-converted samples). It exists iff the wires are BFP and
+ * the math is native (g_inLayer): under BFP_WIRE_BLOCK=float there is no BFP
+ * wire to quantize into, and fq stays the unchanged GEMM fake-quant
+ * reference. Every per-layer table below is indexed by BODY layer (0 =
+ * conv1); model[] = {input layer?, body...}. */
 #define MODEL_SIZE 12
+#define MODEL_SIZE_MAX (MODEL_SIZE + 1)
 _Static_assert(MODEL_SIZE == HAR_NUM_LAYERS, "HAR topology");
+#define IN_ELEMS (IN_CHANNELS * LEN_INPUT)
 
 static dataset_t g_trainDataset;
 static dataset_t g_valDataset;
@@ -119,6 +153,12 @@ static quantization_t *g_outQ[MODEL_SIZE];
 static quantization_t *g_dxQ[MODEL_SIZE];
 static groupShape_t g_outShape[MODEL_SIZE];
 static groupShape_t g_dxShape[MODEL_SIZE];
+/* The input layer's output wire; it has no dx (below conv1, the deepest
+ * trainable layer). */
+static size_t g_inLayer = 0; /* 1 iff model[0] is the input Quantization layer */
+static size_t g_modelSize = MODEL_SIZE;
+static quantization_t *g_inQ = NULL;
+static groupShape_t g_inShape;
 
 static const char *const kLayerNames[MODEL_SIZE] = {"conv1", "relu1",   "pool1",  "conv2",
                                                     "relu2", "pool2",   "conv3",  "relu3",
@@ -127,10 +167,11 @@ static const char *const kLayerNames[MODEL_SIZE] = {"conv1", "relu1",   "pool1",
 static const size_t kOutElems[MODEL_SIZE] = {2048, 2048, 1024, 2048, 2048, 1024,
                                              2048, 2048, 64,   64,   6,    6};
 /* dx PRODUCED by layer k = its input elements; 0 = never allocated (conv1 is
- * the deepest trainable layer, #380 PR2; softmax is skipped by CrossEntropy's
- * fused backward). The CE loss grad (6 elements) clones softmax.out's template. */
+ * the deepest trainable layer, #380 PR2). softmax's dx is the CE loss grad:
+ * CrossEntropy's combined p - y replaces the Softmax backward and writes the
+ * Softmax's dx wire (its propLossQ, 6 elements). */
 static const size_t kDxElems[MODEL_SIZE] = {0,    2048, 2048, 1024, 2048, 2048,
-                                            1024, 2048, 2048, 64,   64,   0};
+                                            1024, 2048, 2048, 64,   64,   6};
 static const bool kIsGemm[MODEL_SIZE] = {true, false, false, true,  false, false,
                                          true, false, false, false, true,  false};
 
@@ -138,19 +179,31 @@ static roundingMode_t trainingSideRounding(void) {
     return (g_cfg.rounding == BFP_ROUNDING_SR) ? SR_HALF_AWAY : HALF_AWAY;
 }
 
-static quantization_t *makeWireTemplate(groupShape_t gs) {
+static quantization_t *makeWireTemplateRounded(groupShape_t gs, roundingMode_t mode) {
     if (g_cfg.wireMode == WIRE_BLOCK_FLOAT) {
         return g_floatQ;
     }
     if (gs.numGroups == 1) {
-        return quantizationInitBfp(g_cfg.mantissaBits, g_cfg.exponentBits, HALF_AWAY);
+        return quantizationInitBfp(g_cfg.mantissaBits, g_cfg.exponentBits, mode);
     }
-    return quantizationInitBfpGrouped(g_cfg.mantissaBits, g_cfg.exponentBits, HALF_AWAY,
-                                      gs.numGroups, gs.groupSize);
+    return quantizationInitBfpGrouped(g_cfg.mantissaBits, g_cfg.exponentBits, mode, gs.numGroups,
+                                      gs.groupSize);
 }
+
+static quantization_t *makeWireTemplate(groupShape_t gs) {
+    return makeWireTemplateRounded(gs, HALF_AWAY);
+}
+
+#define SOFTMAX_IDX 11
 
 static void buildWireTemplates(void) {
     g_floatQ = quantizationInitFloat();
+    g_inLayer = (g_cfg.wireMode != WIRE_BLOCK_FLOAT && g_cfg.math == BFP_MATH_NATIVE) ? 1 : 0;
+    g_modelSize = MODEL_SIZE + g_inLayer;
+    if (g_inLayer) {
+        g_inShape = resolveWireShape(IN_ELEMS, g_cfg.wireMode, g_cfg.wireSize);
+        g_inQ = makeWireTemplate(g_inShape);
+    }
     for (size_t i = 0; i < MODEL_SIZE; i++) {
         g_outShape[i] = resolveWireShape(kOutElems[i], g_cfg.wireMode, g_cfg.wireSize);
         g_outQ[i] = makeWireTemplate(g_outShape[i]);
@@ -159,8 +212,17 @@ static void buildWireTemplates(void) {
             g_dxQ[i] = NULL;
         } else {
             g_dxShape[i] = resolveWireShape(kDxElems[i], g_cfg.wireMode, g_cfg.wireSize);
-            g_dxQ[i] = makeWireTemplate(g_dxShape[i]);
+            /* the loss-grad wire: CE packs p - y by this template's mode */
+            g_dxQ[i] = (i == SOFTMAX_IDX)
+                           ? makeWireTemplateRounded(g_dxShape[i], trainingSideRounding())
+                           : makeWireTemplate(g_dxShape[i]);
         }
+    }
+    if (g_cfg.head == BFP_HEAD_FLOAT && g_outQ[SOFTMAX_IDX] != g_floatQ) {
+        /* the float head keeps p in FLOAT32: no pack between Softmax and CE */
+        freeQuantization(g_outQ[SOFTMAX_IDX]);
+        g_outQ[SOFTMAX_IDX] = g_floatQ;
+        g_outShape[SOFTMAX_IDX] = (groupShape_t){.numGroups = 1, .groupSize = 0};
     }
     if (g_cfg.bfpGrads) {
         g_gradQ =
@@ -179,6 +241,9 @@ static void freeWireTemplates(void) {
     }
     if (g_gradQ != NULL) {
         freeQuantization(g_gradQ);
+    }
+    if (g_inQ != NULL) {
+        freeQuantization(g_inQ);
     }
     freeQuantization(g_floatQ);
 }
@@ -218,11 +283,16 @@ static layerQuant_t layerQuantFor(size_t i) {
         lq.weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
         lq.biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
     }
-    if (i == 11 && g_cfg.math == BFP_MATH_FQ) {
-        /* fq pins Softmax's FORWARD only (funnel-routed, accepts a BFP input);
-         * its propLossMath stays derived -- CrossEntropy's fused backward
-         * skips the softmax layer, so it is never reached. */
-        lq.forwardMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
+    if (i == SOFTMAX_IDX) {
+        /* The head, explicit (BFP_HEAD; requireCrossEntropyHead validates the
+         * tuple at init). propLossQ is the loss-grad wire; propLossMath
+         * declares the combined p - y. float: FLOAT32 Softmax on the
+         * (dequantized) logits, p FLOAT32, p - y float, one conversion onto
+         * the wire. bfp: the integer Softmax and the integer p - y. */
+        arithmeticType_t headMath = (g_cfg.head == BFP_HEAD_BFP) ? ARITH_BFP : ARITH_FLOAT32;
+        lq.outputQ = g_outQ[i];
+        lq.forwardMath = (arithmetic_t){.type = headMath, .roundingMode = HALF_AWAY};
+        lq.propLossMath = (arithmetic_t){.type = headMath, .roundingMode = trainingSideRounding()};
     }
     return lq;
 }
@@ -265,7 +335,98 @@ static tensorArray_t *buildOneHotLabels(tensorArray_t *intLabels) {
     return out;
 }
 
+/* ---- Pre-converted BFP data (the full-integer path) ----------------------
+ * The full-integer path trains on data converted ONCE, before training: the
+ * samples into input.out's BFP format (the input Quantization layer then
+ * passes them straight through), the one-hot labels into per-tensor BFP
+ * (m, e) -- so no float data reaches a training step. `<trainer>
+ * --write-bfp-data` (same env) writes them with the library's own FLOAT32 ->
+ * BFP cell, bit-identical to the online input layer (examples/_shared/
+ * bfp_dataset.h: ODTA files of ODTS tensor records); a training run of the
+ * full-integer path reads them and fails fast when they are missing or not in
+ * this run's format. Every other config reads the float .npy files. */
+static bool fullIntegerPath(void);
+
+#define HAR_DATA_DIR "examples/har_classifier/data"
+static const char *const kSplits[3] = {"train", "val", "test"};
+
+static void bfpDataDir(char *buf, size_t len) {
+    snprintf(buf, len, HAR_DATA_DIR "/bfp_m%u_e%u_w%s", (unsigned)g_cfg.mantissaBits,
+             (unsigned)g_cfg.exponentBits, g_cfg.wireBlockStr);
+}
+
+static void bfpDataPath(char *buf, size_t len, const char *split, const char *xy) {
+    char dir[160];
+    bfpDataDir(dir, sizeof(dir));
+    snprintf(buf, len, "%s/%s_%s.odta", dir, split, xy);
+}
+
+static quantization_t *bfpLabelTemplate(void) {
+    return quantizationInitBfp(g_cfg.mantissaBits, g_cfg.exponentBits, HALF_AWAY);
+}
+
+/* --write-bfp-data: converts the three float splits and exits. */
+static int writeBfpData(void) {
+    if (!fullIntegerPath()) {
+        fprintf(stderr, "--write-bfp-data: only the full-integer path (native math, BFP wires, "
+                        "BFP_GRADS=1 BFP_STATE=1) trains on pre-converted data\n");
+        return 1;
+    }
+    char dir[160];
+    bfpDataDir(dir, sizeof(dir));
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+        fprintf(stderr, "--write-bfp-data: cannot create %s\n", dir);
+        return 1;
+    }
+    quantization_t *labelQ = bfpLabelTemplate();
+    for (size_t s = 0; s < 3; s++) {
+        char path[256];
+        snprintf(path, sizeof(path), HAR_DATA_DIR "/%s_x.npy", kSplits[s]);
+        tensorArray_t *items = npyLoad(path);
+        snprintf(path, sizeof(path), HAR_DATA_DIR "/%s_y.npy", kSplits[s]);
+        tensorArray_t *classes = npyLoad(path);
+        tensorArray_t *bfpItems = bfpDatasetConvert(items, g_inQ);
+        tensorArray_t *bfpLabels = bfpDatasetOneHotLabels(classes, NUM_CLASSES, labelQ);
+        bfpDataPath(path, sizeof(path), kSplits[s], "x");
+        tensorArrayWriteFile(path, bfpItems);
+        bfpDataPath(path, sizeof(path), kSplits[s], "y");
+        tensorArrayWriteFile(path, bfpLabels);
+        fprintf(stdout, "BFP DATA %s: %zu samples -> %s/%s_{x,y}.odta\n", kSplits[s],
+                bfpItems->size, dir, kSplits[s]);
+        freeTensorArray(bfpLabels);
+        freeTensorArray(bfpItems);
+        freeTensorArray(classes);
+        freeTensorArray(items);
+    }
+    freeQuantization(labelQ);
+    return 0;
+}
+
+static tensorArray_t *readBfpSplit(const char *split, const char *xy) {
+    char path[256];
+    bfpDataPath(path, sizeof(path), split, xy);
+    FILE *probe = fopen(path, "rb");
+    if (probe == NULL) {
+        fprintf(stderr,
+                "BFP DATA MISSING: %s -- the full-integer path trains on pre-converted data; run "
+                "this trainer once with --write-bfp-data (same env) first\n",
+                path);
+        exit(1);
+    }
+    fclose(probe);
+    return tensorArrayReadFile(path);
+}
+
 static void initDataSets(void) {
+    if (fullIntegerPath()) {
+        g_trainDataset.items = readBfpSplit("train", "x");
+        g_trainDataset.labels = readBfpSplit("train", "y");
+        g_valDataset.items = readBfpSplit("val", "x");
+        g_valDataset.labels = readBfpSplit("val", "y");
+        g_testDataset.items = readBfpSplit("test", "x");
+        g_testDataset.labels = readBfpSplit("test", "y");
+        return;
+    }
     tensorArray_t *trainItems = npyLoad("examples/har_classifier/data/train_x.npy");
     tensorArray_t *trainLabelsRaw = npyLoad("examples/har_classifier/data/train_y.npy");
     g_trainDataset.items = trainItems;
@@ -301,7 +462,15 @@ static size_t getTestSize(void) {
     return g_testDataset.items->size;
 }
 
-static void buildModel(layer_t **model, const trainingRng_t *rng) {
+/* Init keys stay at the BODY index (0/3/6/10), not the model position, so
+ * the native (13-layer) and fq/float-wire (12-layer) arms start from the same
+ * weights. The input layer converts by its template's HALF_AWAY: no draws. */
+static void buildModel(layer_t **fullModel, const trainingRng_t *rng) {
+    if (g_inLayer) {
+        layerQuant_t inLq = {.outputQ = g_inQ, .propLossQ = g_inQ}; /* no dx below conv1 */
+        fullModel[0] = quantLayerInit(&inLq);
+    }
+    layer_t **model = fullModel + g_inLayer;
     layerQuant_t lq[MODEL_SIZE];
     for (size_t i = 0; i < MODEL_SIZE; i++) {
         lq[i] = layerQuantFor(i);
@@ -480,6 +649,187 @@ static int stateGate(optimizer_t *optim) {
     return 0;
 }
 
+/* FULL gate: the integer training path (native math, BFP wires, BFP_GRADS=1,
+ * BFP_STATE=1 -- the bfp8full configs) is integer only if every layer DECLARES it:
+ * the kernels dispatch on these config fields, and a slot left FLOAT32 (or a
+ * GEMM grad under the fixed-scale mode, which keeps the float bridge) would run
+ * a float kernel silently. Checked at init on the built model and optimizer,
+ * next to the PARAM/GRAD/STATE gates (storage) and before the first-step WIRE
+ * gate (wire shapes): the input layer is the Quantization boundary; every body
+ * slot is ARITH_BFP on BFP wires except the head's, which BFP_HEAD decides
+ * (float: FLOAT32 Softmax + p - y, FLOAT32 p, BFP loss-grad wire); the SGD step
+ * takes its integer ops (lr and momentum encoded, no weight decay). */
+static bool fullIntegerPath(void) {
+    return g_inLayer && g_cfg.bfpGrads && g_cfg.bfpState;
+}
+
+typedef struct fullGateCtx {
+    int count;
+    int fails;
+} fullGateCtx_t;
+
+static void fullGateExpect(fullGateCtx_t *g, size_t layerIdx, const char *what, bool ok) {
+    if (ok) {
+        g->count++;
+        return;
+    }
+    fprintf(stderr, "FULL GATE FAIL: layer %zu %s\n", layerIdx, what);
+    g->fails++;
+}
+
+static void fullGateMath(fullGateCtx_t *g, size_t layerIdx, const char *slot, arithmetic_t math,
+                         arithmeticType_t expected) {
+    char what[96];
+    snprintf(what, sizeof(what), "%s is arithmetic %d, expected %d", slot, (int)math.type,
+             (int)expected);
+    fullGateExpect(g, layerIdx, what, math.type == expected);
+}
+
+static void fullGateWire(fullGateCtx_t *g, size_t layerIdx, const char *slot,
+                         const quantization_t *q, qtype_t expected) {
+    char what[96];
+    snprintf(what, sizeof(what), "%s is %s, expected %s", slot,
+             q == NULL ? "NULL" : quantTypeToString(q->type), quantTypeToString(expected));
+    fullGateExpect(g, layerIdx, what, q != NULL && q->type == expected);
+}
+
+static int fullGateReport(const fullGateCtx_t *g, const char *what) {
+    if (g->fails != 0) {
+        fprintf(stderr, "FULL GATE FAILED: %s (ok=%d fails=%d)\n", what, g->count, g->fails);
+        return 2;
+    }
+    fprintf(stdout, "FULL GATE PASS: %s, head=%s (%d checks)\n", what,
+            (g_cfg.head == BFP_HEAD_BFP) ? "bfp" : "float", g->count);
+    fflush(stdout);
+    return 0;
+}
+
+/* The layers, right after the model is built (before any data loads). */
+static int fullGateLayers(layer_t **model) {
+    fullGateCtx_t g = {.count = 0, .fails = 0};
+    const arithmeticType_t headMath = (g_cfg.head == BFP_HEAD_BFP) ? ARITH_BFP : ARITH_FLOAT32;
+    const qtype_t headOut = (g_cfg.head == BFP_HEAD_BFP) ? BFP : FLOAT32;
+    fullGateExpect(&g, 0, "is not the input Quantization layer", model[0]->type == QUANTIZATION);
+    if (model[0]->type == QUANTIZATION) {
+        fullGateWire(&g, 0, "outputQ", model[0]->config->quantization->outputQ, BFP);
+    }
+    for (size_t i = 1; i < g_modelSize; i++) {
+        layer_t *l = model[i];
+        switch (l->type) {
+        case CONV1D:
+        case LINEAR: {
+            bool conv = (l->type == CONV1D);
+            conv1dConfig_t *c = conv ? l->config->conv1d : NULL;
+            linearConfig_t *f = conv ? NULL : l->config->linear;
+            fullGateMath(&g, i, "forwardMath", conv ? c->forwardMath : f->forwardMath, ARITH_BFP);
+            fullGateMath(&g, i, "weightGradMath", conv ? c->weightGradMath : f->weightGradMath,
+                         ARITH_BFP);
+            fullGateMath(&g, i, "biasGradMath", conv ? c->biasGradMath : f->biasGradMath,
+                         ARITH_BFP);
+            fullGateMath(&g, i, "propLossMath", conv ? c->propLossMath : f->propLossMath,
+                         ARITH_BFP);
+            fullGateExpect(&g, i, "weightGradAccMode is not OUT_ACC_DYNAMIC_RESCALE",
+                           (conv ? c->weightGradAccMode : f->weightGradAccMode) ==
+                               OUT_ACC_DYNAMIC_RESCALE);
+            fullGateExpect(&g, i, "biasGradAccMode is not OUT_ACC_DYNAMIC_RESCALE",
+                           (conv ? c->biasGradAccMode : f->biasGradAccMode) ==
+                               OUT_ACC_DYNAMIC_RESCALE);
+            fullGateWire(&g, i, "outputQ", conv ? c->outputQ : f->outputQ, BFP);
+            fullGateWire(&g, i, "propLossQ", conv ? c->propLossQ : f->propLossQ, BFP);
+            break;
+        }
+        case RELU:
+            fullGateMath(&g, i, "forwardMath", l->config->relu->forwardMath, ARITH_BFP);
+            fullGateMath(&g, i, "propLossMath", l->config->relu->propLossMath, ARITH_BFP);
+            fullGateWire(&g, i, "outputQ", l->config->relu->outputQ, BFP);
+            fullGateWire(&g, i, "propLossQ", l->config->relu->propLossQ, BFP);
+            break;
+        case MAXPOOL1D:
+            fullGateMath(&g, i, "forwardMath", l->config->maxPool1d->forwardMath, ARITH_BFP);
+            fullGateMath(&g, i, "propLossMath", l->config->maxPool1d->propLossMath, ARITH_BFP);
+            fullGateWire(&g, i, "outputQ", l->config->maxPool1d->outputQ, BFP);
+            fullGateWire(&g, i, "propLossQ", l->config->maxPool1d->propLossQ, BFP);
+            break;
+        case AVGPOOL1D:
+            fullGateMath(&g, i, "forwardMath", l->config->avgPool1d->forwardMath, ARITH_BFP);
+            fullGateMath(&g, i, "propLossMath", l->config->avgPool1d->propLossMath, ARITH_BFP);
+            fullGateWire(&g, i, "outputQ", l->config->avgPool1d->outputQ, BFP);
+            fullGateWire(&g, i, "propLossQ", l->config->avgPool1d->propLossQ, BFP);
+            break;
+        case FLATTEN: /* no config: payload and exponents pass through */
+            break;
+        case SOFTMAX:
+            fullGateExpect(&g, i, "the Softmax is not the last layer", i == g_modelSize - 1);
+            fullGateMath(&g, i, "forwardMath (head)", l->config->softmax->forwardMath, headMath);
+            fullGateMath(&g, i, "propLossMath (head)", l->config->softmax->propLossMath, headMath);
+            fullGateWire(&g, i, "outputQ (head)", l->config->softmax->outputQ, headOut);
+            fullGateWire(&g, i, "propLossQ (loss-grad wire)", l->config->softmax->propLossQ, BFP);
+            break;
+        default:
+            fullGateExpect(&g, i, "has a layer type the integer path does not know", false);
+            break;
+        }
+    }
+    return fullGateReport(&g,
+                          "integer forward + backward (input layer, every layer's math + wires, "
+                          "GEMM grad accumulate mode)");
+}
+
+/* The optimizer, right after its creation: the SGD step takes its integer ops. */
+static int fullGateOptimizer(optimizer_t *optim) {
+    fullGateCtx_t g = {.count = 0, .fails = 0};
+    sgd_t *sgd = (optim->type == SGD_M) ? optim->impl->sgd : NULL;
+    fullGateExpect(&g, g_modelSize, "optimizer is not SGD-M", sgd != NULL);
+    if (sgd != NULL) {
+        fullGateExpect(&g, g_modelSize, "SGD lr has no integer encoding",
+                       sgd->learningRateIntValid);
+        fullGateExpect(&g, g_modelSize, "SGD momentum has no integer encoding",
+                       !sgd->momentumIsZero && sgd->momentumIntValid);
+        fullGateExpect(&g, g_modelSize, "SGD weight decay is nonzero", !sgd->weightDecayIsNonzero);
+    }
+    return fullGateReport(&g, "integer SGD step (lr + momentum encoded, no weight decay)");
+}
+
+/* The data, right after it loads: every sample is BFP in exactly input.out's
+ * storage format (so the input layer passes it straight through -- any other
+ * format would be re-blocked through float), every label an exact BFP
+ * one-hot. One failure line per split and kind (not per sample). */
+static void fullGateSplit(fullGateCtx_t *g, const char *split, const dataset_t *d) {
+    const bfpQConfig_t *inQC = g_inQ->qConfig;
+    size_t badItems = 0, badLabels = 0;
+    for (size_t i = 0; i < d->items->size; i++) {
+        tensor_t *x = d->items->array[i];
+        const bfpQConfig_t *qc = x->quantization->type == BFP ? x->quantization->qConfig : NULL;
+        bool ok = qc != NULL && qc->mantissaBits == inQC->mantissaBits &&
+                  qc->exponentBits == inQC->exponentBits && qc->numGroups == inQC->numGroups &&
+                  qc->groupSize == inQC->groupSize && x->shape->numberOfDimensions == 2 &&
+                  x->shape->dimensions[0] == IN_CHANNELS && x->shape->dimensions[1] == LEN_INPUT;
+        badItems += ok ? 0 : 1;
+    }
+    for (size_t i = 0; i < d->labels->size; i++) {
+        tensor_t *y = d->labels->array[i];
+        size_t cls;
+        bool ok = calcNumberOfElementsByTensor(y) == NUM_CLASSES && bfpOneHotClass(y, &cls);
+        badLabels += ok ? 0 : 1;
+    }
+    char what[160];
+    snprintf(what, sizeof(what), "dataset %s: %zu of %zu samples not BFP in input.out's format",
+             split, badItems, d->items->size);
+    fullGateExpect(g, 0, what, badItems == 0 && d->items->size > 0);
+    snprintf(what, sizeof(what), "dataset %s: %zu of %zu labels not an exact BFP one-hot", split,
+             badLabels, d->labels->size);
+    fullGateExpect(g, 0, what, badLabels == 0 && d->labels->size == d->items->size);
+}
+
+static int fullGateDataset(void) {
+    fullGateCtx_t g = {.count = 0, .fails = 0};
+    fullGateSplit(&g, "train", &g_trainDataset);
+    fullGateSplit(&g, "val", &g_valDataset);
+    fullGateSplit(&g, "test", &g_testDataset);
+    return fullGateReport(&g, "pre-converted data (samples BFP in input.out's format, labels exact "
+                              "BFP one-hots)");
+}
+
 typedef struct groupLogInfo {
     groupShape_t conv1, conv2, conv3, linear;
     size_t overheadBytes;
@@ -524,6 +874,9 @@ static groupLogInfo_t computeGroupLogInfo(layer_t **model) {
 
 static void emitWiresResolved(FILE *f) {
     fputs("{", f);
+    if (g_inLayer) {
+        fprintf(f, "\"input.out\": [%zu, %zu], ", g_inShape.numGroups, g_inShape.groupSize);
+    }
     for (size_t i = 0; i < MODEL_SIZE; i++) {
         fprintf(f, "%s\"%s.out\": [%zu, %zu]", i == 0 ? "" : ", ", kLayerNames[i],
                 g_outShape[i].numGroups, g_outShape[i].groupSize);
@@ -565,8 +918,8 @@ static size_t stateMetadataBytes(optimizer_t *o) {
 
 /* Wire profiles for mem_instrument, read off the templates the
  * trainer actually built; numGroups is derived from the wire's N exactly as
- * the allocators do. Slot dx[11] stands for the CE loss grad (6 elements),
- * which clones softmax.out's template. */
+ * the allocators do. Slot dx[11] is the CE loss grad (6 elements) on the
+ * Softmax's dx wire. */
 static harWireProfile_t profileFrom(const quantization_t *q, size_t elems) {
     if (q->type == FLOAT32) {
         return (harWireProfile_t){.present = true, .type = FLOAT32, .bits = 32, .numGroups = 0};
@@ -585,7 +938,6 @@ static void fillWireProfiles(harWireProfile_t out[HAR_NUM_LAYERS],
         dx[i] = (kDxElems[i] == 0) ? (harWireProfile_t){.present = false}
                                    : profileFrom(g_dxQ[i], kDxElems[i]);
     }
-    dx[11] = profileFrom(g_outQ[11], kOutElems[11]);
 }
 #endif /* ODT_MEM_PROFILE */
 
@@ -696,13 +1048,15 @@ static void headroomPreflight(void) {
                       runOf(resolveGroupShape(6144, 64, g_cfg.weightMode, g_cfg.weightSize)),
                       runOf(resolveGroupShape(384, 6, g_cfg.weightMode, g_cfg.weightSize))};
     bool bfpWires = (g_cfg.wireMode != WIRE_BLOCK_FLOAT);
-    /* input-wire run per GEMM: dataset input (always staged), pool1.out, pool2.out, flatten.out */
-    size_t inRun[4] = {0, bfpWires ? runOf(g_outShape[2]) : 0, bfpWires ? runOf(g_outShape[5]) : 0,
-                       bfpWires ? runOf(g_outShape[9]) : 0};
+    /* input-wire run per GEMM: input.out (staged per-tensor without the input
+     * layer), pool1.out, pool2.out, flatten.out */
+    size_t inRun[4] = {g_inLayer ? runOf(g_inShape) : 0, bfpWires ? runOf(g_outShape[2]) : 0,
+                       bfpWires ? runOf(g_outShape[5]) : 0, bfpWires ? runOf(g_outShape[9]) : 0};
     /* dY entering each GEMM's backward = dx produced by the layer above:
-     * relu1.dx, relu2.dx, relu3.dx, and the loss grad (clones softmax.out). */
+     * relu1.dx, relu2.dx, relu3.dx, and the loss grad (softmax.dx). */
     size_t dyRun[4] = {bfpWires ? runOf(g_dxShape[1]) : 0, bfpWires ? runOf(g_dxShape[4]) : 0,
-                       bfpWires ? runOf(g_dxShape[7]) : 0, bfpWires ? runOf(g_outShape[11]) : 0};
+                       bfpWires ? runOf(g_dxShape[7]) : 0,
+                       bfpWires ? runOf(g_dxShape[SOFTMAX_IDX]) : 0};
     static const size_t fwdK[4] = {63, 80, 96, 64};   /* inCh*K, inFeatures */
     static const size_t wgradK[4] = {128, 64, 32, 1}; /* L of the output, batch 1 for linear */
     static const size_t dxK[4] = {0, 160, 192, 6};    /* outCh*K; conv1 has no dx */
@@ -739,23 +1093,29 @@ static void headroomPreflight(void) {
 }
 
 /* ---- First-real-step wire gate ------------------------------------------ */
-#define WIRE_EVENTS (MODEL_SIZE + 1 + (MODEL_SIZE - 1))
+/* Slots by BODY index b: [0,12) fwd@b, [12] lossgrad, [13,24) agrad@b (the
+ * backward runs linear down to conv1, the deepest trainable layer), [24] fwd
+ * of the input layer. agrad never fires for the input layer: no dx below conv1. */
+#define WIRE_EVENTS_BODY (MODEL_SIZE + 1 + (MODEL_SIZE - 1))
+#define WIRE_SLOT_INPUT WIRE_EVENTS_BODY
+#define WIRE_EVENTS_MAX (WIRE_EVENTS_BODY + 1)
 typedef struct wireGateCtx {
-    bool seen[WIRE_EVENTS]; /* [0,12) fwd@i, [12] lossgrad, [13,24) agrad@i */
+    bool seen[WIRE_EVENTS_MAX];
     int fails;
 } wireGateCtx_t;
 static wireGateCtx_t g_wireGate;
 static bool g_wireGateDone = false;
 
+/* tmpl: the template the trainer built for this wire (g_floatQ = FLOAT32). */
 static void checkWire(wireGateCtx_t *g, const char *what, tensor_t *t, size_t elems,
-                      groupShape_t shape) {
+                      groupShape_t shape, const quantization_t *tmpl) {
     size_t n = calcNumberOfElementsByTensor(t);
     if (n != elems) {
         fprintf(stderr, "WIRE GATE FAIL: %s has %zu elements, expected %zu\n", what, n, elems);
         g->fails++;
         return;
     }
-    paramGateExpect_t expect = (g_cfg.wireMode == WIRE_BLOCK_FLOAT)
+    paramGateExpect_t expect = (tmpl == g_floatQ)
                                    ? (paramGateExpect_t){.type = FLOAT32}
                                    : (paramGateExpect_t){.type = BFP,
                                                          .bits = g_cfg.mantissaBits,
@@ -773,25 +1133,37 @@ static void checkWire(wireGateCtx_t *g, const char *what, tensor_t *t, size_t el
  * calculateGradsImpl with calculateGradsSequential). */
 static void wireGateSink(void *ctx, size_t layerIdx, layerType_t layerType, const char *phase,
                          tensor_t *tensor) {
-    (void)layerType;
     wireGateCtx_t *g = ctx;
     char what[48];
     size_t slot;
-    if (strcmp(phase, "fwd") == 0 && layerIdx < MODEL_SIZE) {
-        slot = layerIdx;
-        snprintf(what, sizeof(what), "fwd %s.out", kLayerNames[layerIdx]);
-        checkWire(g, what, tensor, kOutElems[layerIdx], g_outShape[layerIdx]);
-    } else if (strcmp(phase, "lossgrad") == 0 && layerIdx == MODEL_SIZE) {
+    bool isInputLayer = g_inLayer && layerIdx == 0;
+    size_t b = layerIdx - g_inLayer; /* body index; unused for the input layer */
+    if (strcmp(phase, "fwd") == 0 && isInputLayer) {
+        slot = WIRE_SLOT_INPUT;
+        if (layerType != QUANTIZATION) {
+            fprintf(stderr,
+                    "WIRE GATE FAIL: model[0] is layer type %d, not the input "
+                    "Quantization layer\n",
+                    (int)layerType);
+            g->fails++;
+        }
+        checkWire(g, "fwd input.out", tensor, IN_ELEMS, g_inShape, g_inQ);
+    } else if (strcmp(phase, "fwd") == 0 && layerIdx < g_modelSize) {
+        slot = b;
+        snprintf(what, sizeof(what), "fwd %s.out", kLayerNames[b]);
+        checkWire(g, what, tensor, kOutElems[b], g_outShape[b], g_outQ[b]);
+    } else if (strcmp(phase, "lossgrad") == 0 && layerIdx == g_modelSize) {
         slot = MODEL_SIZE;
-        checkWire(g, "lossgrad (clones softmax.out)", tensor, kOutElems[11], g_outShape[11]);
-    } else if (strcmp(phase, "agrad") == 0 && layerIdx < MODEL_SIZE - 1) {
-        slot = MODEL_SIZE + 1 + layerIdx;
-        if (layerIdx == MODEL_SIZE - 2) { /* agrad@linear == the loss grad tensor */
-            checkWire(g, "agrad linear (loss grad)", tensor, kOutElems[11], g_outShape[11]);
+        checkWire(g, "lossgrad (softmax.dx)", tensor, kDxElems[SOFTMAX_IDX], g_dxShape[SOFTMAX_IDX],
+                  g_dxQ[SOFTMAX_IDX]);
+    } else if (strcmp(phase, "agrad") == 0 && !isInputLayer && layerIdx < g_modelSize - 1) {
+        slot = MODEL_SIZE + 1 + b;
+        if (b == MODEL_SIZE - 2) { /* agrad@linear == the loss grad tensor */
+            checkWire(g, "agrad linear (loss grad)", tensor, kDxElems[SOFTMAX_IDX],
+                      g_dxShape[SOFTMAX_IDX], g_dxQ[SOFTMAX_IDX]);
         } else {
-            snprintf(what, sizeof(what), "agrad %s (= %s.dx)", kLayerNames[layerIdx],
-                     kLayerNames[layerIdx + 1]);
-            checkWire(g, what, tensor, kDxElems[layerIdx + 1], g_dxShape[layerIdx + 1]);
+            snprintf(what, sizeof(what), "agrad %s (= %s.dx)", kLayerNames[b], kLayerNames[b + 1]);
+            checkWire(g, what, tensor, kDxElems[b + 1], g_dxShape[b + 1], g_dxQ[b + 1]);
         }
     } else {
         fprintf(stderr, "WIRE GATE FAIL: unexpected event %s@%zu\n", phase, layerIdx);
@@ -819,8 +1191,9 @@ static trainingStats_t *firstStepGatedGrads(layer_t **model, size_t modelSize,
     g_wireGateDone = true;
     trainingStats_t *stats = tracedGrads(model, modelSize, lossConfig, forwardReduction, input,
                                          label, wireGateSink, &g_wireGate, call);
+    size_t expected = WIRE_EVENTS_BODY + g_inLayer;
     int missing = 0;
-    for (size_t s = 0; s < WIRE_EVENTS; s++) {
+    for (size_t s = 0; s < expected; s++) {
         if (!g_wireGate.seen[s]) {
             fprintf(stderr, "WIRE GATE FAIL: missing event slot %zu\n", s);
             missing++;
@@ -828,15 +1201,20 @@ static trainingStats_t *firstStepGatedGrads(layer_t **model, size_t modelSize,
     }
     if (g_wireGate.fails != 0 || missing != 0) {
         fprintf(stderr, "WIRE GATE FAILED (fails=%d missing=%d of %d events)\n", g_wireGate.fails,
-                missing, (int)WIRE_EVENTS);
+                missing, (int)expected);
         exit(2);
     }
-    fprintf(stdout, "WIRE GATE PASS: %d traced wires match wires_resolved\n", (int)WIRE_EVENTS);
+    fprintf(stdout, "WIRE GATE PASS: %d traced wires match wires_resolved\n", (int)expected);
     fflush(stdout);
     return stats;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    bool writeData = (argc == 2 && strcmp(argv[1], "--write-bfp-data") == 0);
+    if (argc > 1 && !writeData) {
+        fprintf(stderr, "usage: %s [--write-bfp-data]\n", argv[0]);
+        exit(1);
+    }
     const char *cfgErr = bfpSweepConfigFromEnv(&g_cfg);
     if (cfgErr != NULL) {
         fprintf(stderr, "%s\n", cfgErr);
@@ -886,12 +1264,14 @@ int main(void) {
     const char *logPath = getenv("LOG_PATH");
     const char *mathStr = (g_cfg.math == BFP_MATH_FQ) ? "fq" : "native";
     const char *roundingStr = (g_cfg.rounding == BFP_ROUNDING_DET) ? "det" : "sr";
+    const char *headStr = (g_cfg.head == BFP_HEAD_BFP) ? "bfp" : "float";
 
     fprintf(stdout,
             "CONFIG mantissa_bits=%u exponent_bits=%u weight_block=%s wire_block=%s bfp_math=%s "
-            "bfp_grads=%d bfp_state=%d bfp_rounding=%s lr=%.5f momentum=%.3f epochs=%d seed=%u\n",
+            "bfp_grads=%d bfp_state=%d bfp_rounding=%s bfp_head=%s lr=%.5f momentum=%.3f "
+            "epochs=%d seed=%u\n",
             g_cfg.mantissaBits, g_cfg.exponentBits, g_cfg.weightBlockStr, g_cfg.wireBlockStr,
-            mathStr, (int)g_cfg.bfpGrads, (int)g_cfg.bfpState, roundingStr, (double)g_lr,
+            mathStr, (int)g_cfg.bfpGrads, (int)g_cfg.bfpState, roundingStr, headStr, (double)g_lr,
             (double)g_momentum, g_epochs, g_seed);
 
 #ifdef ODT_MEM_PROFILE
@@ -902,6 +1282,11 @@ int main(void) {
 #endif
 
     buildWireTemplates(); /* resolves every wire; the preflight reads the shapes */
+    if (writeData) {
+        int rc = writeBfpData();
+        freeWireTemplates();
+        return rc;
+    }
     headroomPreflight();
 
     initDataSets();
@@ -909,24 +1294,27 @@ int main(void) {
 #ifdef ODT_MEM_PROFILE
     size_t markDataset = memProfileMark(); /* dataset_b */
 #endif
+    if (fullIntegerPath() && fullGateDataset() != 0) {
+        return 2;
+    }
 
-    layer_t *model[MODEL_SIZE];
+    layer_t *model[MODEL_SIZE_MAX];
     trainingRng_t rng;
     trainingRngInit(&rng, g_seed);
 #ifdef ODT_MEM_PROFILE
     size_t markBeforeModel = memProfileMark();
 #endif
     buildModel(model, &rng);
-    requantizeParamsToBfp(model);
+    requantizeParamsToBfp(model + g_inLayer);
 #ifdef ODT_MEM_PROFILE
     size_t markAfterModel = memProfileMark(); /* params_grads_b = delta */
 #endif
 
     /* ---- Gate: param + grad storage dtypes -------------------------------- */
     paramGateCtx_t wCtx = {.isGrad = false, .count = 0, .fails = 0};
-    traceModelWeights(model, MODEL_SIZE, "gate", paramGateSink, &wCtx);
+    traceModelWeights(model, g_modelSize, "gate", paramGateSink, &wCtx);
     paramGateCtx_t gCtx = {.isGrad = true, .count = 0, .fails = 0};
-    traceModelGrads(model, MODEL_SIZE, "gate", paramGateSink, &gCtx);
+    traceModelGrads(model, g_modelSize, "gate", paramGateSink, &gCtx);
     /* 4 trainable layers x (weight + bias) = 8 each. */
     if (wCtx.fails != 0 || gCtx.fails != 0 || wCtx.count != 8 || gCtx.count != 8) {
         fprintf(stderr, "GATES FAILED (weight ok=%d fails=%d; grad ok=%d fails=%d)\n", wCtx.count,
@@ -936,6 +1324,9 @@ int main(void) {
     fprintf(stdout, "GATES PASS: weights+bias=BFP m%u/e%u grads=%s (8 param + 8 grad checks)\n",
             g_cfg.mantissaBits, g_cfg.exponentBits, g_cfg.bfpGrads ? "BFP per-tensor" : "FLOAT32");
     fflush(stdout);
+    if (fullIntegerPath() && fullGateLayers(model) != 0) {
+        return 2;
+    }
 
     dataLoader_t *trainLoader = dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
                                                /*shuffle*/ true, /*dropLast*/ true);
@@ -945,8 +1336,8 @@ int main(void) {
                                               /*shuffle*/ false, /*dropLast*/ true);
 
     /* ---- Gate: sane initial loss (~ln(6)=1.7918 for 6-class near-uniform) -- */
-    epochStats_t initStats = evaluationEpochWithMetrics(model, MODEL_SIZE, CROSS_ENTROPY, valLoader,
-                                                        inferenceWithLoss, REDUCTION_MEAN, 0);
+    epochStats_t initStats = evaluationEpochWithMetrics(
+        model, g_modelSize, CROSS_ENTROPY, valLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
     fprintf(stdout, "initial_val_loss=%.6f initial_val_acc=%.6f (expected ~%.4f)\n",
             (double)initStats.loss, (double)initStats.accuracy, log(6.0));
     fflush(stdout);
@@ -961,7 +1352,9 @@ int main(void) {
      * write-back rounding OPTIMIZER-owned (BFP_ROUNDING -> setter below, #279),
      * while grad and momentum state are read/written in their own storage
      * dtype (BFP_GRADS / BFP_STATE). Update arithmetic itself is FLOAT32 via
-     * updateMath. */
+     * updateMath -- except with BFP_GRADS=1 BFP_STATE=1, where both update ops
+     * (momentum store, parameter update) are the integer engines on BFP
+     * storage (docs/conventions/arithmetic-bfp.md §15.7). */
 #ifdef ODT_MEM_PROFILE
     size_t markBeforeOpt = memProfileMark();
 #endif
@@ -970,7 +1363,7 @@ int main(void) {
             ? quantizationInitBfp(g_cfg.mantissaBits, g_cfg.exponentBits, trainingSideRounding())
             : quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(g_lr, g_momentum, /*weightDecay*/ 0.0f, model, MODEL_SIZE, momentumQ,
+        sgdMCreateOptim(g_lr, g_momentum, /*weightDecay*/ 0.0f, model, g_modelSize, momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     /* ONE call covers the param write-back AND the momentum-state write-back
      * (Sgd.c runs both update ops with writeBackRounding as the op rounding). */
@@ -979,6 +1372,9 @@ int main(void) {
     size_t markAfterOpt = memProfileMark(); /* optstate_b = delta */
 #endif
     if (stateGate(sgd) != 0) {
+        return 2;
+    }
+    if (fullIntegerPath() && fullGateOptimizer(sgd) != 0) {
         return 2;
     }
     g_optim = sgd;
@@ -996,7 +1392,7 @@ int main(void) {
         sched = &cosineSched;
     }
 
-    groupLogInfo_t groupInfo = computeGroupLogInfo(model);
+    groupLogInfo_t groupInfo = computeGroupLogInfo(model + g_inLayer);
 
     if (logPath != NULL && logPath[0] != '\0') {
         g_log_file = fopen(logPath, "w");
@@ -1009,12 +1405,13 @@ int main(void) {
                     "\"weight_dtype\": \"bfp\", \"mantissa_bits\": %u, \"exponent_bits\": %u, "
                     "\"weight_block\": \"%s\", \"wire_block\": \"%s\", \"bfp_math\": \"%s\", "
                     "\"bfp_grads\": %d, \"bfp_state\": %d, \"bfp_rounding\": \"%s\", "
+                    "\"bfp_head\": \"%s\", "
                     "\"groups_resolved\": {\"conv1\": [%zu, %zu], \"conv2\": [%zu, %zu], "
                     "\"conv3\": [%zu, %zu], \"linear\": [%zu, %zu]}, ",
                     g_epochs, BATCH, (double)g_lr, (double)g_momentum, g_seed,
                     g_useCosine ? "cosine" : "none", (double)g_lrMin, g_cfg.mantissaBits,
                     g_cfg.exponentBits, g_cfg.weightBlockStr, g_cfg.wireBlockStr, mathStr,
-                    (int)g_cfg.bfpGrads, (int)g_cfg.bfpState, roundingStr,
+                    (int)g_cfg.bfpGrads, (int)g_cfg.bfpState, roundingStr, headStr,
                     groupInfo.conv1.numGroups, groupInfo.conv1.groupSize, groupInfo.conv2.numGroups,
                     groupInfo.conv2.groupSize, groupInfo.conv3.numGroups, groupInfo.conv3.groupSize,
                     groupInfo.linear.numGroups, groupInfo.linear.groupSize);
@@ -1031,7 +1428,7 @@ int main(void) {
     clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
 
     trainingRunResult_t result = trainingRun(
-        model, MODEL_SIZE,
+        model, g_modelSize,
         (lossConfig_t){
             .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
         trainLoader, valLoader, sgd, g_epochs, firstStepGatedGrads, inferenceWithLoss,
@@ -1039,7 +1436,7 @@ int main(void) {
     (void)result;
 
     epochStats_t testStats = evaluationEpochWithMetrics(
-        model, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
+        model, g_modelSize, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
 
     fprintf(stdout, "FINAL test_loss=%.4f test_acc=%.4f\n", (double)testStats.loss,
             (double)testStats.accuracy);
@@ -1059,12 +1456,17 @@ int main(void) {
     report.grads_b = memInstrumentGradBytes(sgd);
     report.optstate_analytic_b = memInstrumentOptStateBytes(sgd);
     report.io_b = memInstrumentHarIoBytes(MICRO_BATCH);
-    report.pool_backward_b = memInstrumentPoolBackwardBytes(model, MODEL_SIZE);
+    report.pool_backward_b = memInstrumentPoolBackwardBytes(model, g_modelSize);
     harWireProfile_t outProf[HAR_NUM_LAYERS], dxProf[HAR_NUM_LAYERS];
     fillWireProfiles(outProf, dxProf);
     report.activations_b = memInstrumentHarActivationBytes(MICRO_BATCH, outProf);
     report.dx_peak_b = memInstrumentHarDxPeakBytes(MICRO_BATCH, dxProf);
     report.wire_overhead_b = memInstrumentHarWireOverheadBytes(MICRO_BATCH, outProf, dxProf);
+    if (g_inLayer) {
+        harWireProfile_t inProf = profileFrom(g_inQ, IN_ELEMS);
+        report.activations_b += memInstrumentHarInputWireBytes(MICRO_BATCH, inProf);
+        report.wire_overhead_b += memInstrumentHarInputWireMetadataBytes(inProf);
+    }
     report.group_overhead_b = groupInfo.overheadBytes;
     report.grad_overhead_b = gradMetadataBytes(sgd);
     report.optstate_overhead_b = stateMetadataBytes(sgd);
@@ -1072,7 +1474,7 @@ int main(void) {
     sample_t *stepSample = getTrainSample(0);
     memStepCtx_t stepCtx = {
         .model = model,
-        .modelSize = MODEL_SIZE,
+        .modelSize = g_modelSize,
         .lossConfig = (lossConfig_t){.funcType = CROSS_ENTROPY,
                                      .backwardReduction = REDUCTION_MEAN,
                                      .classWeights = NULL},

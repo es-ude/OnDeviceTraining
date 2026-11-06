@@ -501,7 +501,9 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
  * kernel: BOTH operands are group-tracked (not just the weight), the
  * boundary combine is a rounding-free ldexpf fold into a float accumulator
  * (never rescaleIntoAccumulatorScale), and the output is raw FLOAT32 (no
- * output-scale write -- the funnel epilogue owns packing). */
+ * output-scale write -- the funnel epilogue owns packing). Since the
+ * integer-only forward (conv1dKernelBfpRaw below) this float fold serves
+ * the BACKWARD only: the ConvT1d dx adjoint keeps its FLOAT32 raw. */
 void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
                      kernel_t const *kernel, size_t groups, tensor_t *output) {
     size_t batch = input->shape->dimensions[0];
@@ -568,6 +570,8 @@ void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t con
 
     int32_t inExpBias = bfpExponentBias(inQC);
     int32_t wExpBias = bfpExponentBias(wQC);
+    bfpGroupRange_t inRange = {0};
+    bfpGroupRange_t wRange = {0};
 
     /* Per-output-channel bias seed, dequantized to float BEFORE the reduction
      * (value-seed, headroom-exempt -- it never touches the int32 partial).
@@ -607,13 +611,15 @@ void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t con
                             size_t kernelIdx = slice.firstValidKernelOffset + i;
                             size_t wIdx = wBase + icOffset * kernelSize + kernelIdx;
                             size_t inIdx = (b * inChannels + ic) * inputLength + inputIdx;
-                            /* Per-element division on BOTH operands (see the SYM
-                             * grouped kernel's gap rationale): clipped windows skip
-                             * taps, so consecutive visited indices can have gaps on
-                             * the weight AND -- across icOffset transitions -- jump
-                             * by inputLength on the input. */
-                            size_t inGroup = bfpGroupOf(inQC, inIdx);
-                            size_t wGroup = bfpGroupOf(wQC, wIdx);
+                            /* Per-element group lookup on BOTH operands (see the
+                             * SYM grouped kernel's gap rationale): clipped windows
+                             * skip taps, so consecutive visited indices can have
+                             * gaps on the weight AND -- across icOffset transitions
+                             * -- jump by inputLength on the input. bfpGroupAt
+                             * divides only when an index leaves the current
+                             * group's range. */
+                            size_t inGroup = bfpGroupAt(&inRange, inQC, inIdx);
+                            size_t wGroup = bfpGroupAt(&wRange, wQC, wIdx);
 
                             if (currentWGroup == SIZE_MAX) {
                                 currentInGroup = inGroup;
@@ -649,4 +655,354 @@ void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t con
             }
         }
     }
+}
+
+/* ---- Integer-only forward (arithmetic-bfp.md §13): conv1dKernelBfpRaw ---- */
+
+/* The row maxima of the pre-pass, read per output row (b, oc); INT16_MIN
+ * marks a run without nonzero codes. */
+typedef struct bfpRowTops {
+    const int16_t *inMaxByBatchGroup; /* [batch * groups]: input rows of a conv group */
+    const int16_t *wMax;              /* [outChannels]: the weight row */
+    const int16_t *biasE;             /* [outChannels] or NULL */
+    const int32_t *biasCodes;         /* [outChannels] or NULL: a zero bias sets nothing */
+    const uint16_t *convGroupOf;      /* [outChannels] */
+    size_t groups;
+} bfpRowTops_t;
+
+/* The row's top, or BFP_NO_LIVE_EXP when nothing in it is nonzero. */
+static int bfpRowTop(const bfpRowTops_t *t, size_t b, size_t oc) {
+    int e =
+        bfpLiveExpSum(bfpLiveExpFrom16(t->inMaxByBatchGroup[b * t->groups + t->convGroupOf[oc]]),
+                      bfpLiveExpFrom16(t->wMax[oc]));
+    if (t->biasE != NULL && t->biasCodes[oc] != 0 && t->biasE[oc] > e) {
+        e = t->biasE[oc];
+    }
+    return e;
+}
+
+/* What the walk of conv1dKernelBfpRaw reads; the tables are the pre-pass's. */
+typedef struct conv1dBfpRawWalk {
+    size_t batch, groups, inChannels, inputLength, outChannels, outputLength, kernelSize;
+    size_t inChPerGroup, outChPerGroup, gsz, segmentLimit;
+    windowGeometry1d_t geom;
+    const bfpQConfig_t *inQC;
+    const bfpQConfig_t *wQC;
+    int32_t inExpBias, wExpBias;
+    const int32_t *xArr;
+    const int32_t *wArr;
+    const int32_t *bArr;  /* NULL without bias */
+    const int16_t *biasE; /* [outChannels] */
+    const int16_t *rawE;  /* E_acc per raw target group */
+    int32_t *mant;
+} conv1dBfpRawWalk_t;
+
+/* The MAC walk (BFP_WALK_NOINLINE: no VLA in this frame). */
+BFP_WALK_NOINLINE void conv1dKernelBfpRawWalk(const conv1dBfpRawWalk_t *p) {
+    size_t batch = p->batch, groups = p->groups, inChannels = p->inChannels;
+    size_t inputLength = p->inputLength, outChannels = p->outChannels;
+    size_t outputLength = p->outputLength, kernelSize = p->kernelSize;
+    size_t inChPerGroup = p->inChPerGroup, outChPerGroup = p->outChPerGroup;
+    size_t gsz = p->gsz, segmentLimit = p->segmentLimit;
+    windowGeometry1d_t geom = p->geom;
+    const bfpQConfig_t *inQC = p->inQC;
+    const bfpQConfig_t *wQC = p->wQC;
+    int32_t inExpBias = p->inExpBias, wExpBias = p->wExpBias;
+    int32_t const *xArr = p->xArr;
+    int32_t const *wArr = p->wArr;
+    int32_t const *bArr = p->bArr;
+    const int16_t *biasE = p->biasE;
+    const int16_t *rawE = p->rawE;
+    int32_t *mant = p->mant;
+
+    bfpGroupRange_t inRange = {0};
+    bfpGroupRange_t wRange = {0};
+    size_t targetGroup = 0;
+    size_t targetEnd = gsz;
+    int eAcc = rawE[0];
+    /* Bias as one more segment, hoisted: realigned only when the channel or
+     * the target group's exponent changes. */
+    int32_t biasSeed = 0;
+    size_t seedOc = SIZE_MAX;
+    int seedE = INT_MIN;
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+
+            for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                size_t oc = outLo + ocOffset;
+                size_t wBase = oc * inChPerGroup * kernelSize;
+
+                for (size_t outPos = 0; outPos < outputLength; outPos++) {
+                    windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
+                    size_t outIdx = (b * outChannels + oc) * outputLength + outPos;
+                    if (outIdx >= targetEnd) {
+                        targetGroup++;
+                        targetEnd += gsz;
+                        eAcc = rawE[targetGroup];
+                    }
+                    if (bArr != NULL && (oc != seedOc || eAcc != seedE)) {
+                        biasSeed = bfpAlignPartial(bArr[oc], eAcc - biasE[oc]);
+                        seedOc = oc;
+                        seedE = eAcc;
+                    }
+                    int32_t acc = biasSeed;
+                    int32_t partial = 0;
+                    size_t segCount = 0;
+                    size_t currentInGroup = 0;
+                    size_t currentWGroup = SIZE_MAX;
+
+                    for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                        size_t ic = inLo + icOffset;
+                        size_t i = 0;
+                        while (i < slice.validCount) {
+                            size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
+                            size_t kernelIdx = slice.firstValidKernelOffset + i;
+                            size_t wIdx = wBase + icOffset * kernelSize + kernelIdx;
+                            size_t inIdx = (b * inChannels + ic) * inputLength + inputIdx;
+                            size_t inGroup = bfpGroupAt(&inRange, inQC, inIdx);
+                            size_t wGroup = bfpGroupAt(&wRange, wQC, wIdx);
+
+                            if (currentWGroup == SIZE_MAX) {
+                                currentInGroup = inGroup;
+                                currentWGroup = wGroup;
+                            } else if (inGroup != currentInGroup || wGroup != currentWGroup ||
+                                       segCount == segmentLimit) {
+                                /* A segment closes on EITHER operand's group
+                                 * change or at the int32 limit (run split):
+                                 * its partial is aligned to E_acc. */
+                                acc += bfpAlignPartial(
+                                    partial,
+                                    eAcc - ((int)inQC->exponents[currentInGroup] - inExpBias +
+                                            (int)wQC->exponents[currentWGroup] - wExpBias));
+                                partial = 0;
+                                segCount = 0;
+                                currentInGroup = inGroup;
+                                currentWGroup = wGroup;
+                            }
+
+                            /* The taps from i that stay in both cached groups
+                             * and under the segment limit need no lookup and
+                             * no segment check: the same segments close at
+                             * the same taps as a per-tap check would. */
+                            size_t run = bfpTapsBelow(wIdx, wRange.end, 1, slice.validCount - i);
+                            run = bfpTapsBelow(inIdx, inRange.end, geom.dilation, run);
+                            if (run > segmentLimit - segCount) {
+                                run = segmentLimit - segCount;
+                            }
+                            segCount += run;
+                            for (size_t runEnd = i + run; i < runEnd; i++) {
+                                inputIdx = slice.firstValidInputIdx + i * geom.dilation;
+                                kernelIdx = slice.firstValidKernelOffset + i;
+                                wIdx = wBase + icOffset * kernelSize + kernelIdx;
+                                inIdx = (b * inChannels + ic) * inputLength + inputIdx;
+                                partial += mulInt32s(xArr[inIdx], wArr[wIdx]);
+                            }
+                        }
+                    }
+                    if (currentWGroup != SIZE_MAX) {
+                        acc += bfpAlignPartial(
+                            partial, eAcc - ((int)inQC->exponents[currentInGroup] - inExpBias +
+                                             (int)wQC->exponents[currentWGroup] - wExpBias));
+                    }
+
+                    mant[outIdx] = acc;
+                }
+            }
+        }
+    }
+}
+
+/* Contract in Conv1dKernel.h. The walk is conv1dKernelBfp's; only the fold
+ * arithmetic and the output format differ. */
+void conv1dKernelBfpRaw(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
+                        kernel_t const *kernel, size_t groups, tensor_t *output) {
+    size_t batch = input->shape->dimensions[0];
+    size_t inChannels = input->shape->dimensions[1];
+    size_t inputLength = input->shape->dimensions[2];
+    size_t outChannels = output->shape->dimensions[1];
+    size_t outputLength = output->shape->dimensions[2];
+    size_t kernelSize = weight->shape->dimensions[2];
+
+    if (input->quantization->type != BFP || weight->quantization->type != BFP) {
+        PRINT_ERROR("conv1dKernelBfpRaw: input and weight must be BFP (unpacked scratch form)");
+        exit(1);
+    }
+    if (output->quantization->type != BFP_RAW) {
+        PRINT_ERROR("conv1dKernelBfpRaw: output must be BFP_RAW (the integer forward raw)");
+        exit(1);
+    }
+    if (inChannels % groups != 0 || outChannels % groups != 0) {
+        PRINT_ERROR("conv1dKernelBfpRaw: groups (%zu) must divide in_channels "
+                    "(%zu) and out_channels (%zu)",
+                    groups, inChannels, outChannels);
+        exit(1);
+    }
+
+    size_t inChPerGroup = inChannels / groups;
+    size_t outChPerGroup = outChannels / groups;
+
+    bfpQConfig_t *inQC = input->quantization->qConfig;
+    bfpQConfig_t *wQC = weight->quantization->qConfig;
+    validateBfpQConfigShape(inQC, calcNumberOfElementsByShape(input->shape));
+    validateBfpQConfigShape(wQC, calcNumberOfElementsByShape(weight->shape));
+
+    bfpQConfig_t *biasQC = NULL;
+    if (bias != NULL) {
+        if (bias->quantization->type != BFP) {
+            PRINT_ERROR("conv1dKernelBfpRaw: bias must be BFP");
+            exit(1);
+        }
+        if (calcNumberOfElementsByShape(bias->shape) != outChannels) {
+            PRINT_ERROR("conv1dKernelBfpRaw: bias element count != out_channels");
+            exit(1);
+        }
+        biasQC = bias->quantization->qConfig;
+        validateBfpQConfigShape(biasQC, outChannels);
+    }
+
+    windowGeometry1d_t geom = windowGeometry1dCalc(inputLength, kernel);
+    if (geom.outputLength != outputLength) {
+        PRINT_ERROR("conv1dKernelBfpRaw: output_length mismatch "
+                    "(geometry=%zu, output tensor=%zu)",
+                    geom.outputLength, outputLength);
+        exit(1);
+    }
+
+    size_t outElems = batch * outChannels * outputLength;
+    bfpRawQConfig_t *rawQC = output->quantization->qConfig;
+    size_t gsz = bfpRawRequireOutput(rawQC, outElems, "conv1dKernelBfpRaw");
+    int16_t *rawE = rawQC->exponents;
+    if (outElems == 0) {
+        return;
+    }
+
+    /* Static headroom proof: g from the product bound over the nominal
+     * reduction (padded taps are a superset of the visited ones); over-long
+     * same-exponent runs split at the segment limit instead of failing. */
+    size_t reductionLen = inChPerGroup * kernelSize;
+    int guard = bfpFoldGuardBits(reductionLen, inQC->mantissaBits, wQC->mantissaBits,
+                                 biasQC != NULL ? biasQC->mantissaBits : 0, "conv1dKernelBfpRaw");
+    size_t segmentLimit = bfpSegmentLimit(inQC->mantissaBits, wQC->mantissaBits);
+
+    int32_t const *xArr = (int32_t const *)input->data;
+    int32_t const *wArr = (int32_t const *)weight->data;
+    int32_t const *bArr = bias != NULL ? (int32_t const *)bias->data : NULL;
+    int32_t *mant = (int32_t *)output->data;
+
+    int32_t inExpBias = bfpExponentBias(inQC);
+    int32_t wExpBias = bfpExponentBias(wQC);
+
+    /* Pre-pass (one read per operand code, stack tables sized by the
+     * topology, never by the output): per (batch, conv group) the input
+     * rows' max exponent, per output channel the weight row's max and the
+     * bias exponent -- each over the groups holding a nonzero code (a zero
+     * code adds nothing, so its group's exponent bounds nothing). */
+    int16_t inMaxByBatchGroup[batch * groups];
+    int16_t wMax[outChannels];
+    int16_t biasE[outChannels];
+    uint16_t convGroupOf[outChannels];
+    {
+        bfpRowCursor_t c = {.group = 0, .groupEnd = inQC->groupSize};
+        size_t row = 0;
+        for (size_t b = 0; b < batch; b++) {
+            for (size_t cg = 0; cg < groups; cg++) {
+                int e = BFP_NO_LIVE_EXP;
+                for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                    int er = bfpRowMaxExponent(&c, inQC, inExpBias, xArr, row * inputLength,
+                                               inputLength);
+                    if (er > e) {
+                        e = er;
+                    }
+                    row++;
+                }
+                inMaxByBatchGroup[b * groups + cg] = bfpLiveExpTo16(e);
+            }
+        }
+    }
+    {
+        bfpRowCursor_t c = {.group = 0, .groupEnd = wQC->groupSize};
+        bfpGroupRange_t biasRange = {0};
+        size_t cg = 0;
+        size_t cgEnd = outChPerGroup;
+        for (size_t oc = 0; oc < outChannels; oc++) {
+            if (oc >= cgEnd) {
+                cg++;
+                cgEnd += outChPerGroup;
+            }
+            convGroupOf[oc] = (uint16_t)cg;
+            wMax[oc] = bfpLiveExpTo16(
+                bfpRowMaxExponent(&c, wQC, wExpBias, wArr, oc * reductionLen, reductionLen));
+            biasE[oc] = biasQC != NULL
+                            ? (int16_t)((int)biasQC->exponents[bfpGroupAt(&biasRange, biasQC, oc)] -
+                                        bfpExponentBias(biasQC))
+                            : 0;
+        }
+    }
+    bfpRowTops_t tops = {.inMaxByBatchGroup = inMaxByBatchGroup,
+                         .wMax = wMax,
+                         .biasE = biasQC != NULL ? biasE : NULL,
+                         .biasCodes = biasQC != NULL ? bArr : NULL,
+                         .convGroupOf = convGroupOf,
+                         .groups = groups};
+
+    /* E_acc per raw target group: the max row top over the output rows the
+     * group covers (a group may straddle channels and batches), plus g. Rows
+     * advance with cursors; the loop order below produces outputs in this
+     * same flat order. */
+    {
+        size_t rowB = 0, rowOc = 0;
+        size_t rowEnd = outputLength;
+        for (size_t t = 0; t < rawQC->numGroups; t++) {
+            size_t tStart = t * gsz;
+            size_t tEnd = tStart + gsz;
+            while (tStart >= rowEnd) {
+                if (++rowOc == outChannels) {
+                    rowOc = 0;
+                    rowB++;
+                }
+                rowEnd += outputLength;
+            }
+            int eTop = bfpRowTop(&tops, rowB, rowOc);
+            size_t rB = rowB, rOc = rowOc, rEnd = rowEnd;
+            while (tEnd > rEnd) {
+                if (++rOc == outChannels) {
+                    rOc = 0;
+                    rB++;
+                }
+                rEnd += outputLength;
+                int e = bfpRowTop(&tops, rB, rOc);
+                if (e > eTop) {
+                    eTop = e;
+                }
+            }
+            rawE[t] = (int16_t)(bfpLiveTopOrZero(eTop) + guard);
+        }
+    }
+
+    conv1dBfpRawWalk_t walk = {.batch = batch,
+                               .groups = groups,
+                               .inChannels = inChannels,
+                               .inputLength = inputLength,
+                               .outChannels = outChannels,
+                               .outputLength = outputLength,
+                               .kernelSize = kernelSize,
+                               .inChPerGroup = inChPerGroup,
+                               .outChPerGroup = outChPerGroup,
+                               .gsz = gsz,
+                               .segmentLimit = segmentLimit,
+                               .geom = geom,
+                               .inQC = inQC,
+                               .wQC = wQC,
+                               .inExpBias = inExpBias,
+                               .wExpBias = wExpBias,
+                               .xArr = xArr,
+                               .wArr = wArr,
+                               .bArr = bArr,
+                               .biasE = biasE,
+                               .rawE = rawE,
+                               .mant = mant};
+    conv1dKernelBfpRawWalk(&walk);
 }

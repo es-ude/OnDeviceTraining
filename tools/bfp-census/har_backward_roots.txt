@@ -1,0 +1,95 @@
+# The HAR classifier's integer BFP backward (examples/har_classifier/train_c_bfp.c,
+# BFP wires, native math), grown one path at a time. Today: the Conv1d and Linear
+# dx, and their weightGrad / biasGrad into BFP grad storage (BFP_GRADS=1).
+#   <source file> <function base name>         walk the root and everything it calls
+#   <source file> <function base name> self    the function's OWN call sites only
+# Same reading as har_forward_roots.txt: the kernels are reached through
+# executeOp's function pointer and the conversion cells through conversionMatrix,
+# so each is its own root; the dispatchers are `self` roots. The one float route
+# a self root cannot see on this path -- staging a FLOAT32-stored loss gradient --
+# is unreachable under BFP wires: every dx wire the Conv1d / Linear dx reads is BFP.
+# Every HAR backward op is here; the one float left is the loss boundary below.
+#
+# The funnel (prologue, raw setup, epilogue dispatch) and the conversion entry:
+ExecuteOp.c         executeOp            self
+ExecuteOp.c         writeOutConversion   self
+# Operand unpack (executeOp prologue, BFP-stored operands):
+TensorConversion.c  unpackSignExtend
+# Conv1d dx: dispatch wrapper, then the kernel adapter (walks the scatter kernel):
+Conv1d.c            conv1dBackward       self
+Conv1d.c            propLossKernelBfp
+# OUT_WRITE epilogue into the dx wire (conversionMatrix[BFP_RAW][BFP]):
+TensorConversion.c  reblockBfpRawTensor
+# Conv1d weightGrad / biasGrad into BFP grads (BFP_RAW_BACKWARD_ACC): the dispatch
+# wrappers (each picks the integer kernel only for a BFP grad under DYNAMIC_RESCALE;
+# the float-bridge kernels it may pick otherwise are not roots), the integer kernels,
+# and the ACC epilogue's integer engine (reached through accumulateOut, which is
+# inside executeOp's object and walked as executeOp self does not follow it):
+Conv1d.c            conv1dCalcWeightGradsBfp self
+Conv1d.c            conv1dCalcBiasGradsBfp   self
+Conv1d.c            weightGradKernelBfpRaw
+Conv1d.c            biasGradKernelBfpRaw
+TensorConversion.c  accumulateBfpRawIntoBfpRescale
+# Linear dx / weightGrad / biasGrad: the dispatch (self; it picks the integer grad
+# kernels only for a BFP grad under DYNAMIC_RESCALE, every ARITH_BFP dx is integer),
+# then the kernel adapters (each walks its core: matmulBfpRawTensors, the bias fold
+# and its raw emit). The engine and the re-block are the roots above.
+Linear.c            linearBackward           self
+Linear.c            propLossKernelBfp
+Linear.c            weightGradKernelBfpRaw
+Linear.c            biasGradKernelBfpRaw
+# The loss boundary: CrossEntropy's combined Softmax + CE gradient p - y (the Softmax
+# backward it replaces never runs). The dispatch (self: its own calls -- the shape
+# checks, the bfp head's funnel op and op key; its float arms are out of line), then
+# per model head (ruling R2):
+#   bfp head:   the integer p - y kernel, walked, with NO allow-list entry -- no float,
+#               no division on the gradient path (the re-block is the root above);
+#   float head: the loss island, allow-listed and stopped at the root (its rows
+#               document the boundary): float p - y + ONE float -> BFP conversion into
+#               the grad wire (FakeQuant), or the all-FLOAT32 arm under float wires.
+CrossEntropy.c      crossEntropySoftmaxBackward   self
+CrossEntropy.c      crossEntropySoftmaxBackwardKernelBfp
+CrossEntropy.c      crossEntropySoftmaxBackwardFakeQuant
+CrossEntropy.c      crossEntropySoftmaxBackwardFloat
+# The float head's ONE float -> BFP conversion onto the loss-grad wire (reached from
+# its FakeQuant island through conversionMatrix; stops at itself like the island).
+TensorConversion.c  convertFloatTensorToBfpTensor
+# ReLU dx: dispatch (self), then the code-domain sign mask (walked).
+Relu.c              reluBackward             self
+Relu.c              reluBackwardBfp
+# MaxPool1d / AvgPool1d dx: the dispatch (self), then the integer kernels (each walks
+# its pre-pass, its noinline scatter walk and the raw emit); the re-block is the root
+# above.
+MaxPool1d.c         maxPool1dBackward        self
+MaxPool1d.c         maxPool1dBackwardKernelBfpRaw
+AvgPool1d.c         avgPool1dBackward        self
+AvgPool1d.c         avgPool1dBackwardKernelBfpRaw
+# Flatten dx: payload and exponent copy (walked).
+Flatten.c           flattenBackward
+# Standalone Softmax dx (HAR never runs it: CrossEntropy skips the Softmax): the dispatch
+# (self), then the integer VJP kernel (walks the integer forward's exp codes and
+# normalisation it recomputes p with).
+Softmax.c           softmaxBackward          self
+Softmax.c           softmaxBackwardKernelBfp
+# Input layer dx (BFP -> BFP; HAR never runs it, no dx below conv1): dispatch (self;
+# its other dtype pairs convert through executeConvert, not walked), the integer kernel.
+QuantizationLayer.c quantizationBackward     self
+QuantizationLayer.c quantizationBackwardKernelBfp
+# Macro-batch mean scale of BFP grads (trainingEpochDefault -> scaleOptimizerGradientsMean):
+# the entry (self: its non-BFP arms run in an out-of-line helper, not walked), the
+# integer in-place scale, and CE's integer divisor (reached through the loss vtable).
+OptimizerApi.c      scaleOptimizerGradientsMean   self
+TensorConversion.c  scaleBfpTensorByScalarInPlace
+CrossEntropy.c      computeMeanDivisorCE
+# Integer SGD step on BFP storage: the step itself (self: its own call sites -- the
+# BFP branches call the two helpers, the other dtypes' arms call executeOp, a self
+# root; both branch tests are bools decided at sgdInit), the momentum store (BFP grad
+# AND BFP state, op 0) and the parameter update (BFP param with that stored state, or
+# with the BFP grad without momentum, op 1): each helper self (its own calls -- the
+# per-op key fold and stream open, as executeOp self leaves openPhaseStream's folds
+# unwalked) and each engine wrapper (walked).
+Sgd.c               sgdStepM                 self
+Sgd.c               sgdMomentumStoreBfp      self
+Sgd.c               sgdParamUpdateBfp        self
+TensorConversion.c  momentumStoreBfpInPlace
+TensorConversion.c  paramUpdateBfpInPlace

@@ -45,11 +45,14 @@ class TrainConfig(TypedDict):
     exponent_bits: NotRequired[int]
     weight_block: NotRequired[str]  # "tensor" | "channel" | "<int>" as given to BFP_WEIGHT_BLOCK
     wire_block: NotRequired[str]  # "float" | "tensor" | "<int>" as given to BFP_WIRE_BLOCK
-    wires_resolved: NotRequired[dict[str, list[int]]]  # "<layer>.out"/"<layer>.dx" -> [numGroups, groupSize]
+    # "<layer>.out"/"<layer>.dx" -> [numGroups, groupSize]; "input.out" = the input Quantization
+    # layer's wire (BFP wires + native math only; absent = no input layer, 12-layer model)
+    wires_resolved: NotRequired[dict[str, list[int]]]
     bfp_math: NotRequired[str]  # "native" | "fq" (fq = GEMM slots + softmax forward pinned FLOAT32)
     bfp_grads: NotRequired[int]  # 0 | 1 per-tensor BFP grad storage
     bfp_state: NotRequired[int]  # 0 | 1 per-tensor BFP momentum storage
     bfp_rounding: NotRequired[str]  # "sr" | "det" (training-side seams only; inference deterministic)
+    bfp_head: NotRequired[str]  # "float" | "bfp": the model head (Softmax + CE p - y), BFP_HEAD
 
     # Remat scheduler (#4): the scheme the run chose (REMAT_STORAGE / REMAT_PLAN); a scheduler
     # that fails to build stops the run, so a complete log with these keys ran on it. Absent =

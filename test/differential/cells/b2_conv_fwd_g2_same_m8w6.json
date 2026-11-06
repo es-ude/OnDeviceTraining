@@ -1,6 +1,6 @@
 {
   "name": "b2_conv_fwd_g2_same_m8w6",
-  "description": "B2 Conv1d forward SAME, convGroups 2, K=3, grouped operands (input gs 6, weight gs 3), mixed m8 x m6: padded taps skipped, group hops inside the reduction.",
+  "description": "B2 Conv1d forward SAME, convGroups 2, K=3, grouped operands (input gs 6, weight gs 3), mixed m8 x m6: padded taps skipped, group hops inside the reduction. Kernel tier: raw target groups of 8 over the [2, 4, 12] output straddle output rows (E_acc covers both).",
   "family": "bfp_gemm",
   "op": "conv1d",
   "direction": "forward",
@@ -49,9 +49,11 @@
   },
   "expect": {
     "legA": [
-      "EXACT",
-      "TIE_ONLY"
+      "EXACT"
     ],
     "legB": "BOUNDED"
+  },
+  "raw": {
+    "groupSize": 8
   }
 }

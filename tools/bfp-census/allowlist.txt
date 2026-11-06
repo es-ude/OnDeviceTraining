@@ -1,0 +1,253 @@
+# Permitted calls, each SCOPED to one root (<source.c>:<function> as the roots
+# file names it), so an entry never hides another root's hits.
+#   <root> <function>                  traversal stops at <function> under <root>
+#   <root> <function> <symbol> <count> exactly <count> call sites of <symbol> in
+#                                      <function> are allowed under <root>; more
+#                                      are hits, fewer make the entry stale
+#                                      (--strict fails on both)
+# Policy (integer-only BFP forward): no float/double/libm/int64 outside the float
+# boundaries (the loss-facing dequant; the loss island in the backward); no BFP-specific division per MAC. Allowed divisions run per
+# call, per group change, per output element, or are the index math the FLOAT32
+# arm shares (same-algorithm rule).
+
+# ---- Float boundaries --------------------------------------------------------
+# Loss-facing dequant: the softmax wire leaves the integer domain for the loss.
+TensorConversion.c:convertBfpTensorToFloat32Tensor convertBfpTensorToFloat32Tensor
+
+# ---- Conv1d ------------------------------------------------------------------
+# Two uidivmod at entry (inChannels % groups, outChannels % groups; per call,
+# the FLOAT32 kernel has them too); three uidiv = the inlined bfpGroupAt
+# recomputes (input, weight, bias), one only when an index leaves its group:
+# the bias one in the pre-pass, the two MAC-loop ones in the walk (own frame).
+Conv1d.c:forwardKernelBfpRaw conv1dKernelBfpRaw __aeabi_uidivmod 2
+Conv1d.c:forwardKernelBfpRaw conv1dKernelBfpRaw __aeabi_uidiv 1
+Conv1d.c:forwardKernelBfpRaw conv1dKernelBfpRawWalk __aeabi_uidiv 2
+# Shared window geometry (per call) and window slice (per OUTPUT element).
+Conv1d.c:forwardKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
+Conv1d.c:forwardKernelBfpRaw windowSlice1dAt __aeabi_ldivmod 2
+
+# ---- MaxPool1d ---------------------------------------------------------------
+# Two bfpGroupAt recomputes (per group change); shared window math as above.
+MaxPool1d.c:maxPool1dForwardKernelBfpRaw maxPool1dForwardKernelBfpRaw __aeabi_uidiv 2
+MaxPool1d.c:maxPool1dForwardKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
+MaxPool1d.c:maxPool1dForwardKernelBfpRaw windowSlice1dAt __aeabi_ldivmod 2
+
+# ---- AvgPool1d ---------------------------------------------------------------
+# One bfpGroupAt recompute; shared window math as above. The mean is an
+# exponent shift: BFP math takes a power-of-two K only (ruling R1).
+AvgPool1d.c:avgPool1dForwardKernelBfpRaw avgPool1dForwardKernelBfpRaw __aeabi_uidiv 1
+AvgPool1d.c:avgPool1dForwardKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
+AvgPool1d.c:avgPool1dForwardKernelBfpRaw windowSlice1dAt __aeabi_ldivmod 2
+
+# ---- Linear ------------------------------------------------------------------
+# Three bfpGroupAt recomputes (bias in the pre-pass; a, b in the walk, own
+# frame). calcElementIndexByIndices
+# divides once per dimension per call, i.e. per MAC -- on the FLOAT32 arm too:
+# the shared index math the same-algorithm rule keeps.
+Linear.c:linearForwardKernelBfpRaw matmulBfpRawTensors __aeabi_uidiv 1
+Linear.c:linearForwardKernelBfpRaw matmulBfpRawTensorsWalk __aeabi_uidiv 2
+Linear.c:linearForwardKernelBfpRaw calcElementIndexByIndices __aeabi_uidiv 1
+
+# ---- Softmax -----------------------------------------------------------------
+# The float head's forward island (BFP_HEAD=float): the FLOAT32 Softmax kernel.
+Softmax.c:softmaxForwardKernel softmaxForwardKernel
+# Two bfpGroupAt recomputes (steps 1 and 2). Steps 2-4: the i-exp core's
+# z = -qW / ln2 is one division per ELEMENT; the integer normalisation (step 5)
+# divides by restoring shifts and calls no helper.
+Softmax.c:softmaxForwardKernelBfp softmaxExpCodesBfp __aeabi_uidiv 2
+Softmax.c:softmaxForwardKernelBfp bfpIExpQ __aeabi_idiv 1
+
+# ---- Funnel (self root: executeOp's own body) --------------------------------
+# idx / groupSize in the ARITH_SYM_INT32 arm's grouped-ASYM zero-point hoist,
+# once per group, never on the BFP path.
+ExecuteOp.c:executeOp executeOp __aeabi_uidiv 1
+
+# ==== Backward (har_backward_roots.txt) =======================================
+# ---- Conv1d dx (propLossKernelBfp -> convTranspose1dKernelBfpScatter) --------
+# Two uidivmod at entry (inChannels % groups, outChannels % groups; per call,
+# the FLOAT32 kernel has them too); one in the setup's tap-overlap count
+# ((k - k') * dilation % stride, O(K^2) per call); two uidiv = the inlined
+# bfpGroupAt recomputes (loss, weight) in the walk (own frame), one only when an
+# index leaves its group.
+# The raw post-pass (exponent max, re-grid) runs on cursors and divides nothing.
+Conv1d.c:propLossKernelBfp convTranspose1dKernelBfpScatter __aeabi_uidivmod 3
+Conv1d.c:propLossKernelBfp convTranspose1dKernelBfpScatterWalk __aeabi_uidiv 2
+# Shared window geometry via convT1dResolveGeometry (per call).
+Conv1d.c:propLossKernelBfp windowGeometry1dCalc __aeabi_uidiv 3
+
+# ---- Conv1d weightGrad into BFP grads (weightGradKernelBfpRaw) ----------------
+# The shared scatter (weightGradBfpScatter, the C4 loop, unchanged): two uidiv at
+# entry (inChannels / groups, outChannels / groups; per call), two = the inlined
+# bfpGroupAt recomputes (input, loss) in the walk (own frame), one only when an
+# index leaves its group.
+# The E_acc pre-pass finds oc's conv group by cursor (no division).
+# The kernel's own: gwElems / outChannels (the row length, per call). The raw
+# emit (bfpRawEmitFromRows) runs on cursors and divides nothing.
+Conv1d.c:weightGradKernelBfpRaw weightGradBfpScatter __aeabi_uidiv 2
+Conv1d.c:weightGradKernelBfpRaw weightGradBfpScatterWalk __aeabi_uidiv 2
+Conv1d.c:weightGradKernelBfpRaw Conv1d.c:weightGradKernelBfpRaw __aeabi_uidiv 1
+# Shared window geometry (per call), tap ranges (per tap, per call) and window
+# slice (per (batch, output channel, output position) -- the FLOAT32 loop's own).
+Conv1d.c:weightGradKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
+Conv1d.c:weightGradKernelBfpRaw windowTapOutputRange1d __aeabi_ldivmod 2
+Conv1d.c:weightGradKernelBfpRaw windowSlice1dAt __aeabi_ldivmod 2
+
+# ---- Conv1d biasGrad into BFP grads (biasGradKernelBfpRaw) --------------------
+# One inlined bfpGroupAt recompute (per loss-group change).
+Conv1d.c:biasGradKernelBfpRaw Conv1d.c:biasGradKernelBfpRaw __aeabi_uidiv 1
+
+# ---- Integer grad accumulate (the BFP_RAW_BACKWARD_ACC epilogue) --------------
+# Per conversion chunk (256 elements): the scan frontier (chunkEnd - 1) / gsz, and
+# in the scan its start group from / gsz and ring slot g % 257 (once per call of
+# the scan, i.e. per chunk); the runs inside advance cursors.
+TensorConversion.c:accumulateBfpRawIntoBfpRescale accumulateBfpRawIntoBfpRescale __aeabi_uidiv 2
+TensorConversion.c:accumulateBfpRawIntoBfpRescale accumulateBfpRawIntoBfpRescale __aeabi_uidivmod 1
+
+# ---- Linear dx and weightGrad (propLossKernelBfp / weightGradKernelBfpRaw) ----
+# Both walk matmulBfpRawTensors, the forward's integer GEMM (same entries as
+# Linear.c:linearForwardKernelBfpRaw): three inlined bfpGroupAt recomputes (a, b,
+# and the bias pre-pass -- dead here, the backward passes no bias), each only when
+# an index leaves its group; calcElementIndexByIndices divides once per dimension
+# per MAC, on the FLOAT32 arm too (the shared index math).
+Linear.c:propLossKernelBfp matmulBfpRawTensors __aeabi_uidiv 1
+Linear.c:propLossKernelBfp matmulBfpRawTensorsWalk __aeabi_uidiv 2
+Linear.c:propLossKernelBfp calcElementIndexByIndices __aeabi_uidiv 1
+Linear.c:weightGradKernelBfpRaw matmulBfpRawTensors __aeabi_uidiv 1
+Linear.c:weightGradKernelBfpRaw matmulBfpRawTensorsWalk __aeabi_uidiv 2
+Linear.c:weightGradKernelBfpRaw calcElementIndexByIndices __aeabi_uidiv 1
+
+# ---- Linear biasGrad into BFP grads (biasGradKernelBfpRaw) --------------------
+# One uidivmod at entry (loss elements / and % features; per call) and one inlined
+# bfpGroupAt recompute (per loss-group change). The E_acc pre-pass and the raw
+# emit run on cursors.
+Linear.c:biasGradKernelBfpRaw linearCalcBiasGradsBfpRaw __aeabi_uidivmod 1
+Linear.c:biasGradKernelBfpRaw linearCalcBiasGradsBfpRaw __aeabi_uidiv 1
+
+# ---- Integer mean scale of BFP grads (scaleBfpTensorByScalarInPlace) --------
+# Per conversion chunk (256 elements): the scan frontier (chunkEnd - 1) / gsz, and
+# in the scan its start group from / gsz and ring slot g % 257 (once per scan
+# call, i.e. per chunk); the runs inside advance cursors. 1/B itself is a
+# restoring shift-subtract (bfpScalarFromCount), no divide helper.
+TensorConversion.c:scaleBfpTensorByScalarInPlace scaleBfpTensorByScalarInPlace __aeabi_uidiv 2
+TensorConversion.c:scaleBfpTensorByScalarInPlace scaleBfpTensorByScalarInPlace __aeabi_uidivmod 1
+
+# ---- Integer SGD momentum store and parameter update on BFP storage ----------
+# Both wrappers run the one scaled-sum engine (bfpScaledSumInPlace). Per conversion
+# chunk (256 elements): the scan frontier (chunkEnd - 1) / gsz, and in the scan its
+# start group from / gsz and ring slot g % 257 (once per scan call, i.e. per chunk);
+# the runs inside advance cursors. The accumulate engine's shape.
+TensorConversion.c:momentumStoreBfpInPlace bfpScaledSumInPlace __aeabi_uidiv 2
+TensorConversion.c:momentumStoreBfpInPlace bfpScaledSumInPlace __aeabi_uidivmod 1
+TensorConversion.c:paramUpdateBfpInPlace bfpScaledSumInPlace __aeabi_uidiv 2
+TensorConversion.c:paramUpdateBfpInPlace bfpScaledSumInPlace __aeabi_uidivmod 1
+
+# ---- The loss boundary (backward) ----------------------------------------------
+# The FLOAT head's island (ruling R2): loss-facing dequant of p and y, float p - y,
+# then ONE float -> BFP conversion into the grad wire (its RNG_TAG_LOSS stream fold
+# included), or the all-FLOAT32 arm under float wires. The roots document the
+# boundary; traversal stops at them. The BFP head's root
+# (crossEntropySoftmaxBackwardKernelBfp) and the dispatch have NO entry: no float.
+CrossEntropy.c:crossEntropySoftmaxBackwardFakeQuant crossEntropySoftmaxBackwardFakeQuant
+CrossEntropy.c:crossEntropySoftmaxBackwardFloat crossEntropySoftmaxBackwardFloat
+# Its ONE float -> BFP conversion onto the loss-grad wire. (No sample crosses
+# here: the data is converted offline and passes the input layer straight through.)
+TensorConversion.c:convertFloatTensorToBfpTensor convertFloatTensorToBfpTensor
+
+# ---- MaxPool1d / AvgPool1d dx (the integer kernels) ----------------------------
+# Per call: the covering-window count (span - 1) / stride in the kernel, and the
+# shared window geometry. Per loss group change: the walk's inlined bfpGroupAt
+# recompute. AvgPool's walk also takes the shared window slice per OUTPUT (the
+# FLOAT32 arm's own index math); its mean is an exponent shift (power-of-two K
+# only, ruling R1), no division.
+MaxPool1d.c:maxPool1dBackwardKernelBfpRaw maxPool1dBackwardKernelBfpRaw __aeabi_uidiv 1
+MaxPool1d.c:maxPool1dBackwardKernelBfpRaw maxPool1dBackwardBfpWalk __aeabi_uidiv 1
+MaxPool1d.c:maxPool1dBackwardKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
+AvgPool1d.c:avgPool1dBackwardKernelBfpRaw avgPool1dBackwardKernelBfpRaw __aeabi_uidiv 1
+AvgPool1d.c:avgPool1dBackwardKernelBfpRaw avgPool1dBackwardBfpWalk __aeabi_uidiv 1
+AvgPool1d.c:avgPool1dBackwardKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
+AvgPool1d.c:avgPool1dBackwardKernelBfpRaw windowSlice1dAt __aeabi_ldivmod 2
+
+# ---- Softmax dx (the integer VJP, softmaxBackwardKernelBfp) --------------------
+# The recompute of p runs the forward's integer exp codes (the forward root's two
+# bfpGroupAt recomputes and bfpIExpQ's one division by ln 2); the VJP's three loops
+# (dot, per-group max, emit) each recompute the loss group on a group change.
+Softmax.c:softmaxBackwardKernelBfp softmaxBackwardKernelBfp __aeabi_uidiv 3
+Softmax.c:softmaxBackwardKernelBfp softmaxExpCodesBfp __aeabi_uidiv 2
+Softmax.c:softmaxBackwardKernelBfp bfpIExpQ __aeabi_idiv 1
+
+# ==== The whole training step (har_train_step_roots.txt) =======================
+# The phase sets above keep their entries; these are the step driver's own.
+# ---- The loss VALUE (monitoring, off the gradient path; both heads) ----------
+# CrossEntropy's forward: the float core (log, clamp, the non-finite check and
+# its report, the micro-batch mean) is the island; the dispatch and the
+# dequantizing arm in front of it are walked (the BFP -> FLOAT32 cell is the
+# forward's boundary root above).
+CrossEntropy.c:crossEntropyForward crossEntropyForwardFloat
+# The epoch loop's loss sum and mean (totalLoss += ..., / (float)batches): two
+# fadd (the compiler splits the sum), one ui2f, one fdiv, per batch / per epoch.
+TrainingEpochDefault.c:trainingEpochDefault trainingEpochDefault __aeabi_fadd 2
+TrainingEpochDefault.c:trainingEpochDefault trainingEpochDefault __aeabi_ui2f 1
+TrainingEpochDefault.c:trainingEpochDefault trainingEpochDefault __aeabi_fdiv 1
+# Per epoch: numberOfBatches = datasetSize / batchSize and batchSize % m (the
+# micro-batch divisibility check).
+TrainingEpochDefault.c:trainingEpochDefault trainingEpochDefault __aeabi_uidiv 1
+TrainingEpochDefault.c:trainingEpochDefault trainingEpochDefault __aeabi_uidivmod 1
+# The batch loop's per-sample loss sum and its MEAN (/ (float)batch->size), per
+# batch; batch->size % m per batch.
+TrainingBatchDefault.c:trainingBatchDefault trainingBatchDefault __aeabi_fadd 1
+TrainingBatchDefault.c:trainingBatchDefault trainingBatchDefault __aeabi_ui2f 1
+TrainingBatchDefault.c:trainingBatchDefault trainingBatchDefault __aeabi_fdiv 1
+TrainingBatchDefault.c:trainingBatchDefault trainingBatchDefault __aeabi_uidivmod 1
+
+# ---- RNG keys and the per-call scheduler (index math, no data path) ----------
+# rngFold: the threefry rotation index (round % 3), two per key fold, i.e. per
+# op / per step / per sample -- never per element.
+CalculateGradsSequential.c:calculateGradsSequential rngFold __aeabi_uidivmod 2
+TrainingRng.c:trainingRngStepKey rngFold __aeabi_uidivmod 2
+TrainingRng.c:trainingRngUpdateKey rngFold __aeabi_uidivmod 2
+TrainingRng.c:trainingCallForIndex rngFold __aeabi_uidivmod 2
+# The remat wire table, built per calculate-grads call (the ephemeral HEAP
+# scheduler): a BFP wire's elements % groupSize check and its group count, once
+# per WIRE per call.
+CalculateGradsSequential.c:calculateGradsSequential setWireFacts __aeabi_uidivmod 1
+CalculateGradsSequential.c:calculateGradsSequential writeWireConfig __aeabi_uidivmod 1
+
+# ---- Reached through a pointer on every step (the indirect closure) ----------
+# The scheduler's per-call wire table also binds wires inside rematHeapNext
+# (s->fns->next): the same once-per-WIRE-per-call group-count check as above.
+RematHeap.c:rematHeapNext writeWireConfig __aeabi_uidivmod 1
+# The output-shape functions the wire table and the plan run per call
+# (layerFunctions[].calcOutputShape): the shared window geometry, the same
+# per-call uidivs the conv / pool forward kernels' entries above allow. Per
+# calculate-grads call, i.e. per SAMPLE with the ephemeral scheduler.
+Conv1d.c:conv1dCalcOutputShape windowGeometry1dCalc __aeabi_uidiv 3
+MaxPool1d.c:maxPool1dCalcOutputShape windowGeometry1dCalc __aeabi_uidiv 3
+AvgPool1d.c:avgPool1dCalcOutputShape windowGeometry1dCalc __aeabi_uidiv 3
+# The BFP -> FLOAT32 dequant's chunk reader: part of that loss-facing boundary.
+TensorConversion.c:dequantChunkToFloat dequantChunkToFloat
+
+# ---- Called directly from the self roots (the step trace closure) -----------
+# Linear's BFP arms, which the kernel adapters above also run: the same
+# per-call / per-group-change matmul divisions and the shared per-MAC index
+# math the linearForwardKernelBfpRaw entries allow.
+Linear.c:linearForwardBfpRaw matmulBfpRawTensors __aeabi_uidiv 1
+Linear.c:linearForwardBfpRaw matmulBfpRawTensorsWalk __aeabi_uidiv 2
+Linear.c:linearForwardBfpRaw calcElementIndexByIndices __aeabi_uidiv 1
+Linear.c:linearCalcPropLossBfp matmulBfpRawTensors __aeabi_uidiv 1
+Linear.c:linearCalcPropLossBfp matmulBfpRawTensorsWalk __aeabi_uidiv 2
+Linear.c:linearCalcPropLossBfp calcElementIndexByIndices __aeabi_uidiv 1
+Linear.c:linearCalcWeightGradsBfpRaw matmulBfpRawTensors __aeabi_uidiv 1
+Linear.c:linearCalcWeightGradsBfpRaw matmulBfpRawTensorsWalk __aeabi_uidiv 2
+Linear.c:linearCalcWeightGradsBfpRaw calcElementIndexByIndices __aeabi_uidiv 1
+# The per-op / per-update / per-call key folds (rngFold round % 3, as above).
+LayerExec.c:layerExecOpKey rngFold __aeabi_uidivmod 2
+LayerExec.c:layerExecPhaseKey rngFold __aeabi_uidivmod 2
+LayerExec.c:layerExecPurposeStream rngFold __aeabi_uidivmod 2
+OptimizerKeys.c:optimizerScaleStream rngFold __aeabi_uidivmod 2
+OptimizerKeys.c:optimizerUpdateOpKey rngFold __aeabi_uidivmod 2
+TrainingRng.c:trainingRngCallKey rngFold __aeabi_uidivmod 2
+# The trainer's first step enters the same interpreter as calculateGradsSequential:
+# its key fold and the per-wire table checks, as there.
+CalculateGradsSequential.c:tracedGrads rngFold __aeabi_uidivmod 2
+CalculateGradsSequential.c:tracedGrads setWireFacts __aeabi_uidivmod 1
+CalculateGradsSequential.c:tracedGrads writeWireConfig __aeabi_uidivmod 1

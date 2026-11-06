@@ -2,6 +2,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "BfpAccumulateRef.h"
+#include "BfpRawFixture.h"
+#include "BfpScatterRef.h"
 #include "BorrowedLayer.h"
 #include "Conv1d.h"
 #include "Conv1dApi.h"
@@ -10,9 +13,11 @@
 #include "KeyedDrawCheck.h"
 #include "Layer.h"
 #include "LayerCommon.h"
+#include "LayerExec.h"
 #include "LayerQuant.h"
 #include "QuantizationApi.h"
 #include "RNG.h"
+#include "SlidingWindow1d.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
@@ -2552,8 +2557,8 @@ void testConv1dBackwardBfpBiasGradMatchesGold(void) {
     TEST_ASSERT_EQUAL_MEMORY(kConvBfpBgExpected, captured, sizeof(captured));
 }
 
-/* dx wire: the ARITH_BFP propLoss arm routes the adjoint through the BFP D9
- * GATHER kernel (convTranspose1dKernelBfpGather, bias NULL, outputPadding 0).
+/* dx wire: the ARITH_BFP propLoss arm routes the adjoint through the integer
+ * scatter kernel (convTranspose1dKernelBfpScatter, outputPadding 0).
  * Sentinel prefill pins every element as kernel-written -- including the
  * ADJOINT HOLES (stride 2 x dilation 2 reach only even input positions, so
  * every odd dx position must come back exactly 0.0, goldgen-asserted). */
@@ -3249,6 +3254,986 @@ void testConv1dBiasGradSymSumWideWireExactThenAborts(void) {
                              (void)runConv1dSymBiasGradSum(3, 1, (1 << 30) - 1, 31));
 }
 
+/* ---- Conv1d weightGrad under ARITH_BFP: the integer scatter ----------------
+ * weightGradKernelBfp walks the FLOAT32 weightGrad loop and keeps an int32 raw
+ * accumulator per weight-grad element. References: BfpScatterRef.h (int64,
+ * output-centric, from the definition) and, for the worst case, the exact
+ * value count * 2^(2m-2) * 2^(Ex+Egy). */
+
+static uint32_t c4Lcg(uint32_t *s) {
+    *s = *s * 1664525u + 1013904223u;
+    return *s >> 8;
+}
+
+typedef struct c4WgCase {
+    size_t batch, cin, length, cout, groups, kernelSize, stride, dilation, padding;
+    uint8_t m;
+    size_t xGroupSize, gyGroupSize;
+} c4WgCase_t;
+
+/* Runs conv1dCalcWeightGradsBfp and the reference on the same BFP-stored
+ * operands; `gw` / `ref` hold cout * cin/groups * K floats. */
+static bfpRefStats_t c4RunBfpWeightGrad(const c4WgCase_t *c, const int32_t *xCodes,
+                                        const uint8_t *xExps, const int32_t *gyCodes,
+                                        const uint8_t *gyExps, float *gw, float *ref) {
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernelExplicit(kernel, c->kernelSize, c->padding, c->dilation, c->stride);
+    windowGeometry1d_t geom = windowGeometry1dCalc(c->length, kernel);
+    size_t cinG = c->cin / c->groups;
+    size_t xElems = c->batch * c->cin * c->length;
+    size_t gyElems = c->batch * c->cout * geom.outputLength;
+    size_t wElems = c->cout * cinG * c->kernelSize;
+
+    size_t wDims[] = {c->cout, cinG, c->kernelSize};
+    tensor_t *weightsParam = makeFloatTensor(wDims, 3, NULL);
+    quantization_t *bfpTemplate = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 1, 0);
+    requantizeTensorInPlace(weightsParam, bfpTemplate);
+    freeQuantization(bfpTemplate);
+    parameter_t *weights = parameterInit(weightsParam, gradInitFloat(weightsParam, NULL));
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *conv1d = buildBorrowedConv1dLayerGrouped(weights, NULL, kernel, c->groups, floatQ);
+    conv1d->config->conv1d->weightGradMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+
+    size_t xDims[] = {c->batch, c->cin, c->length};
+    size_t gyDims[] = {c->batch, c->cout, geom.outputLength};
+    tensor_t *x =
+        buildBfpStoredTensor(3, xDims, xCodes, xExps, c->m, 8,
+                             c->xGroupSize == 0 ? 1 : xElems / c->xGroupSize, c->xGroupSize);
+    tensor_t *gy =
+        buildBfpStoredTensor(3, gyDims, gyCodes, gyExps, c->m, 8,
+                             c->gyGroupSize == 0 ? 1 : gyElems / c->gyGroupSize, c->gyGroupSize);
+
+    conv1dCalcWeightGradsBfp(conv1d->config->conv1d, x, gy, NULL);
+    memcpy(gw, conv1d->config->conv1d->weights->grad->data, wElems * sizeof(float));
+
+    freeConv1dLayer(conv1d);
+    freeTensor(gy);
+    freeTensor(x);
+    freeQuantization(floatQ);
+
+    bfpRefGeom_t G = {.batch = c->batch,
+                      .cin = c->cin,
+                      .length = c->length,
+                      .cout = c->cout,
+                      .groups = c->groups,
+                      .kernelSize = c->kernelSize,
+                      .stride = c->stride,
+                      .dilation = c->dilation,
+                      .padLeft = geom.padLeft,
+                      .outLength = geom.outputLength};
+    bfpRefOperand_t xRef = {xCodes, xExps, c->xGroupSize, c->m, 8};
+    bfpRefOperand_t gyRef = {gyCodes, gyExps, c->gyGroupSize, c->m, 8};
+    return bfpRefConv1dWeightGrad(&G, &xRef, &gyRef, ref);
+}
+
+/* Worst case at m = 16: every code -2^15, every product +2^30, and the
+ * centre tap sums batch * outputLength = 12 of them. The guard must
+ * right-shift; without it the int32 accumulator overflows. */
+void testConv1dBackwardBfpWeightGradWorstCaseM16IsExact(void) {
+    c4WgCase_t c = {.batch = 2,
+                    .cin = 2,
+                    .length = 6,
+                    .cout = 2,
+                    .groups = 1,
+                    .kernelSize = 3,
+                    .stride = 1,
+                    .dilation = 1,
+                    .padding = 1,
+                    .m = 16,
+                    .xGroupSize = 0,
+                    .gyGroupSize = 0};
+    int32_t xCodes[24];
+    int32_t gyCodes[24];
+    for (size_t i = 0; i < 24; i++) {
+        xCodes[i] = -32768;
+        gyCodes[i] = -32768;
+    }
+    uint8_t xExps[] = {127 - 4};
+    uint8_t gyExps[] = {127 + 1};
+    float gw[12];
+    float ref[12];
+    bfpRefStats_t st = c4RunBfpWeightGrad(&c, xCodes, xExps, gyCodes, gyExps, gw, ref);
+
+    TEST_ASSERT_TRUE(st.fitsInt32);
+    for (size_t oc = 0; oc < 2; oc++) {
+        for (size_t ic = 0; ic < 2; ic++) {
+            for (size_t k = 0; k < 3; k++) {
+                size_t count = 0;
+                for (size_t t = 0; t < 6; t++) {
+                    long long pos = (long long)(t + k) - 1;
+                    count += 2 * (pos >= 0 && pos < 6);
+                }
+                float expected = ldexpf((float)count, 30 - 4 + 1);
+                size_t idx = (oc * 2 + ic) * 3 + k;
+                TEST_ASSERT_EQUAL_MEMORY(&expected, &gw[idx], sizeof(float));
+                TEST_ASSERT_EQUAL_MEMORY(&expected, &ref[idx], sizeof(float));
+            }
+        }
+    }
+}
+
+/* m = 8, conv groups 2, stride 2, dilation 2, EXPLICIT padding 2 (taps 0
+ * and 2 are partly clipped), grouped operands with a wide exponent spread:
+ * products far below the row top are rounded, products near it are shifted
+ * left. Bit-exact against the int64 reference. */
+void testConv1dBackwardBfpWeightGradMixedExponentsMatchesReference(void) {
+    c4WgCase_t c = {.batch = 2,
+                    .cin = 4,
+                    .length = 10,
+                    .cout = 4,
+                    .groups = 2,
+                    .kernelSize = 3,
+                    .stride = 2,
+                    .dilation = 2,
+                    .padding = 2,
+                    .m = 8,
+                    .xGroupSize = 8,
+                    .gyGroupSize = 5};
+    int32_t xCodes[80];  /* [2, 4, 10] */
+    int32_t gyCodes[40]; /* [2, 4, 5] */
+    uint8_t xExps[10];
+    uint8_t gyExps[8];
+    uint32_t s = 777u;
+    for (size_t i = 0; i < 80; i++) {
+        xCodes[i] = (int32_t)(c4Lcg(&s) % 256u) - 128;
+    }
+    for (size_t i = 0; i < 40; i++) {
+        gyCodes[i] = (int32_t)(c4Lcg(&s) % 256u) - 128;
+    }
+    for (size_t i = 0; i < 10; i++) {
+        xExps[i] = (uint8_t)(127 - 10 + (int)(c4Lcg(&s) % 21u));
+    }
+    for (size_t i = 0; i < 8; i++) {
+        gyExps[i] = (uint8_t)(127 - 8 + (int)(c4Lcg(&s) % 17u));
+    }
+    float gw[24];
+    float ref[24];
+    bfpRefStats_t st = c4RunBfpWeightGrad(&c, xCodes, xExps, gyCodes, gyExps, gw, ref);
+
+    TEST_ASSERT_TRUE(st.fitsInt32);
+    TEST_ASSERT_TRUE(st.rounded > 0);
+    TEST_ASSERT_TRUE(st.leftShift > 0);
+    TEST_ASSERT_EQUAL_MEMORY(ref, gw, sizeof(gw));
+}
+
+/* ---- Conv1d dx under ARITH_BFP: integer end to end ---------------------
+ * The dx kernel emits the BFP_RAW (BfpScatterRef.h's bfpRefConv1dDxRaw) and
+ * the OUT_WRITE epilogue re-blocks it into the BFP dx wire in integers, by
+ * the OP's rounding mode, drawing (SR) from the op's RNG_TAG_OUT stream one
+ * draw per element in element order. The re-block reference
+ * (BfpScatterRef.h's bfpRefReblockRaw) is written from
+ * docs/conventions/arithmetic-bfp.md section 13 (stored exponent = the
+ * smallest E with absmax <= qMax 2^E, by search, not by bit length). */
+
+typedef struct dxWireCase {
+    size_t batch, cin, length, cout, groups, kernelSize, stride, dilation, padding;
+    uint8_t m; /* loss and weight mantissa bits */
+    size_t gyGroupSize, wGroupSize;
+    uint8_t wireM;        /* dx wire mantissa bits */
+    size_t wireGroupSize; /* 0 = per tensor */
+} dxWireCase_t;
+
+#define DX_WIRE_MAX 96
+
+typedef struct dxWireResult {
+    int32_t codes[DX_WIRE_MAX], refCodes[DX_WIRE_MAX];
+    uint8_t stored[DX_WIRE_MAX], refStored[DX_WIRE_MAX];
+    size_t n, numGroups;
+    bfpRefStats_t st;
+    roundingMode_t wireModeAfter;
+} dxWireResult_t;
+
+/* conv1dBackward (frozen: dx only) with BFP-stored loss and weights into a
+ * BFP dx wire whose template rounds HALF_AWAY; the op rounds by `opMode`.
+ * exec keyed by `seed` (the SR stream), NULL for HALF_AWAY. */
+static void dxRunIntoBfpWire(const dxWireCase_t *c, const int32_t *gyCodes, const uint8_t *gyExps,
+                             const int32_t *wCodes, const uint8_t *wExps, roundingMode_t opMode,
+                             uint64_t seed, dxWireResult_t *r) {
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernelExplicit(kernel, c->kernelSize, c->padding, c->dilation, c->stride);
+    windowGeometry1d_t geom = windowGeometry1dCalc(c->length, kernel);
+    size_t cinG = c->cin / c->groups;
+    size_t gyElems = c->batch * c->cout * geom.outputLength;
+    size_t wElems = c->cout * cinG * c->kernelSize;
+    r->n = c->batch * c->cin * c->length;
+    r->numGroups = c->wireGroupSize == 0 ? 1 : r->n / c->wireGroupSize;
+    TEST_ASSERT_TRUE(r->n <= DX_WIRE_MAX);
+
+    size_t wDims[] = {c->cout, cinG, c->kernelSize};
+    tensor_t *weightsParam =
+        buildBfpStoredTensor(3, wDims, wCodes, wExps, c->m, 8,
+                             c->wGroupSize == 0 ? 1 : wElems / c->wGroupSize, c->wGroupSize);
+    parameter_t *weights = parameterInit(weightsParam, NULL);
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *conv1d = buildBorrowedConv1dLayerGrouped(weights, NULL, kernel, c->groups, floatQ);
+    conv1d->config->conv1d->frozen = true;
+    conv1d->config->conv1d->propLossMath =
+        (arithmetic_t){.type = ARITH_BFP, .roundingMode = opMode};
+
+    size_t xDims[] = {c->batch, c->cin, c->length};
+    size_t gyDims[] = {c->batch, c->cout, geom.outputLength};
+    tensor_t *gy =
+        buildBfpStoredTensor(3, gyDims, gyCodes, gyExps, c->m, 8,
+                             c->gyGroupSize == 0 ? 1 : gyElems / c->gyGroupSize, c->gyGroupSize);
+    tensor_t *x = makeFloatTensor(xDims, 3, NULL); /* frozen: dx reads only the shape */
+    int32_t zeros[DX_WIRE_MAX] = {0};
+    uint8_t zeroExps[DX_WIRE_MAX] = {0};
+    tensor_t *dx = buildBfpStoredTensor(3, xDims, zeros, zeroExps, c->wireM, 8, r->numGroups,
+                                        c->wireGroupSize);
+
+    layerExec_t exec = {.key = rngKeyFromSeed(seed)};
+    conv1dBackward(conv1d, x, gy, dx, opMode == SR_HALF_AWAY ? &exec : NULL);
+
+    bfpQConfig_t *dxQC = dx->quantization->qConfig;
+    unpackSignExtend(dx->data, c->wireM, 0, r->codes, r->n);
+    memcpy(r->stored, dxQC->exponents, r->numGroups);
+    r->wireModeAfter = dxQC->roundingMode;
+
+    freeConv1dLayer(conv1d);
+    freeTensor(dx);
+    freeTensor(x);
+    freeTensor(gy);
+    freeQuantization(floatQ);
+
+    bfpRefGeom_t G = {.batch = c->batch,
+                      .cin = c->cin,
+                      .length = c->length,
+                      .cout = c->cout,
+                      .groups = c->groups,
+                      .kernelSize = c->kernelSize,
+                      .stride = c->stride,
+                      .dilation = c->dilation,
+                      .padLeft = geom.padLeft,
+                      .outLength = geom.outputLength};
+    bfpRefOperand_t gyRef = {gyCodes, gyExps, c->gyGroupSize, c->m, 8};
+    bfpRefOperand_t wRef = {wCodes, wExps, c->wGroupSize, c->m, 8};
+    int32_t rawMant[DX_WIRE_MAX];
+    int16_t rawE[DX_WIRE_MAX];
+    r->st = bfpRefConv1dDxRaw(&G, &gyRef, &wRef, c->wireGroupSize, rawMant, rawE);
+    /* The op's out stream: rngFold(op key, RNG_TAG_OUT, 0), op key =
+     * rngFold(rngFold(exec key, RNG_TAG_BACKWARD, 0), RNG_TAG_OP, OP(3)) --
+     * Conv1d's CONV1D_OP_PROP_LOSS, part of the key contract. */
+    rngStream_t out = rngOpen(
+        rngFold(rngFold(rngFold(exec.key, RNG_TAG_BACKWARD, 0u), RNG_TAG_OP, 3u), RNG_TAG_OUT, 0u));
+    bfpRefReblockRaw(rawMant, rawE, r->n, c->wireGroupSize, c->wireM, 8,
+                     opMode == SR_HALF_AWAY ? &out : NULL, r->refCodes, r->refStored);
+}
+
+static void dxSpreadOperands(uint32_t seed, size_t gyN, size_t gyGroups, size_t wN, size_t wGroups,
+                             uint8_t m, int32_t *gyCodes, uint8_t *gyExps, int32_t *wCodes,
+                             uint8_t *wExps) {
+    uint32_t s = seed;
+    uint32_t span = 1u << m;
+    for (size_t i = 0; i < gyN; i++) {
+        gyCodes[i] = (int32_t)(c4Lcg(&s) % span) - (int32_t)(span / 2);
+    }
+    for (size_t i = 0; i < wN; i++) {
+        wCodes[i] = (int32_t)(c4Lcg(&s) % span) - (int32_t)(span / 2);
+    }
+    for (size_t i = 0; i < gyGroups; i++) {
+        gyExps[i] = (uint8_t)(127 - 12 + (int)(c4Lcg(&s) % 25u));
+    }
+    for (size_t i = 0; i < wGroups; i++) {
+        wExps[i] = (uint8_t)(127 - 6 + (int)(c4Lcg(&s) % 13u));
+    }
+}
+
+/* m = 8 operands, conv groups 2, stride 2, dilation 2, EXPLICIT padding 2,
+ * a 24-binade loss spread, batch 2, into an m = 6 wire: raw groups of 4
+ * (inside rows and across them), 16 (across conv groups and the batch, so
+ * the raw re-grids the lower rows) and per tensor. Codes and stored
+ * exponents exact against the int64 scatter + the section-13 re-block. */
+void testConv1dBackwardBfpDxIntoBfpWireMatchesIntegerReference(void) {
+    static const size_t wireGroupSizes[] = {4, 16, 0};
+    bool anyRealigned = false;
+    for (size_t v = 0; v < 3; v++) {
+        dxWireCase_t c = {.batch = 2,
+                          .cin = 4,
+                          .length = 8,
+                          .cout = 4,
+                          .groups = 2,
+                          .kernelSize = 3,
+                          .stride = 2,
+                          .dilation = 2,
+                          .padding = 2,
+                          .m = 8,
+                          .gyGroupSize = 4,
+                          .wGroupSize = 6,
+                          .wireM = 6,
+                          .wireGroupSize = wireGroupSizes[v]};
+        int32_t gyCodes[32]; /* [2, 4, 4] */
+        int32_t wCodes[24];  /* [4, 2, 3] */
+        uint8_t gyExps[8];
+        uint8_t wExps[4];
+        dxSpreadOperands(31337u, 32, 8, 24, 4, 8, gyCodes, gyExps, wCodes, wExps);
+        dxWireResult_t r;
+        dxRunIntoBfpWire(&c, gyCodes, gyExps, wCodes, wExps, HALF_AWAY, 0, &r);
+
+        TEST_ASSERT_TRUE(r.st.fitsInt32);
+        TEST_ASSERT_TRUE(r.st.rounded > 0);
+        TEST_ASSERT_EQUAL_UINT8_ARRAY(r.refStored, r.stored, r.numGroups);
+        TEST_ASSERT_EQUAL_INT32_ARRAY(r.refCodes, r.codes, r.n);
+        anyRealigned = anyRealigned || r.st.realigned > 0;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(anyRealigned, "no raw group re-grids a lower row");
+}
+
+/* Worst case at m = 16 into an m = 16 wire: every code -2^15, overlapping
+ * taps (stride 1, K = 3), the m16 guard g > 0. Exact against the reference. */
+void testConv1dBackwardBfpDxWorstCaseM16IntoBfpWireIsExact(void) {
+    dxWireCase_t c = {.batch = 2,
+                      .cin = 2,
+                      .length = 6,
+                      .cout = 3,
+                      .groups = 1,
+                      .kernelSize = 3,
+                      .stride = 1,
+                      .dilation = 1,
+                      .padding = 1,
+                      .m = 16,
+                      .gyGroupSize = 0,
+                      .wGroupSize = 0,
+                      .wireM = 16,
+                      .wireGroupSize = 4};
+    int32_t gyCodes[36];
+    int32_t wCodes[18];
+    for (size_t i = 0; i < 36; i++) {
+        gyCodes[i] = -32768;
+    }
+    for (size_t i = 0; i < 18; i++) {
+        wCodes[i] = -32768;
+    }
+    uint8_t gyExps[] = {127 + 3};
+    uint8_t wExps[] = {127 - 5};
+    dxWireResult_t r;
+    dxRunIntoBfpWire(&c, gyCodes, gyExps, wCodes, wExps, HALF_AWAY, 0, &r);
+
+    TEST_ASSERT_TRUE(r.st.fitsInt32);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(r.refStored, r.stored, r.numGroups);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(r.refCodes, r.codes, r.n);
+    /* interior elements: 9 products of 2^30 * 2^-2 = 9 * 2^28 -> m16 code
+     * 9 * 2^11 = 18432 under stored E = 17 */
+    TEST_ASSERT_EQUAL_INT32(18432, r.codes[2]);
+    TEST_ASSERT_EQUAL_UINT8(127 + 17, r.stored[0]);
+}
+
+/* The training-side seam: the dx wire rounds by the OP's mode (SR here),
+ * not by the wire template's (HALF_AWAY, restored afterwards), drawing from
+ * the op's RNG_TAG_OUT stream one draw per element in element order -- the
+ * stream and order of the float re-pack the integer re-block replaced.
+ * Exact against the reference fed the same stream; non-vacuous: SR differs
+ * from HALF_AWAY on this data. */
+void testConv1dBackwardBfpDxIntoBfpWireSrFollowsTheOpModeAndTheOutStream(void) {
+    dxWireCase_t c = {.batch = 2,
+                      .cin = 4,
+                      .length = 8,
+                      .cout = 4,
+                      .groups = 2,
+                      .kernelSize = 3,
+                      .stride = 2,
+                      .dilation = 2,
+                      .padding = 2,
+                      .m = 8,
+                      .gyGroupSize = 4,
+                      .wGroupSize = 6,
+                      .wireM = 6,
+                      .wireGroupSize = 16};
+    int32_t gyCodes[32];
+    int32_t wCodes[24];
+    uint8_t gyExps[8];
+    uint8_t wExps[4];
+    dxSpreadOperands(4711u, 32, 8, 24, 4, 8, gyCodes, gyExps, wCodes, wExps);
+    dxWireResult_t sr;
+    dxRunIntoBfpWire(&c, gyCodes, gyExps, wCodes, wExps, SR_HALF_AWAY, 2026u, &sr);
+    dxWireResult_t ha;
+    dxRunIntoBfpWire(&c, gyCodes, gyExps, wCodes, wExps, HALF_AWAY, 0, &ha);
+
+    TEST_ASSERT_EQUAL_INT(HALF_AWAY, sr.wireModeAfter);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(sr.refStored, sr.stored, sr.numGroups);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(sr.refCodes, sr.codes, sr.n);
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(sr.codes, ha.codes, sizeof(sr.codes)) == 0,
+                              "SR and HALF_AWAY agree: the SR test is vacuous");
+}
+
+/* ---- Conv1d weightGrad / biasGrad into BFP grad STORAGE: integer end to end
+ * Under ARITH_BFP with a BFP grad and DYNAMIC_RESCALE, both grad kernels emit
+ * BFP_RAW on the grad's geometry (BfpScatterRef.h: the int64 sums of the
+ * scatter / the segment fold, then bfpRefRawFromRows' data-derived raw
+ * exponent) and the funnel's BFP_RAW_BACKWARD_ACC epilogue adds it to the
+ * stored grad with the integer engine (BfpAccumulateRef.h, the exact
+ * reference). The runs below chain several micro-batch calls into one grad
+ * and compare codes AND stored exponents after every call. */
+
+typedef struct gaCase {
+    size_t batch, cin, length, cout, groups, kernelSize, stride, dilation, padding;
+    uint8_t m;                       /* operand mantissa bits (x, gy) */
+    size_t xGroupSize, gyGroupSize;  /* 0 = per tensor */
+    uint8_t gm, ge;                  /* grad widths */
+    roundingMode_t grm;              /* grad storage rounding */
+    size_t wgGroupSize, bgGroupSize; /* grad groups (0 = per tensor, gradInit) */
+    uint8_t initWgE, initBgE;        /* stored exponent of the fresh (zero-code) grads */
+} gaCase_t;
+
+#define GA_MAX 256
+#define GA_MAX_CALLS 4
+
+typedef struct gaOperands {
+    int32_t x[GA_MAX], gy[GA_MAX];
+    uint8_t xE[GA_MAX], gyE[GA_MAX];
+} gaOperands_t;
+
+typedef struct gaResult {
+    size_t wN, bN, wGroups, bGroups;
+    int32_t wCodes[GA_MAX], bCodes[GA_MAX], wRef[GA_MAX], bRef[GA_MAX];
+    uint8_t wE[GA_MAX], bE[GA_MAX], wRefE[GA_MAX], bRefE[GA_MAX];
+    bfpRefStats_t wSt, bSt; /* summed over the calls */
+} gaResult_t;
+
+static size_t gaGroups(size_t n, size_t gsz) {
+    return gsz == 0 ? 1 : n / gsz;
+}
+
+/* A BFP grad with zero codes under the stored exponent `e` (gradInit's per-
+ * tensor template, or a hand-built grouped one -- the engine and the raw
+ * emit are grouped-capable; the public factories are per-tensor only). */
+static tensor_t *gaGrad(tensor_t *param, uint8_t m, uint8_t e, roundingMode_t rm, size_t gsz,
+                        uint8_t storedE) {
+    size_t n = calcNumberOfElementsByTensor(param);
+    tensor_t *g;
+    if (gsz == 0) {
+        quantization_t *q = quantizationInitBfp(m, e, rm);
+        g = gradInit(param, q, NULL);
+        freeQuantization(q);
+    } else {
+        quantization_t *q = quantizationInitBfpGrouped(m, e, rm, n / gsz, gsz);
+        g = initTensor(getShapeLike(param->shape), q, NULL);
+    }
+    bfpQConfig_t *qc = g->quantization->qConfig;
+    for (size_t i = 0; i < qc->numGroups; i++) {
+        qc->exponents[i] = storedE;
+    }
+    return g;
+}
+
+static void gaReadGrad(tensor_t *g, int32_t *codes, uint8_t *stored) {
+    bfpQConfig_t *qc = g->quantization->qConfig;
+    unpackSignExtend(g->data, qc->mantissaBits, 0, codes, calcNumberOfElementsByTensor(g));
+    memcpy(stored, qc->exponents, qc->numGroups);
+}
+
+/* Runs `calls` micro-batches (ops[j]) through conv1dCalcWeightGradsBfp and
+ * conv1dCalcBiasGradsBfp into one weight / bias grad pair and the reference
+ * chain next to it; asserts equality after every call. key NULL = no streams
+ * (HALF_AWAY grads only). */
+static void gaRun(const gaCase_t *c, const gaOperands_t *ops, size_t calls, const rngKey_t *key,
+                  gaResult_t *r) {
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernelExplicit(kernel, c->kernelSize, c->padding, c->dilation, c->stride);
+    windowGeometry1d_t geom = windowGeometry1dCalc(c->length, kernel);
+    size_t cinG = c->cin / c->groups;
+    size_t xElems = c->batch * c->cin * c->length;
+    size_t gyElems = c->batch * c->cout * geom.outputLength;
+    r->wN = c->cout * cinG * c->kernelSize;
+    r->bN = c->cout;
+    r->wGroups = gaGroups(r->wN, c->wgGroupSize);
+    r->bGroups = gaGroups(r->bN, c->bgGroupSize);
+    TEST_ASSERT_TRUE(xElems <= GA_MAX && gyElems <= GA_MAX && r->wN <= GA_MAX);
+
+    size_t wDims[] = {c->cout, cinG, c->kernelSize};
+    tensor_t *wParam = makeFloatTensor(wDims, 3, NULL);
+    quantization_t *wq = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 1, 0);
+    requantizeTensorInPlace(wParam, wq);
+    freeQuantization(wq);
+    parameter_t *weights =
+        parameterInit(wParam, gaGrad(wParam, c->gm, c->ge, c->grm, c->wgGroupSize, c->initWgE));
+    size_t bDims[] = {c->cout};
+    tensor_t *bParam = makeFloatTensor(bDims, 1, NULL);
+    parameter_t *bias =
+        parameterInit(bParam, gaGrad(bParam, c->gm, c->ge, c->grm, c->bgGroupSize, c->initBgE));
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *conv1d = buildBorrowedConv1dLayerGrouped(weights, bias, kernel, c->groups, floatQ);
+    conv1dConfig_t *cfg = conv1d->config->conv1d;
+    cfg->weightGradMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    cfg->biasGradMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    cfg->weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
+    cfg->biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
+
+    gaReadGrad(weights->grad, r->wRef, r->wRefE);
+    gaReadGrad(bias->grad, r->bRef, r->bRefE);
+    r->wSt = (bfpRefStats_t){.fitsInt32 = true};
+    r->bSt = (bfpRefStats_t){.fitsInt32 = true};
+    bfpRefGeom_t G = {.batch = c->batch,
+                      .cin = c->cin,
+                      .length = c->length,
+                      .cout = c->cout,
+                      .groups = c->groups,
+                      .kernelSize = c->kernelSize,
+                      .stride = c->stride,
+                      .dilation = c->dilation,
+                      .padLeft = geom.padLeft,
+                      .outLength = geom.outputLength};
+    size_t xDims[] = {c->batch, c->cin, c->length};
+    size_t gyDims[] = {c->batch, c->cout, geom.outputLength};
+    for (size_t j = 0; j < calls; j++) {
+        const gaOperands_t *o = &ops[j];
+        tensor_t *x = buildBfpStoredTensor(3, xDims, o->x, o->xE, c->m, 8,
+                                           gaGroups(xElems, c->xGroupSize), c->xGroupSize);
+        tensor_t *gy = buildBfpStoredTensor(3, gyDims, o->gy, o->gyE, c->m, 8,
+                                            gaGroups(gyElems, c->gyGroupSize), c->gyGroupSize);
+        conv1dCalcWeightGradsBfp(cfg, x, gy, key);
+        conv1dCalcBiasGradsBfp(cfg, gy, key);
+        freeTensor(gy);
+        freeTensor(x);
+
+        bfpRefOperand_t xRef = {o->x, o->xE, c->xGroupSize, c->m, 8};
+        bfpRefOperand_t gyRef = {o->gy, o->gyE, c->gyGroupSize, c->m, 8};
+        int64_t sum[GA_MAX];
+        int eAcc[GA_MAX];
+        int32_t mant[GA_MAX];
+        int16_t rawE[GA_MAX];
+        bfpRefConv1dWeightGradSums(&G, &xRef, &gyRef, sum, eAcc, &r->wSt);
+        bfpRefRawFromRows(sum, eAcc, r->wN, c->wgGroupSize, mant, rawE, &r->wSt);
+        rngStream_t s;
+        if (key != NULL) {
+            s = rngOpen(rngFold(*key, RNG_TAG_ACC, 0u));
+        }
+        bfpAccRefAccumulate(r->wRef, r->wRefE, mant, rawE, r->wN, c->wgGroupSize, c->gm, c->ge,
+                            c->grm, key != NULL ? &s : NULL);
+        bfpRefConv1dBiasGradSums(&G, &gyRef, sum, eAcc, &r->bSt);
+        bfpRefRawFromRows(sum, eAcc, r->bN, c->bgGroupSize, mant, rawE, &r->bSt);
+        if (key != NULL) {
+            s = rngOpen(rngFold(*key, RNG_TAG_ACC, 0u));
+        }
+        bfpAccRefAccumulate(r->bRef, r->bRefE, mant, rawE, r->bN, c->bgGroupSize, c->gm, c->ge,
+                            c->grm, key != NULL ? &s : NULL);
+
+        gaReadGrad(weights->grad, r->wCodes, r->wE);
+        gaReadGrad(bias->grad, r->bCodes, r->bE);
+        TEST_ASSERT_EQUAL_UINT8_ARRAY(r->wRefE, r->wE, r->wGroups);
+        TEST_ASSERT_EQUAL_INT32_ARRAY(r->wRef, r->wCodes, r->wN);
+        TEST_ASSERT_EQUAL_UINT8_ARRAY(r->bRefE, r->bE, r->bGroups);
+        TEST_ASSERT_EQUAL_INT32_ARRAY(r->bRef, r->bCodes, r->bN);
+    }
+    TEST_ASSERT_TRUE(r->wSt.fitsInt32);
+    TEST_ASSERT_TRUE(r->bSt.fitsInt32);
+    TEST_ASSERT_EQUAL_INT(c->grm,
+                          ((bfpQConfig_t *)weights->grad->quantization->qConfig)->roundingMode);
+
+    freeConv1dLayer(conv1d);
+    freeQuantization(floatQ);
+}
+
+/* Random operand codes in the full m-bit range; stored exponents uniform in
+ * bias + [lo, hi]. */
+static void gaFill(gaOperands_t *o, uint32_t seed, uint8_t m, size_t xN, size_t xGroups, int xLo,
+                   int xHi, size_t gyN, size_t gyGroups, int gyLo, int gyHi) {
+    uint32_t s = seed;
+    uint32_t span = 1u << m;
+    for (size_t i = 0; i < xN; i++) {
+        o->x[i] = (int32_t)(c4Lcg(&s) % span) - (int32_t)(span / 2u);
+    }
+    for (size_t i = 0; i < gyN; i++) {
+        o->gy[i] = (int32_t)(c4Lcg(&s) % span) - (int32_t)(span / 2u);
+    }
+    for (size_t i = 0; i < xGroups; i++) {
+        o->xE[i] = (uint8_t)(127 + xLo + (int)(c4Lcg(&s) % (uint32_t)(xHi - xLo + 1)));
+    }
+    for (size_t i = 0; i < gyGroups; i++) {
+        o->gyE[i] = (uint8_t)(127 + gyLo + (int)(c4Lcg(&s) % (uint32_t)(gyHi - gyLo + 1)));
+    }
+}
+
+/* The mixed C4 geometry (conv groups 2, stride 2, dilation 2, EXPLICIT pad
+ * 2, batch 2, grouped operands with a wide exponent spread) into per-tensor
+ * m8 grads, four micro-batches: the first from a fresh grad, the others on
+ * the carried grid, the third with a much smaller loss (the old grid
+ * dominates), the fourth much larger (the increment does). */
+static const gaCase_t kGaMixed = {.batch = 2,
+                                  .cin = 4,
+                                  .length = 10,
+                                  .cout = 4,
+                                  .groups = 2,
+                                  .kernelSize = 3,
+                                  .stride = 2,
+                                  .dilation = 2,
+                                  .padding = 2,
+                                  .m = 8,
+                                  .xGroupSize = 8,
+                                  .gyGroupSize = 5,
+                                  .gm = 8,
+                                  .ge = 8,
+                                  .grm = HALF_AWAY,
+                                  .wgGroupSize = 0,
+                                  .bgGroupSize = 0,
+                                  .initWgE = 127,
+                                  .initBgE = 127};
+
+static void gaMixedOperands(gaOperands_t *ops, uint32_t seed) {
+    static const int gyShift[GA_MAX_CALLS] = {0, 3, -14, 12};
+    for (size_t j = 0; j < GA_MAX_CALLS; j++) {
+        gaFill(&ops[j], seed + 101u * (uint32_t)j, 8, 80, 10, -10, 10, 40, 8, -8 + gyShift[j],
+               8 + gyShift[j]);
+    }
+}
+
+void testConv1dBfpGradsIntoBfpStorageMatchIntegerReferenceOverMicroBatches(void) {
+    static gaOperands_t ops[GA_MAX_CALLS];
+    static gaResult_t r;
+    gaMixedOperands(ops, 777u);
+    gaRun(&kGaMixed, ops, GA_MAX_CALLS, NULL, &r);
+    TEST_ASSERT_TRUE(r.wSt.rounded > 0);   /* in-loop alignment rounded */
+    TEST_ASSERT_TRUE(r.wSt.realigned > 0); /* raw re-grid dropped a fraction */
+    TEST_ASSERT_TRUE(r.wSt.leftShift > 0);
+    TEST_ASSERT_TRUE(r.bSt.leftShift > 0);
+}
+
+/* Grouped grads whose groups straddle output-channel rows (weight rows are
+ * cinG * K = 6 long, groups of 4; bias groups of 2), from zero codes under a
+ * STALE exponent (the fresh-accumulator rule: an all-zero old side must not
+ * set the working grid). */
+void testConv1dBfpGradsIntoGroupedBfpStorageStraddlingRowsMatchReference(void) {
+    static gaOperands_t ops[GA_MAX_CALLS];
+    static gaResult_t r;
+    gaCase_t c = kGaMixed;
+    c.wgGroupSize = 4;
+    c.bgGroupSize = 2;
+    c.initWgE = 127 + 40;
+    c.initBgE = 127 - 40;
+    c.gm = 6;
+    gaMixedOperands(ops, 4242u);
+    gaRun(&c, ops, GA_MAX_CALLS, NULL, &r);
+    TEST_ASSERT_TRUE(r.wSt.realigned > 0);
+}
+
+/* SR grads (the HAR template): the engine rounds by the grad's own mode,
+ * drawing one uniform per element in element order from the op's ACC(0)
+ * stream (the key the layer passes). Non-vacuous: HALF_AWAY grads differ. */
+void testConv1dBfpGradsIntoSrBfpStorageDrawFromTheAccStream(void) {
+    static gaOperands_t ops[GA_MAX_CALLS];
+    static gaResult_t sr;
+    static gaResult_t ha;
+    gaMixedOperands(ops, 99u);
+    rngKey_t key = rngKeyFromSeed(2027u);
+    gaCase_t c = kGaMixed;
+    c.grm = SR_HALF_AWAY;
+    gaRun(&c, ops, 3, &key, &sr);
+    gaRun(&kGaMixed, ops, 3, NULL, &ha);
+    TEST_ASSERT_FALSE_MESSAGE(memcmp(sr.wCodes, ha.wCodes, sr.wN * sizeof(int32_t)) == 0,
+                              "SR and HALF_AWAY weight grads agree: the SR test is vacuous");
+}
+
+/* The bias sum's guard is a pure-SUM guard (N 2^(m-1), not the product
+ * bound N 2^(2m-2)): one loss group per code (every code its own segment).
+ * Each channel's first code is a 1 at E = 0 (the row's top; a ZERO code
+ * there would set nothing), the others sit 15-20 binades lower. With batch * outputLength = 10
+ * codes the sum guard (-20) keeps every segment exact; the product guard
+ * (-13) would round the lowest ones to a few bits -- coarser than the m16
+ * grad's step. */
+void testConv1dBfpBiasGradSegmentsFoldExactlyUnderTheSumGuard(void) {
+    static gaOperands_t ops[2];
+    static gaResult_t r;
+    gaCase_t c = kGaMixed;
+    c.gyGroupSize = 1;
+    c.gm = 16;
+    for (size_t j = 0; j < 2; j++) {
+        gaFill(&ops[j], 515u + (uint32_t)j, 8, 80, 10, -2, 2, 40, 40, -20, -15);
+        for (size_t oc = 0; oc < 4; oc++) {
+            ops[j].gy[oc * 5] = 1; /* batch 0, outPos 0 of channel oc */
+            ops[j].gyE[oc * 5] = 127;
+        }
+    }
+    gaRun(&c, ops, 2, NULL, &r);
+    TEST_ASSERT_EQUAL_size_t(0, r.bSt.rounded);
+}
+
+/* The raw exponent comes from the data, not from the rows' E_acc bounds. Two
+ * output channels, per-row loss groups: channel 0's loss group is all zero
+ * in the canonical zero state (stored exponent = bias, E = 0 -- what every
+ * BFP pack writes for an all-zero group), channel 1's holds full-scale codes
+ * 30 binades lower. By E_acc channel 0 would set the per-tensor raw exponent
+ * and channel 1's sums would be re-gridded half away ~30 binades up, i.e. to
+ * a few bits, coarser than the 8-bit grad step; from the data channel 1
+ * carries the top and keeps every bit (no sum re-gridded). */
+void testConv1dBfpWeightGradRawExponentFollowsTheDataNotTheBound(void) {
+    gaCase_t c = {.batch = 1,
+                  .cin = 1,
+                  .length = 8,
+                  .cout = 2,
+                  .groups = 1,
+                  .kernelSize = 3,
+                  .stride = 1,
+                  .dilation = 1,
+                  .padding = 0,
+                  .m = 8,
+                  .xGroupSize = 0,
+                  .gyGroupSize = 6, /* one loss group per output channel row */
+                  .gm = 8,
+                  .ge = 8,
+                  .grm = HALF_AWAY,
+                  .wgGroupSize = 0,
+                  .bgGroupSize = 0,
+                  .initWgE = 127,
+                  .initBgE = 127};
+    static gaOperands_t ops[1];
+    static gaResult_t r;
+    for (size_t i = 0; i < 8; i++) {
+        ops[0].x[i] = 100 - (int32_t)(i * 23);
+    }
+    ops[0].xE[0] = 127 - 7;
+    for (size_t t = 0; t < 6; t++) {
+        ops[0].gy[t] = 0;                          /* channel 0: zero state */
+        ops[0].gy[6 + t] = (int32_t)(t * 37) - 90; /* channel 1: full scale, low exponent */
+    }
+    ops[0].gyE[0] = 127;
+    ops[0].gyE[1] = 127 - 30;
+    gaRun(&c, ops, 1, NULL, &r);
+    TEST_ASSERT_EQUAL_size_t(0, r.wSt.realigned);
+    int32_t top = 0;
+    for (size_t k = 0; k < 3; k++) {
+        TEST_ASSERT_EQUAL_INT32(0, r.wCodes[k]);
+        int32_t a = r.wCodes[3 + k] < 0 ? -r.wCodes[3 + k] : r.wCodes[3 + k];
+        top = a > top ? a : top;
+    }
+    TEST_ASSERT_TRUE(top >= 64); /* channel 1 owns the grid: its top uses all 8 bits */
+}
+
+/* ---- Zero groups never set E_acc -------------------------------------------
+ * An all-zero operand group (zero state: stored = bias, E = 0) next to live
+ * codes 28 binades lower. The grads are m16 and start from zero, and every
+ * exact sum fits 15 bits, so the stored grad equals the exact value iff the
+ * kernel's raw kept every bit. */
+
+static const gaCase_t kGaZg = {.batch = 1,
+                               .cin = 1,
+                               .length = 8,
+                               .cout = 1,
+                               .groups = 1,
+                               .kernelSize = 3,
+                               .stride = 1,
+                               .dilation = 1,
+                               .padding = 0,
+                               .m = 8,
+                               .xGroupSize = 4,
+                               .gyGroupSize = 3,
+                               .gm = 16,
+                               .ge = 8,
+                               .grm = HALF_AWAY,
+                               .wgGroupSize = 0,
+                               .bgGroupSize = 0,
+                               .initWgE = 127,
+                               .initBgE = 127};
+
+static void zgAssertGradExact(int32_t code, uint8_t stored, int64_t exact, int exactE, size_t i) {
+    TEST_ASSERT_TRUE(exact > -32768 && exact < 32768);
+    assertBfpValueExact(code, (int)stored - 127, exact, exactE, i);
+}
+
+/* weightGrad: x [1, 1, 8] in groups of 4 (group 0 live at E = -6, group 1
+ * all zero); loss [1, 1, 6] in groups of 3 (group 0 live at E = -28, group 1
+ * all zero). Every product is at E = -34. */
+void testConv1dBfpWeightGradZeroGroupsDoNotSetTheAccumulator(void) {
+    static gaOperands_t ops[1];
+    static gaResult_t r;
+    static const int32_t x[8] = {7, -5, 3, -9, 0, 0, 0, 0};
+    static const int32_t gy[6] = {113, -77, 91, 0, 0, 0};
+    memcpy(ops[0].x, x, sizeof(x));
+    memcpy(ops[0].gy, gy, sizeof(gy));
+    ops[0].xE[0] = 127 - 6;
+    ops[0].xE[1] = 127;
+    ops[0].gyE[0] = 127 - 28;
+    ops[0].gyE[1] = 127;
+    gaRun(&kGaZg, ops, 1, NULL, &r);
+    for (size_t k = 0; k < 3; k++) {
+        int64_t exact = 0;
+        for (size_t t = 0; t < 6; t++) {
+            exact += (int64_t)gy[t] * x[t + k];
+        }
+        zgAssertGradExact(r.wCodes[k], r.wE[0], exact, -34, k);
+    }
+}
+
+/* biasGrad: loss [2, 1, 4] in one group per batch row, row 0 all zero, row 1
+ * live at E = -28. */
+void testConv1dBfpBiasGradZeroGroupDoesNotSetTheAccumulator(void) {
+    gaCase_t c = kGaZg;
+    c.batch = 2;
+    c.length = 6;
+    c.xGroupSize = 0;
+    c.gyGroupSize = 4;
+    static gaOperands_t ops[1];
+    static gaResult_t r;
+    static const int32_t gy[8] = {0, 0, 0, 0, 113, -77, 91, -59};
+    for (size_t i = 0; i < 12; i++) {
+        ops[0].x[i] = (int32_t)(i % 5) - 2;
+    }
+    ops[0].xE[0] = 127;
+    memcpy(ops[0].gy, gy, sizeof(gy));
+    ops[0].gyE[0] = 127;
+    ops[0].gyE[1] = 127 - 28;
+    gaRun(&c, ops, 1, NULL, &r);
+    zgAssertGradExact(r.bCodes[0], r.bE[0], 113 - 77 + 91 - 59, -28, 0);
+}
+
+/* Cancellation to the exact zero state: one product per grad element, codes
+ * that fit the grad exactly, then the same micro-batch with the loss negated
+ * -- every sum is exactly zero, so codes 0 and stored = bias. */
+void testConv1dBfpGradsCancelToTheZeroState(void) {
+    gaCase_t c = {.batch = 1,
+                  .cin = 1,
+                  .length = 1,
+                  .cout = 2,
+                  .groups = 1,
+                  .kernelSize = 1,
+                  .stride = 1,
+                  .dilation = 1,
+                  .padding = 0,
+                  .m = 8,
+                  .xGroupSize = 0,
+                  .gyGroupSize = 0,
+                  .gm = 8,
+                  .ge = 8,
+                  .grm = HALF_AWAY,
+                  .wgGroupSize = 0,
+                  .bgGroupSize = 0,
+                  .initWgE = 127,
+                  .initBgE = 127};
+    static gaOperands_t ops[2];
+    static gaResult_t r;
+    ops[0].x[0] = 3;
+    ops[0].xE[0] = 127 - 4;
+    ops[0].gy[0] = 5;
+    ops[0].gy[1] = -7;
+    ops[0].gyE[0] = 127 - 9;
+    ops[1] = ops[0];
+    ops[1].gy[0] = -5;
+    ops[1].gy[1] = 7;
+    gaRun(&c, ops, 1, NULL, &r);
+    /* {15, -21} * 2^-13: absmax 21 <= 127 * 2^(E + 13) first at E = -15 */
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){60, -84}), r.wCodes, 2);
+    TEST_ASSERT_EQUAL_UINT8(127 - 15, r.wE[0]);
+    gaRun(&c, ops, 2, NULL, &r);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){0, 0}), r.wCodes, 2);
+    TEST_ASSERT_EQUAL_UINT8(127, r.wE[0]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(((int32_t[]){0, 0}), r.bCodes, 2);
+    TEST_ASSERT_EQUAL_UINT8(127, r.bE[0]);
+}
+
+/* Exponent extremes, from fresh grads: m16 worst case (every code -2^15,
+ * every product 2^30, the guard right-shifts) into an m16 grad, exact over
+ * two calls; operands at the top of e = 8 (the grad saturates at the cap)
+ * and at its floor (the grad flushes toward the smallest exponent). */
+void testConv1dBfpGradsExponentExtremes(void) {
+    gaCase_t c = {.batch = 2,
+                  .cin = 2,
+                  .length = 6,
+                  .cout = 2,
+                  .groups = 1,
+                  .kernelSize = 3,
+                  .stride = 1,
+                  .dilation = 1,
+                  .padding = 1,
+                  .m = 16,
+                  .xGroupSize = 0,
+                  .gyGroupSize = 0,
+                  .gm = 16,
+                  .ge = 8,
+                  .grm = HALF_AWAY,
+                  .wgGroupSize = 0,
+                  .bgGroupSize = 0,
+                  .initWgE = 127,
+                  .initBgE = 127};
+    static gaOperands_t ops[2];
+    static gaResult_t r;
+    for (size_t i = 0; i < 24; i++) {
+        ops[0].x[i] = -32768;
+        ops[0].gy[i] = -32768;
+    }
+    ops[0].xE[0] = 127 - 4;
+    ops[0].gyE[0] = 127 + 1;
+    ops[1] = ops[0];
+    gaRun(&c, ops, 2, NULL, &r);
+    /* centre tap: 2 * 6 products of 2^30 * 2^-3 per call, two calls ->
+     * 24 * 2^27 = 24576 * 2^17 at m16 (qMax 32767) */
+    TEST_ASSERT_EQUAL_INT32(24576, r.wCodes[1]);
+    TEST_ASSERT_EQUAL_UINT8(127 + 17, r.wE[0]);
+
+    c.m = 8;
+    c.gm = 8;
+    for (size_t i = 0; i < 24; i++) {
+        ops[0].x[i] = (int32_t)(i * 11 % 256) - 128;
+        ops[0].gy[i] = 127 - (int32_t)(i * 5 % 256);
+    }
+    ops[0].xE[0] = 254;
+    ops[0].gyE[0] = 250;
+    gaRun(&c, ops, 1, NULL, &r);
+    TEST_ASSERT_EQUAL_UINT8(254, r.wE[0]); /* capped: bias + 127 */
+    ops[0].xE[0] = 1;
+    ops[0].gyE[0] = 3;
+    gaRun(&c, ops, 1, NULL, &r);
+    TEST_ASSERT_EQUAL_UINT8(0, r.wE[0]); /* floored */
+}
+
+/* The fixed grid is a separate mode: a BFP grad under OUT_ACC_FIXED_SCALE
+ * keeps the FLOAT32 raw (the float bridge) and the float fixed-grid engine
+ * -- the result equals that engine fed the float reference. */
+void testConv1dBfpWeightGradFixedScaleKeepsTheFloatBridge(void) {
+    static gaOperands_t ops[GA_MAX_CALLS];
+    gaMixedOperands(ops, 31u);
+    const gaCase_t *c = &kGaMixed;
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
+    initKernelExplicit(kernel, c->kernelSize, c->padding, c->dilation, c->stride);
+    windowGeometry1d_t geom = windowGeometry1dCalc(c->length, kernel);
+    size_t wDims[] = {c->cout, c->cin / c->groups, c->kernelSize};
+    tensor_t *wParam = makeFloatTensor(wDims, 3, NULL);
+    quantization_t *wq = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 1, 0);
+    requantizeTensorInPlace(wParam, wq);
+    freeQuantization(wq);
+    parameter_t *weights = parameterInit(wParam, gaGrad(wParam, 8, 8, HALF_AWAY, 0, 127));
+    tensor_t *twin = gaGrad(wParam, 8, 8, HALF_AWAY, 0, 127);
+    quantization_t *floatQ = quantizationInitFloat();
+    layer_t *conv1d = buildBorrowedConv1dLayerGrouped(weights, NULL, kernel, c->groups, floatQ);
+    conv1dConfig_t *cfg = conv1d->config->conv1d;
+    cfg->weightGradMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
+    cfg->weightGradAccMode = OUT_ACC_FIXED_SCALE;
+
+    size_t xDims[] = {c->batch, c->cin, c->length};
+    size_t gyDims[] = {c->batch, c->cout, geom.outputLength};
+    tensor_t *x = buildBfpStoredTensor(3, xDims, ops[0].x, ops[0].xE, 8, 8, 10, 8);
+    tensor_t *gy = buildBfpStoredTensor(3, gyDims, ops[0].gy, ops[0].gyE, 8, 8, 8, 5);
+    conv1dCalcWeightGradsBfp(cfg, x, gy, NULL);
+
+    bfpRefGeom_t G = {.batch = c->batch,
+                      .cin = c->cin,
+                      .length = c->length,
+                      .cout = c->cout,
+                      .groups = c->groups,
+                      .kernelSize = c->kernelSize,
+                      .stride = c->stride,
+                      .dilation = c->dilation,
+                      .padLeft = geom.padLeft,
+                      .outLength = geom.outputLength};
+    bfpRefOperand_t xRef = {ops[0].x, ops[0].xE, 8, 8, 8};
+    bfpRefOperand_t gyRef = {ops[0].gy, ops[0].gyE, 5, 8, 8};
+    float ref[24];
+    (void)bfpRefConv1dWeightGrad(&G, &xRef, &gyRef, ref);
+    accumulateFloatIntoBfpTensorFixedGrid(twin, ref, 24, NULL);
+    int32_t got[24];
+    int32_t want[24];
+    uint8_t gotE[1];
+    uint8_t wantE[1];
+    gaReadGrad(weights->grad, got, gotE);
+    gaReadGrad(twin, want, wantE);
+    TEST_ASSERT_EQUAL_UINT8(wantE[0], gotE[0]);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(want, got, 24);
+
+    freeTensor(twin);
+    freeTensor(gy);
+    freeTensor(x);
+    freeConv1dLayer(conv1d);
+    freeQuantization(floatQ);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testConv1dWgGuardProvenSafeN511RunsExact);
@@ -3319,6 +4304,21 @@ int main() {
     RUN_TEST(testConv1dBackwardBfpWeightGradFullyClippedTapIsZero);
     RUN_TEST(testConv1dBackwardBfpDxPowerOfTwoBitIdenticalToGroupedSym);
     RUN_TEST(testConv1dBackwardBfpDxConvGroups2MatchesGold);
+    RUN_TEST(testConv1dBackwardBfpWeightGradWorstCaseM16IsExact);
+    RUN_TEST(testConv1dBackwardBfpWeightGradMixedExponentsMatchesReference);
+    RUN_TEST(testConv1dBackwardBfpDxIntoBfpWireMatchesIntegerReference);
+    RUN_TEST(testConv1dBackwardBfpDxWorstCaseM16IntoBfpWireIsExact);
+    RUN_TEST(testConv1dBackwardBfpDxIntoBfpWireSrFollowsTheOpModeAndTheOutStream);
+    RUN_TEST(testConv1dBfpGradsIntoBfpStorageMatchIntegerReferenceOverMicroBatches);
+    RUN_TEST(testConv1dBfpGradsIntoGroupedBfpStorageStraddlingRowsMatchReference);
+    RUN_TEST(testConv1dBfpGradsIntoSrBfpStorageDrawFromTheAccStream);
+    RUN_TEST(testConv1dBfpBiasGradSegmentsFoldExactlyUnderTheSumGuard);
+    RUN_TEST(testConv1dBfpWeightGradRawExponentFollowsTheDataNotTheBound);
+    RUN_TEST(testConv1dBfpWeightGradZeroGroupsDoNotSetTheAccumulator);
+    RUN_TEST(testConv1dBfpBiasGradZeroGroupDoesNotSetTheAccumulator);
+    RUN_TEST(testConv1dBfpGradsCancelToTheZeroState);
+    RUN_TEST(testConv1dBfpGradsExponentExtremes);
+    RUN_TEST(testConv1dBfpWeightGradFixedScaleKeepsTheFloatBridge);
     RUN_TEST(testConv1dCalcWeightGradsBfpRejectsFloat32Weights);
     RUN_TEST(testConv1dCalcBiasGradsBfpRejectsFloat32Weights);
     RUN_TEST(testConv1dCalcWeightGradsBfpRejectsInputChannelMismatch);

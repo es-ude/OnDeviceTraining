@@ -114,6 +114,11 @@ size_t packedMetadataBytes(qtype_t type, size_t numGroups);
  * to WARN. */
 typedef enum bfpMathSweep { BFP_MATH_NATIVE, BFP_MATH_FQ } bfpMathSweep_t;
 typedef enum bfpRoundingSweep { BFP_ROUNDING_SR, BFP_ROUNDING_DET } bfpRoundingSweep_t;
+/* BFP_HEAD (REQUIRED, no default -- ruling R2): the model head, i.e. the
+ * Softmax forward + CrossEntropy's combined gradient p - y. float: float
+ * Softmax and p - y, ONE float -> BFP conversion onto the loss-grad wire;
+ * bfp: the integer Softmax and the integer p - y (needs BFP wires). */
+typedef enum bfpHeadSweep { BFP_HEAD_FLOAT, BFP_HEAD_BFP } bfpHeadSweep_t;
 enum {
     LEGACY_KNOB_SYM_BITS = 1u << 0,
     LEGACY_KNOB_SYM_WIRES = 1u << 1,
@@ -134,6 +139,7 @@ typedef struct bfpSweepConfig {
     bool bfpGrads;
     bool bfpState;
     bfpRoundingSweep_t rounding;
+    bfpHeadSweep_t head;
     unsigned ignoredLegacyKnobs;
     char weightBlockStr[16];
     char wireBlockStr[16];

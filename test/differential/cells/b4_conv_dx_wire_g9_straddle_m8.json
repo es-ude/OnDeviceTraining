@@ -1,0 +1,61 @@
+{
+  "name": "b4_conv_dx_wire_g9_straddle_m8",
+  "description": "B4 Conv1d dx into a BFP wire (m8, groupSize 9 over 30 elements per batch): VALID, batch 3, per-batch loss exponents far apart, so the raw groups at the batch boundaries straddle two batches of different E_acc (section 14 re-grid).",
+  "family": "bfp_gemm",
+  "op": "conv1d",
+  "direction": "dx",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "geometry": {
+    "kernelSize": 3,
+    "padding": "VALID",
+    "groups": 1
+  },
+  "output": {
+    "dtype": "BFP",
+    "m": 8,
+    "e": 8,
+    "groupSize": 9
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 5502,
+    "batch": 3,
+    "cin": 5,
+    "length": 6,
+    "cout": 3,
+    "kernelSize": 3,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 1.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.5,
+      "expSpread": 0
+    },
+    "loss": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 12,
+      "absmax": 1.0,
+      "expSpread": 24
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED"
+  }
+}

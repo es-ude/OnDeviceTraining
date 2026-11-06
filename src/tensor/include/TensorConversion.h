@@ -221,6 +221,167 @@ void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment,
  * SYM/ASYM scale arms, there is nothing here to propagate it into. */
 void scaleBfpTensorInPlace(tensor_t *t, float factor, rngStream_t *rs);
 
-extern conversionFunction_t conversionMatrix[7][7];
+/*! @brief The INTEGER dynamic-rescale grad accumulate: target (BFP) +=
+ * increment (BFP_RAW, int32 mantissas + one unbiased exponent per TARGET
+ * group), shifts and integer rounding only -- no float, no division, no int64
+ * (arithmetic-bfp.md §15; the integer twin of accumulateTensorIntoBfpRescale).
+ *
+ * Per target group: a working grid 2^E_c from the actual old and raw absmax
+ * (every aligned term below 2^30, so the int32 sum cannot overflow -- the
+ * bound is re-derived on every call); the exact sum in quotient/remainder
+ * form (the bits an alignment drops are carried to the final rounding, so a
+ * small increment is never erased before SR); the fresh exponent from the SUM
+ * (cancellation included) by the integer exponent rule, floored at E_c (a sum
+ * cancelled below the working grid's top m - 1 bits keeps E_c), then the BFP
+ * D6 clamp; ONE rounding per element by the target config's roundingMode
+ * (HALF_AWAY, or SR "lift iff u < frac" on a 32-bit fraction: exact for a
+ * remainder of up to 32 bits, below 2^-32 of a code step the probability is
+ * truncated -- the documented cutoff), clamped to [-2^(m-1), qMax]. Under SR
+ * exactly one draw per element in element order on every path (zero, exact,
+ * saturated). An all-zero sum is the zero state (stored = bias); n == 0
+ * leaves the zero state too (R7). A raw so large that it exceeds the
+ * exponent cap by 2^30 code steps saturates its element exactly.
+ *
+ * In place, alias-safe: the old exponents are published only after the last
+ * read of their group (the bfpRescaleWalk window rule). Fails fast on a
+ * non-BFP target or non-BFP_RAW increment, an element-count or geometry
+ * mismatch (the raw must carry the target's {numGroups, groupSize}), an
+ * increment sharing the target's data pointer, and SR without a stream.
+ * Direct-call only, not a conversionMatrix cell. */
+void accumulateBfpRawIntoBfpRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs);
+
+/* bfpScalar_t (BfpKernelSupport.h); a declaration may take it incomplete,
+ * callers include BfpKernelSupport.h to build one. */
+struct bfpScalar;
+
+/*! @brief The INTEGER in-place scale of a BFP tensor by a scalar s = q * 2^e
+ * in (0, 1] -- the macro-batch mean scale (s = bfpScalarFromCount(B)); no
+ * float, no division, no int64 (arithmetic-bfp.md §15.6, the integer twin of
+ * scaleBfpTensorInPlace for factors <= 1).
+ *
+ * Per group: A = the absmax code; A == 0 is the zero state (stored = bias),
+ * no draws. Otherwise code * q (exact in int32) is a raw mantissa on the grid
+ * 2^(E + e), and the fresh exponent comes from q * A by the integer exponent
+ * rule (the float walker's rule: smallest exponent with q * A <= qMax on it),
+ * floored at stored 0; the emit shift d = fresh - E - e is >= 0 (q >= 2^14
+ * gives q * A at least 15 bits). A power-of-two s on a group whose grid stays
+ * tight and above the floor (q == 2^14, d == 14) is exact by the exponent
+ * alone: codes are not touched and nothing is drawn. Every other group --
+ * a non-power-of-two s, a renormalizing or floored grid -- re-emits each
+ * code as round(code * q / 2^d) by the config's roundingMode (bfpQrRound:
+ * the remainder carried to the rounding, so a code driven below one step at
+ * the floor still lifts with its exact probability), clamped to the code
+ * range; under SR one draw per element of such a group, in element order.
+ * The cap is unreachable for s <= 1 except through the code bound itself
+ * (clamped). Old exponents stay readable until each group's last element is
+ * consumed (the rescale engines' one-group window, fixed stack).
+ * Fails fast: non-BFP tensor, s outside (0, 1] or not normalized
+ * (2^14 <= q <= 2^15 - 1), SR without a stream. n == 0 -> zero state. */
+void scaleBfpTensorByScalarInPlace(tensor_t *t, struct bfpScalar s, rngStream_t *rs);
+
+/*! @brief The INTEGER SGD momentum store v' = mu * v + g, in place on a BFP
+ * state v, from a BFP gradient g and a scalar mu = q * 2^e in [0, 1] -- no
+ * float, no division, no int64 (arithmetic-bfp.md §15.7; the integer twin of
+ * the float update op state = momentum * state + grad).
+ *
+ * Per destination group, each operand under its OWN exponent: the term
+ * v_i * q (exact in int32) on 2^(E_v + e) and g_i on 2^E_g. A working grid
+ * 2^E_c from the actual absmax of both terms (E_c = max(top) - 30, so each
+ * aligned term stays below 2^30 and their sum fits int32; re-derived on every
+ * call), capped at the state's top exponent; the exact sum in
+ * quotient/remainder form (the term that sets E_c is exact, so at most one
+ * operand carries a tail -- bfpQrAdd checks it); the fresh exponent from the
+ * SUM (cancellation included) by the integer exponent rule, floored at E_c,
+ * then the BFP D6 clamp; ONE rounding per element by `rm` -- the
+ * operation's write-back mode, not the state's storage mode (#282) -- with
+ * the discarded tail carried to it (SR "lift iff u < frac" on a 32-bit
+ * fraction; below 2^-32 of a code step truncated, the §15 cutoff), clamped
+ * to [-2^(m-1), qMax]. Under SR exactly one draw per element in element
+ * order on every path (zero, exact, saturated): the draw count of the float
+ * op's OUT_WRITE re-pack. A gradient so far above the state's exponent cap
+ * that its term reaches 2^30 on the capped grid saturates its element
+ * exactly. An all-zero sum is the zero state (stored = bias); n == 0 too.
+ *
+ * In place, alias-safe: the state's old exponents are published only after
+ * the last read of their group (the rescale engines' one-group window, two
+ * fixed rings and two fixed chunk buffers: bounded stack, no VLA). The
+ * gradient is read only; it is per-tensor or in the state's geometry (its
+ * exponent per state group: its own group, or its only one). Fails fast:
+ * non-BFP state or gradient, element-count mismatch, any other gradient
+ * geometry, mantissa width > 16, a gradient sharing the state's data, mu not
+ * normalized or outside [0, 1], a rounding mode other than HALF_AWAY /
+ * SR_HALF_AWAY, SR without a stream. */
+void momentumStoreBfpInPlace(tensor_t *state, const tensor_t *grad, struct bfpScalar mu,
+                             roundingMode_t rm, rngStream_t *rs);
+
+/*! @brief The INTEGER SGD parameter update w' = w - lr * u, in place on a BFP
+ * parameter w, from a BFP update u -- the STORED new momentum (after its own
+ * rounding), or the gradient on the stateless path -- and a scalar lr = q *
+ * 2^e (any sign and binade, normalized) -- no float, no division, no int64
+ * (arithmetic-bfp.md §15.7; the integer twin of the float update op param =
+ * param - lr * state). The same engine as momentumStoreBfpInPlace with the
+ * roles swapped: the parameter is the narrow term (its codes on 2^E_w), the
+ * update the wide one (u_i * q, exact in int32, on 2^(E_u + e)).
+ *
+ * Per PARAMETER group (the parameter's own BFP geometry: per-channel weights
+ * keep one exponent per channel), each operand under its OWN exponent; the
+ * update is per-tensor or in the parameter's geometry. Working grid E_c =
+ * max(E_w + bitlen(A_w), E_u + e + bitlen(q * A_u)) - 30, capped at the
+ * parameter's top exponent; the exact difference in quotient/remainder form;
+ * the fresh exponent from the RESULT (cancellation included) by the integer
+ * exponent rule, floored at E_c, then the BFP D6 clamp; ONE rounding per
+ * element by `rm` (the optimizer's write-back mode, #282) with the discarded
+ * tail carried to it -- an update far below one code step still moves the
+ * code with its exact probability (SR "lift iff u < frac" on a 32-bit
+ * fraction; below 2^-32 of a step truncated, the §15 cutoff) -- clamped to
+ * [-2^(m-1), qMax]. Under SR exactly one draw per element in element order
+ * on every path (zero, exact, saturated): the draw count of the float op's
+ * OUT_WRITE re-pack. An update so far above the parameter's exponent cap that
+ * its term reaches 2^30 on the capped grid saturates the element with the
+ * sign of -lr * u. lr = 0 re-grids w exactly; an all-zero result is the zero
+ * state (stored = bias); n == 0 too.
+ *
+ * In place, alias-safe (the parameter's old exponents are published only
+ * after the last read of their group; fixed rings and chunk buffers, no VLA).
+ * The update is read only. Fails fast: non-BFP parameter or update,
+ * element-count mismatch, an update geometry other than per-tensor or the
+ * parameter's, mantissa width > 16, an update sharing the parameter's data, lr
+ * not normalized, a rounding mode other than HALF_AWAY / SR_HALF_AWAY, SR
+ * without a stream. */
+void paramUpdateBfpInPlace(tensor_t *param, const tensor_t *update, struct bfpScalar lr,
+                           roundingMode_t rm, rngStream_t *rs);
+
+/*! @brief BFP_RAW -> BFP: the integer re-block of the funnel's forward raw
+ * (int32 mantissas + one UNBIASED int16 exponent per TARGET group) onto the
+ * target's grid -- shifts and integer rounding only, no float.
+ *
+ * Per target group: uint32 absmax of the mantissas; stored exponent by the
+ * SAME rule as deriveBfpStoredExponent in integer form (smallest E with
+ * absmax <= qMax * 2^E, from one bit length plus one correcting compare,
+ * then the BFP D6 clamp to [0, min(2^e - 1, bias + 127)]; an all-zero group
+ * is the zero state, stored = bias); then ONE two-sided shift per group,
+ * k = stored - bias - rawE: k in [1, 31] rounds by the target config's
+ * roundingMode -- HALF_AWAY on the magnitude, or SR in integer form (lift
+ * iff u < rem, u = the draw's top k bits, rem = the k dropped bits: the
+ * shipped "lift iff u < frac" law on a k-bit grid); k >= 32 flushes to 0;
+ * k <= 0 is an exact left shift that saturates. Codes clamp to
+ * [-2^(m-1), qMax] (D6 cap regime). Under SR exactly ONE draw is consumed
+ * per element in element order whatever k is, like roundByMode -- the same
+ * stream and order as the float re-pack it replaces, so pinned draws and
+ * Python mirrors keep their positions. Raw and target geometry must be
+ * identical (fail-fast); n == 0 writes zero-state exponents and no payload.
+ * Packed through packChunkGuarded (byte/halfword fast path at m = 8/16).
+ * Wired into conversionMatrix[BFP_RAW][BFP]; the OUT_WRITE epilogue reaches
+ * it through convertTensor with the #282 rounding swap in place. */
+void reblockBfpRawTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs);
+/*! @brief BFP_RAW -> FLOAT32: the loss-facing dequant, value = ldexpf((float)
+ * mantissa, rawE[g]) per element (exact where representable; a zero mantissa
+ * under an out-of-range exponent stays 0). One of the two permitted float
+ * boundaries of the integer-only forward. Wired into
+ * conversionMatrix[BFP_RAW][FLOAT32]. */
+void convertBfpRawTensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outputTensor,
+                                        rngStream_t *rs);
+
+extern conversionFunction_t conversionMatrix[8][8];
 
 #endif // TENSOR_CONVERSION_H

@@ -1,0 +1,66 @@
+{
+  "name": "b4_lin_dw_grad_bfp_m16_b2",
+  "description": "B4 Linear weightGrad + biasGrad at m16 operands into m16 BFP grads, 2 calls: the segment limit is one product and the guard positive (the float fold refused this batch at bfpValidateBlockHeadroom; the integer GEMM splits).",
+  "family": "bfp_gemm",
+  "op": "linear",
+  "direction": "weightGrad",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3305,
+    "batch": 2,
+    "inF": 8,
+    "outF": 4,
+    "input": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 2.0,
+      "expSpread": 0
+    },
+    "weight": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.25,
+      "expSpread": 0
+    },
+    "bias": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    },
+    "loss": {
+      "m": 16,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 1.0,
+      "expSpread": 0
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED",
+    "biasGrad": {
+      "legA": [
+        "EXACT"
+      ],
+      "legB": "BOUNDED"
+    }
+  },
+  "grad": {
+    "m": 16,
+    "e": 8
+  },
+  "calls": 2
+}

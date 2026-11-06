@@ -110,14 +110,18 @@ static void forwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_
  * scratch form; the BFP kernel reads all quant info from the operands
  * themselves, so only the kernel_t/groups geometry is taken from ctx —
  * ctx->groupedWeight stays NULL (BFP weights never take the SYM carrier
- * path, symGroupedWeightOrNull returns NULL for the BFP dtype). */
-static void forwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                             const void *ctx, rngStream_t *rs) {
+ * path, symGroupedWeightOrNull returns NULL for the BFP dtype).
+ * Integer-only forward (arithmetic-bfp.md §13): rawOut is the BFP_RAW the
+ * forward arm opts into (opSpec_t.bfpRawOut), folded in int32 by the
+ * kernel; the OUT_WRITE epilogue re-blocks or dequantizes it. */
+static void forwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                const void *ctx, rngStream_t *rs) {
     (void)auxOut;
+    (void)rs; /* SR belongs to the re-block, never to the fold */
     const conv1dForwardCtx_t *fctx = ctx;
     const conv1dConfig_t *cfg = fctx->cfg;
     tensor_t *bias = (n > 2) ? ops[2] : NULL;
-    conv1dKernelBfp(ops[0], ops[1], bias, cfg->kernel, cfg->groups, rawOut);
+    conv1dKernelBfpRaw(ops[0], ops[1], bias, cfg->kernel, cfg->groups, rawOut);
 }
 
 /* OP(k) of each funnel op of this layer, for layerExecOpKey. Part of the
@@ -216,7 +220,7 @@ void conv1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const laye
                               .exponentBits = wQC->exponentBits};
         executeOp(
             &(opSpec_t){
-                .kernel = forwardKernelBfp,
+                .kernel = forwardKernelBfpRaw,
                 .ctx = &fctx,
                 .inputs = biasTensor != NULL ? (tensor_t *[]){input, weightTensor, biasTensor}
                                              : (tensor_t *[]){input, weightTensor},
@@ -229,6 +233,7 @@ void conv1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const laye
                              (biasTensor != NULL && biasTensor->quantization->type == FLOAT32)
                                  ? &stage
                                  : NULL},
+                .bfpRawOut = BFP_RAW_FORWARD, /* the integer forward raw */
             },
             output);
         break;
@@ -242,11 +247,10 @@ void conv1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const laye
 /* executeOp kernel adapters (ctx = conv1dConfig_t*, for kernel_t/groups
  * geometry: the fixed opKernelFn_t shape has no
  * per-op-instance geometry slot other than ctx). The FLOAT32/SYM weight-grad
- * kernels `+=` into the same weight cell across many (b, outPos) iterations,
- * so they memset rawOut first (the executeOp Phase-2 scratch is an
- * uninitialized VLA, unlike the reserveMemory-backed intermediate they
- * replace); the BFP twin is output-centric and writes each cell
- * exactly once (its own comment). Bias-grad kernels write each
+ * kernels (and their BFP twin, on int32 accumulators) `+=` into the same
+ * weight cell across many (b, outPos) iterations, so they memset rawOut first
+ * (the executeOp Phase-2 scratch is an uninitialized VLA, unlike the
+ * reserveMemory-backed intermediate they replace). Bias-grad kernels write each
  * output-channel index exactly once (no
  * zero-init hazard). SYM weight-grad sets the raw intermediate's scale
  * itself (s_in*s_loss); SYM bias-grad emits the raw per-channel sum at the
@@ -556,21 +560,87 @@ void conv1dCalcWeightGradsSymInt32(conv1dConfig_t *cfg, tensor_t *forwardInput, 
         cfg->weights->grad);
 }
 
-/* BFP epic PR3 (Task 3): OUTPUT-CENTRIC weight grad -- one reduction per gw
- * element (its contributors walked b outer / outPos inner, the goldgen
- * refs' normative order), restoring the int32 block-partial fold contract
- * the SYM/float kernels' scatter-style `+=` accumulation cannot offer (a
- * fold needs ONE partial per output cell, but the scatter revisits each gw
- * cell across many (b, outPos) iterations). Each gw element is written
- * exactly once, so there is NO memset (unlike the float/SYM twins). */
-static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
-                                const void *ctx, rngStream_t *rs) {
-    (void)n;
-    (void)auxOut;
-    const conv1dConfig_t *cfg = ctx;
-    tensor_t *forwardInput = ops[0];
-    tensor_t *lossGrad = ops[1];
+/* What the scatter walk of weightGradBfpScatter reads (eAccOf from its
+ * pre-pass). */
+typedef struct conv1dWgBfpScatterWalk {
+    size_t batch, groups, inChannels, inputLength, outChannels, outputLength, kernelSize;
+    size_t inChPerGroup, outChPerGroup;
+    windowGeometry1d_t geom;
+    const bfpQConfig_t *xQC;
+    const bfpQConfig_t *gyQC;
+    int32_t xExpBias, gyExpBias;
+    const int32_t *xArr;
+    const int32_t *gyArr;
+    const int *eAccOf; /* [outChannels] */
+    int32_t *acc;
+} conv1dWgBfpScatterWalk_t;
 
+/* The MAC walk (BFP_WALK_NOINLINE: no VLA in this frame). */
+BFP_WALK_NOINLINE void weightGradBfpScatterWalk(const conv1dWgBfpScatterWalk_t *p) {
+    size_t batch = p->batch, groups = p->groups, inChannels = p->inChannels;
+    size_t inputLength = p->inputLength, outChannels = p->outChannels;
+    size_t outputLength = p->outputLength, kernelSize = p->kernelSize;
+    size_t inChPerGroup = p->inChPerGroup, outChPerGroup = p->outChPerGroup;
+    windowGeometry1d_t geom = p->geom;
+    const bfpQConfig_t *xQC = p->xQC;
+    const bfpQConfig_t *gyQC = p->gyQC;
+    int32_t xExpBias = p->xExpBias, gyExpBias = p->gyExpBias;
+    int32_t const *xArr = p->xArr;
+    int32_t const *gyArr = p->gyArr;
+    const int *eAccOf = p->eAccOf;
+    int32_t *acc = p->acc;
+
+    bfpGroupRange_t xRange = {0};
+    bfpGroupRange_t gyRange = {0};
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+
+            for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                size_t oc = outLo + ocOffset;
+                for (size_t outPos = 0; outPos < outputLength; outPos++) {
+                    windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
+                    size_t gyIdx = (b * outChannels + oc) * outputLength + outPos;
+                    int32_t gy = gyArr[gyIdx];
+                    int gyShift =
+                        eAccOf[oc] -
+                        ((int)gyQC->exponents[bfpGroupAt(&gyRange, gyQC, gyIdx)] - gyExpBias);
+
+                    for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                        size_t ic = inLo + icOffset;
+                        for (size_t i = 0; i < slice.validCount; i++) {
+                            size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
+                            size_t kernelIdx = slice.firstValidKernelOffset + i;
+
+                            size_t xIdx = (b * inChannels + ic) * inputLength + inputIdx;
+                            int shift =
+                                gyShift -
+                                ((int)xQC->exponents[bfpGroupAt(&xRange, xQC, xIdx)] - xExpBias);
+                            acc[(oc * inChPerGroup + icOffset) * kernelSize + kernelIdx] +=
+                                bfpAlignPartial(mulInt32s(xArr[xIdx], gy), shift);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* weightGradKernelFloat's loop with an int32 raw accumulator per gw element
+ * (acc, gwElems entries). Every product x * gy enters as product *
+ * 2^-(E_acc - Ex - Egy) (bfpAlignPartial: exact left shift or half-away right
+ * shift), E_acc fixed per output channel before the walk (eAccOf, one entry
+ * per output channel): max over the batch of the input rows' max exponent
+ * (the channel's conv group) + the loss row's max exponent, each over the
+ * groups holding a nonzero code (a zero group never sets E_acc; nothing
+ * set: 0), plus the guard of bfpFoldGuardBits over N = batch * (most output
+ * positions one tap reaches). So no accumulator can leave int32; every product is its own
+ * one-product segment. Shared by both weightGrad kernels below, which
+ * differ only in what they make of the finished sums. */
+static void weightGradBfpScatter(const conv1dConfig_t *cfg, tensor_t *forwardInput,
+                                 tensor_t *lossGrad, int32_t *acc, size_t gwElems, int *eAccOf) {
     size_t batch = forwardInput->shape->dimensions[0];
     size_t inChannels = forwardInput->shape->dimensions[1];
     size_t inputLength = forwardInput->shape->dimensions[2];
@@ -620,83 +690,132 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     bfpQConfig_t *gyQC = lossGrad->quantization->qConfig;
     validateBfpQConfigShape(xQC, calcNumberOfElementsByShape(forwardInput->shape));
     validateBfpQConfigShape(gyQC, calcNumberOfElementsByShape(lossGrad->shape));
-    /* Reduction length per gw element: at most one contributor per
-     * (b, outPos) pair. */
-    bfpValidateBlockHeadroom(xQC, gyQC, batch * outputLength, "conv1dCalcWeightGradsBfp");
+
+    for (size_t oc = 0; oc < outChannels; oc++) {
+        eAccOf[oc] = 0; /* a channel without products keeps 0 */
+    }
+    memset(acc, 0, gwElems * sizeof(int32_t));
+    if (gwElems == 0) {
+        return;
+    }
+
+    size_t maxTaps = 0;
+    for (size_t k = 0; k < kernelSize; k++) {
+        size_t tapLo;
+        size_t tapHi;
+        windowTapOutputRange1d(&geom, k, &tapLo, &tapHi);
+        maxTaps = tapHi - tapLo > maxTaps ? tapHi - tapLo : maxTaps;
+    }
+    int guard = bfpFoldGuardBits(batch * maxTaps, xQC->mantissaBits, gyQC->mantissaBits, 0,
+                                 "conv1dCalcWeightGradsBfp");
 
     int32_t const *xArr = (int32_t const *)forwardInput->data;
     int32_t const *gyArr = (int32_t const *)lossGrad->data;
-    float *gwArr = (float *)rawOut->data;
-
     int32_t xExpBias = bfpExponentBias(xQC);
     int32_t gyExpBias = bfpExponentBias(gyQC);
 
-    for (size_t g = 0; g < groups; g++) {
-        size_t inLo = g * inChPerGroup;
-        size_t outLo = g * outChPerGroup;
-
-        for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
-            size_t oc = outLo + ocOffset;
-
-            for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
-                size_t ic = inLo + icOffset;
-
-                for (size_t k = 0; k < kernelSize; k++) {
-                    float acc = 0.0f;
-                    int32_t partial = 0;
-                    size_t currentXGroup = 0;
-                    size_t currentGyGroup = SIZE_MAX;
-                    size_t tapLo;
-                    size_t tapHi;
-                    windowTapOutputRange1d(&geom, k, &tapLo, &tapHi);
-
-                    for (size_t b = 0; b < batch; b++) {
-                        for (size_t outPos = tapLo; outPos < tapHi; outPos++) {
-                            size_t inputIdx =
-                                outPos * geom.stride + k * geom.dilation - geom.padLeft;
-                            size_t xIdx = (b * inChannels + ic) * inputLength + inputIdx;
-                            size_t gyIdx = (b * outChannels + oc) * outputLength + outPos;
-                            /* Per-element division on BOTH operands (the SYM
-                             * grouped kernels' gap rationale): consecutive
-                             * contributors hop by stride on the input and by
-                             * outputLength across batches. */
-                            size_t xGroup = bfpGroupOf(xQC, xIdx);
-                            size_t gyGroup = bfpGroupOf(gyQC, gyIdx);
-
-                            if (currentGyGroup == SIZE_MAX) {
-                                currentXGroup = xGroup;
-                                currentGyGroup = gyGroup;
-                            } else if (xGroup != currentXGroup || gyGroup != currentGyGroup) {
-                                /* Boundary fold on EITHER operand's group
-                                 * change: the finished same-exponent segment's
-                                 * raw int32 partial enters the float
-                                 * accumulator via a pure exponent shift --
-                                 * rounding-free by contract. */
-                                acc += ldexpf((float)partial,
-                                              (int)xQC->exponents[currentXGroup] - xExpBias +
-                                                  (int)gyQC->exponents[currentGyGroup] - gyExpBias);
-                                partial = 0;
-                                currentXGroup = xGroup;
-                                currentGyGroup = gyGroup;
-                            }
-
-                            partial += mulInt32s(xArr[xIdx], gyArr[gyIdx]);
-                        }
-                    }
-                    /* Tail fold, guarded on >= 1 visited contributor: a (oc, k)
-                     * whose windows are all clipped away (extreme padding)
-                     * never seeds a segment and its grad is 0. */
-                    if (currentGyGroup != SIZE_MAX) {
-                        acc += ldexpf((float)partial,
-                                      (int)xQC->exponents[currentXGroup] - xExpBias +
-                                          (int)gyQC->exponents[currentGyGroup] - gyExpBias);
-                    }
-
-                    gwArr[(oc * inChPerGroup + icOffset) * kernelSize + k] = acc;
-                }
+    /* Pre-pass (stack tables sized by the topology): E_acc per output
+     * channel. */
+    if (batch > 0 && inputLength > 0 && outputLength > 0) {
+        int xMaxOf[batch * groups];
+        bfpRowCursor_t xc = {.group = 0, .groupEnd = xQC->groupSize};
+        for (size_t b = 0; b < batch; b++) {
+            for (size_t g = 0; g < groups; g++) {
+                xMaxOf[b * groups + g] = bfpRowMaxExponent(
+                    &xc, xQC, xExpBias, xArr, (b * inChannels + g * inChPerGroup) * inputLength,
+                    inChPerGroup * inputLength);
             }
         }
+        int eTop[outChannels];
+        bfpRowCursor_t gc = {.group = 0, .groupEnd = gyQC->groupSize};
+        for (size_t b = 0; b < batch; b++) {
+            size_t cg = 0; /* oc's conv group, by cursor (no division) */
+            size_t cgEnd = outChPerGroup;
+            for (size_t oc = 0; oc < outChannels; oc++) {
+                if (oc >= cgEnd) {
+                    cg++;
+                    cgEnd += outChPerGroup;
+                }
+                int e = bfpLiveExpSum(bfpRowMaxExponent(&gc, gyQC, gyExpBias, gyArr,
+                                                        (b * outChannels + oc) * outputLength,
+                                                        outputLength),
+                                      xMaxOf[b * groups + cg]);
+                eTop[oc] = (b == 0 || e > eTop[oc]) ? e : eTop[oc];
+            }
+        }
+        for (size_t oc = 0; oc < outChannels; oc++) {
+            eAccOf[oc] = bfpLiveTopOrZero(eTop[oc]) + guard;
+        }
     }
+
+    conv1dWgBfpScatterWalk_t walk = {.batch = batch,
+                                     .groups = groups,
+                                     .inChannels = inChannels,
+                                     .inputLength = inputLength,
+                                     .outChannels = outChannels,
+                                     .outputLength = outputLength,
+                                     .kernelSize = kernelSize,
+                                     .inChPerGroup = inChPerGroup,
+                                     .outChPerGroup = outChPerGroup,
+                                     .geom = geom,
+                                     .xQC = xQC,
+                                     .gyQC = gyQC,
+                                     .xExpBias = xExpBias,
+                                     .gyExpBias = gyExpBias,
+                                     .xArr = xArr,
+                                     .gyArr = gyArr,
+                                     .eAccOf = eAccOf,
+                                     .acc = acc};
+    weightGradBfpScatterWalk(&walk);
+}
+
+/* FLOAT32 grads and the fixed grid (BFP_RAW_NONE): the scatter's sums become
+ * the float acc * 2^E_acc in place -- the bridge into the FLOAT32 raw. */
+static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                const void *ctx, rngStream_t *rs) {
+    (void)n;
+    (void)auxOut;
+    (void)rs;
+    const conv1dConfig_t *cfg = ctx;
+    size_t outChannels = ops[1]->shape->dimensions[1];
+    int eAccOf[outChannels > 0 ? outChannels : 1];
+    size_t gwElems = calcNumberOfElementsByTensor(rawOut);
+    int32_t *acc = (int32_t *)rawOut->data;
+    weightGradBfpScatter(cfg, ops[0], ops[1], acc, gwElems, eAccOf);
+    if (gwElems == 0) {
+        return;
+    }
+    size_t rowLen = gwElems / outChannels;
+    for (size_t oc = 0; oc < outChannels; oc++) {
+        for (size_t j = 0; j < rowLen; j++) {
+            float v = bfpLdexpInt32(acc[oc * rowLen + j], eAccOf[oc]);
+            memcpy(&acc[oc * rowLen + j], &v, sizeof(v));
+        }
+    }
+}
+
+/* BFP grads under DYNAMIC_RESCALE (BFP_RAW_BACKWARD_ACC): the scatter's sums
+ * become the BFP_RAW on the grad's geometry (bfpRawEmitFromRows: one
+ * exponent per grad group from the data, rows = output channels of cinG * K
+ * sums each), integer only; the funnel accumulates it into the grad. */
+static void weightGradKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                   const void *ctx, rngStream_t *rs) {
+    (void)n;
+    (void)auxOut;
+    (void)rs;
+    if (rawOut->quantization->type != BFP_RAW) {
+        PRINT_ERROR("Conv1d backward (BFP weightGrad): the integer kernel needs a BFP_RAW raw "
+                    "(opSpec_t.bfpRawOut = BFP_RAW_BACKWARD_ACC)");
+        exit(1);
+    }
+    const conv1dConfig_t *cfg = ctx;
+    size_t outChannels = ops[1]->shape->dimensions[1];
+    int eAccOf[outChannels > 0 ? outChannels : 1];
+    size_t gwElems = calcNumberOfElementsByTensor(rawOut);
+    int32_t *acc = (int32_t *)rawOut->data;
+    weightGradBfpScatter(cfg, ops[0], ops[1], acc, gwElems, eAccOf);
+    bfpRawEmitFromRows(acc, gwElems, eAccOf, gwElems > 0 ? gwElems / outChannels : 0,
+                       rawOut->quantization->qConfig, "conv1dCalcWeightGradsBfp");
 }
 
 void conv1dCalcWeightGradsBfp(conv1dConfig_t *cfg, tensor_t *forwardInput, tensor_t *lossGrad,
@@ -723,9 +842,14 @@ void conv1dCalcWeightGradsBfp(conv1dConfig_t *cfg, tensor_t *forwardInput, tenso
                           .roundingMode = cfg->weightGradMath.roundingMode,
                           .mantissaBits = wQC->mantissaBits,
                           .exponentBits = wQC->exponentBits};
+    /* BFP grad storage under DYNAMIC_RESCALE: integer end to end (BFP_RAW
+     * into the integer accumulate engine). FLOAT32 grads and the fixed grid
+     * keep the float bridge. */
+    bool intAcc = cfg->weights->grad->quantization->type == BFP &&
+                  cfg->weightGradAccMode == OUT_ACC_DYNAMIC_RESCALE;
     executeOp(
         &(opSpec_t){
-            .kernel = weightGradKernelBfp,
+            .kernel = intAcc ? weightGradKernelBfpRaw : weightGradKernelBfp,
             .ctx = cfg,
             .inputs = (tensor_t *[]){forwardInput, lossGrad},
             .nInputs = 2,
@@ -734,6 +858,7 @@ void conv1dCalcWeightGradsBfp(conv1dConfig_t *cfg, tensor_t *forwardInput, tenso
             .mode = cfg->weightGradAccMode,
             .bfpStage = {forwardInput->quantization->type == FLOAT32 ? &stage : NULL,
                          lossGrad->quantization->type == FLOAT32 ? &stage : NULL, NULL},
+            .bfpRawOut = intAcc ? BFP_RAW_BACKWARD_ACC : BFP_RAW_NONE,
         },
         cfg->weights->grad);
 }
@@ -829,7 +954,7 @@ void conv1dCalcBiasGradsSymInt32(conv1dConfig_t *cfg, tensor_t *lossGrad, const 
 }
 
 /* BFP epic PR3 (Task 3): per-oc batch*outputLength sum of BFP loss mantissas
- * -- int32 partial per same-group visited segment, lossless ldexpf fold on
+ * -- int32 partial per same-group visited segment, lossless power-of-two fold on
  * group change + tail (linearCalcBiasGradsBfp's core on the conv walk,
  * indices (b*outChannels + oc)*outputLength + outPos, b outer / outPos
  * inner). Sum headroom via bfpValidateSumHeadroom (the product bound does
@@ -858,6 +983,7 @@ static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
     bfpValidateSumHeadroom(gyQC, batch * outputLength, "conv1dCalcBiasGradsBfp");
 
     int32_t expBias = bfpExponentBias(gyQC);
+    bfpGroupRange_t gyRange = {0};
     int32_t const *gyArr = (int32_t const *)lossGrad->data;
     float *out = (float *)rawOut->data;
 
@@ -868,11 +994,11 @@ static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
         for (size_t b = 0; b < batch; b++) {
             for (size_t outPos = 0; outPos < outputLength; outPos++) {
                 size_t idx = (b * outChannels + oc) * outputLength + outPos;
-                size_t g = bfpGroupOf(gyQC, idx);
+                size_t g = bfpGroupAt(&gyRange, gyQC, idx);
                 if (b == 0 && outPos == 0) {
                     currentGroup = g;
                 } else if (g != currentGroup) {
-                    acc += ldexpf((float)partial, (int)gyQC->exponents[currentGroup] - expBias);
+                    acc += bfpLdexpInt32(partial, (int)gyQC->exponents[currentGroup] - expBias);
                     partial = 0;
                     currentGroup = g;
                 }
@@ -880,10 +1006,102 @@ static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
             }
         }
         if (batch > 0 && outputLength > 0) {
-            acc += ldexpf((float)partial, (int)gyQC->exponents[currentGroup] - expBias);
+            acc += bfpLdexpInt32(partial, (int)gyQC->exponents[currentGroup] - expBias);
         }
         out[oc] = acc;
     }
+}
+
+/* biasGradKernelBfp's walk and segments with an int32 destination instead
+ * of the float fold (BFP grads under DYNAMIC_RESCALE, BFP_RAW_BACKWARD_ACC):
+ * each same-group segment's exact code sum enters as partial *
+ * 2^-(E_acc - E_segment) (bfpAlignPartial), E_acc per output channel = max
+ * over the batch of the loss row's max exponent over its nonzero codes
+ * (none: 0) + the guard of a pure sum of
+ * batch * outputLength codes (bfpSumFoldGuardBits: the fold proof with the
+ * second factor 1), so no destination can leave int32. Then the BFP_RAW on
+ * the grad's geometry (bfpRawEmitFromRows, rows of one sum). */
+static void biasGradKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
+                                 const void *ctx, rngStream_t *rs) {
+    (void)n;
+    (void)auxOut;
+    (void)rs;
+    const conv1dConfig_t *cfg = ctx;
+    tensor_t *lossGrad = ops[0];
+
+    size_t batch = lossGrad->shape->dimensions[0];
+    size_t outChannels = lossGrad->shape->dimensions[1];
+    size_t outputLength = lossGrad->shape->dimensions[2];
+    size_t biasOutChannels = cfg->bias->param->shape->dimensions[0];
+
+    if (outChannels != biasOutChannels) {
+        PRINT_ERROR("Conv1d backward (biasGrad): lossGrad outChannels (%zu) does not match "
+                    "bias Cout (%zu)",
+                    outChannels, biasOutChannels);
+        exit(1);
+    }
+    if (rawOut->quantization->type != BFP_RAW) {
+        PRINT_ERROR("Conv1d backward (BFP biasGrad): the integer kernel needs a BFP_RAW raw "
+                    "(opSpec_t.bfpRawOut = BFP_RAW_BACKWARD_ACC)");
+        exit(1);
+    }
+
+    bfpQConfig_t *gyQC = lossGrad->quantization->qConfig;
+    validateBfpQConfigShape(gyQC, calcNumberOfElementsByShape(lossGrad->shape));
+    bfpValidateSumHeadroom(gyQC, batch * outputLength, "conv1dCalcBiasGradsBfp");
+
+    int32_t expBias = bfpExponentBias(gyQC);
+    int32_t const *gyArr = (int32_t const *)lossGrad->data;
+    int32_t *acc = (int32_t *)rawOut->data;
+
+    int eAccOf[outChannels > 0 ? outChannels : 1];
+    for (size_t oc = 0; oc < outChannels; oc++) {
+        eAccOf[oc] = 0;
+    }
+    if (batch > 0 && outputLength > 0) {
+        int guard =
+            bfpSumFoldGuardBits(batch * outputLength, gyQC->mantissaBits, "conv1dCalcBiasGradsBfp");
+        bfpRowCursor_t gc = {.group = 0, .groupEnd = gyQC->groupSize};
+        for (size_t b = 0; b < batch; b++) {
+            for (size_t oc = 0; oc < outChannels; oc++) {
+                int e = bfpRowMaxExponent(&gc, gyQC, expBias, gyArr,
+                                          (b * outChannels + oc) * outputLength, outputLength);
+                eAccOf[oc] = (b == 0 || e > eAccOf[oc]) ? e : eAccOf[oc];
+            }
+        }
+        for (size_t oc = 0; oc < outChannels; oc++) {
+            eAccOf[oc] = bfpLiveTopOrZero(eAccOf[oc]) + guard;
+        }
+    }
+
+    bfpGroupRange_t gyRange = {0};
+    for (size_t oc = 0; oc < outChannels; oc++) {
+        int32_t sum = 0;
+        int32_t partial = 0;
+        size_t currentGroup = 0;
+        for (size_t b = 0; b < batch; b++) {
+            for (size_t outPos = 0; outPos < outputLength; outPos++) {
+                size_t idx = (b * outChannels + oc) * outputLength + outPos;
+                size_t g = bfpGroupAt(&gyRange, gyQC, idx);
+                if (b == 0 && outPos == 0) {
+                    currentGroup = g;
+                } else if (g != currentGroup) {
+                    sum += bfpAlignPartial(
+                        partial, eAccOf[oc] - ((int)gyQC->exponents[currentGroup] - expBias));
+                    partial = 0;
+                    currentGroup = g;
+                }
+                partial += gyArr[idx];
+            }
+        }
+        if (batch > 0 && outputLength > 0) {
+            sum += bfpAlignPartial(partial,
+                                   eAccOf[oc] - ((int)gyQC->exponents[currentGroup] - expBias));
+        }
+        acc[oc] = sum;
+    }
+    bfpRawEmitFromRows(acc, outChannels, eAccOf, 1, rawOut->quantization->qConfig,
+                       "conv1dCalcBiasGradsBfp");
 }
 
 void conv1dCalcBiasGradsBfp(conv1dConfig_t *cfg, tensor_t *lossGrad, const rngKey_t *key) {
@@ -907,9 +1125,13 @@ void conv1dCalcBiasGradsBfp(conv1dConfig_t *cfg, tensor_t *lossGrad, const rngKe
                           .roundingMode = cfg->biasGradMath.roundingMode,
                           .mantissaBits = wQC->mantissaBits,
                           .exponentBits = wQC->exponentBits};
+    /* As the weightGrad: integer end to end into BFP grads under
+     * DYNAMIC_RESCALE, the float fold otherwise. */
+    bool intAcc = cfg->bias->grad->quantization->type == BFP &&
+                  cfg->biasGradAccMode == OUT_ACC_DYNAMIC_RESCALE;
     executeOp(
         &(opSpec_t){
-            .kernel = biasGradKernelBfp,
+            .kernel = intAcc ? biasGradKernelBfpRaw : biasGradKernelBfp,
             .ctx = cfg,
             .inputs = (tensor_t *[]){lossGrad},
             .nInputs = 1,
@@ -917,13 +1139,14 @@ void conv1dCalcBiasGradsBfp(conv1dConfig_t *cfg, tensor_t *lossGrad, const rngKe
             .key = key,
             .mode = cfg->biasGradAccMode,
             .bfpStage = {lossGrad->quantization->type == FLOAT32 ? &stage : NULL, NULL, NULL},
+            .bfpRawOut = intAcc ? BFP_RAW_BACKWARD_ACC : BFP_RAW_NONE,
         },
         cfg->bias->grad);
 }
 
 /* dx adapters (ctx = conv1dForwardCtx_t*, PR3 Task 3): dL/dx via the
  * adjoint -- convTranspose1d of lossGrad with the Conv1d weight [oc][ic][K]
- * (FLOAT32/SYM take the SCATTER cores; the BFP adapter below gathers, BFP D9).
+ * (every arithmetic takes a SCATTER core; BFP its integer twin).
  * The scatter kernel's weight index arithmetic
  * ((ic*outChPerGroup + ocOffset)*K + k, ConvTranspose1dKernel.c) computes
  * exactly the Conv1d weight's flat storage index in this adjoint role, so a
@@ -953,8 +1176,8 @@ static void propLossKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
     }
 }
 
-/* BFP epic PR3 (Task 3): dx via the BFP D9 GATHER adjoint (output-centric fold
- * contract; the SYM scatter cores stay SYM-only) -- same {cfg, groupedWeight}
+/* dx on the FLOAT32 scatter loop with integer accumulators into the BFP_RAW
+ * (convTranspose1dKernelBfpScatter) -- same {cfg, groupedWeight}
  * ctx wrapper as the other dx adapters, groupedWeight always NULL for BFP
  * (symGroupedWeightOrNull returns NULL for the BFP dtype). */
 static void propLossKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
@@ -963,7 +1186,7 @@ static void propLossKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
     (void)auxOut;
     const conv1dForwardCtx_t *fctx = ctx;
     const conv1dConfig_t *cfg = fctx->cfg;
-    convTranspose1dKernelBfpGather(ops[0], ops[1], NULL, cfg->kernel, cfg->groups, 0u, rawOut);
+    convTranspose1dKernelBfpScatter(ops[0], ops[1], cfg->kernel, cfg->groups, 0u, rawOut);
 }
 
 void conv1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad, tensor_t *propLoss,
@@ -1137,6 +1360,10 @@ void conv1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad, 
                      * staged. */
                     .bfpStage = {lossGrad->quantization->type == FLOAT32 ? &stage : NULL, NULL,
                                  NULL},
+                    /* integer dx end to end: the kernel emits the BFP_RAW,
+                     * the epilogue re-blocks it into the dx wire by the op's
+                     * mode (arithmetic-bfp.md §14) */
+                    .bfpRawOut = BFP_RAW_BACKWARD_DX,
                 },
                 propLoss);
             break;

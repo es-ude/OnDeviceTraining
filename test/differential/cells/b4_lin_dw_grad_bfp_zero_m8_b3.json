@@ -1,0 +1,72 @@
+{
+  "name": "b4_lin_dw_grad_bfp_zero_m8_b3",
+  "description": "B4 Linear weightGrad + biasGrad into m8 BFP grads, 2 calls, with an input group and a loss group in the zero state (codes 0, stored = bias): they set nothing in the operand-wide E_top of the weightGrad (a zero group never sets E_acc), the bias raw exponent follows the data.",
+  "family": "bfp_gemm",
+  "op": "linear",
+  "direction": "weightGrad",
+  "tiers": [
+    "layer"
+  ],
+  "arith": {
+    "type": "BFP",
+    "rounding": "HALF_AWAY"
+  },
+  "fixture": {
+    "type": "bfp_gemm",
+    "seed": 3307,
+    "batch": 3,
+    "inF": 32,
+    "outF": 6,
+    "input": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 8,
+      "absmax": 2.0,
+      "expSpread": 4,
+      "zeroGroups": [
+        2
+      ]
+    },
+    "weight": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.25,
+      "expSpread": 0
+    },
+    "bias": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 0,
+      "absmax": 0.1,
+      "expSpread": 0
+    },
+    "loss": {
+      "m": 8,
+      "e": 8,
+      "groupSize": 3,
+      "absmax": 0.001,
+      "expSpread": 10,
+      "zeroGroups": [
+        1
+      ]
+    }
+  },
+  "expect": {
+    "legA": [
+      "EXACT"
+    ],
+    "legB": "BOUNDED",
+    "biasGrad": {
+      "legA": [
+        "EXACT"
+      ],
+      "legB": "BOUNDED"
+    }
+  },
+  "grad": {
+    "m": 8,
+    "e": 8
+  },
+  "calls": 2
+}

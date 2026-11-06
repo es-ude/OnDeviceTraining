@@ -59,3 +59,22 @@ def test_bfp_train_config_keys_are_declared_in_the_schema():
                 "wires_resolved", "bfp_math", "bfp_grads", "bfp_state", "bfp_rounding", "bfp_head",
                 "groups_resolved", "group_overhead_b"):
         assert key in declared, key
+
+
+def test_full_integer_configs_need_pre_converted_bfp_data():
+    """The trainer's FULL predicate (native math, BFP wires, BFP_GRADS=1,
+    BFP_STATE=1) trains on data written by `--write-bfp-data`; one write per
+    data format (m, e, wire block), whatever the head."""
+    full = {n for n, (_, env) in run_matrix.CONFIGS.items() if run_matrix.needs_bfp_data(env)}
+    assert {"bfp8full_hflt", "bfp8full_hbfp"} <= full
+    assert run_matrix.needs_bfp_data(run_matrix._bfp(BFP_GRADS="1", BFP_STATE="1")[1])
+    for env in (run_matrix._bfp()[1],
+                run_matrix._bfp(BFP_GRADS="1")[1],
+                run_matrix._bfp(BFP_GRADS="1", BFP_STATE="1", BFP_MATH="fq")[1],
+                run_matrix._bfp(BFP_GRADS="1", BFP_STATE="1", BFP_WIRE_BLOCK="float",
+                                BFP_HEAD="float")[1],
+                {"SYM_BITS": "8"}, {}):
+        assert not run_matrix.needs_bfp_data(env)
+    keys = {run_matrix.bfp_data_key(run_matrix.CONFIGS[n][1])
+            for n in ("bfp8full_hflt", "bfp8full_hbfp")}
+    assert keys == {("8", "8", "16")}

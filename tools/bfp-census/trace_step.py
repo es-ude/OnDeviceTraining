@@ -96,7 +96,10 @@ def main():
     binary = build / "examples" / "har_classifier" / TARGET
 
     sys.path.insert(0, str(REPO / "examples" / "har_classifier"))
-    from run_matrix import CONFIGS as MATRIX  # noqa: E402
+    from run_matrix import CONFIGS as MATRIX, write_bfp_data  # noqa: E402
+
+    # bfp8full trains on pre-converted BFP data: write it with this build.
+    write_bfp_data(CONFIGS, binary.parent)
 
     names = set()
     for cfg in CONFIGS:

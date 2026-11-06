@@ -14,7 +14,9 @@
  *     forward and dx resolved independently by resolveWireShape (6-element
  *     head wires always fall back to per-tensor -- recorded in wires_resolved).
  *     Under BFP wires + native math an input Quantization layer writes the
- *     input.out wire first, so the integer forward never sees a float.
+ *     input.out wire first, so the integer forward never sees a float; on
+ *     the full-integer path the samples are pre-converted into that wire's
+ *     format (--write-bfp-data) and the layer passes them straight through.
  *   - math: native = ARITH_BFP on the four GEMM slots; fq = those slots
  *     pinned ARITH_FLOAT32 (the GEMM fake-quant reference, NOT a whole-model
  *     twin: Relu/pools keep their BFP arms; the head is BFP_HEAD's).
@@ -45,11 +47,13 @@
  * + LR MOMENTUM EPOCHS SEED LR_SCHEDULE LR_MIN LOG_PATH
  * LOG_CODE_MOVEMENT (inherited). The SYM-only knobs are ignored with a WARN. */
 
+#include <errno.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #include "ArithmeticType.h"
@@ -92,6 +96,7 @@
 #include "TraceApi.h"
 #include "TrainingLoopApi.h"
 
+#include "bfp_dataset.h"
 #include "mem_instrument.h"
 #include "param_gate.h"
 
@@ -113,8 +118,8 @@
 #define C3_K 3
 
 /* 3 x (Conv1d + ReLU + Pool) + Flatten + Linear + Softmax = 12 body layers,
- * behind an optional input Quantization layer (FLOAT32 -> BFP wire), the one
- * float boundary of the integer forward. It exists iff the wires are BFP and
+ * behind an optional input Quantization layer (FLOAT32 -> BFP wire; a straight
+ * pass for the full-integer path's pre-converted samples). It exists iff the wires are BFP and
  * the math is native (g_inLayer): under BFP_WIRE_BLOCK=float there is no BFP
  * wire to quantize into, and fq stays the unchanged GEMM fake-quant
  * reference. Every per-layer table below is indexed by BODY layer (0 =
@@ -330,7 +335,98 @@ static tensorArray_t *buildOneHotLabels(tensorArray_t *intLabels) {
     return out;
 }
 
+/* ---- Pre-converted BFP data (the full-integer path) ----------------------
+ * The full-integer path trains on data converted ONCE, before training: the
+ * samples into input.out's BFP format (the input Quantization layer then
+ * passes them straight through), the one-hot labels into per-tensor BFP
+ * (m, e) -- so no float data reaches a training step. `<trainer>
+ * --write-bfp-data` (same env) writes them with the library's own FLOAT32 ->
+ * BFP cell, bit-identical to the online input layer (examples/_shared/
+ * bfp_dataset.h: ODTA files of ODTS tensor records); a training run of the
+ * full-integer path reads them and fails fast when they are missing or not in
+ * this run's format. Every other config reads the float .npy files. */
+static bool fullIntegerPath(void);
+
+#define HAR_DATA_DIR "examples/har_classifier/data"
+static const char *const kSplits[3] = {"train", "val", "test"};
+
+static void bfpDataDir(char *buf, size_t len) {
+    snprintf(buf, len, HAR_DATA_DIR "/bfp_m%u_e%u_w%s", (unsigned)g_cfg.mantissaBits,
+             (unsigned)g_cfg.exponentBits, g_cfg.wireBlockStr);
+}
+
+static void bfpDataPath(char *buf, size_t len, const char *split, const char *xy) {
+    char dir[160];
+    bfpDataDir(dir, sizeof(dir));
+    snprintf(buf, len, "%s/%s_%s.odta", dir, split, xy);
+}
+
+static quantization_t *bfpLabelTemplate(void) {
+    return quantizationInitBfp(g_cfg.mantissaBits, g_cfg.exponentBits, HALF_AWAY);
+}
+
+/* --write-bfp-data: converts the three float splits and exits. */
+static int writeBfpData(void) {
+    if (!fullIntegerPath()) {
+        fprintf(stderr, "--write-bfp-data: only the full-integer path (native math, BFP wires, "
+                        "BFP_GRADS=1 BFP_STATE=1) trains on pre-converted data\n");
+        return 1;
+    }
+    char dir[160];
+    bfpDataDir(dir, sizeof(dir));
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+        fprintf(stderr, "--write-bfp-data: cannot create %s\n", dir);
+        return 1;
+    }
+    quantization_t *labelQ = bfpLabelTemplate();
+    for (size_t s = 0; s < 3; s++) {
+        char path[256];
+        snprintf(path, sizeof(path), HAR_DATA_DIR "/%s_x.npy", kSplits[s]);
+        tensorArray_t *items = npyLoad(path);
+        snprintf(path, sizeof(path), HAR_DATA_DIR "/%s_y.npy", kSplits[s]);
+        tensorArray_t *classes = npyLoad(path);
+        tensorArray_t *bfpItems = bfpDatasetConvert(items, g_inQ);
+        tensorArray_t *bfpLabels = bfpDatasetOneHotLabels(classes, NUM_CLASSES, labelQ);
+        bfpDataPath(path, sizeof(path), kSplits[s], "x");
+        tensorArrayWriteFile(path, bfpItems);
+        bfpDataPath(path, sizeof(path), kSplits[s], "y");
+        tensorArrayWriteFile(path, bfpLabels);
+        fprintf(stdout, "BFP DATA %s: %zu samples -> %s/%s_{x,y}.odta\n", kSplits[s],
+                bfpItems->size, dir, kSplits[s]);
+        freeTensorArray(bfpLabels);
+        freeTensorArray(bfpItems);
+        freeTensorArray(classes);
+        freeTensorArray(items);
+    }
+    freeQuantization(labelQ);
+    return 0;
+}
+
+static tensorArray_t *readBfpSplit(const char *split, const char *xy) {
+    char path[256];
+    bfpDataPath(path, sizeof(path), split, xy);
+    FILE *probe = fopen(path, "rb");
+    if (probe == NULL) {
+        fprintf(stderr,
+                "BFP DATA MISSING: %s -- the full-integer path trains on pre-converted data; run "
+                "this trainer once with --write-bfp-data (same env) first\n",
+                path);
+        exit(1);
+    }
+    fclose(probe);
+    return tensorArrayReadFile(path);
+}
+
 static void initDataSets(void) {
+    if (fullIntegerPath()) {
+        g_trainDataset.items = readBfpSplit("train", "x");
+        g_trainDataset.labels = readBfpSplit("train", "y");
+        g_valDataset.items = readBfpSplit("val", "x");
+        g_valDataset.labels = readBfpSplit("val", "y");
+        g_testDataset.items = readBfpSplit("test", "x");
+        g_testDataset.labels = readBfpSplit("test", "y");
+        return;
+    }
     tensorArray_t *trainItems = npyLoad("examples/har_classifier/data/train_x.npy");
     tensorArray_t *trainLabelsRaw = npyLoad("examples/har_classifier/data/train_y.npy");
     g_trainDataset.items = trainItems;
@@ -692,6 +788,46 @@ static int fullGateOptimizer(optimizer_t *optim) {
         fullGateExpect(&g, g_modelSize, "SGD weight decay is nonzero", !sgd->weightDecayIsNonzero);
     }
     return fullGateReport(&g, "integer SGD step (lr + momentum encoded, no weight decay)");
+}
+
+/* The data, right after it loads: every sample is BFP in exactly input.out's
+ * storage format (so the input layer passes it straight through -- any other
+ * format would be re-blocked through float), every label an exact BFP
+ * one-hot. One failure line per split and kind (not per sample). */
+static void fullGateSplit(fullGateCtx_t *g, const char *split, const dataset_t *d) {
+    const bfpQConfig_t *inQC = g_inQ->qConfig;
+    size_t badItems = 0, badLabels = 0;
+    for (size_t i = 0; i < d->items->size; i++) {
+        tensor_t *x = d->items->array[i];
+        const bfpQConfig_t *qc = x->quantization->type == BFP ? x->quantization->qConfig : NULL;
+        bool ok = qc != NULL && qc->mantissaBits == inQC->mantissaBits &&
+                  qc->exponentBits == inQC->exponentBits && qc->numGroups == inQC->numGroups &&
+                  qc->groupSize == inQC->groupSize && x->shape->numberOfDimensions == 2 &&
+                  x->shape->dimensions[0] == IN_CHANNELS && x->shape->dimensions[1] == LEN_INPUT;
+        badItems += ok ? 0 : 1;
+    }
+    for (size_t i = 0; i < d->labels->size; i++) {
+        tensor_t *y = d->labels->array[i];
+        size_t cls;
+        bool ok = calcNumberOfElementsByTensor(y) == NUM_CLASSES && bfpOneHotClass(y, &cls);
+        badLabels += ok ? 0 : 1;
+    }
+    char what[160];
+    snprintf(what, sizeof(what), "dataset %s: %zu of %zu samples not BFP in input.out's format",
+             split, badItems, d->items->size);
+    fullGateExpect(g, 0, what, badItems == 0 && d->items->size > 0);
+    snprintf(what, sizeof(what), "dataset %s: %zu of %zu labels not an exact BFP one-hot", split,
+             badLabels, d->labels->size);
+    fullGateExpect(g, 0, what, badLabels == 0 && d->labels->size == d->items->size);
+}
+
+static int fullGateDataset(void) {
+    fullGateCtx_t g = {.count = 0, .fails = 0};
+    fullGateSplit(&g, "train", &g_trainDataset);
+    fullGateSplit(&g, "val", &g_valDataset);
+    fullGateSplit(&g, "test", &g_testDataset);
+    return fullGateReport(&g, "pre-converted data (samples BFP in input.out's format, labels exact "
+                              "BFP one-hots)");
 }
 
 typedef struct groupLogInfo {
@@ -1073,7 +1209,12 @@ static trainingStats_t *firstStepGatedGrads(layer_t **model, size_t modelSize,
     return stats;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    bool writeData = (argc == 2 && strcmp(argv[1], "--write-bfp-data") == 0);
+    if (argc > 1 && !writeData) {
+        fprintf(stderr, "usage: %s [--write-bfp-data]\n", argv[0]);
+        exit(1);
+    }
     const char *cfgErr = bfpSweepConfigFromEnv(&g_cfg);
     if (cfgErr != NULL) {
         fprintf(stderr, "%s\n", cfgErr);
@@ -1141,6 +1282,11 @@ int main(void) {
 #endif
 
     buildWireTemplates(); /* resolves every wire; the preflight reads the shapes */
+    if (writeData) {
+        int rc = writeBfpData();
+        freeWireTemplates();
+        return rc;
+    }
     headroomPreflight();
 
     initDataSets();
@@ -1148,6 +1294,9 @@ int main(void) {
 #ifdef ODT_MEM_PROFILE
     size_t markDataset = memProfileMark(); /* dataset_b */
 #endif
+    if (fullIntegerPath() && fullGateDataset() != 0) {
+        return 2;
+    }
 
     layer_t *model[MODEL_SIZE_MAX];
     trainingRng_t rng;

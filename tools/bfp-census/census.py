@@ -702,7 +702,11 @@ STEP_INJECTIONS = (
     + [("Linear.c", "linearForwardBfpRaw", "__aeabi_fmul"),
        ("LayerExec.c", "layerExecOpKey", "__aeabi_ldivmod"),
        ("OptimizerKeys.c", "optimizerScaleStream", "__aeabi_fadd"),
-       ("Softmax.c", "softmaxRowGeometry", "__aeabi_lmul")])
+       ("Softmax.c", "softmaxRowGeometry", "__aeabi_lmul")]
+    # the pre-converted data path: the input layer's straight-through and the
+    # integer head's BFP label read
+    + [("QuantizationLayer.c", "quantizationForward", "__aeabi_fmul"),
+       ("CrossEntropy.c", "crossEntropySoftmaxBackwardKernelBfp", "__aeabi_fcmpeq")])
 
 
 def negative_controls(build, roots, allow):

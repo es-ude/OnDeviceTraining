@@ -5,17 +5,12 @@
 #                                      <function> are allowed under <root>; more
 #                                      are hits, fewer make the entry stale
 #                                      (--strict fails on both)
-# Policy (integer-only BFP forward): no float/double/libm/int64 outside the two
-# float boundaries; no BFP-specific division per MAC. Allowed divisions run per
+# Policy (integer-only BFP forward): no float/double/libm/int64 outside the float
+# boundaries (the loss-facing dequant; the loss island in the backward); no BFP-specific division per MAC. Allowed divisions run per
 # call, per group change, per output element, or are the index math the FLOAT32
 # arm shares (same-algorithm rule).
 
 # ---- Float boundaries --------------------------------------------------------
-# Input quantization layer: float samples enter the BFP domain. The layer's
-# dispatch derives its op key per call (rngFold) and copies through convertTensor;
-# the cell itself is the boundary.
-QuantizationLayer.c:quantizationForward rngFold __aeabi_uidivmod 2
-TensorConversion.c:convertFloatTensorToBfpTensor convertFloatTensorToBfpTensor
 # Loss-facing dequant: the softmax wire leaves the integer domain for the loss.
 TensorConversion.c:convertBfpTensorToFloat32Tensor convertBfpTensorToFloat32Tensor
 
@@ -154,6 +149,9 @@ TensorConversion.c:paramUpdateBfpInPlace bfpScaledSumInPlace __aeabi_uidivmod 1
 # (crossEntropySoftmaxBackwardKernelBfp) and the dispatch have NO entry: no float.
 CrossEntropy.c:crossEntropySoftmaxBackwardFakeQuant crossEntropySoftmaxBackwardFakeQuant
 CrossEntropy.c:crossEntropySoftmaxBackwardFloat crossEntropySoftmaxBackwardFloat
+# Its ONE float -> BFP conversion onto the loss-grad wire. (No sample crosses
+# here: the data is converted offline and passes the input layer straight through.)
+TensorConversion.c:convertFloatTensorToBfpTensor convertFloatTensorToBfpTensor
 
 # ---- MaxPool1d / AvgPool1d dx (the integer kernels) ----------------------------
 # Per call: the covering-window count (span - 1) / stride in the kernel, and the
@@ -244,6 +242,7 @@ Linear.c:linearCalcWeightGradsBfpRaw calcElementIndexByIndices __aeabi_uidiv 1
 # The per-op / per-update / per-call key folds (rngFold round % 3, as above).
 LayerExec.c:layerExecOpKey rngFold __aeabi_uidivmod 2
 LayerExec.c:layerExecPhaseKey rngFold __aeabi_uidivmod 2
+LayerExec.c:layerExecPurposeStream rngFold __aeabi_uidivmod 2
 OptimizerKeys.c:optimizerScaleStream rngFold __aeabi_uidivmod 2
 OptimizerKeys.c:optimizerUpdateOpKey rngFold __aeabi_uidivmod 2
 TrainingRng.c:trainingRngCallKey rngFold __aeabi_uidivmod 2

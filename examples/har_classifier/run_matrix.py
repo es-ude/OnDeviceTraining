@@ -227,6 +227,34 @@ def parse_final_acc(stdout: str) -> float | None:
     return None
 
 
+def needs_bfp_data(env: dict[str, str]) -> bool:
+    """The trainer's full-integer predicate (native math, BFP wires, BFP grads AND
+    momentum): such a run trains on data pre-converted by `--write-bfp-data`."""
+    return (env.get("BFP_GRADS") == "1" and env.get("BFP_STATE") == "1"
+            and env.get("BFP_MATH", "native") == "native"
+            and env.get("BFP_WIRE_BLOCK") not in (None, "float"))
+
+
+def bfp_data_key(env: dict[str, str]) -> tuple[str, str, str]:
+    """What the pre-converted data depends on: (m, e, wire block)."""
+    return (env["BFP_MANTISSA_BITS"], env["BFP_EXPONENT_BITS"], env["BFP_WIRE_BLOCK"])
+
+
+def write_bfp_data(configs, build_dir: Path) -> None:
+    """Runs `<trainer> --write-bfp-data` once per data format the selected
+    full-integer configs need, serially, before any job starts (the parallel
+    runs then only read the files)."""
+    done = set()
+    for config in configs:
+        binary_name, env = CONFIGS[config]
+        if not needs_bfp_data(env) or bfp_data_key(env) in done:
+            continue
+        done.add(bfp_data_key(env))
+        subprocess.run([str(build_dir / binary_name), "--write-bfp-data"], cwd=ROOT,
+                       env={**os.environ, **env}, capture_output=True, text=True, check=True)
+        print(f"pre-converted BFP data written for {config}", flush=True)
+
+
 def run_one(
     config: str, seed: int, epochs: int, logs_dir: Path, build_dir: Path
 ) -> tuple[float | None, float]:
@@ -337,6 +365,7 @@ def main() -> None:
             + " ".join(sorted(path.name for path in missing))
             + "\n(and pass the matching --build-subdir; default is examples_memprofile)"
         )
+    write_bfp_data(dict.fromkeys(c for c, _ in pairs), build_dir)
 
     print(
         f"HAR sweep: {len(args.configs)} configs x {len(args.seeds)} seeds "

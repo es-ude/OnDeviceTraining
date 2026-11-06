@@ -12,12 +12,14 @@
 #     forward, float p - y and ONE float -> BFP conversion onto the loss-grad
 #     wire (softmaxForwardKernel, crossEntropySoftmaxBackwardFakeQuant/Float);
 #   - the loss VALUE on both heads (monitoring, off the gradient path): its
-#     float core (crossEntropyForwardFloat) and the loop's loss sums and means;
-#   - the input boundary: the input Quantization layer (float samples -> BFP)
-#     and the loss-facing dequant of p for the loss value.
-# Not in the arm objects, so outside the census: the trainer's dataset (float
-# samples, float one-hot labels the integer p - y reads as 0/1) and the
-# evaluation (argmax on the head output).
+#     float core (crossEntropyForwardFloat) and the loop's loss sums and means
+#     (the loss-facing dequant of p and of the BFP label included).
+# No input boundary: the trainer pre-converts the samples into input.out's BFP
+# format and the one-hot labels into BFP before training (its FULL gate checks
+# them at load); the input layer passes them straight through (a self root; its
+# converting arm is a declared boundary), the bfp head's p - y reads the label
+# in integers. Not in the arm objects, so outside the census: the trainer's
+# loader and the evaluation (argmax on the head output).
 include har_forward_roots.txt
 include har_backward_roots.txt
 #
@@ -106,6 +108,9 @@ TensorApi.c                 getSparsityLike
 #   folds), the per-call key, the plan's step index;
 LayerExec.c                 layerExecOpKey
 LayerExec.c                 layerExecPhaseKey
+# (the purpose streams: the float head's loss stream and the Softmax's; formerly
+#  reached through the input layer's converting dispatch)
+LayerExec.c                 layerExecPurposeStream
 OptimizerKeys.c             optimizerScaleStream
 OptimizerKeys.c             optimizerUpdateOpKey
 TrainingRng.c               trainingRngCallKey

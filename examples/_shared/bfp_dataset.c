@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "CheckedSize.h"
 #include "Common.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
@@ -21,10 +22,43 @@
 #define ODTA_MAGIC "ODTA"
 
 static tensorArray_t *newTensorArray(size_t n) {
+    size_t bytes;
+    if (!checkedMulSize(n > 0 ? n : 1, sizeof(tensor_t *), &bytes)) {
+        PRINT_ERROR("bfp_dataset: an array of %zu tensors overflows size_t", n);
+        exit(1);
+    }
     tensorArray_t *arr = reserveMemory(sizeof(tensorArray_t));
+    tensor_t **slots = reserveMemory(bytes);
+    if (arr == NULL || slots == NULL) {
+        PRINT_ERROR("bfp_dataset: cannot reserve an array of %zu tensors", n);
+        exit(1);
+    }
     arr->size = n;
-    arr->array = reserveMemory((n > 0 ? n : 1) * sizeof(tensor_t *));
+    arr->array = slots;
     return arr;
+}
+
+bool tensorArrayCountFits(uint64_t count, uint64_t remainingBytes, uint64_t sizeMax,
+                          size_t pointerBytes) {
+    if (count > remainingBytes / ODTA_MIN_RECORD_BYTES) {
+        return false;
+    }
+    return pointerBytes == 0 || count <= sizeMax / pointerBytes;
+}
+
+/* Bytes between the stream position and the end of the file. */
+static uint64_t bytesLeft(FILE *f, const char *path) {
+    long here = ftell(f);
+    if (here < 0 || fseek(f, 0, SEEK_END) != 0) {
+        PRINT_ERROR("tensorArrayReadFile: %s: cannot determine the file size", path);
+        exit(1);
+    }
+    long end = ftell(f);
+    if (end < here || fseek(f, here, SEEK_SET) != 0) {
+        PRINT_ERROR("tensorArrayReadFile: %s: cannot determine the file size", path);
+        exit(1);
+    }
+    return (uint64_t)(end - here);
 }
 
 /* A fresh BFP quantization of q's storage format (widths, group shape,
@@ -179,7 +213,17 @@ void tensorArrayWriteFile(const char *path, const tensorArray_t *arr) {
     }
 }
 
-static tensor_t *tensorFromRecord(tensorRecordHeader_t *h, size_t index, const char *path) {
+static tensor_t *tensorFromRecord(tensorRecordHeader_t *h, size_t index, const char *path,
+                                  uint64_t remaining) {
+    /* Before anything is built: the payload must be in the file and within
+     * the per-tensor limit (a tiny record must not request a huge buffer). */
+    if ((uint64_t)h->payloadBytes > remaining || h->payloadBytes > ODTA_MAX_TENSOR_BYTES) {
+        PRINT_ERROR("tensorArrayReadFile: %s: record %zu needs %zu payload bytes, the file has "
+                    "%llu left (per-tensor limit %zu)",
+                    path, index, h->payloadBytes, (unsigned long long)remaining,
+                    (size_t)ODTA_MAX_TENSOR_BYTES);
+        exit(1);
+    }
     shape_t wire = {.dimensions = h->dimensions,
                     .numberOfDimensions = h->numberOfDimensions,
                     .orderOfDimensions = NULL};
@@ -200,6 +244,11 @@ static tensor_t *tensorFromRecord(tensorRecordHeader_t *h, size_t index, const c
         exit(1);
     }
     tensor_t *t = initTensor(shapeLike(&wire), q, NULL);
+    if (t == NULL || (h->payloadBytes > 0 && t->data == NULL)) {
+        PRINT_ERROR("tensorArrayReadFile: %s: cannot reserve record %zu (%zu payload bytes)", path,
+                    index, h->payloadBytes);
+        exit(1);
+    }
     if (q->type == BFP) {
         const bfpQConfig_t *src = &h->qConfigStorage.bfp;
         memcpy(((bfpQConfig_t *)q->qConfig)->exponents, src->exponents, src->numGroups);
@@ -230,12 +279,19 @@ tensorArray_t *tensorArrayReadFile(const char *path) {
                     path, (unsigned)version, (unsigned)ODTS_TENSOR_RECORD_VERSION);
         exit(1);
     }
-    size_t count = (size_t)serialReadU32LE(f);
+    uint32_t fileCount = serialReadU32LE(f);
+    if (!tensorArrayCountFits(fileCount, bytesLeft(f, path), SIZE_MAX, sizeof(tensor_t *))) {
+        PRINT_ERROR("tensorArrayReadFile: %s declares %lu records, more records than the file can "
+                    "hold",
+                    path, (unsigned long)fileCount);
+        exit(1);
+    }
+    size_t count = (size_t)fileCount;
     tensorArray_t *arr = newTensorArray(count);
     for (size_t i = 0; i < count; i++) {
         tensorRecordHeader_t h;
         readTensorRecordHeader(&h, f);
-        tensor_t *t = tensorFromRecord(&h, i, path);
+        tensor_t *t = tensorFromRecord(&h, i, path, bytesLeft(f, path));
         serialReadBytes(t->data, h.payloadBytes, f);
         freeTensorRecordHeader(&h);
         arr->array[i] = t;

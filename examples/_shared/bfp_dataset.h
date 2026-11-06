@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "Dataset.h"
 #include "Quantization.h"
@@ -41,10 +42,26 @@ tensorArray_t *bfpDatasetOneHotLabels(const tensorArray_t *classes, size_t numCl
  * Integer only. */
 bool bfpOneHotClass(const tensor_t *label, size_t *cls);
 
+/* The reader's bounds on untrusted input. A record is at least
+ * ODTA_MIN_RECORD_BYTES (u32 rank + u8 dtype), so the container count can
+ * never exceed the bytes left after the header / that minimum; one tensor's
+ * payload must be backed by the file and stay under ODTA_MAX_TENSOR_BYTES. */
+#define ODTA_MIN_RECORD_BYTES 5u
+#define ODTA_MAX_TENSOR_BYTES ((size_t)1 << 26)
+
+/* true iff `count` records can fit `remainingBytes` of file AND count
+ * pointers of `pointerBytes` fit `sizeMax` (the target's SIZE_MAX), checked
+ * without wrapping -- the reader passes SIZE_MAX and sizeof(tensor_t *); a
+ * test passes UINT32_MAX and 4 to reproduce a 32-bit MCU on the host. */
+bool tensorArrayCountFits(uint64_t count, uint64_t remainingBytes, uint64_t sizeMax,
+                          size_t pointerBytes);
+
 /* Writes / reads an ODTA file (format above). The reader builds a fresh
  * tensor per record (identity dimension order; FLOAT32, INT32 and BFP) and
  * fails fast on a missing file, a foreign magic, another record version,
- * a truncated record or trailing bytes. The writer fails fast on a tensor
+ * a count the file cannot hold, a payload the file does not back (checked
+ * before any tensor is built), a truncated record, an allocation failure or
+ * trailing bytes. The writer fails fast on a tensor
  * whose dimension order is not the identity. Free with freeTensorArray. */
 void tensorArrayWriteFile(const char *path, const tensorArray_t *arr);
 tensorArray_t *tensorArrayReadFile(const char *path);

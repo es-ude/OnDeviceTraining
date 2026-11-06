@@ -468,7 +468,10 @@ BFP_HEAD=float BFP_MANTISSA_BITS=8 BFP_EXPONENT_BITS=8 BFP_WEIGHT_BLOCK=channel
 `data/bfp_m<m>_e<e>_w<wire block>/{train,val,test}_{x,y}.odta`, one per split and kind.
 Format (`examples/_shared/bfp_dataset.h`): `"ODTA"`, u32 LE tensor-record version, u32 LE
 count, then that many ODTS tensor records exactly as `serializeTensor` writes them (shape,
-dtype, BFP config with the group exponents, packed payload). A run of this path exits 1 if
+dtype, BFP config with the group exponents, packed payload). The reader treats the file as
+untrusted: the count is bounded by the bytes left, each payload by what the file still holds
+and 64 MiB per tensor, both before anything is allocated, and every stored exponent must fit
+its exponent width. A run of this path exits 1 if
 the files are missing, and the FULL gate's data check exits 2 if a sample is not in exactly
 `input.out`'s format or a label is not an exact BFP one-hot. Normalization is unchanged (raw
 UCI signals, as for every other config). bfp8 sizes: `train_x.odta` is 8.3 MB (1152 B of

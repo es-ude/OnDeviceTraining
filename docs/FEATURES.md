@@ -873,8 +873,9 @@ checkpointing, limitations, literature).
   BFP storage + `ARITH_BFP` compute with sweepable weight/wire blocks, widths,
   rounding and grad/state storage. Its `bfp8full_hflt` / `bfp8full_hbfp` configs run the
   whole training step integer (forward, backward, grad accumulation, mean scale,
-  momentum, update; float only in the float head's loss island, the logged loss value
-  and the input data), behind an init-time FULL gate and the M0+ census
+  momentum, update; float only in the float head's loss island and the logged loss value:
+  samples and one-hot labels are pre-converted to BFP before training, bit-identical to
+  online conversion), behind an init-time FULL gate and the M0+ census
   `tools/bfp-census/har_train_step_roots.txt --strict`.
 
 ## Known gaps / partial features

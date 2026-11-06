@@ -9,10 +9,13 @@
 # route on this path -- staging a FLOAT32 operand -- is closed at run time by
 # executeOp's forward check.
 #
-# Boundaries (allowed float, see allowlist.txt). These two stop at themselves:
-# their rows document the boundary and check nothing.
-QuantizationLayer.c quantizationForward
-TensorConversion.c  convertFloatTensorToBfpTensor
+# The input layer: the samples arrive pre-converted into input.out's BFP format
+# and pass straight through (self: its own body is the copy; the converting arm
+# for FLOAT32 samples is out of line and never runs on this path -- the trainer's
+# FULL gate checks every sample's format at load).
+QuantizationLayer.c quantizationForward  self
+# Boundary (allowed float, see allowlist.txt): the loss-facing dequant of p. It
+# stops at itself: its row documents the boundary and checks nothing.
 TensorConversion.c  convertBfpTensorToFloat32Tensor
 # The funnel (prologue, raw setup, epilogue dispatch) and the conversion entry:
 ExecuteOp.c         executeOp            self

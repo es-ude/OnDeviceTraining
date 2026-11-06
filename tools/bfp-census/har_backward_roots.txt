@@ -51,6 +51,9 @@ CrossEntropy.c      crossEntropySoftmaxBackward   self
 CrossEntropy.c      crossEntropySoftmaxBackwardKernelBfp
 CrossEntropy.c      crossEntropySoftmaxBackwardFakeQuant
 CrossEntropy.c      crossEntropySoftmaxBackwardFloat
+# The float head's ONE float -> BFP conversion onto the loss-grad wire (reached from
+# its FakeQuant island through conversionMatrix; stops at itself like the island).
+TensorConversion.c  convertFloatTensorToBfpTensor
 # ReLU dx: dispatch (self), then the code-domain sign mask (walked).
 Relu.c              reluBackward             self
 Relu.c              reluBackwardBfp

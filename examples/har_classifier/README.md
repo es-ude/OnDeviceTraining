@@ -443,10 +443,36 @@ kernels. There is no bare `bfp8full`: the head stays `BFP_HEAD`'s (one alias per
 On this path (native math, BFP wires, `BFP_GRADS=1`, `BFP_STATE=1`, whatever the widths) the
 trainer adds the FULL gate at init: every layer's math slot is `ARITH_BFP`, every wire BFP,
 both GEMM grads under `OUT_ACC_DYNAMIC_RESCALE`, the head as `BFP_HEAD` declares it, and the
-SGD step takes its integer ops (`FULL GATE PASS` twice, or exit 2 before any data loads).
-What stays float: the float head's loss island, the loss value (logging), the input layer's
-float samples and the float one-hot labels. The M0+ census of the whole step is
+SGD step takes its integer ops, and the data is pre-converted (below): `FULL GATE PASS`
+three times, or exit 2. What stays float: the float head's loss island and the loss value
+(logging); with the bfp head only the loss value. The M0+ census of the whole step is
 `tools/bfp-census/har_train_step_roots.txt` (`arithmetic-bfp.md` §15.8).
+
+**Pre-converted data (full-integer path only).** These runs read no float data: the
+samples are converted ONCE, before training, into the input wire's BFP format (m, e, the
+`BFP_WIRE_BLOCK` grouping of the 1152-element input, HALF_AWAY), the one-hot labels into
+per-tensor BFP (m, e) -- 0 and 1.0 are exact. The input Quantization layer then passes a
+sample of its own format straight through (payload + exponents copied, no conversion), and
+the integer `p − y` reads the BFP label in integers (the float head dequantizes it inside its
+loss island). The conversion is the library's own FLOAT32 → BFP cell, the one the input
+layer runs online, so the stored codes and every training log are bit-identical to online
+conversion. Write the files with the trainer itself, same env as the run:
+
+```
+BFP_HEAD=float BFP_MANTISSA_BITS=8 BFP_EXPONENT_BITS=8 BFP_WEIGHT_BLOCK=channel 
+  BFP_WIRE_BLOCK=16 BFP_GRADS=1 BFP_STATE=1 
+  build/examples/examples/har_classifier/train_c_har_classifier_bfp --write-bfp-data
+```
+
+(`run_matrix.py` and `trace_step.py` do this before their runs.) Files:
+`data/bfp_m<m>_e<e>_w<wire block>/{train,val,test}_{x,y}.odta`, one per split and kind.
+Format (`examples/_shared/bfp_dataset.h`): `"ODTA"`, u32 LE tensor-record version, u32 LE
+count, then that many ODTS tensor records exactly as `serializeTensor` writes them (shape,
+dtype, BFP config with the group exponents, packed payload). A run of this path exits 1 if
+the files are missing, and the FULL gate's data check exits 2 if a sample is not in exactly
+`input.out`'s format or a label is not an exact BFP one-hot. Normalization is unchanged (raw
+UCI signals, as for every other config). bfp8 sizes: `train_x.odta` is 8.3 MB (1152 B of
+codes + 72 B of exponents per sample, plus record headers) vs 30.5 MB for `train_x.npy`.
 
 ```
 uv run examples/har_classifier/run_matrix.py --build-subdir examples \

@@ -37,8 +37,9 @@ uv run tools/bfp-census/trace_step.py               # regenerate har_train_step_
   optimizer step, the grad reset, the RNG keys) and the targets the step reaches only
   through a pointer (the remat HEAP scheduler's rows, every HAR layer's
   `calcOutputShape`, the loader's `getBatch`); the --strict gate of the full path.
-  Its only float is the loss island of the float head, the loss value (both heads)
-  and the input boundary.
+  Its only float is the loss island of the float head and the loss value (both
+  heads): the samples and labels are pre-converted to BFP, and the input layer's
+  converting arm is a declared boundary.
   `include <file>` (relative to the including file) pulls a roots file in; a root
   line seen before is dropped, so a union lists each root once.
   Format `<source.c> <function>`: the census follows direct calls from the root, within
@@ -98,7 +99,9 @@ uv run tools/bfp-census/trace_step.py               # regenerate har_train_step_
   into the pointer-only and directly-called roots, graft a new helper with a float
   call onto `reluForward` (not in the trace), add a second static `clampInt32` with a
   float call in `Relu.c` (from the self root, from a walked root, and in the trace),
-  drop roots, add an undeclared pointer call and fake a changed source fingerprint;
+  drop roots, add an undeclared pointer call, fake a changed source fingerprint, and
+  inject a float call into the input layer's straight-through and into the integer
+  head's BFP-label read;
   each must fail `--strict` for its own reason.
   The dtype dispatchers (`executeOp`, `writeOutConversion`, the layers' `*Forward`
   switches) are `self` roots: a full walk from them reaches every dtype's arm. What a

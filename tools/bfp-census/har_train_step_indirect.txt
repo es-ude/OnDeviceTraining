@@ -32,8 +32,7 @@ site RematWireTable.c           rematWireTableBind    1 layerFunctions[].calcOut
 site RematPlan.c                rematPlanBuild        1 layerFunctions[].calcOutputShape
 site ExecuteOp.c                executeOp             1 spec->kernel: the layers' BFP kernels and engines (roots)
 site ExecuteOp.c                writeOutConversion    2 conversionMatrix[BFP_RAW][BFP] (reblockBfpRawTensor)
-site ExecuteOp.c                executeConvert        2 conversionMatrix cells: FLOAT32 -> BFP (input layer, float head), BFP -> FLOAT32 (loss value)
-site TensorConversion.c         convertTensor         1 conversionMatrix cells, as executeConvert
+site TensorConversion.c         convertTensor         1 conversionMatrix cells: FLOAT32 -> BFP (the float head's one conversion), BFP -> FLOAT32 (loss value, the float head's logits and BFP label)
 site Optimizer.c                optimizerStep         1 optimizerFunctions[SGD_M].step (sgdStepM)
 site OdtHook.c                  odtHookFire           1 the application's phase hook (odtHookSet): none in the HAR trainer, a host timer in timing builds; outside the objects
 #
@@ -227,6 +226,8 @@ boundary MaxPool1d.c            maxPool1dBackward            MaxPool1d.c        
 boundary MaxPool1d.c            maxPool1dBackward            MaxPool1d.c         maxPool1dBackwardFloat                 FLOAT32 arm: the dx wire is BFP (WIRE / FULL gates)
 boundary OptimizerApi.c         scaleOptimizerGradientsMean  OptimizerApi.c      meanFactorOf                           float 1/divisor of a non-BFP grad: every grad is BFP (FULL gate); its arm is scaleBfpTensorByScalarInPlace, a root
 boundary OptimizerApi.c         scaleOptimizerGradientsMean  OptimizerApi.c      scaleNonBfpGradient                    mean scale of a non-BFP grad: every grad is BFP (FULL gate)
+boundary QuantizationLayer.c    quantizationBackward         ExecuteOp.c         executeConvert                         the input layer's dx: never runs (no dx below conv1, the deepest trainable layer)
+boundary QuantizationLayer.c    quantizationForward          QuantizationLayer.c quantizationForwardConvert             converting arm for samples NOT in input.out's BFP format (FLOAT32): the full-integer path trains on pre-converted data, every sample checked at load (FULL gate: dataset)
 boundary Relu.c                 reluBackward                 Relu.c              reluBackwardFloat                      FLOAT32 arm: the dx wire is BFP (WIRE / FULL gates)
 boundary Relu.c                 reluBackward                 Relu.c              reluBackwardSymInt32                   SYM_INT32 arm: the dx wire is BFP (WIRE / FULL gates)
 boundary Relu.c                 reluForward                  Comparison.c        gteFloatValue                          FLOAT32 arm of the ReLU mask: the wire is BFP
@@ -247,13 +248,13 @@ boundary TrainingBatchDefault.c trainingBatchDefault         TrainingBatchDefaul
 # cross-check of the static closure above; regenerate with trace_step.py (the
 # census fails on a stale source fingerprint).
 #   trace-exclude <source.c> <function> <reason>
-# Inside the stopped float boundaries (the loss island and the input boundary):
+# Inside the stopped float boundaries (the loss island; the samples cross no
+# float boundary any more -- they are pre-converted):
 trace-exclude CrossEntropy.c      crossEntropyForwardFloat  the loss VALUE's float core: stopped under CrossEntropy.c:crossEntropyForward
 trace-exclude Softmax.c           softmaxValuesFloat        the float head's FLOAT32 Softmax: inside the softmaxForwardKernel island root
-trace-exclude TensorConversion.c  packFloatBufferAsBfp      FLOAT32 -> BFP packing: inside the convertFloatTensorToBfpTensor boundary root
-trace-exclude TensorConversion.c  deriveBfpStoredExponent   FLOAT32 -> BFP block exponent: inside the convertFloatTensorToBfpTensor boundary root
-trace-exclude Rounding.c          roundByMode               FLOAT32 -> BFP rounding: inside the convertFloatTensorToBfpTensor boundary root
-trace-exclude Rounding.c          roundHalfAway             FLOAT32 -> BFP rounding, inlined into roundByMode on the arm build: inside the convertFloatTensorToBfpTensor boundary root
-trace-exclude RNG.c               rngNextUnitFloat          the SR draw of FLOAT32 -> BFP rounding: inside the convertFloatTensorToBfpTensor boundary root
-trace-exclude Rounding.c          clamp                     FLOAT32 -> BFP code clamp: inside the convertFloatTensorToBfpTensor boundary root
-trace-exclude Quantization.c      bfpGroupScale             the float scale of a block: only the FLOAT32 <-> BFP boundary roots and dequantChunkToFloat reach it
+trace-exclude TensorConversion.c  packFloatBufferAsBfp      FLOAT32 -> BFP packing: inside the float head's convertFloatTensorToBfpTensor boundary root
+trace-exclude TensorConversion.c  deriveBfpStoredExponent   FLOAT32 -> BFP block exponent: inside the float head's convertFloatTensorToBfpTensor boundary root
+trace-exclude Rounding.c          roundByMode               FLOAT32 -> BFP rounding: inside the float head's convertFloatTensorToBfpTensor boundary root
+trace-exclude RNG.c               rngNextUnitFloat          the SR draw of FLOAT32 -> BFP rounding: inside the float head's convertFloatTensorToBfpTensor boundary root
+trace-exclude Rounding.c          clamp                     FLOAT32 -> BFP code clamp: inside the float head's convertFloatTensorToBfpTensor boundary root
+trace-exclude Quantization.c      bfpGroupScale             the float scale of a block: only the float head's FLOAT32 <-> BFP boundary roots and dequantChunkToFloat reach it

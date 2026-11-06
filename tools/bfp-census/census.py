@@ -21,6 +21,7 @@ site the roots reach must be declared there. Every allow-list entry is scoped
 to ONE root, so an entry for one root never hides another root's hits.
 """
 import argparse
+import functools
 import os
 import re
 import shutil
@@ -84,13 +85,24 @@ def self_test():
         print(f"self-test FAIL {k}: got {got}, want {want}", file=sys.stderr)
     # Scoped allow-list: an entry for root A must not touch root B's sites, an
     # excess site over the count stays a hit, and a missing site is stale.
-    allow = {"A.c:a": {"sym": {("f", "__aeabi_uidiv"): 2}, "stop": set()}}
+    allow = {"A.c:a": {"sym": {(("x.c", "f"), "__aeabi_uidiv"): 2}, "stop": set()}}
     sites = {("x.c", "f"): {("div", "__aeabi_uidiv"): 3}}
     hits_a, stale_a = apply_allow(sites, allow.get("A.c:a"), set())
     hits_b, _ = apply_allow(sites, allow.get("B.c:b"), set())
     _, stale_c = apply_allow({}, allow.get("A.c:a"), set())
     scoped_ok = (hits_a == {("x.c", "f"): {("div", "__aeabi_uidiv"): 1}} and not stale_a
-                 and hits_b == sites and stale_c == ["f __aeabi_uidiv: allowed 2, found 0"])
+                 and hits_b == sites and stale_c == ["x.c:f __aeabi_uidiv: allowed 2, found 0"])
+    # Translation-unit identity: an entry for x.c:f does not cover y.c:f, and an
+    # unqualified name two objects define is rejected (qualify exits).
+    hits_tu, _ = apply_allow({("y.c", "f"): {("div", "__aeabi_uidiv"): 1}}, allow["A.c:a"], set())
+    scoped_ok = scoped_ok and hits_tu == {("y.c", "f"): {("div", "__aeabi_uidiv"): 1}}
+    try:
+        qualify("f", {"f": {"x.c", "y.c"}}, "self-test")
+        scoped_ok = False
+    except SystemExit:
+        pass
+    scoped_ok = (scoped_ok and qualify("f", {"f": {"x.c"}}, "t") == ("x.c", "f")
+                 and qualify("y.c:f", {"f": {"x.c", "y.c"}}, "t") == ("y.c", "f"))
     if not scoped_ok:
         print(f"self-test FAIL scoped allow-list: {hits_a} {stale_a} {hits_b} {stale_c}",
               file=sys.stderr)
@@ -124,14 +136,27 @@ def self_test():
         print(f"self-test FAIL indirect coverage: {probs} {stale} {stale2}", file=sys.stderr)
     # Step-trace closure: an arm function the trace runs must be covered or
     # trace-excluded; names outside the arm objects are skipped.
-    tprobs, tstale, tn = check_trace({"walked", "island", "missed", "trainerFn"},
-                                     {("a.c", "walked")}, {"walked", "island", "missed"},
-                                     {"island": "boundary", "walked": "x", "gone": "y"})
-    trace_ok = (tn == 3 and tprobs == ["step trace: missed runs on the step but no root walks it"]
-                and tstale == ["trace-exclude walked: covered by the roots",
-                               "trace-exclude gone: not an arm function the step trace executes"])
+    # A same-named static in another object (b.c:walked) is not covered by a.c's.
+    tprobs, tstale, tn = check_trace(
+        {("a.c", "walked"), ("b.c", "walked"), ("a.c", "island"), ("t.c", "trainerFn")},
+        {("a.c", "walked")}, {("a.c", "walked"), ("b.c", "walked"), ("a.c", "island")},
+        {("a.c", "island"): "boundary", ("a.c", "walked"): "x", ("a.c", "gone"): "y"})
+    trace_ok = (tn == 3 and tprobs == ["step trace: b.c:walked runs on the step but no root walks it"]
+                and tstale == ["trace-exclude a.c walked: covered by the roots",
+                               "trace-exclude a.c gone: not an arm function the step trace executes"])
+    # Self-root closure: an uncovered, undeclared direct callee is a problem; a
+    # boundary for a covered callee or a call that does not exist is stale.
+    r = ("d.c", "disp")
+    eprobs, estale = check_self_edges(
+        {(r, ("d.c", "armF")), (r, ("d.c", "armI")), (r, ("x.c", "new"))}, {("d.c", "armI")},
+        {(r, ("d.c", "armF")): "float arm", (r, ("d.c", "armI")): "x", (r, ("d.c", "old")): "y"})
+    trace_ok = trace_ok and eprobs == [
+        "x.c:new is called directly by the self root d.c:disp; no root walks it and no boundary "
+        "line declares it"] and estale == ["boundary d.c disp d.c armI: covered by the roots",
+                                          "boundary d.c disp d.c old: no such call from a self root"]
     if not trace_ok:
-        print(f"self-test FAIL step trace: {tprobs} {tstale} {tn}", file=sys.stderr)
+        print(f"self-test FAIL step trace / self edges: {tprobs} {tstale} {tn} {eprobs} {estale}",
+              file=sys.stderr)
     failed = bool(bad) or not scoped_ok or not self_ok or not ind_ok or not trace_ok
     print("self-test " + ("FAILED" if failed else "ok"))
     return 1 if failed else 0
@@ -234,6 +259,13 @@ def parse_addr_refs(objdump, obj):
     return refs
 
 
+def fn_key(node):
+    """A function's identity: (translation unit, base name). A static name may
+    exist in several objects; every coverage and allow-list decision is keyed
+    by the pair, never by the name alone."""
+    return (node[0], base_name(node[1]))
+
+
 def base_name(sym):
     return re.sub(r"(\.(constprop|isra|part|cold|lto_priv)\.?\d*)+$", "", sym)
 
@@ -245,6 +277,8 @@ def read_allow(path):
       <root> <function>                  traversal stops at <function> under <root>
       <root> <function> <symbol> <count> <count> call sites of <symbol> inside
                                          <function> are allowed under <root>
+    <function> is `<name>` when one object defines it, else `<source.c>:<name>`
+    (qualify_allow resolves it against the build and rejects an ambiguous name).
     """
     allow = defaultdict(lambda: {"stop": set(), "sym": {}})
     for parts in read_pairs(path):
@@ -260,7 +294,7 @@ def read_allow(path):
 
 def walk_root(local, seeds, stops, self_only, resolve):
     """Collect the call sites a root reaches: {node: {(cat, sym): n}}, plus the
-    nodes entered and the base names reached (stops included).
+    nodes entered and the fn_keys reached (stops included). stops: fn_keys.
 
     self_only: count the seeds' own call sites and follow nothing -- for the
     dtype dispatchers, whose callees span every dtype's arm.
@@ -271,11 +305,11 @@ def walk_root(local, seeds, stops, self_only, resolve):
         node = stack.pop()
         if node in seen:
             continue
-        if base_name(node[1]) in stops:
-            reached.add(base_name(node[1]))
+        if fn_key(node) in stops:
+            reached.add(fn_key(node))
             continue
         seen.add(node)
-        reached.add(base_name(node[1]))
+        reached.add(fn_key(node))
         for callee in local[node]:
             cat = category(callee)
             if cat:
@@ -292,31 +326,57 @@ def walk_root(local, seeds, stops, self_only, resolve):
 def apply_allow(sites, entry, reached):
     """Split one root's call sites into hits and stale entries.
 
-    sites: {node: {(cat, sym): n}}; entry: that root's allow-list (or None);
-    reached: base names of the functions the walk entered or stopped at.
+    sites: {node: {(cat, sym): n}}; entry: that root's qualified allow-list
+    (fn_key functions, see qualify_allow; or None); reached: fn_keys of the
+    functions the walk entered or stopped at.
     """
     entry = entry or {"stop": set(), "sym": {}}
     per_key = defaultdict(int)
     for node, fnhits in sites.items():
         for (_, sym), n in fnhits.items():
-            per_key[(base_name(node[1]), sym)] += n
+            per_key[(fn_key(node), sym)] += n
     stale = []
     for (fn, sym), allowed in sorted(entry["sym"].items()):
         if per_key.get((fn, sym), 0) < allowed:
-            stale.append(f"{fn} {sym}: allowed {allowed}, found {per_key.get((fn, sym), 0)}")
+            stale.append(f"{fn[0]}:{fn[1]} {sym}: allowed {allowed}, "
+                         f"found {per_key.get((fn, sym), 0)}")
     for fn in sorted(entry["stop"] - reached):
-        stale.append(f"{fn}: stop entry never reached")
+        stale.append(f"{fn[0]}:{fn[1]}: stop entry never reached")
     budget = dict(entry["sym"])
     hits = defaultdict(lambda: defaultdict(int))
     for node in sorted(sites):
         for (cat, sym), n in sorted(sites[node].items()):
-            key = (base_name(node[1]), sym)
+            key = (fn_key(node), sym)
             take = min(n, budget.get(key, 0))
             if key in budget:
                 budget[key] -= take
             if n - take:
                 hits[node][(cat, sym)] += n - take
     return {k: dict(v) for k, v in hits.items()}, stale
+
+
+def qualify(fn, tus, what):
+    """`<source.c>:<name>` or a `<name>` exactly one object defines -> fn_key.
+    tus: {base name: {sources defining it}}. A name several objects define must
+    be qualified; an unknown name keeps a key no walk reaches (stale)."""
+    if ":" in fn:
+        src, name = fn.split(":", 1)
+        return (src, name)
+    where = tus.get(fn, set())
+    if len(where) > 1:
+        sys.exit(f"census: {what}: '{fn}' is defined in {', '.join(sorted(where))}; "
+                 f"qualify it as <source.c>:{fn}")
+    return (next(iter(where)) if where else "?", fn)
+
+
+def qualify_allow(allow, tus):
+    """read_allow's entries with every function resolved to its fn_key."""
+    out = {}
+    for root, e in allow.items():
+        out[root] = {"stop": {qualify(f, tus, f"allow-list {root}") for f in e["stop"]},
+                     "sym": {(qualify(f, tus, f"allow-list {root}"), sym): n
+                             for (f, sym), n in e["sym"].items()}}
+    return out
 
 
 def read_indirect(path):
@@ -327,20 +387,26 @@ def read_indirect(path):
                                                        that does not run on the step
       site <source.c> <function> <count> <reason ...>  a covered function makes
                                                        exactly <count> indirect calls
-      trace-exclude <function> <reason ...>            a function the step trace
+      boundary <self.c> <self root> <callee.c> <callee> <reason ...>
+                                                       a direct call a `self` root
+                                                       makes that no root walks
+      trace-exclude <source.c> <function> <reason ...> a function the step trace
                                                        executes that no root walks
     """
-    spec = {"exclude": {}, "site": {}, "untraced": {}}
+    spec = {"exclude": {}, "site": {}, "untraced": {}, "boundary": {}}
     for parts in read_pairs(path):
-        if parts[0] == "trace-exclude" and len(parts) >= 3:
-            spec["untraced"][parts[1]] = " ".join(parts[2:])
+        if parts[0] == "trace-exclude" and len(parts) >= 4:
+            spec["untraced"][(parts[1], parts[2])] = " ".join(parts[3:])
+        elif parts[0] == "boundary" and len(parts) >= 6:
+            spec["boundary"][((parts[1], parts[2]), (parts[3], parts[4]))] = " ".join(parts[5:])
         elif parts[0] == "exclude" and len(parts) >= 4:
             spec["exclude"][(parts[1], parts[2])] = " ".join(parts[3:])
         elif parts[0] == "site" and len(parts) >= 5 and parts[3].isdigit():
             spec["site"][(parts[1], parts[2])] = (int(parts[3]), " ".join(parts[4:]))
         else:
             sys.exit(f"census: bad indirect line (want 'exclude <src.c> <function> <reason>', "
-                     f"'site <src.c> <function> <count> <reason>' or 'trace-exclude <function> "
+                     f"'site <src.c> <function> <count> <reason>', 'boundary <self.c> <root> "
+                     f"<callee.c> <callee> <reason>' or 'trace-exclude <src.c> <function> "
                      f"<reason>'): {' '.join(parts)}")
     return spec
 
@@ -383,26 +449,67 @@ def check_indirect(spec, covered, addr_taken, indirect_sites):
     return problems, stale
 
 
-def check_trace(executed, covered, arm_functions, untraced):
-    """Close the roots over what the step really runs.
+def check_self_edges(edges, covered, boundary):
+    """Close the `self` roots statically: every direct call a self root makes
+    must reach a function some root walks (or names), or be a declared
+    boundary. edges: {(self fn_key, callee fn_key)}. Returns (problems, stale)."""
+    problems = [f"{c[0]}:{c[1]} is called directly by the self root {r[0]}:{r[1]}; "
+                f"no root walks it and no boundary line declares it"
+                for r, c in sorted(edges) if c not in covered and (r, c) not in boundary]
+    stale = [f"boundary {r[0]} {r[1]} {c[0]} {c[1]}: "
+             + ("covered by the roots" if c in covered else "no such call from a self root")
+             for r, c in sorted(boundary) if c in covered or (r, c) not in edges]
+    return problems, stale
 
-    executed: function names the instrumented host step entered
-    (har_train_step_trace.txt); covered: (source, base name) of every function
-    a root walked or names; arm_functions: base names defined in the arm
-    objects; untraced: {name: reason} of the trace-exclude lines. A name that is
-    an arm function, covered by no root and not excluded is a problem; names
-    outside the arm objects (the trainer, or inlined on the arm build, where the
-    caller's walk checks the body) are skipped. An exclusion of a covered name or
-    of a name the trace does not hold is stale. Returns (problems, stale,
-    number of names checked)."""
-    covered_names = {fn for _, fn in covered}
+
+@functools.lru_cache(maxsize=None)
+def source_fingerprint(repo=None):
+    """SHA-256 over the sources the step trace is built from: every .c / .h
+    under src/, the HAR BFP trainer and the trace tool. The trace file stores
+    it; a mismatch means the trace may miss what the step now runs."""
+    import hashlib
+    repo = Path(repo) if repo else HERE.parent.parent
+    files = sorted(f for f in (repo / "src").rglob("*") if f.suffix in (".c", ".h"))
+    files += [repo / "examples" / "har_classifier" / "train_c_bfp.c",
+              HERE / "step_trace_hook.c", HERE / "trace_step.py"]
+    h = hashlib.sha256()
+    for f in files:
+        h.update(str(f.relative_to(repo)).encode() + b"\0" + f.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def read_trace(path):
+    """(fingerprint, {(source, function)}) of a trace file."""
+    fp, executed = None, set()
+    for raw in path.read_text().splitlines():
+        if raw.startswith("# fingerprint "):
+            fp = raw.split()[2]
+        line = raw.split("#", 1)[0].split()
+        if len(line) == 2:
+            executed.add((line[0], line[1]))
+        elif line:
+            sys.exit(f"census: bad trace line (want '<source.c> <function>'): {raw}")
+    return fp, executed
+
+
+def check_trace(executed, covered, arm_functions, untraced):
+    """Cross-check the roots against what the step really runs.
+
+    executed: (source, function) the instrumented host step entered;
+    covered: fn_keys some root walks or names; arm_functions: fn_keys of the
+    arm objects; untraced: {fn_key: reason} of the trace-exclude lines. An arm
+    function the trace runs, covered by no root and not excluded is a problem;
+    entries outside the arm objects (the trainer, or functions the arm build
+    inlines, whose caller's walk checks the body) are skipped. An exclusion of
+    a covered function or of one the trace does not hold is stale. Returns
+    (problems, stale, number checked)."""
     checked = sorted(executed & arm_functions)
-    problems = [f"step trace: {fn} runs on the step but no root walks it"
-                for fn in checked if fn not in covered_names and fn not in untraced]
-    stale = [f"trace-exclude {fn}: covered by the roots" for fn in sorted(untraced)
-             if fn in covered_names]
-    stale += [f"trace-exclude {fn}: not an arm function the step trace executes"
-              for fn in sorted(set(untraced) - set(checked))]
+    problems = [f"step trace: {s}:{fn} runs on the step but no root walks it"
+                for s, fn in checked if (s, fn) not in covered and (s, fn) not in untraced]
+    stale = [f"trace-exclude {k[0]} {k[1]}: covered by the roots" for k in sorted(untraced)
+             if k in covered]
+    stale += [f"trace-exclude {k[0]} {k[1]}: not an arm function the step trace executes"
+              for k in sorted(set(untraced) - set(checked))]
     return problems, stale, len(checked)
 
 
@@ -434,11 +541,17 @@ def load_build(build_dir, objdump):
     return {"local": local, "defined": defined, "indirect": indirect, "addr": dict(addr)}
 
 
-def run_census(build, roots, allow, out, err, verbose=False, extra_executed=()):
+def run_census(build, roots, allow, out, err, verbose=False, extra_executed=(),
+               fingerprint=None):
     """Walk every root of `roots` (read_roots lines), print the report to `out`
     and the failures to `err`. Returns the number of --strict failures (0 = the
-    gate passes). extra_executed: names added to the step trace (controls)."""
+    gate passes). extra_executed: (source, function) added to the step trace
+    and fingerprint: a stand-in for the sources' fingerprint (controls)."""
     local, defined = build["local"], build["defined"]
+    tus = defaultdict(set)
+    for src, fn in local:
+        tus[base_name(fn)].add(src)
+    allow = qualify_allow(allow, tus)
     unresolved = {}  # callee -> reason; printed once so silent drops are visible
 
     def resolve(src, sym):
@@ -453,7 +566,7 @@ def run_census(build, roots, allow, out, err, verbose=False, extra_executed=()):
     indirect_files = [p[1] for p in roots if p[0] == "indirect"]
     if len(indirect_files) > 1:
         sys.exit(f"census: more than one indirect file: {indirect_files}")
-    rows, missing, stale_all, covered = [], 0, [], set()
+    rows, missing, stale_all, covered, self_edges = [], 0, [], set(), set()
     for parts in roots:
         if parts[0] in ("indirect", "trace"):
             continue
@@ -470,7 +583,13 @@ def run_census(build, roots, allow, out, err, verbose=False, extra_executed=()):
             missing += 1
             continue
         sites, seen, reached = walk_root(local, seeds, stops, self_only, resolve)
-        covered |= {(s, base_name(f)) for s, f in list(seen) + seeds}
+        covered |= {fn_key(n) for n in list(seen) + seeds}
+        if self_only:
+            for seed in seeds:
+                for callee in local[seed]:
+                    nxt = None if category(callee) else resolve(seed[0], callee)
+                    if nxt and fn_key(nxt) != fn_key(seed):
+                        self_edges.add((fn_key(seed), fn_key(nxt)))
         hits, stale = apply_allow(sites, entry, reached)
         stale_all += [f"{label}: {s}" for s in stale]
         totals = defaultdict(int)
@@ -505,7 +624,11 @@ def run_census(build, roots, allow, out, err, verbose=False, extra_executed=()):
             line += f"\n      reached from: {', '.join(sorted(reached_by[node]))}"
         print(line, file=out)
     for sym, why in sorted(unresolved.items()):
-        print(f"census: warning: callee {sym} is {why}; not followed", file=err)
+        print(f"census: {'warning: ' if why == 'undefined' else ''}callee {sym} is {why}; "
+              f"not followed", file=err)
+    # A name several objects define and the caller's object does not: the walk
+    # cannot tell which one runs, so it cannot certify either.
+    n_ambiguous = sum(1 for why in unresolved.values() if why == "ambiguous")
     n_hit = sum(sum(h.values()) for h in unique.values())
     n_gate = sum(n for h in unique.values() for (c, _), n in h.items() if c in GATE_CATS)
     print(f"\ntotal non-allow-listed hit call sites (unique): {n_hit} "
@@ -527,12 +650,27 @@ def run_census(build, roots, allow, out, err, verbose=False, extra_executed=()):
         for line in stale:
             print(f"census: stale indirect entry: {line}", file=err)
         n_ind = len(problems) + len(stale)
+        problems, stale = check_self_edges(self_edges, covered, spec["boundary"])
+        print(f"self roots: {len(self_edges)} direct calls, {len(spec['boundary'])} declared "
+              f"boundaries; problems {len(problems)}, stale {len(stale)}", file=out)
+        for line in problems:
+            print(f"census: {line}", file=err)
+        for line in stale:
+            print(f"census: stale boundary entry: {line}", file=err)
+        n_ind += len(problems) + len(stale)
     trace_files = [p[1] for p in roots if p[0] == "trace"]
     if trace_files:
         if not indirect_files:
             sys.exit("census: a `trace` line needs an `indirect` file for its trace-exclude lines")
-        executed = {p[0] for p in read_pairs(Path(trace_files[0]))} | set(extra_executed)
-        arm_functions = {base_name(fn) for _, fn in local}
+        recorded, executed = read_trace(Path(trace_files[0]))
+        executed |= set(extra_executed)
+        current = fingerprint or source_fingerprint()
+        if recorded != current:
+            print(f"census: step trace {Path(trace_files[0]).name} is stale (fingerprint "
+                  f"{recorded}, sources now {current}): re-run uv run tools/bfp-census/"
+                  f"trace_step.py", file=err)
+            n_ind += 1
+        arm_functions = {fn_key(n) for n in local}
         problems, stale, n_checked = check_trace(executed, covered, arm_functions,
                                                  read_indirect(Path(indirect_files[0]))["untraced"])
         print(f"\nstep trace ({Path(trace_files[0]).name}): {len(executed)} executed functions, "
@@ -543,7 +681,7 @@ def run_census(build, roots, allow, out, err, verbose=False, extra_executed=()):
         for line in stale:
             print(f"census: stale trace entry: {line}", file=err)
         n_ind += len(problems) + len(stale)
-    return (1 if n_gate else 0) + missing + len(stale_all) + n_ind
+    return (1 if n_gate else 0) + missing + len(stale_all) + n_ind + n_ambiguous
 
 
 # Each control breaks the step gate one way; --strict must fail on every one.
@@ -574,12 +712,12 @@ def negative_controls(build, roots, allow):
     import io
     bad = 0
 
-    def gate(b, r, what, want_fail, needle=None, extra=()):
+    def gate(b, r, what, want_fail, needle=None, extra=(), fp=None):
         """needle: text the report must contain, so a control fails for its
         own reason and not for an unrelated one."""
         nonlocal bad
         out, err = io.StringIO(), io.StringIO()
-        failures = run_census(b, r, allow, out, err, extra_executed=extra)
+        failures = run_census(b, r, allow, out, err, extra_executed=extra, fingerprint=fp)
         text = out.getvalue() + err.getvalue()
         found = (needle is None or (needle.search(text) if hasattr(needle, "search")
                                     else needle in text))
@@ -610,11 +748,46 @@ def negative_controls(build, roots, allow):
     gate(b, roots, "extra indirect call in RematScheduler.c:rematNext", True,
          "RematScheduler.c:rematNext makes 2 indirect call(s), declared 1")
     # The step-trace closure: a traced function no root walks, and a dropped root.
-    gate(build, roots, "adamWStep added to the step trace", True,
-         "step trace: adamWStep runs on the step", extra=("adamWStep",))
+    gate(build, roots, "AdamW.c:adamWStep added to the step trace", True,
+         "step trace: AdamW.c:adamWStep runs on the step", extra=(("AdamW.c", "adamWStep"),))
     dropped = [p for p in roots if p[:2] != ["Linear.c", "linearForwardBfpRaw"]]
     gate(build, dropped, "root Linear.c:linearForwardBfpRaw dropped", True,
-         "step trace: linearForwardBfpRaw runs on the step")
+         "step trace: Linear.c:linearForwardBfpRaw runs on the step")
+    dropped = [p for p in roots if p[:2] != ["Quantization.c", "initBfpRawQuantization"]]
+    gate(build, dropped, "root Quantization.c:initBfpRawQuantization dropped", True,
+         "Quantization.c:initBfpRawQuantization is called directly by the self root "
+         "ExecuteOp.c:executeOp")
+    gate(build, roots, "sources changed since the step trace", True,
+         "is stale (fingerprint", fp="0" * 64)
+
+    def graft(b, caller, node, callees):
+        """A new function `node` the existing `caller` calls directly."""
+        b = dict(b, local=dict(b["local"]), defined=defaultdict(list, b["defined"]))
+        b["local"][node] = list(callees)
+        b["defined"][node[1]] = b["defined"][node[1]] + [node]
+        if caller is not None:
+            key = next(k for k in b["local"] if fn_key(k) == caller)
+            b["local"][key] = b["local"][key] + [node[1]]
+        return b
+
+    # The static closure, not the trace: a new helper of a self root that the
+    # trace never saw (Codex re-review D, counterexample 1).
+    gate(graft(build, ("Relu.c", "reluForward"), ("Relu.c", "reviewProbe"), ["__aeabi_fmul"]),
+         roots, "Relu.c:reluForward -> new reviewProbe -> __aeabi_fmul, not traced", True,
+         "Relu.c:reviewProbe is called directly by the self root Relu.c:reluForward")
+    # Translation-unit identity (counterexample 2): a second, static clampInt32
+    # in Relu.c with a float call is not covered by Rounding.c's root -- neither
+    # from the self root, nor through the trace, nor inside a walked root.
+    dup = ("Relu.c", "clampInt32")
+    gate(graft(build, ("Relu.c", "reluForward"), dup, ["__aeabi_fmul"]), roots,
+         "static Relu.c:clampInt32 (fmul) called by reluForward", True,
+         "Relu.c:clampInt32 is called directly by the self root Relu.c:reluForward")
+    gate(graft(build, None, dup, ["__aeabi_fmul"]), roots,
+         "static Relu.c:clampInt32 (fmul) in the step trace", True,
+         "step trace: Relu.c:clampInt32 runs", extra=(dup,))
+    gate(graft(build, ("Relu.c", "reluForwardBfp"), dup, ["__aeabi_fmul"]), roots,
+         "static Relu.c:clampInt32 (fmul) called by the walked reluForwardBfp", True,
+         re.compile(r"^  Relu\.c:clampInt32  .*__aeabi_fmul x1", re.M))
     return bad
 
 

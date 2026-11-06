@@ -74,8 +74,10 @@ DataLoaderApi.c             getBatch
 TensorConversion.c          dequantChunkToFloat
 #
 # Called directly from the `self` roots above (dispatcher helpers, which a self
-# root does not walk) and run on every step -- the `trace` line below fails the
-# gate on any function the instrumented step executes that no root walks:
+# root does not walk) and run on every step. The indirect file closes every
+# direct call out of a self root statically (a root, or a declared `boundary`
+# the step does not take); the `trace` line cross-checks the roots against an
+# instrumented run (keyed by translation unit, stale when the sources change):
 # - the layers' BFP arms and their checks (Linear, Softmax, ReLU, the pools' wire
 #   anchor; the grad-mode check of Conv1d / Linear);
 Linear.c                    linearForwardBfpRaw

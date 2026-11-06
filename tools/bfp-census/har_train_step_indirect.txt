@@ -1,6 +1,7 @@
 # The closures of har_train_step_roots.txt: over calls through pointers (its
-# `indirect` line; exclude / site below) and over what the step really runs
-# (its `trace` line; trace-exclude at the end).
+# `indirect` line; exclude / site below), over the direct calls of its `self`
+# roots (boundary below) and, as a cross-check, over what an instrumented step
+# really runs (its `trace` line; trace-exclude at the end).
 # Pointer closure:
 # with it, --strict fails unless
 #   - every function whose address the arm build takes (a vtable or conversion
@@ -195,22 +196,64 @@ exclude TensorConversion.c  requantBfpTensor                        conversionMa
 exclude TensorConversion.c  requantSymInt32Tensor                   conversionMatrix[SYM_INT32][SYM_INT32]: no SYM_INT32 tensor on the step
 exclude TensorConversion.c  unsupportedConversionTypes              conversionMatrix error cell (exits)
 #
+# ---- Direct calls out of the `self` roots that no root walks ------------------
+# A self root checks only its own call sites, so every direct call it makes is
+# closed here statically: the callee is walked by some root, or it is a
+# boundary below -- an arm the bfp8full step does not take, with the reason
+# (the trainer's init gates pin the dtypes, modes and knobs it names). A new
+# direct call out of a self root fails --strict until rooted or declared.
+#   boundary <self.c> <self root> <callee.c> <callee> <reason>
+boundary AvgPool1d.c            avgPool1dBackward            AvgPool1d.c         avgPool1dBackwardFloat                 FLOAT32 arm: the dx wire is BFP (WIRE / FULL gates)
+boundary AvgPool1d.c            avgPool1dBackward            AvgPool1d.c         bfpRequireNoBfpWire                    a non-BFP arm's guard (exits on a BFP wire): the arm is not taken under BFP math
+boundary Conv1d.c               conv1dBackward               Conv1d.c            conv1dCalcBiasGradsSymInt32            SYM_INT32 grad arm: BFP grads under DYNAMIC_RESCALE (FULL gate)
+boundary Conv1d.c               conv1dBackward               Conv1d.c            conv1dCalcWeightGradsSymInt32          SYM_INT32 grad arm: BFP grads under DYNAMIC_RESCALE (FULL gate)
+boundary ExecuteOp.c            executeOp                    Add.c               addSymInt32TensorsInplace              SYM_INT32 ACC epilogue: grads accumulate BFP_RAW -> BFP (accumulateBfpRawIntoBfpRescale, a root)
+boundary ExecuteOp.c            executeOp                    Quantization.c      initSymInt32QConfig                    SYM_INT32 raw / staging config: every operand and raw output of the BFP step is BFP / BFP_RAW
+boundary ExecuteOp.c            executeOp                    Rounding.c          rescaleIntoAccumulatorScale            SYM_INT32 ACC epilogue: grads accumulate BFP_RAW -> BFP (accumulateBfpRawIntoBfpRescale, a root)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateFloatIntoAsymTensorRescale   ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateFloatIntoBfpTensorFixedGrid  ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateFloatIntoBfpTensorRescale    ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateFloatIntoSymTensorFixedGrid  ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateFloatIntoSymTensorRescale    ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateSymInt32IntoSymInt32Rescale  ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateTensorIntoAsymRescale        ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateTensorIntoBfpFixedGrid       ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateTensorIntoBfpRescale         ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateTensorIntoFloat32Inplace     ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateTensorIntoSymFixedGrid       ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  accumulateTensorIntoSymRescale         ACC epilogue engine of another dtype pair or grad mode: BFP_RAW grads accumulate into BFP under DYNAMIC_RESCALE (accumulateBfpRawIntoBfpRescale, a root; FULL gate)
+boundary ExecuteOp.c            executeOp                    TensorConversion.c  quantizeFloatBufferToBfpCodes          FLOAT32 operand staging into BFP: no FLOAT32 operand on the BFP step (executeOp rejects it on the forward)
+boundary MaxPool1d.c            maxPool1dBackward            MaxPool1d.c         bfpRequireNoBfpWire                    a non-BFP arm's guard (exits on a BFP wire): the arm is not taken under BFP math
+boundary MaxPool1d.c            maxPool1dBackward            MaxPool1d.c         maxPool1dBackwardFloat                 FLOAT32 arm: the dx wire is BFP (WIRE / FULL gates)
+boundary OptimizerApi.c         scaleOptimizerGradientsMean  OptimizerApi.c      meanFactorOf                           float 1/divisor of a non-BFP grad: every grad is BFP (FULL gate); its arm is scaleBfpTensorByScalarInPlace, a root
+boundary OptimizerApi.c         scaleOptimizerGradientsMean  OptimizerApi.c      scaleNonBfpGradient                    mean scale of a non-BFP grad: every grad is BFP (FULL gate)
+boundary Relu.c                 reluBackward                 Relu.c              reluBackwardFloat                      FLOAT32 arm: the dx wire is BFP (WIRE / FULL gates)
+boundary Relu.c                 reluBackward                 Relu.c              reluBackwardSymInt32                   SYM_INT32 arm: the dx wire is BFP (WIRE / FULL gates)
+boundary Relu.c                 reluForward                  Comparison.c        gteFloatValue                          FLOAT32 arm of the ReLU mask: the wire is BFP
+boundary Relu.c                 reluForward                  Comparison.c        gteSymInt32Zero                        SYM_INT32 arm of the ReLU mask: the wire is BFP
+boundary Relu.c                 reluForward                  Relu.c              bfpRequireNoBfpWire                    a non-BFP arm's guard (exits on a BFP wire): the arm is not taken under BFP math
+boundary Sgd.c                  sgdStepM                     Sgd.c               sgdRejectIntegerWeightDecay            cold reject of integer weight decay (exits): bfp8full has none (FULL gate optimizer check)
+boundary Softmax.c              softmaxBackward              Softmax.c           bfpRequireNoBfpWire                    standalone Softmax backward: HAR never runs it (CrossEntropy's combined p - y replaces it)
+boundary Softmax.c              softmaxBackward              Softmax.c           softmaxBackwardRequireWires            standalone Softmax backward: HAR never runs it (CrossEntropy's combined p - y replaces it)
+boundary Softmax.c              softmaxBackward              Softmax.c           softmaxVjpRows                         standalone Softmax backward: HAR never runs it (CrossEntropy's combined p - y replaces it)
+boundary TrainingBatchDefault.c trainingBatchDefault         StackGather.c       stackGatherRequireFloat32Model         micro-batch m > 1 path: HAR trains at m = 1
+boundary TrainingBatchDefault.c trainingBatchDefault         TrainingBatchDefault.c trainingBatchStacked                   micro-batch m > 1 path: HAR trains at m = 1
+#
 # ---- Executed on the step (har_train_step_trace.txt), walked by no root ------
-# The roots file's `trace` line: every name in the generated step trace that is
-# a function of the arm objects must be walked by a root or listed here. Names
-# outside the arm objects (the trainer; functions the arm build inlines into a
-# walked caller) are skipped. Regenerate the trace with trace_step.py.
-#   trace-exclude <function> <reason>
+# The roots file's `trace` line: every <translation unit, function> of the
+# generated step trace that is a function of the arm objects must be walked by
+# a root or listed here. Entries outside the arm objects (the trainer;
+# functions the arm build inlines into a walked caller) are skipped. A
+# cross-check of the static closure above; regenerate with trace_step.py (the
+# census fails on a stale source fingerprint).
+#   trace-exclude <source.c> <function> <reason>
 # Inside the stopped float boundaries (the loss island and the input boundary):
-trace-exclude crossEntropyForwardFloat  the loss VALUE's float core: stopped under CrossEntropy.c:crossEntropyForward
-trace-exclude softmaxValuesFloat        the float head's FLOAT32 Softmax: inside the softmaxForwardKernel island root
-trace-exclude packFloatBufferAsBfp      FLOAT32 -> BFP packing: inside the convertFloatTensorToBfpTensor boundary root
-trace-exclude deriveBfpStoredExponent   FLOAT32 -> BFP block exponent: inside the convertFloatTensorToBfpTensor boundary root
-trace-exclude roundByMode               FLOAT32 -> BFP rounding: inside the convertFloatTensorToBfpTensor boundary root
-trace-exclude roundHalfAway             FLOAT32 -> BFP rounding, inlined into roundByMode on the arm build: inside the convertFloatTensorToBfpTensor boundary root
-trace-exclude rngNextUnitFloat          the SR draw of FLOAT32 -> BFP rounding: inside the convertFloatTensorToBfpTensor boundary root
-trace-exclude clamp                     FLOAT32 -> BFP code clamp: inside the convertFloatTensorToBfpTensor boundary root
-trace-exclude bfpGroupScale             the float scale of a block: only the FLOAT32 <-> BFP boundary roots and dequantChunkToFloat reach it
-# A static inline header helper whose step copy the arm build inlines into
-# CrossEntropy.c (walked under crossEntropyForward); the standalone copy is MSE's.
-trace-exclude requireBatchedOutput      LossFunctionInternal.h helper: inlined into the walked CrossEntropy.c callers; the arm symbol is MSE.c's
+trace-exclude CrossEntropy.c      crossEntropyForwardFloat  the loss VALUE's float core: stopped under CrossEntropy.c:crossEntropyForward
+trace-exclude Softmax.c           softmaxValuesFloat        the float head's FLOAT32 Softmax: inside the softmaxForwardKernel island root
+trace-exclude TensorConversion.c  packFloatBufferAsBfp      FLOAT32 -> BFP packing: inside the convertFloatTensorToBfpTensor boundary root
+trace-exclude TensorConversion.c  deriveBfpStoredExponent   FLOAT32 -> BFP block exponent: inside the convertFloatTensorToBfpTensor boundary root
+trace-exclude Rounding.c          roundByMode               FLOAT32 -> BFP rounding: inside the convertFloatTensorToBfpTensor boundary root
+trace-exclude Rounding.c          roundHalfAway             FLOAT32 -> BFP rounding, inlined into roundByMode on the arm build: inside the convertFloatTensorToBfpTensor boundary root
+trace-exclude RNG.c               rngNextUnitFloat          the SR draw of FLOAT32 -> BFP rounding: inside the convertFloatTensorToBfpTensor boundary root
+trace-exclude Rounding.c          clamp                     FLOAT32 -> BFP code clamp: inside the convertFloatTensorToBfpTensor boundary root
+trace-exclude Quantization.c      bfpGroupScale             the float scale of a block: only the FLOAT32 <-> BFP boundary roots and dequantChunkToFloat reach it

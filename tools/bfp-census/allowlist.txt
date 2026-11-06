@@ -227,3 +227,28 @@ MaxPool1d.c:maxPool1dCalcOutputShape windowGeometry1dCalc __aeabi_uidiv 3
 AvgPool1d.c:avgPool1dCalcOutputShape windowGeometry1dCalc __aeabi_uidiv 3
 # The BFP -> FLOAT32 dequant's chunk reader: part of that loss-facing boundary.
 TensorConversion.c:dequantChunkToFloat dequantChunkToFloat
+
+# ---- Called directly from the self roots (the step trace closure) -----------
+# Linear's BFP arms, which the kernel adapters above also run: the same
+# per-call / per-group-change matmul divisions and the shared per-MAC index
+# math the linearForwardKernelBfpRaw entries allow.
+Linear.c:linearForwardBfpRaw matmulBfpRawTensors __aeabi_uidiv 1
+Linear.c:linearForwardBfpRaw matmulBfpRawTensorsWalk __aeabi_uidiv 2
+Linear.c:linearForwardBfpRaw calcElementIndexByIndices __aeabi_uidiv 1
+Linear.c:linearCalcPropLossBfp matmulBfpRawTensors __aeabi_uidiv 1
+Linear.c:linearCalcPropLossBfp matmulBfpRawTensorsWalk __aeabi_uidiv 2
+Linear.c:linearCalcPropLossBfp calcElementIndexByIndices __aeabi_uidiv 1
+Linear.c:linearCalcWeightGradsBfpRaw matmulBfpRawTensors __aeabi_uidiv 1
+Linear.c:linearCalcWeightGradsBfpRaw matmulBfpRawTensorsWalk __aeabi_uidiv 2
+Linear.c:linearCalcWeightGradsBfpRaw calcElementIndexByIndices __aeabi_uidiv 1
+# The per-op / per-update / per-call key folds (rngFold round % 3, as above).
+LayerExec.c:layerExecOpKey rngFold __aeabi_uidivmod 2
+LayerExec.c:layerExecPhaseKey rngFold __aeabi_uidivmod 2
+OptimizerKeys.c:optimizerScaleStream rngFold __aeabi_uidivmod 2
+OptimizerKeys.c:optimizerUpdateOpKey rngFold __aeabi_uidivmod 2
+TrainingRng.c:trainingRngCallKey rngFold __aeabi_uidivmod 2
+# The trainer's first step enters the same interpreter as calculateGradsSequential:
+# its key fold and the per-wire table checks, as there.
+CalculateGradsSequential.c:tracedGrads rngFold __aeabi_uidivmod 2
+CalculateGradsSequential.c:tracedGrads setWireFacts __aeabi_uidivmod 1
+CalculateGradsSequential.c:tracedGrads writeWireConfig __aeabi_uidivmod 1

@@ -1,4 +1,7 @@
-# The indirect-call closure of har_train_step_roots.txt (its `indirect` line):
+# The closures of har_train_step_roots.txt: over calls through pointers (its
+# `indirect` line; exclude / site below) and over what the step really runs
+# (its `trace` line; trace-exclude at the end).
+# Pointer closure:
 # with it, --strict fails unless
 #   - every function whose address the arm build takes (a vtable or conversion
 #     cell in data, a kernel or callback pointer loaded from a literal pool) is
@@ -191,3 +194,23 @@ exclude TensorConversion.c  extractInt32TensorFromSymInt32Tensor    conversionMa
 exclude TensorConversion.c  requantBfpTensor                        conversionMatrix[BFP][BFP]: no BFP -> BFP storage conversion on the step
 exclude TensorConversion.c  requantSymInt32Tensor                   conversionMatrix[SYM_INT32][SYM_INT32]: no SYM_INT32 tensor on the step
 exclude TensorConversion.c  unsupportedConversionTypes              conversionMatrix error cell (exits)
+#
+# ---- Executed on the step (har_train_step_trace.txt), walked by no root ------
+# The roots file's `trace` line: every name in the generated step trace that is
+# a function of the arm objects must be walked by a root or listed here. Names
+# outside the arm objects (the trainer; functions the arm build inlines into a
+# walked caller) are skipped. Regenerate the trace with trace_step.py.
+#   trace-exclude <function> <reason>
+# Inside the stopped float boundaries (the loss island and the input boundary):
+trace-exclude crossEntropyForwardFloat  the loss VALUE's float core: stopped under CrossEntropy.c:crossEntropyForward
+trace-exclude softmaxValuesFloat        the float head's FLOAT32 Softmax: inside the softmaxForwardKernel island root
+trace-exclude packFloatBufferAsBfp      FLOAT32 -> BFP packing: inside the convertFloatTensorToBfpTensor boundary root
+trace-exclude deriveBfpStoredExponent   FLOAT32 -> BFP block exponent: inside the convertFloatTensorToBfpTensor boundary root
+trace-exclude roundByMode               FLOAT32 -> BFP rounding: inside the convertFloatTensorToBfpTensor boundary root
+trace-exclude roundHalfAway             FLOAT32 -> BFP rounding, inlined into roundByMode on the arm build: inside the convertFloatTensorToBfpTensor boundary root
+trace-exclude rngNextUnitFloat          the SR draw of FLOAT32 -> BFP rounding: inside the convertFloatTensorToBfpTensor boundary root
+trace-exclude clamp                     FLOAT32 -> BFP code clamp: inside the convertFloatTensorToBfpTensor boundary root
+trace-exclude bfpGroupScale             the float scale of a block: only the FLOAT32 <-> BFP boundary roots and dequantChunkToFloat reach it
+# A static inline header helper whose step copy the arm build inlines into
+# CrossEntropy.c (walked under crossEntropyForward); the standalone copy is MSE's.
+trace-exclude requireBatchedOutput      LossFunctionInternal.h helper: inlined into the walked CrossEntropy.c callers; the arm symbol is MSE.c's

@@ -72,4 +72,53 @@ DataLoaderApi.c             getBatch
 # - the BFP -> FLOAT32 dequant's chunk reader (a pointer the dequant boundary
 #   hands its walker): inside the loss-value island, it stops at itself.
 TensorConversion.c          dequantChunkToFloat
+#
+# Called directly from the `self` roots above (dispatcher helpers, which a self
+# root does not walk) and run on every step -- the `trace` line below fails the
+# gate on any function the instrumented step executes that no root walks:
+# - the layers' BFP arms and their checks (Linear, Softmax, ReLU, the pools' wire
+#   anchor; the grad-mode check of Conv1d / Linear);
+Linear.c                    linearForwardBfpRaw
+Linear.c                    linearCalcPropLossBfp
+Linear.c                    linearCalcWeightGradsBfpRaw
+Linear.c                    linearBackwardKernelForArithmetic
+Conv1d.c                    executeOpValidateAccMode
+Linear.c                    executeOpValidateAccMode
+Softmax.c                   softmaxBfpRequireSingleRow
+Softmax.c                   softmaxRequireInputDims
+Softmax.c                   softmaxRowGeometry
+Relu.c                      requireBfpWire
+AvgPool1d.c                 bfpWireAnchor
+MaxPool1d.c                 bfpWireAnchor
+Softmax.c                   bfpWireAnchor
+Rounding.c                  clampInt32
+# - the funnel's raw-output setup (executeOp self) and the parameter accessors;
+Quantization.c              initBfpRawQuantization
+Quantization.c              initBfpQConfigGrouped
+Tensor.c                    setTensorValues
+Tensor.c                    copyShape
+Tensor.c                    getParamFromParameter
+Tensor.c                    getGradFromParameter
+TensorApi.c                 getSparsityLike
+# - the per-op / per-update RNG keys and streams (the layer and SGD helpers' own
+#   folds), the per-call key, the plan's step index;
+LayerExec.c                 layerExecOpKey
+LayerExec.c                 layerExecPhaseKey
+OptimizerKeys.c             optimizerScaleStream
+OptimizerKeys.c             optimizerUpdateOpKey
+TrainingRng.c               trainingRngCallKey
+RematPlanPolicy.c           rematBackwardStep
+# - the loops' views and frees, and the trainer's first (wire-gated) step, which
+#   enters calculateGradsImpl through tracedGrads.
+BatchView.c                 batchViewOf
+DataLoaderApi.c             freeBatch
+DataLoaderApi.c             freeSample
+TrainingLoopApi.c           freeTrainingStats
+TensorApi.c                 freeTensor
+TensorApi.c                 freeData
+TensorApi.c                 freeQuantization
+TensorApi.c                 freeShape
+TensorApi.c                 freeSparsity
+CalculateGradsSequential.c  tracedGrads
 indirect har_train_step_indirect.txt
+trace har_train_step_trace.txt

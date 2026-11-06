@@ -4178,7 +4178,7 @@ void testConv1dBfpGradsExponentExtremes(void) {
  * keeps the FLOAT32 raw (the float bridge) and the float fixed-grid engine
  * -- the result equals that engine fed the float reference. */
 void testConv1dBfpWeightGradFixedScaleKeepsTheFloatBridge(void) {
-    static gaOperands_t ops[1];
+    static gaOperands_t ops[GA_MAX_CALLS];
     gaMixedOperands(ops, 31u);
     const gaCase_t *c = &kGaMixed;
     kernel_t *kernel = reserveMemory(sizeof(kernel_t));

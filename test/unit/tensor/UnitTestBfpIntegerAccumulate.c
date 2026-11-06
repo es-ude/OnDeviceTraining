@@ -862,6 +862,27 @@ void testEngineExponentExtremes(void) {
     }
 }
 
+/* A raw at the cap exponent lands on the working grid unshifted (kr == 0), and
+ * its full int32 range would wrap the sum: it saturates with the raw's sign,
+ * like a raw shifted left onto the capped grid. */
+void testEngineUnshiftedRawAtTheCapSaturatesWithItsSign(void) {
+    const uint8_t stored[1] = {15}; /* e4: bias 7, E = 8, the cap */
+    const int16_t rawE[1] = {8};
+    const struct {
+        int32_t code, raw, expect;
+    } cases[] = {{-1, INT32_MIN, -128}, {1, INT32_MAX, 127}};
+    for (size_t c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+        const int32_t codes[1] = {cases[c].code};
+        const int32_t raw[1] = {cases[c].raw};
+        int32_t got[1];
+        accInit(&fixA, 1, 1, 0, 8, 4, HALF_AWAY, codes, stored, raw, rawE);
+        accumulateBfpRawIntoBfpRescale(&fixA.target, &fixA.inc, NULL);
+        accCodes(&fixA, got);
+        TEST_ASSERT_EQUAL_UINT8(15, fixA.exps[0]);
+        TEST_ASSERT_EQUAL_INT32(cases[c].expect, got[0]);
+    }
+}
+
 /* A fresh accumulator (all codes zero, e.g. after optimizerZeroGrad) takes
  * the increment's own exponent: a zero OLD side never dominates the working
  * grid, whatever its stored exponent. */
@@ -1001,6 +1022,7 @@ int main(void) {
     RUN_TEST(testEngineLargeExponentGapKeepsTheTail);
     RUN_TEST(testEngineCancellation);
     RUN_TEST(testEngineExponentExtremes);
+    RUN_TEST(testEngineUnshiftedRawAtTheCapSaturatesWithItsSign);
     RUN_TEST(testEngineFreshAccumulatorTakesTheIncrementGrid);
     RUN_TEST(testEngineEmptyTargetIsZeroState);
     RUN_TEST(testEngineRejectsBadInputs);

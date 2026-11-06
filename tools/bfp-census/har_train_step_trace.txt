@@ -2,7 +2,7 @@
 # executes (host, -finstrument-functions, both heads, three steps each), as
 # <translation unit> <function>. Do not edit; census.py --strict fails when
 # the sources no longer match the fingerprint.
-# fingerprint f03829db6a3835a2a5ed8ba457383fb12a545856fdbaaf20a7e535e4cf774201
+# fingerprint 06ad5ef643a6c311b23bedce0747c0c8ad08b5ae65757aae8d415f5c9bdb43b1
 Arithmetic.c               calcElementIndexByIndices
 Arithmetic.c               getDimensionsByIndex
 AvgPool1d.c                avgPool1dBackward

@@ -13,6 +13,7 @@
 #include "LayerExec.h"
 #include "Softmax.h"
 #include "TensorConversion.h"
+#include "TensorRows.h"
 
 void softmaxInitConfig(softmaxConfig_t *softmaxConfig, quantization_t *forwardQ,
                        quantization_t *backwardQ) {
@@ -57,35 +58,11 @@ static void softmaxValuesFloat(const float *x, float *s, size_t n) {
     }
 }
 
-/* #152: row = axis 0 -- every row normalizes over all elements after axis 0
- * (crossEntropyForwardFloat's MEAN rule); a rank-1 tensor is one row. The row
- * count is the STORAGE dimensions[0], the same field that rule reads
- * (transposeTensor permutes orderOfDimensions only, never dimensions). rowLen
- * is the product of the trailing dims, not count / rows, so an empty leading
- * axis cannot divide by zero. The row walk runs over physical storage, so
- * more than one storage row requires identity order (GroupNorm.c:67's rule):
- * a permuted view would silently normalize a partition that is not its
- * logical rows. One storage row is the whole tensor for any order, as before
- * #152 -- so a logical [1, N] stored as [N, 1] + transpose fails fast. */
+/* #152: row = axis 0, a row spans every trailing dim, rank 1 = one row, more
+ * than one storage row needs identity order -- the shared tensorRowGeometry
+ * (TensorRows.h), the same rule CrossEntropy's one-hot rows use. */
 static void softmaxRowGeometry(const tensor_t *t, const char *where, size_t *rows, size_t *rowLen) {
-    const shape_t *s = t->shape;
-    size_t first = (s->numberOfDimensions >= 2) ? 1 : 0;
-    *rows = (first == 1) ? s->dimensions[0] : 1;
-    size_t len = 1;
-    for (size_t d = first; d < s->numberOfDimensions; d++) {
-        len *= s->dimensions[d];
-    }
-    *rowLen = len;
-    if (*rows > 1) {
-        for (size_t d = 0; d < s->numberOfDimensions; d++) {
-            if (s->orderOfDimensions[d] != d) {
-                PRINT_ERROR("%s: a wire with %zu storage rows must be identity-order (dim %zu "
-                            "is order %zu)",
-                            where, *rows, d, s->orderOfDimensions[d]);
-                exit(1);
-            }
-        }
-    }
+    tensorRowGeometry(t, where, rows, rowLen);
 }
 
 /* Softmax's real compute is always float (numerically stable max-shifted exp);

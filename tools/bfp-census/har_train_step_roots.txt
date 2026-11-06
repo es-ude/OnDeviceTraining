@@ -90,7 +90,6 @@ Conv1d.c                    executeOpValidateAccMode
 Linear.c                    executeOpValidateAccMode
 Softmax.c                   softmaxBfpRequireSingleRow
 Softmax.c                   softmaxRequireInputDims
-Softmax.c                   softmaxRowGeometry
 Relu.c                      requireBfpWire
 AvgPool1d.c                 bfpWireAnchor
 MaxPool1d.c                 bfpWireAnchor

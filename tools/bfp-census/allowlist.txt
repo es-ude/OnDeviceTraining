@@ -90,7 +90,7 @@ Conv1d.c:propLossKernelBfp windowGeometry1dCalc __aeabi_uidiv 3
 # emit (bfpRawEmitFromRows) runs on cursors and divides nothing.
 Conv1d.c:weightGradKernelBfpRaw weightGradBfpScatter __aeabi_uidiv 2
 Conv1d.c:weightGradKernelBfpRaw weightGradBfpScatterWalk __aeabi_uidiv 2
-Conv1d.c:weightGradKernelBfpRaw weightGradKernelBfpRaw __aeabi_uidiv 1
+Conv1d.c:weightGradKernelBfpRaw Conv1d.c:weightGradKernelBfpRaw __aeabi_uidiv 1
 # Shared window geometry (per call), tap ranges (per tap, per call) and window
 # slice (per (batch, output channel, output position) -- the FLOAT32 loop's own).
 Conv1d.c:weightGradKernelBfpRaw windowGeometry1dCalc __aeabi_uidiv 3
@@ -99,7 +99,7 @@ Conv1d.c:weightGradKernelBfpRaw windowSlice1dAt __aeabi_ldivmod 2
 
 # ---- Conv1d biasGrad into BFP grads (biasGradKernelBfpRaw) --------------------
 # One inlined bfpGroupAt recompute (per loss-group change).
-Conv1d.c:biasGradKernelBfpRaw biasGradKernelBfpRaw __aeabi_uidiv 1
+Conv1d.c:biasGradKernelBfpRaw Conv1d.c:biasGradKernelBfpRaw __aeabi_uidiv 1
 
 # ---- Integer grad accumulate (the BFP_RAW_BACKWARD_ACC epilogue) --------------
 # Per conversion chunk (256 elements): the scan frontier (chunkEnd - 1) / gsz, and

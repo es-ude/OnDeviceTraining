@@ -1253,11 +1253,57 @@ void testCeIntegerHeadRejectsABfpLabelThatIsNotOneHot(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, msg, ceDieBfpLabelTwo());
 }
 
+/* Review E #4: the label is a ONE-HOT per class row, not per element: a row
+ * with two exact ones (p - y would be the gradient of a different loss) or
+ * none (no class) fails fast, for a BFP and a FLOAT32 label alike; several
+ * rows, each with its own one, stay legal (testCeIntegerHeadReadsABfp...). */
+static void ceLabelRowDies(const int32_t *yCodes, const float *yFloat) {
+    int32_t codes[4] = {64, 32, 16, 16};
+    uint8_t e7[1] = {120};
+    tensor_t *p = ceBfp2d(1, 4, 8, 1, 0, codes, e7, HALF_AWAY);
+    tensor_t *label = yCodes != NULL ? ceBfp2d(1, 4, 8, 1, 0, yCodes, (uint8_t[]){121}, HALF_AWAY)
+                                     : ceFloat2d(1, 4, yFloat);
+    tensor_t *grad = ceBfp2d(1, 4, 8, 1, 0, NULL, NULL, HALF_AWAY);
+    crossEntropySoftmaxBackward(p, label, grad, NULL);
+}
+static void ceDieBfpTwoOnes(void) {
+    ceLabelRowDies((int32_t[]){64, 64, 0, 0}, NULL);
+}
+static void ceDieBfpNoOne(void) {
+    ceLabelRowDies((int32_t[]){0, 0, 0, 0}, NULL);
+}
+static void ceDieFloatTwoOnes(void) {
+    ceLabelRowDies(NULL, (float[]){1.f, 0.f, 1.f, 0.f});
+}
+static void ceDieFloatNoOne(void) {
+    ceLabelRowDies(NULL, (float[]){0.f, 0.f, 0.f, 0.f});
+}
+/* two rows: the first one-hot, the second with two ones */
+static void ceDieSecondRowTwoOnes(void) {
+    int32_t codes[6] = {100, 20, 7, 3, 120, 5};
+    uint8_t te[2] = {120, 121};
+    tensor_t *p = ceBfp2d(2, 3, 8, 2, 3, codes, te, HALF_AWAY);
+    tensor_t *label =
+        ceBfp2d(2, 3, 8, 1, 0, (int32_t[]){64, 0, 0, 64, 0, 64}, (uint8_t[]){121}, HALF_AWAY);
+    tensor_t *grad = ceBfp2d(2, 3, 8, 1, 0, NULL, NULL, HALF_AWAY);
+    crossEntropySoftmaxBackward(p, label, grad, NULL);
+}
+
+void testCeIntegerHeadRequiresExactlyOneOnePerClassRow(void) {
+    const char *msg = "needs exactly one 1.0";
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, ceDieBfpTwoOnes());
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, ceDieBfpNoOne());
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, ceDieFloatTwoOnes());
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, ceDieFloatNoOne());
+    ASSERT_EXITS_WITH_OUTPUT(1, "label row 1", ceDieSecondRowTwoOnes());
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testCeIntegerHeadReadsABfpOneHotLabelExactly);
     RUN_TEST(testCeIntegerHeadGivesTheSameGradForABfpAndAFloatOneHot);
     RUN_TEST(testCeIntegerHeadRejectsABfpLabelThatIsNotOneHot);
+    RUN_TEST(testCeIntegerHeadRequiresExactlyOneOnePerClassRow);
     RUN_TEST(unitTestCrossEntropySoftmaxBackward);
     RUN_TEST(testCrossEntropyBackward_WritesRawPerElementGrad);
     RUN_TEST(testCrossEntropyForward_SumReturnsRawSum);

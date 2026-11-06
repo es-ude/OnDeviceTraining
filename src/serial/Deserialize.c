@@ -550,14 +550,20 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
          * corrupt or from-the-future, exactly like the width caps. Checked
          * against the record's OWN bias, so a narrow-exponentBits record
          * carrying a wide byte is caught too, not just the exponentBits == 8 /
-         * stored == 255 case the canonical range can reach. */
+         * stored == 255 case the canonical range can reach. The byte must also
+         * fit the record's exponent WIDTH: at narrow widths bias + 127 lies far
+         * above 2^e - 1 (128 vs 3 at e2), and a wider byte encodes a scale no
+         * exponentBits-wide field can hold. */
         int32_t maxFiniteStored = bfpExponentBias(bfpQC) + 127;
+        int32_t maxWidthStored = (int32_t)((1u << fileExponentBits) - 1u);
+        int32_t maxStored = maxFiniteStored < maxWidthStored ? maxFiniteStored : maxWidthStored;
         for (size_t g = 0; g < fileNumGroups; g++) {
-            if ((int32_t)bfpQC->exponents[g] > maxFiniteStored) {
+            if ((int32_t)bfpQC->exponents[g] > maxStored) {
                 PRINT_ERROR("deserializeQConfig: BFP file exponent[%zu] (%u) exceeds the largest "
-                            "finite scale at exponentBits %u (bias + 127 == %d)",
+                            "valid stored exponent at exponentBits %u (min(2^e - 1, bias + 127) "
+                            "== %d)",
                             g, (unsigned)bfpQC->exponents[g], (unsigned)fileExponentBits,
-                            maxFiniteStored);
+                            maxStored);
                 exit(1);
             }
         }

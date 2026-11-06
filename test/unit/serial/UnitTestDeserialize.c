@@ -2653,6 +2653,44 @@ static FILE *writeAndReopenRecord(tensor_t *src, long *fileLength) {
     return f;
 }
 
+/* Review E #3: a stored BFP exponent must fit its own exponent width too, not
+ * only the finite-scale cap bias + 127 (which is 128 at e2, far above the
+ * 2-bit maximum 3). One-element per-tensor record written by hand:
+ * rank 1, dim 1, order 0, BFP {1, 0}, the exponent byte, m 8, e, HALF_AWAY. */
+static void writeBfpExponentRecord(uint8_t stored, uint8_t exponentBits) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    writeU32LE(f, 1);
+    writeU32LE(f, 1);
+    writeU32LE(f, 0);
+    uint8_t bytes[] = {(uint8_t)BFP};
+    fwrite(bytes, 1, 1, f);
+    writeU32LE(f, 1);
+    writeU32LE(f, 0);
+    uint8_t tail[] = {stored, 8, exponentBits, 0, 1 /* payload: code 1 */};
+    fwrite(tail, 1, sizeof(tail), f);
+    fclose(f);
+}
+
+static void readBfpExponentRecord(uint8_t stored, uint8_t exponentBits) {
+    writeBfpExponentRecord(stored, exponentBits);
+    FILE *f = fopen(FILE_PATH, "rb");
+    tensorRecordHeader_t header;
+    readTensorRecordHeader(&header, f);
+    fclose(f);
+    freeTensorRecordHeader(&header);
+}
+
+static void testBfpRecordRejectsAnExponentWiderThanItsWidth(void) {
+    readBfpExponentRecord(3, 2);   /* the 2-bit maximum */
+    readBfpExponentRecord(7, 3);   /* the 3-bit maximum */
+    readBfpExponentRecord(254, 8); /* e8: bias + 127, the largest finite scale */
+    const char *msg = "BFP file exponent[0]";
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, readBfpExponentRecord(4, 2));
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, readBfpExponentRecord(8, 3));
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, readBfpExponentRecord(16, 4));
+    ASSERT_EXITS_WITH_OUTPUT(1, msg, readBfpExponentRecord(255, 8));
+}
+
 static void testReadTensorRecordHeaderFloat32(void) {
     float data[] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
     tensor_t *src = makeFloatTensor2D(2, 3, data, 6);
@@ -2809,6 +2847,7 @@ int main(void) {
     RUN_TEST(testBfpDeserializeRejectsMantissaBitsOutOfRange);
     RUN_TEST(testBfpDeserializeRejectsExponentBitsOutOfRange);
     RUN_TEST(testBfpDeserializeRejectsNonFiniteScaleExponent);
+    RUN_TEST(testBfpRecordRejectsAnExponentWiderThanItsWidth);
     RUN_TEST(testDeserializeWeightsOnlyIntoTrainableSkeleton);
     RUN_TEST(testSkipSerializedTensorRejectsRankAboveCap);
     RUN_TEST(testSkipSerializedTensorRejectsTruncatedPayload);

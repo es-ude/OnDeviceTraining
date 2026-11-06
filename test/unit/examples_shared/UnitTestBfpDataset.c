@@ -10,6 +10,7 @@
 #include "QuantizationApi.h"
 #include "QuantizationLayer.h"
 #include "RNG.h"
+#include "Serialize.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
@@ -206,6 +207,85 @@ void testTensorArrayFileRejectsAForeignOrDamagedFile(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "cannot open", bdReadMissing());
 }
 
+/* Review E #1: the container count is untrusted. On a 32-bit MCU count
+ * 0x40000001 x 4-byte pointers wraps to a 4-byte array that the record loop
+ * then overruns. The reader bounds the count by the bytes left in the file
+ * (a record is at least ODTA_MIN_RECORD_BYTES) and by the target's SIZE_MAX
+ * with a checked multiply; the predicate takes SIZE_MAX and the pointer
+ * width, so the 32-bit wrap is reproduced on the host. */
+void testTensorArrayCountBoundCatchesThe32BitWrap(void) {
+    const uint64_t size32 = UINT32_MAX;
+    TEST_ASSERT_FALSE(tensorArrayCountFits(0x40000001u, (uint64_t)1 << 40, size32, 4));
+    TEST_ASSERT_TRUE(tensorArrayCountFits(0x3FFFFFFFu, (uint64_t)1 << 40, size32, 4));
+    TEST_ASSERT_FALSE(tensorArrayCountFits(0x40000001u, 2 * 9, SIZE_MAX, sizeof(void *)));
+    TEST_ASSERT_TRUE(tensorArrayCountFits(2, 2 * ODTA_MIN_RECORD_BYTES, SIZE_MAX, sizeof(void *)));
+    TEST_ASSERT_FALSE(tensorArrayCountFits(3, 2 * ODTA_MIN_RECORD_BYTES, SIZE_MAX, sizeof(void *)));
+    TEST_ASSERT_TRUE(tensorArrayCountFits(0, 0, size32, 4));
+}
+
+/* "ODTA", version, count, then two valid 1-element FLOAT32 records. */
+static void bdReadHostileCount(void) {
+    tensor_t *t = bdTensor2D(1, 1, quantizationInitFloat());
+    FILE *f = fopen(bdPath("bd_hostile.odta"), "wb");
+    fwrite("ODTA\x05\x00\x00\x00\x01\x00\x00\x40", 1, 12, f);
+    serializeTensor(t, f);
+    serializeTensor(t, f);
+    fclose(f);
+    (void)tensorArrayReadFile(bdPath("bd_hostile.odta"));
+}
+
+/* Review E #2: count 1, a rank-1 BFP m8/e8 record of 0xffffffff elements
+ * followed by ONE payload byte: rejected before any tensor is built. */
+static void bdReadHugePayload(void) {
+    FILE *f = fopen(bdPath("bd_hugepayload.odta"), "wb");
+    const uint8_t bytes[] = {'O',
+                             'D',
+                             'T',
+                             'A',
+                             5,
+                             0,
+                             0,
+                             0,
+                             1,
+                             0,
+                             0,
+                             0, /* count 1 */
+                             1,
+                             0,
+                             0,
+                             0, /* rank 1 */
+                             0xff,
+                             0xff,
+                             0xff,
+                             0xff, /* dim */
+                             0,
+                             0,
+                             0,
+                             0, /* order */
+                             (uint8_t)BFP,
+                             1,
+                             0,
+                             0,
+                             0,
+                             0,
+                             0,
+                             0,
+                             0, /* {1, 0} */
+                             127,
+                             8,
+                             8,
+                             0, /* exp, m, e, mode */
+                             0x2a};
+    fwrite(bytes, 1, sizeof(bytes), f);
+    fclose(f);
+    (void)tensorArrayReadFile(bdPath("bd_hugepayload.odta"));
+}
+
+void testTensorArrayFileRejectsAHostileCountAndAnUnbackedPayload(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "more records than the file can hold", bdReadHostileCount());
+    ASSERT_EXITS_WITH_OUTPUT(1, "payload bytes, the file has", bdReadHugePayload());
+}
+
 static tensorArray_t *bdClasses(const int32_t *cls, size_t n) {
     tensorArray_t *arr = reserveMemory(sizeof(tensorArray_t));
     arr->size = n;
@@ -295,6 +375,8 @@ int main(void) {
     RUN_TEST(testOfflineConversionRejectsANonDeterministicOrNonBfpTemplate);
     RUN_TEST(testTensorArrayFileRoundTripsBfpAndFloatTensors);
     RUN_TEST(testTensorArrayFileRejectsAForeignOrDamagedFile);
+    RUN_TEST(testTensorArrayCountBoundCatchesThe32BitWrap);
+    RUN_TEST(testTensorArrayFileRejectsAHostileCountAndAnUnbackedPayload);
     RUN_TEST(testOneHotLabelsAreExactBfpOneHots);
     RUN_TEST(testOneHotClassAcceptsExactlyOneExactOne);
     RUN_TEST(testOneHotLabelsRejectAClassOutOfRange);

@@ -2428,7 +2428,9 @@ as the required knob `BFP_HEAD=float|bfp`.
   label (a dataset converted offline) is the op's second operand, unpacked
   like `p`: element `i` is the class iff its code `c` on its group's `2^E` is
   exactly 1 (`E <= 0`, `c = 2^−E`), not the class iff `c = 0`, anything else
-  fails fast. Each element is an int32 term on its own grid: a non-label
+  fails fast. Either label must also hold exactly one 1.0 per class row (its
+  last dimension; several rows each with their own): a two-hot or zero-hot
+  row fails fast. Each element is an int32 term on its own grid: a non-label
   element is its code `c` on its `p` group's exponent `E_g`; the label
   subtracts `1.0 = 2^−E` on `E = clamp(E_g, −30, 0)`: exact for every `E_g`
   in `[−30, 0]`, also when 1.0 needs the code `2^(m−1)`, one beyond the

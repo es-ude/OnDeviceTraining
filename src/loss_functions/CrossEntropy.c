@@ -221,6 +221,40 @@ static bool ceBfpLabelIsOne(int32_t c, int e, size_t i) {
     exit(1);
 }
 
+/* The label is one-hot per CLASS ROW (its last dimension), not only per
+ * element: a row with two exact ones would make p - y the gradient of another
+ * loss, a row with none has no class. One pass, counters only (no division):
+ * every element is checked to be 0 or 1 and every row to hold exactly one 1.
+ * yCodes / yQC: a BFP label (unpacked codes, group grid by cursor); else y. */
+static void ceRequireOneHotRows(const tensor_t *label, const float *y, const int32_t *yCodes,
+                                const bfpQConfig_t *yQC, int32_t yBias, size_t yGroupSize,
+                                size_t count) {
+    const shape_t *s = label->shape;
+    size_t rowLen = s->dimensions[s->numberOfDimensions - 1];
+    size_t yGroup = 0, yGroupEnd = yGroupSize;
+    size_t row = 0, inRow = 0, ones = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (i == yGroupEnd) {
+            yGroup++;
+            yGroupEnd += yGroupSize;
+        }
+        bool one = (y != NULL) ? ceLabelIsOne(y, i)
+                               : ceBfpLabelIsOne(yCodes[i], (int)yQC->exponents[yGroup] - yBias, i);
+        ones += one ? 1u : 0u;
+        if (++inRow == rowLen) {
+            if (ones != 1) {
+                PRINT_ERROR("crossEntropySoftmaxBackward: the integer head's label row %zu holds "
+                            "%zu ones, a one-hot needs exactly one 1.0 per class row",
+                            row, ones);
+                exit(1);
+            }
+            row++;
+            inRow = 0;
+            ones = 0;
+        }
+    }
+}
+
 /* The integer term of element i: p's code c on its group grid E_g, minus 1.0
  * at the label. The label's grid is E = clamp(E_g, -30, 0) so that 1.0 =
  * 2^-E is an int32: exact for E_g in [-30, 0] (also when 1.0 is code
@@ -307,6 +341,7 @@ void crossEntropySoftmaxBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *ra
     int16_t *rawE = rawQC->exponents;
     const size_t pGroupSize = qC->groupSize == 0 ? count : qC->groupSize;
     const size_t yGroupSize = (yQC == NULL || yQC->groupSize == 0) ? count : yQC->groupSize;
+    ceRequireOneHotRows(label, y, yCodes, yQC, yBias, yGroupSize, count);
 
     /* Per raw target group, two passes over its terms (recomputed, no
      * table): the data rule E_t = max over its nonzero terms of E +

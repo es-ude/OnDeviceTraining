@@ -2741,10 +2741,10 @@ void scaleBfpTensorInPlace(tensor_t *t, float factor, rngStream_t *rs) {
  * rings of ODT_RESCALE_FRESH_WINDOW slots. */
 #define BFP_INT_ACC_ZERO_GROUP INT32_MIN /* workE marker: every sum of the group is 0 */
 
-/* The raw term's left shift onto the working grid reaches 2^30 -- possible
- * only in the cap regime (outside it, E_c >= E_r + bitlen(A_r) - 30). */
+/* The raw term reaches 2^30 on the working grid, shifted left or unshifted --
+ * possible only in the cap regime (outside it, E_c >= E_r + bitlen(A_r) - 30). */
 static inline bool bfpRawTermSaturates(int32_t r, int kr) {
-    if (kr >= 0 || r == 0) {
+    if (kr > 0 || r == 0) {
         return false;
     }
     const unsigned l = (unsigned)(-kr);

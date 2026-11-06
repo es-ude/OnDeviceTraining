@@ -1298,12 +1298,60 @@ void testCeIntegerHeadRequiresExactlyOneOnePerClassRow(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "label row 1", ceDieSecondRowTwoOnes());
 }
 
+/* Re-review E #4: a class row is Softmax's row (#152): axis 0 is the row
+ * axis, a row spans every trailing dim (rank 1 = one row), so the label of a
+ * [1, 2, 2] prediction is ONE row of 4 elements -- not two rows of 2. The
+ * kernel is called directly with a BFP label as the second operand and must
+ * give the FLOAT32-label raw where the row is one-hot. */
+static void ceRowGeometryCase(size_t ndim, const size_t *dims, const int32_t *yCodes,
+                              const float *yFloat) {
+    int32_t codes[4] = {64, 32, 16, 16};
+    uint8_t e7[1] = {120};
+    bfpScratchFixture_t p;
+    bfpScratchInit(&p, ndim, dims, codes, e7, 1, 0, 8, 8);
+    bfpScratchFixture_t y;
+    bfpScratchInit(&y, ndim, dims, yCodes, (uint8_t[]){121}, 1, 0, 8, 8);
+    bfpRawFixture_t rawB, rawF;
+    bfpRawInit(&rawB, ndim, dims, 1, 0);
+    bfpRawInit(&rawF, ndim, dims, 1, 0);
+    tensor_t *opsB[2] = {&p.tensor, &y.tensor};
+    crossEntropySoftmaxBackwardKernelBfp(opsB, 2, &rawB.tensor, NULL, NULL, NULL);
+    tensor_t *label = buildFloatTensorShaped(dims, ndim, (float *)yFloat);
+    tensor_t *opsF[1] = {&p.tensor};
+    crossEntropySoftmaxBackwardKernelBfp(opsF, 1, &rawF.tensor, NULL, label, NULL);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(rawF.mant, rawB.mant, 4);
+    TEST_ASSERT_EQUAL_INT16(rawF.exps[0], rawB.exps[0]);
+    freeTensor(label);
+}
+
+static const size_t CE_DIMS_R3[3] = {1, 2, 2};
+static const size_t CE_DIMS_R1[1] = {4};
+
+void testCeOneHotRowsFollowSoftmaxRowGeometry(void) {
+    ceRowGeometryCase(3, CE_DIMS_R3, (int32_t[]){64, 0, 0, 0}, (float[]){1.f, 0.f, 0.f, 0.f});
+    ceRowGeometryCase(1, CE_DIMS_R1, (int32_t[]){0, 0, 64, 0}, (float[]){0.f, 0.f, 1.f, 0.f});
+}
+
+static void ceDieRank3TwoHot(void) {
+    ceRowGeometryCase(3, CE_DIMS_R3, (int32_t[]){64, 0, 64, 0}, (float[]){1.f, 0.f, 1.f, 0.f});
+}
+static void ceDieRank1TwoHot(void) {
+    ceRowGeometryCase(1, CE_DIMS_R1, (int32_t[]){64, 64, 0, 0}, (float[]){1.f, 1.f, 0.f, 0.f});
+}
+
+void testCeOneHotRowsRejectATwoHotSoftmaxRow(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "needs exactly one 1.0", ceDieRank3TwoHot());
+    ASSERT_EXITS_WITH_OUTPUT(1, "needs exactly one 1.0", ceDieRank1TwoHot());
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testCeIntegerHeadReadsABfpOneHotLabelExactly);
     RUN_TEST(testCeIntegerHeadGivesTheSameGradForABfpAndAFloatOneHot);
     RUN_TEST(testCeIntegerHeadRejectsABfpLabelThatIsNotOneHot);
     RUN_TEST(testCeIntegerHeadRequiresExactlyOneOnePerClassRow);
+    RUN_TEST(testCeOneHotRowsFollowSoftmaxRowGeometry);
+    RUN_TEST(testCeOneHotRowsRejectATwoHotSoftmaxRow);
     RUN_TEST(unitTestCrossEntropySoftmaxBackward);
     RUN_TEST(testCrossEntropyBackward_WritesRawPerElementGrad);
     RUN_TEST(testCrossEntropyForward_SumReturnsRawSum);

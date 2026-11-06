@@ -2,7 +2,7 @@
 # executes (host, -finstrument-functions, both heads, three steps each), as
 # <translation unit> <function>. Do not edit; census.py --strict fails when
 # the sources no longer match the fingerprint.
-# fingerprint dc487720107023d708d22c4c293b5a449a0aa143bd5ad5c90b030e25cd535fdd
+# fingerprint f03829db6a3835a2a5ed8ba457383fb12a545856fdbaaf20a7e535e4cf774201
 Arithmetic.c               calcElementIndexByIndices
 Arithmetic.c               getDimensionsByIndex
 AvgPool1d.c                avgPool1dBackward
@@ -115,6 +115,7 @@ CrossEntropy.c             crossEntropySoftmaxBackwardFakeQuant
 CrossEntropy.c             crossEntropySoftmaxBackwardKernelBfp
 CrossEntropy.c             requireBatchedOutput
 CrossEntropy.c             requireOperandMatchesOutput
+CrossEntropy.c             tensorRowGeometry
 DataLoaderApi.c            freeBatch
 DataLoaderApi.c            freeSample
 DataLoaderApi.c            getBatch
@@ -393,6 +394,7 @@ Softmax.c                  softmaxNormalizeRaw
 Softmax.c                  softmaxRequireInputDims
 Softmax.c                  softmaxRowGeometry
 Softmax.c                  softmaxValuesFloat
+Softmax.c                  tensorRowGeometry
 StorageApi.c               freeReservedMemory
 StorageApi.c               reserveMemory
 Tensor.c                   byteConversion

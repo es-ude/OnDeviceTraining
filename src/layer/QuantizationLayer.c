@@ -1,5 +1,6 @@
 #define SOURCE_FILE "QUANTIZATION_LAYER"
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,7 +15,9 @@
  * (same-dtype SYM_INT32 and BFP route through their diagonals: SYM_INT32 is
  * the sanctioned requant, BFP the sanctioned re-block/width-change point).
  * Any other same-dtype pair stays a config error: a Quantization layer that
- * neither changes dtype nor requantizes is a misconfigured no-op. */
+ * neither changes dtype nor requantizes is a misconfigured no-op. The one
+ * exception is the forward of a BFP input already in the output wire's
+ * storage format, which passes straight through (quantizationForward). */
 static void dispatchQuantization(tensor_t *input, tensor_t *output, rngStream_t *convert) {
     qtype_t inputDType = input->quantization->type;
     qtype_t outputDType = output->quantization->type;
@@ -29,15 +32,58 @@ static void dispatchQuantization(tensor_t *input, tensor_t *output, rngStream_t 
     executeConvert(input, output, convert);
 }
 
+/* A BFP input already in the output wire's storage format (mantissa and
+ * exponent widths, group shape): the input of a model whose dataset was
+ * converted offline into its input wire's format. Nothing to convert -- the
+ * BFP -> BFP cell would dequantize to float and re-derive every exponent. */
+static bool bfpSameStorageFormat(const tensor_t *input, const tensor_t *output) {
+    if (input->quantization->type != BFP || output->quantization->type != BFP) {
+        return false;
+    }
+    const bfpQConfig_t *in = input->quantization->qConfig;
+    const bfpQConfig_t *out = output->quantization->qConfig;
+    return in->mantissaBits == out->mantissaBits && in->exponentBits == out->exponentBits &&
+           in->numGroups == out->numGroups && in->groupSize == out->groupSize &&
+           calcNumberOfElementsByTensor((tensor_t *)input) ==
+               calcNumberOfElementsByTensor((tensor_t *)output);
+}
+
+/* Straight-through: payload and group exponents copied. Integer, no rounding
+ * (so no draw, whatever the template's mode), byte-identical to what the
+ * offline conversion wrote. */
+static void passThroughBfp(const tensor_t *input, tensor_t *output) {
+    const bfpQConfig_t *in = input->quantization->qConfig;
+    bfpQConfig_t *out = output->quantization->qConfig;
+    size_t n = calcNumberOfElementsByTensor((tensor_t *)input);
+    if (n == 0) {
+        return; /* N=0 tensor data may be NULL (#160) */
+    }
+    memcpy(output->data, input->data, calcNumberOfBytesForData(input->quantization, n));
+    memcpy(out->exponents, in->exponents, in->numGroups);
+}
+
+/* Out of line (BFP_WALK_NOINLINE) so quantizationForward's own body holds
+ * only the straight-through: the bfp-census checks the dispatcher as a
+ * `self` root and declares this converting arm (FLOAT32 samples) a boundary
+ * the pre-converted integer path never takes. */
+BFP_WALK_NOINLINE void quantizationForwardConvert(tensor_t *inputTensor, tensor_t *outputTensor,
+                                                  const layerExec_t *exec) {
+    rngStream_t convertStorage;
+    dispatchQuantization(
+        inputTensor, outputTensor,
+        layerExecPurposeStream(exec, RNG_TAG_FORWARD, RNG_TAG_CONVERT, &convertStorage));
+}
+
 void quantizationForward(layer_t *layer, tensor_t *inputTensor, tensor_t *outputTensor,
                          const layerExec_t *exec) {
     (void)layer; /* dtype dispatch reads the tensors; config->quantization->outputQ
                   * already determined outputTensor's dtype when its header was
                   * derived (the remat wire table's bind / initBufferOutput). */
-    rngStream_t convertStorage;
-    dispatchQuantization(
-        inputTensor, outputTensor,
-        layerExecPurposeStream(exec, RNG_TAG_FORWARD, RNG_TAG_CONVERT, &convertStorage));
+    if (bfpSameStorageFormat(inputTensor, outputTensor)) {
+        passThroughBfp(inputTensor, outputTensor);
+        return;
+    }
+    quantizationForwardConvert(inputTensor, outputTensor, exec);
 }
 
 /* OP(k) of each funnel op of this layer, for layerExecOpKey. Part of the

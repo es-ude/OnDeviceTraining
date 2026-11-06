@@ -205,6 +205,22 @@ static bool ceLabelIsOne(const float *y, size_t i) {
     exit(1);
 }
 
+/* A BFP one-hot label element -- its unpacked code c on its group grid 2^e --
+ * in integers: exactly 1.0 (e <= 0 and c == 2^-e) is the class, code 0 is
+ * not, anything else fails fast. */
+static bool ceBfpLabelIsOne(int32_t c, int e, size_t i) {
+    if (c == 0) {
+        return false;
+    }
+    if (e <= 0 && e > -31 && c == ((int32_t)1 << (unsigned)(-e))) {
+        return true;
+    }
+    PRINT_ERROR("crossEntropySoftmaxBackward: the integer head's label element %zu (code %ld on "
+                "2^%d) is not one-hot (0 or 1): soft labels need the float head",
+                i, (long)c, e);
+    exit(1);
+}
+
 /* The integer term of element i: p's code c on its group grid E_g, minus 1.0
  * at the label. The label's grid is E = clamp(E_g, -30, 0) so that 1.0 =
  * 2^-E is an int32: exact for E_g in [-30, 0] (also when 1.0 is code
@@ -248,12 +264,10 @@ static inline int32_t ceTermOf(int32_t c, int eG, bool one, size_t i, int *e) {
 
 void crossEntropySoftmaxBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut,
                                           tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
-    (void)n;
     (void)auxOut;
     (void)rs;
     const char *what = "crossEntropySoftmaxBackward (integer head)";
     tensor_t *p = ops[0];
-    const tensor_t *label = ctx;
     size_t count = calcNumberOfElementsByTensor(p);
     if (p->quantization->type != BFP || rawOut->quantization->type != BFP_RAW ||
         calcNumberOfElementsByTensor(rawOut) != count) {
@@ -262,12 +276,20 @@ void crossEntropySoftmaxBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *ra
                     what, (int)p->quantization->type, (int)rawOut->quantization->type);
         exit(1);
     }
-    if (label->quantization->type != FLOAT32 ||
+    /* The label: a FLOAT32 one-hot in the context (read by bit pattern), or a
+     * BFP one-hot as the second operand (unpacked codes, own group exponents). */
+    const tensor_t *label = (n == 2) ? ops[1] : ctx;
+    const qtype_t labelType = (n == 2) ? BFP : FLOAT32;
+    if (label == NULL || label->quantization->type != labelType ||
         calcNumberOfElementsByTensor((tensor_t *)label) != count) {
-        PRINT_ERROR("%s: the integer head needs a FLOAT32 one-hot label of p's element count, got "
-                    "dtype %d",
-                    what, (int)label->quantization->type);
+        PRINT_ERROR("%s: the integer head needs a FLOAT32 one-hot label (context) or a BFP one "
+                    "(second operand) of p's element count, got dtype %d",
+                    what, label == NULL ? -1 : (int)label->quantization->type);
         exit(1);
+    }
+    const bfpQConfig_t *yQC = (n == 2) ? label->quantization->qConfig : NULL;
+    if (yQC != NULL) {
+        validateBfpQConfigShape(yQC, count);
     }
     const bfpQConfig_t *qC = p->quantization->qConfig;
     validateBfpQConfigShape(qC, count);
@@ -278,34 +300,50 @@ void crossEntropySoftmaxBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *ra
     }
     const int32_t expBias = bfpExponentBias(qC);
     const int32_t *codes = (const int32_t *)p->data;
-    const float *y = (const float *)label->data;
+    const float *y = (yQC == NULL) ? (const float *)label->data : NULL;
+    const int32_t *yCodes = (yQC != NULL) ? (const int32_t *)label->data : NULL;
+    const int32_t yBias = (yQC != NULL) ? bfpExponentBias(yQC) : 0;
     int32_t *mant = (int32_t *)rawOut->data;
     int16_t *rawE = rawQC->exponents;
     const size_t pGroupSize = qC->groupSize == 0 ? count : qC->groupSize;
+    const size_t yGroupSize = (yQC == NULL || yQC->groupSize == 0) ? count : yQC->groupSize;
 
     /* Per raw target group, two passes over its terms (recomputed, no
      * table): the data rule E_t = max over its nonzero terms of E +
      * bitlen(|term|), minus 31 (bfpRawEmitFromRows' rule), then every term
      * onto 2^E_t -- left exact, right half away only for a term more than 31
-     * binades below the group's top. p's group by cursor: no division. */
+     * binades below the group's top. p's and a BFP label's groups by cursor:
+     * no division. */
     size_t pGroup = 0;
     size_t pGroupEnd = pGroupSize;
+    size_t yGroup = 0;
+    size_t yGroupEnd = yGroupSize;
     for (size_t t = 0, start = 0; start < count; t++, start += gsz) {
         size_t stop = start + gsz;
         size_t g0 = pGroup;
         size_t g0End = pGroupEnd;
+        size_t y0 = yGroup;
+        size_t y0End = yGroupEnd;
         for (int pass = 0; pass < 2; pass++) {
             pGroup = g0;
             pGroupEnd = g0End;
+            yGroup = y0;
+            yGroupEnd = y0End;
             int top = INT_MIN;
             for (size_t i = start; i < stop; i++) {
                 if (i == pGroupEnd) {
                     pGroup++;
                     pGroupEnd += pGroupSize;
                 }
+                if (i == yGroupEnd) {
+                    yGroup++;
+                    yGroupEnd += yGroupSize;
+                }
+                bool one = (y != NULL)
+                               ? ceLabelIsOne(y, i)
+                               : ceBfpLabelIsOne(yCodes[i], (int)yQC->exponents[yGroup] - yBias, i);
                 int e;
-                int32_t v = ceTermOf(codes[i], (int)qC->exponents[pGroup] - expBias,
-                                     ceLabelIsOne(y, i), i, &e);
+                int32_t v = ceTermOf(codes[i], (int)qC->exponents[pGroup] - expBias, one, i, &e);
                 if (pass == 0) {
                     if (v != 0) {
                         uint32_t mag = v < 0 ? 0u - (uint32_t)v : (uint32_t)v;
@@ -324,8 +362,10 @@ void crossEntropySoftmaxBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *ra
 }
 
 /* The integer head (ruling R2): p - y with no float. One funnel op: p is
- * borrowed as unpacked codes, the label rides in the kernel context (no
- * staging), the raw is BFP_RAW_BACKWARD_DX on the loss-grad wire's geometry,
+ * borrowed as unpacked codes, a FLOAT32 label rides in the kernel context (no
+ * staging) and a BFP label is the second operand (unpacked like p: a dataset
+ * converted to BFP offline, no float on this path at all), the raw is
+ * BFP_RAW_BACKWARD_DX on the loss-grad wire's geometry,
  * and the OUT_WRITE epilogue re-blocks it by the WIRE's rounding mode (the
  * template of the Softmax's propLossQ: SR under SR), drawing from this op's
  * OUT stream -- the training-side seam rule of every dx wire. */
@@ -338,20 +378,23 @@ static void crossEntropySoftmaxBackwardBfp(tensor_t *softmaxOutput, tensor_t *di
                     (int)loss->quantization->type);
         exit(1);
     }
-    if (distribution->quantization->type != FLOAT32) {
-        PRINT_ERROR("crossEntropySoftmaxBackward: the integer head needs a FLOAT32 one-hot label, "
-                    "got dtype %d",
-                    (int)distribution->quantization->type);
+    qtype_t labelType = distribution->quantization->type;
+    if (labelType != FLOAT32 && labelType != BFP) {
+        PRINT_ERROR("crossEntropySoftmaxBackward: the integer head needs a FLOAT32 or BFP one-hot "
+                    "label, got dtype %d",
+                    (int)labelType);
         exit(1);
     }
+    bool bfpLabel = (labelType == BFP);
+    tensor_t *inputs[2] = {softmaxOutput, distribution};
     const bfpQConfig_t *target = loss->quantization->qConfig;
     rngKey_t opKey;
     executeOp(
         &(opSpec_t){
             .kernel = crossEntropySoftmaxBackwardKernelBfp,
-            .ctx = distribution,
-            .inputs = (tensor_t *[]){softmaxOutput},
-            .nInputs = 1,
+            .ctx = bfpLabel ? NULL : distribution,
+            .inputs = inputs,
+            .nInputs = bfpLabel ? 2 : 1,
             .arithmetic = {.type = ARITH_BFP, .roundingMode = target->roundingMode},
             .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, CROSS_ENTROPY_OP_GRAD, &opKey),
             .mode = OUT_WRITE,

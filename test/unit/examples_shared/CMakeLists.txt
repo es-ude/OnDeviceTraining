@@ -70,3 +70,33 @@ target_link_libraries(UnitTestRematSelect PRIVATE
         odt_test_death
 )
 __register_target_as_unit_test(UnitTestRematSelect)
+
+# bfp_dataset.c: the offline FLOAT32 -> BFP dataset conversion of the
+# full-integer HAR path (its bit identity with the online input layer), the
+# ODTA tensor-array file and the exact one-hot check.
+add_executable(UnitTestBfpDataset UnitTestBfpDataset.c)
+target_link_libraries(UnitTestBfpDataset PRIVATE
+        unity
+        examples_shared
+        QuantizationLayer
+        Layer
+        LayerExec
+        NPYLoaderApi
+        DataLoader
+        Serialize
+        Deserialize
+        SerialWire
+        TensorApi
+        QuantizationApi
+        TensorConversion
+        Tensor
+        Quantization
+        Rounding
+        RNG
+        Common
+        StorageApi
+        odt_test_death
+)
+target_compile_definitions(UnitTestBfpDataset PRIVATE
+        BFP_DATASET_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+__register_target_as_unit_test(UnitTestBfpDataset)

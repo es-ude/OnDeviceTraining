@@ -538,8 +538,89 @@ void testQuantizationSrForwardIsAPureFunctionOfItsConvertStream(void) {
     freeTensor(input);
 }
 
+/* ---- BFP input already in the output wire's format: straight-through ----
+ * A dataset stored offline in the input wire's own BFP format reaches the
+ * input layer as BFP. The BFP -> BFP conversion cell would dequantize to
+ * float and re-derive every exponent; the layer copies the payload and the
+ * group exponents instead (integer, no rounding, no draw), so the wire holds
+ * exactly the bytes the offline FLOAT32 -> BFP conversion wrote. */
+
+static size_t qlBfpCellCalls;
+static void qlCountingBfpCell(tensor_t *in, tensor_t *out, rngStream_t *rs) {
+    qlBfpCellCalls++;
+    qlSavedCell(in, out, rs);
+}
+
+static void qlForwardCountingBfpCell(tensor_t *input, tensor_t *output) {
+    layer_t qLayer = {.type = QUANTIZATION, .config = NULL};
+    layerExec_t exec = {.key = rngKeyFromSeed(QL_EXEC_TEST_SEED)};
+    qlSavedCell = conversionMatrix[BFP][BFP];
+    conversionMatrix[BFP][BFP] = qlCountingBfpCell;
+    qlBfpCellCalls = 0;
+    quantizationForward(&qLayer, input, output, &exec);
+    conversionMatrix[BFP][BFP] = qlSavedCell;
+}
+
+/* 4 groups of 6: an ordinary group; a group whose largest code (9) is far
+ * below the m-bit maximum, which a re-block moves onto a finer exponent; an
+ * all-zero group under a non-canonical exponent; a negative group. */
+static const int32_t QL_PASS_CODES[QL_BFP_N] = {31, -17, 5, 0, 12, -30, 9,  -4,  1,   0,  7,  -9,
+                                                0,  0,   0, 0, 0,  0,   -1, -31, -16, -8, -2, -5};
+static const uint8_t QL_PASS_EXPS[4] = {120, 125, 3, 100};
+
+static void qlBfpPassThroughCase(uint8_t m, roundingMode_t outMode) {
+    tensor_t *input =
+        buildBfp2DWithCodes(QL_BFP_N, m, HALF_AWAY, 4, 6, QL_PASS_CODES, QL_PASS_EXPS);
+    tensor_t *output = buildBfp2DWithCodes(QL_BFP_N, m, outMode, 4, 6, NULL, NULL);
+    size_t bytes = calcNumberOfBytesForData(input->quantization, QL_BFP_N);
+    memset(output->data, 0xA5, bytes);
+    memset(((bfpQConfig_t *)output->quantization->qConfig)->exponents, 0x5A, 4);
+
+    qlForwardCountingBfpCell(input, output);
+
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0u, (uint32_t)qlBfpCellCalls,
+                                     "the same format never reaches the BFP -> BFP cell");
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(input->data, output->data, bytes);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(QL_PASS_EXPS,
+                                  ((bfpQConfig_t *)output->quantization->qConfig)->exponents, 4);
+
+    /* Anti-vacuity: the conversion cell does NOT reproduce these exponents. */
+    tensor_t *reblocked = buildBfp2DWithCodes(QL_BFP_N, m, HALF_AWAY, 4, 6, NULL, NULL);
+    requantBfpTensor(input, reblocked, NULL);
+    TEST_ASSERT_FALSE(memcmp(QL_PASS_EXPS,
+                             ((bfpQConfig_t *)reblocked->quantization->qConfig)->exponents,
+                             4) == 0);
+    freeTensor(reblocked);
+    freeTensor(output);
+    freeTensor(input);
+}
+
+void testQuantizationForwardPassesABfpInputOfTheWireFormatThroughByteForByte(void) {
+    qlBfpPassThroughCase(8, HALF_AWAY);
+    qlBfpPassThroughCase(6, HALF_AWAY);    /* sub-byte packing */
+    qlBfpPassThroughCase(8, SR_HALF_AWAY); /* a copy rounds nothing: the mode is irrelevant */
+}
+
+/* Any other BFP -> BFP pair is a real re-block and keeps the conversion
+ * cell: another group shape, another mantissa width. */
+void testQuantizationForwardStillReblocksABfpInputOfAnotherFormat(void) {
+    tensor_t *input =
+        buildBfp2DWithCodes(QL_BFP_N, 8, HALF_AWAY, 4, 6, QL_PASS_CODES, QL_PASS_EXPS);
+    tensor_t *otherGroups = buildBfp2DWithCodes(QL_BFP_N, 8, HALF_AWAY, 3, 8, NULL, NULL);
+    qlForwardCountingBfpCell(input, otherGroups);
+    TEST_ASSERT_EQUAL_UINT32(1u, (uint32_t)qlBfpCellCalls);
+    tensor_t *otherWidth = buildBfp2DWithCodes(QL_BFP_N, 6, HALF_AWAY, 4, 6, NULL, NULL);
+    qlForwardCountingBfpCell(input, otherWidth);
+    TEST_ASSERT_EQUAL_UINT32(1u, (uint32_t)qlBfpCellCalls);
+    freeTensor(otherWidth);
+    freeTensor(otherGroups);
+    freeTensor(input);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testQuantizationForwardPassesABfpInputOfTheWireFormatThroughByteForByte);
+    RUN_TEST(testQuantizationForwardStillReblocksABfpInputOfAnotherFormat);
     RUN_TEST(testQuantizationForwardSymToSymMatchesDirectRequant);
     RUN_TEST(testQuantizationForwardSymToFloatMatchesConvertTensor);
     RUN_TEST(testQuantLayerConvertsAsymToSymInt32MatchesConvertTensor);

@@ -11,9 +11,10 @@
  * so every positive value has exactly one representation and odtScaleEq is a
  * field comparison. Admissible range: the value is a normal float,
  * 2^-126 <= m * 2^e <= FLT_MAX, which for a canonical m is exactly
- * ODT_SCALE_E_MIN <= e <= ODT_SCALE_E_MAX. Every helper fails fast
- * (PRINT_ERROR + exit(1)) on a non-canonical operand and on a result outside
- * that range; a zero-initialised odtScale_t is not canonical.
+ * ODT_SCALE_E_MIN <= e <= ODT_SCALE_E_MAX. Every arithmetic and float-boundary
+ * helper fails fast (PRINT_ERROR + exit(1)) on a non-canonical operand and on a
+ * result outside that range; a zero-initialised odtScale_t is not canonical.
+ * odtScaleStore / odtScaleLoad are unchecked 4-byte copies.
  *
  * Use it wherever a stored scale must be dyadic, so integer kernels on an MCU
  * without FPU can rescale with shifts and int32 multiplies. The arithmetic
@@ -76,7 +77,11 @@ float odtScaleCanonFloat(float x, odtScaleRound_t r);
 
 /* __builtin_assume_aligned: without it gcc cannot prove the pointer is word
  * aligned and, on Cortex-M0+ (no unaligned access), emits a memcpy call
- * instead of one str / ldr. The struct's _Alignas(4) makes the promise true. */
+ * instead of one str / ldr. The struct's _Alignas(4) makes the promise true.
+ *
+ * Precondition: dst / src point to a real odtScale_t object (4-byte aligned).
+ * Never cast a byte-buffer offset to odtScale_t *; to read a scale from a byte
+ * buffer (e.g. a serialized model), memcpy the 4 bytes into a local first. */
 static inline void odtScaleStore(odtScale_t *dst, odtScale_t v) {
     uint32_t bits;
     memcpy(&bits, &v, sizeof bits);

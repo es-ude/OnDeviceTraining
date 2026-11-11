@@ -50,7 +50,6 @@ target_link_libraries(Tensor PRIVATE
         Common
 )
 
-
 add_library(DyadicScale
         DyadicScale.c
 )

@@ -187,7 +187,7 @@
       "configurePreset": "arm_cross",
       "jobs": 4,
       "targets": [
-        "DTypes", "DataStorage", "Quantization", "TensorConversion", "Tensor",
+        "DTypes", "DataStorage", "Quantization", "DyadicScale", "TensorConversion", "Tensor",
         "Add", "Arithmetic", "ArithmeticType", "Comparison", "Distributions",
         "Div", "Kernel", "Log", "Matmul", "Mul", "MinMax", "PointwiseFused",
         "Reduce", "Rounding", "Square", "Sub", "Sum", "SlidingWindow1d", "AdaptiveWindow1d",

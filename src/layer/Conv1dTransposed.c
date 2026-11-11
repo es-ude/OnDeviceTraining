@@ -317,8 +317,7 @@ static void weightGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, te
         exit(1);
     }
 
-    long long outputLengthSigned = (long long)outputLength;
-    long long dilation = (long long)cfg->kernel->dilation;
+    size_t dilation = cfg->kernel->dilation;
     size_t stride = cfg->kernel->stride;
 
     float const *xArr = (float const *)forwardInput->data;
@@ -336,17 +335,16 @@ static void weightGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, te
                 size_t ic = inLo + icOffset;
                 for (size_t inPos = 0; inPos < inputLength; inPos++) {
                     float xv = xArr[(b * inChannels + ic) * inputLength + inPos];
-                    long long outBase = (long long)(inPos * stride); // VALID -> padLeft=0
+                    size_t kLo, kHi;
+                    convTValidTapRange(inPos, stride, dilation, /* VALID: padLeft 0 */ 0,
+                                       outputLength, kernelSize, &kLo, &kHi);
+                    size_t outFirst = inPos * stride + kLo * dilation;
 
                     for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
                         size_t oc = outLo + ocOffset;
-                        for (size_t k = 0; k < kernelSize; k++) {
-                            long long outIdx = outBase + (long long)k * dilation;
-                            if (outIdx < 0 || outIdx >= outputLengthSigned) {
-                                continue;
-                            }
-                            float gy =
-                                gyArr[(b * outChannels + oc) * outputLength + (size_t)outIdx];
+                        size_t outIdx = outFirst;
+                        for (size_t k = kLo; k < kHi; k++, outIdx += dilation) {
+                            float gy = gyArr[(b * outChannels + oc) * outputLength + outIdx];
                             gwArr[(ic * outChPerGroup + ocOffset) * kernelSize + k] += xv * gy;
                         }
                     }
@@ -430,8 +428,7 @@ SYM_ACCUM_ALWAYS_INLINE void conv1dTransposedWeightGradSymScatter(
     size_t outChannels, size_t inputLength, size_t outputLength, size_t kernelSize,
     const kernel_t *kernel, const int32_t *xArr, const int32_t *gyArr, int32_t *interData,
     const bool checked, const symAccumSite_t *site) {
-    long long outputLengthSigned = (long long)outputLength;
-    long long dilation = (long long)kernel->dilation;
+    size_t dilation = kernel->dilation;
     size_t stride = kernel->stride;
 
     for (size_t b = 0; b < batch; b++) {
@@ -443,17 +440,16 @@ SYM_ACCUM_ALWAYS_INLINE void conv1dTransposedWeightGradSymScatter(
                 size_t ic = inLo + icOffset;
                 for (size_t inPos = 0; inPos < inputLength; inPos++) {
                     int32_t xv = xArr[(b * inChannels + ic) * inputLength + inPos];
-                    long long outBase = (long long)(inPos * stride); // VALID -> padLeft=0
+                    size_t kLo, kHi;
+                    convTValidTapRange(inPos, stride, dilation, /* VALID: padLeft 0 */ 0,
+                                       outputLength, kernelSize, &kLo, &kHi);
+                    size_t outFirst = inPos * stride + kLo * dilation;
 
                     for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
                         size_t oc = outLo + ocOffset;
-                        for (size_t k = 0; k < kernelSize; k++) {
-                            long long outIdx = outBase + (long long)k * dilation;
-                            if (outIdx < 0 || outIdx >= outputLengthSigned) {
-                                continue;
-                            }
-                            int32_t gy =
-                                gyArr[(b * outChannels + oc) * outputLength + (size_t)outIdx];
+                        size_t outIdx = outFirst;
+                        for (size_t k = kLo; k < kHi; k++, outIdx += dilation) {
+                            int32_t gy = gyArr[(b * outChannels + oc) * outputLength + outIdx];
                             size_t gwIdx = (ic * outChPerGroup + ocOffset) * kernelSize + k;
                             interData[gwIdx] = symMac(interData[gwIdx], xv, gy, checked, site);
                         }

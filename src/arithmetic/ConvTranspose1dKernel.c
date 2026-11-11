@@ -98,9 +98,7 @@ void convTranspose1dKernelFloat32(tensor_t const *input, tensor_t const *weight,
         yArr[i] = 0.0f;
     }
 
-    long long padLeftSigned = (long long)padLeft;
-    long long outputLengthSigned = (long long)outputLength;
-    long long dilation = (long long)kernel->dilation;
+    size_t dilation = kernel->dilation;
 
     for (size_t b = 0; b < batch; b++) {
         for (size_t g = 0; g < groups; g++) {
@@ -111,18 +109,17 @@ void convTranspose1dKernelFloat32(tensor_t const *input, tensor_t const *weight,
                 size_t ic = inLo + icOffset;
                 for (size_t inPos = 0; inPos < inputLength; inPos++) {
                     float xv = xArr[(b * inChannels + ic) * inputLength + inPos];
-                    long long outBase = (long long)(inPos * kernel->stride) - padLeftSigned;
+                    size_t kLo, kHi;
+                    convTValidTapRange(inPos, kernel->stride, dilation, padLeft, outputLength,
+                                       kernelSize, &kLo, &kHi);
+                    size_t outFirst = inPos * kernel->stride + kLo * dilation - padLeft;
 
                     for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
                         size_t oc = outLo + ocOffset;
-                        for (size_t k = 0; k < kernelSize; k++) {
-                            long long outIdx = outBase + (long long)k * dilation;
-                            if (outIdx < 0 || outIdx >= outputLengthSigned) {
-                                continue;
-                            }
-
+                        size_t outIdx = outFirst;
+                        for (size_t k = kLo; k < kHi; k++, outIdx += dilation) {
                             float wv = wArr[(ic * outChPerGroup + ocOffset) * kernelSize + k];
-                            yArr[(b * outChannels + oc) * outputLength + (size_t)outIdx] += xv * wv;
+                            yArr[(b * outChannels + oc) * outputLength + outIdx] += xv * wv;
                         }
                     }
                 }
@@ -202,9 +199,7 @@ SYM_ACCUM_ALWAYS_INLINE void convTSymScatter(const convTSymView_t *v, const bool
                                              const symAccumSite_t *site) {
     CONVT_SYM_VIEW_LOCALS(v);
 
-    long long padLeftSigned = (long long)padLeft;
-    long long outputLengthSigned = (long long)outputLength;
-    long long dilation = (long long)kernel->dilation;
+    size_t dilation = kernel->dilation;
 
     for (size_t b = 0; b < batch; b++) {
         for (size_t g = 0; g < groups; g++) {
@@ -215,17 +210,17 @@ SYM_ACCUM_ALWAYS_INLINE void convTSymScatter(const convTSymView_t *v, const bool
                 size_t ic = inLo + icOffset;
                 for (size_t inPos = 0; inPos < inputLength; inPos++) {
                     int32_t xv = xArr[(b * inChannels + ic) * inputLength + inPos];
-                    long long outBase = (long long)(inPos * kernel->stride) - padLeftSigned;
+                    size_t kLo, kHi;
+                    convTValidTapRange(inPos, kernel->stride, dilation, padLeft, outputLength,
+                                       kernelSize, &kLo, &kHi);
+                    size_t outFirst = inPos * kernel->stride + kLo * dilation - padLeft;
 
                     for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
                         size_t oc = outLo + ocOffset;
-                        for (size_t k = 0; k < kernelSize; k++) {
-                            long long outIdx = outBase + (long long)k * dilation;
-                            if (outIdx < 0 || outIdx >= outputLengthSigned) {
-                                continue;
-                            }
+                        size_t outIdx = outFirst;
+                        for (size_t k = kLo; k < kHi; k++, outIdx += dilation) {
                             int32_t wv = wArr[(ic * outChPerGroup + ocOffset) * kernelSize + k];
-                            size_t yIdx = (b * outChannels + oc) * outputLength + (size_t)outIdx;
+                            size_t yIdx = (b * outChannels + oc) * outputLength + outIdx;
                             yArr[yIdx] = symMac(yArr[yIdx], xv, wv, checked, site);
                         }
                     }
@@ -378,9 +373,7 @@ SYM_ACCUM_ALWAYS_INLINE void convTSymGroupedScatter(const convTSymView_t *v,
                                                     const symAccumSite_t *site) {
     CONVT_SYM_VIEW_LOCALS(v);
 
-    long long padLeftSigned = (long long)padLeft;
-    long long outputLengthSigned = (long long)outputLength;
-    long long dilation = (long long)kernel->dilation;
+    size_t dilation = kernel->dilation;
 
     for (size_t b = 0; b < batch; b++) {
         for (size_t g = 0; g < groups; g++) {
@@ -391,15 +384,15 @@ SYM_ACCUM_ALWAYS_INLINE void convTSymGroupedScatter(const convTSymView_t *v,
                 size_t ic = inLo + icOffset;
                 for (size_t inPos = 0; inPos < inputLength; inPos++) {
                     int32_t xv = xArr[(b * inChannels + ic) * inputLength + inPos];
-                    long long outBase = (long long)(inPos * kernel->stride) - padLeftSigned;
+                    size_t kLo, kHi;
+                    convTValidTapRange(inPos, kernel->stride, dilation, padLeft, outputLength,
+                                       kernelSize, &kLo, &kHi);
+                    size_t outFirst = inPos * kernel->stride + kLo * dilation - padLeft;
 
                     for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
                         size_t oc = outLo + ocOffset;
-                        for (size_t k = 0; k < kernelSize; k++) {
-                            long long outIdx = outBase + (long long)k * dilation;
-                            if (outIdx < 0 || outIdx >= outputLengthSigned) {
-                                continue;
-                            }
+                        size_t outIdx = outFirst;
+                        for (size_t k = kLo; k < kHi; k++, outIdx += dilation) {
                             size_t wStorageIdx = (ic * outChPerGroup + ocOffset) * kernelSize + k;
                             /* Per-PRODUCT rescale into sAcc -- NOT the gather
                              * cores' running group-partial: consecutive
@@ -415,7 +408,7 @@ SYM_ACCUM_ALWAYS_INLINE void convTSymGroupedScatter(const convTSymView_t *v,
                              * precomputed run length would overshoot. */
                             size_t elemGroup = wStorageIdx / weightGroups->groupSize;
                             int32_t product = symProduct(xv, wArr[wStorageIdx], checked, site);
-                            size_t yIdx = (b * outChannels + oc) * outputLength + (size_t)outIdx;
+                            size_t yIdx = (b * outChannels + oc) * outputLength + outIdx;
                             yArr[yIdx] =
                                 symAdd(yArr[yIdx],
                                        rescalePartialIntoAccumulatorScale(
@@ -765,9 +758,7 @@ BFP_WALK_NOINLINE void convTranspose1dKernelBfpScatterWalk(const convT1dBfpScatt
     const int *eAccOf = p->eAccOf;
     int32_t *acc = p->acc;
 
-    long long padLeftSigned = (long long)padLeft;
-    long long outputLengthSigned = (long long)outputLength;
-    long long dilation = (long long)kernel->dilation;
+    size_t dilation = kernel->dilation;
     bfpGroupRange_t inRange = {0};
     bfpGroupRange_t wRange = {0};
 
@@ -787,21 +778,20 @@ BFP_WALK_NOINLINE void convTranspose1dKernelBfpScatterWalk(const convT1dBfpScatt
                     int32_t xv = xArr[inIdx];
                     int xShift = eAcc - ((int)inQC->exponents[bfpGroupAt(&inRange, inQC, inIdx)] -
                                          inExpBias);
-                    long long outBase = (long long)(inPos * kernel->stride) - padLeftSigned;
+                    size_t kLo, kHi;
+                    convTValidTapRange(inPos, kernel->stride, dilation, padLeft, outputLength,
+                                       kernelSize, &kLo, &kHi);
+                    size_t outFirst = inPos * kernel->stride + kLo * dilation - padLeft;
 
                     for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
                         size_t oc = outLo + ocOffset;
-                        for (size_t k = 0; k < kernelSize; k++) {
-                            long long outIdx = outBase + (long long)k * dilation;
-                            if (outIdx < 0 || outIdx >= outputLengthSigned) {
-                                continue;
-                            }
-
+                        size_t outIdx = outFirst;
+                        for (size_t k = kLo; k < kHi; k++, outIdx += dilation) {
                             size_t wIdx = (ic * outChPerGroup + ocOffset) * kernelSize + k;
                             int shift =
                                 xShift -
                                 ((int)wQC->exponents[bfpGroupAt(&wRange, wQC, wIdx)] - wExpBias);
-                            acc[(b * outChannels + oc) * outputLength + (size_t)outIdx] +=
+                            acc[(b * outChannels + oc) * outputLength + outIdx] +=
                                 bfpAlignPartial(mulInt32s(xv, wArr[wIdx]), shift);
                         }
                     }

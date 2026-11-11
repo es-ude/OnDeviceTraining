@@ -642,6 +642,63 @@ void testWindowTapOutputRange1dMatchesReferenceExhaustive() {
     TEST_ASSERT_TRUE(checks > 0);
 }
 
+/* The per-tap bounds test the ConvT scatters used before they switched to
+ * convTValidTapRange: output index inPos*stride - padLeft + k*dilation, signed. */
+static bool refConvTTapValid(size_t inPos, size_t stride, size_t dilation, size_t padLeft,
+                             size_t outputLength, size_t k) {
+    long long outIdx =
+        (long long)(inPos * stride) - (long long)padLeft + (long long)k * (long long)dilation;
+    return outIdx >= 0 && outIdx < (long long)outputLength;
+}
+
+static void checkConvTTapRange(size_t inPos, size_t stride, size_t dilation, size_t padLeft,
+                               size_t outputLength, size_t kernelSize, size_t *checks) {
+    size_t kLo = SIZE_MAX, kHi = SIZE_MAX;
+    convTValidTapRange(inPos, stride, dilation, padLeft, outputLength, kernelSize, &kLo, &kHi);
+    (*checks)++;
+    char msg[200];
+    snprintf(msg, sizeof(msg),
+             "inPos=%zu stride=%zu dil=%zu padLeft=%zu Lout=%zu K=%zu -> [%zu,%zu)", inPos, stride,
+             dilation, padLeft, outputLength, kernelSize, kLo, kHi);
+    TEST_ASSERT_TRUE_MESSAGE(kLo <= kHi && kHi <= kernelSize, msg);
+    for (size_t k = 0; k < kernelSize; k++) {
+        bool expected = refConvTTapValid(inPos, stride, dilation, padLeft, outputLength, k);
+        bool actual = (k >= kLo && k < kHi);
+        TEST_ASSERT_EQUAL_MESSAGE(expected, actual, msg);
+    }
+}
+
+/* inputLength 1..12 x K 1..7 x stride 1..3 x dilation 0..3 x padLeft 0..6 x
+ * outputLength 0 .. VALID ConvT length + 2 (covers the +-2 band around the
+ * geometry and every shorter adjoint length). dilation 0 is not a real
+ * geometry, but the scatters tolerated it (every tap hits outBase), so the
+ * helper must reproduce that instead of dividing by zero. */
+void testConvTValidTapRangeMatchesBoundsTest() {
+    size_t checks = 0;
+    for (size_t inputLength = 1; inputLength <= 12; inputLength++) {
+        for (size_t kernelSize = 1; kernelSize <= 7; kernelSize++) {
+            for (size_t stride = 1; stride <= 3; stride++) {
+                for (size_t dilation = 0; dilation <= 3; dilation++) {
+                    size_t convTLength =
+                        (inputLength - 1) * stride + dilation * (kernelSize - 1) + 1;
+                    for (size_t padLeft = 0; padLeft <= 6; padLeft++) {
+                        for (size_t outputLength = 0; outputLength <= convTLength + 2;
+                             outputLength++) {
+                            for (size_t inPos = 0; inPos < inputLength; inPos++) {
+                                checkConvTTapRange(inPos, stride, dilation, padLeft, outputLength,
+                                                   kernelSize, &checks);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    printf("convTValidTapRange: %zu (geometry, inPos) cases matched the per-tap bounds test\n",
+           checks);
+    TEST_ASSERT_TRUE(checks > 0);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -678,5 +735,6 @@ int main(void) {
     RUN_TEST(testTapOutputRangeEmptyWhenStrideSkipsTheInput);
     RUN_TEST(testWindowSlice1dAtMatchesReferenceExhaustive);
     RUN_TEST(testWindowTapOutputRange1dMatchesReferenceExhaustive);
+    RUN_TEST(testConvTValidTapRangeMatchesBoundsTest);
     return UNITY_END();
 }

@@ -41,6 +41,16 @@ windowSlice1d_t windowSlice1dAt(windowGeometry1d_t const *geometry, size_t outpu
 void windowTapOutputRange1d(windowGeometry1d_t const *geometry, size_t k, size_t *outLo,
                             size_t *outHi);
 
+/*! ConvT scatter: kernel taps [*kLo, *kHi) of input position inPos land inside
+ *  the output; tap k writes output index inPos*stride + k*dilation - padLeft.
+ *  The valid taps are contiguous, so a scatter loop can walk exactly this range
+ *  instead of bounds-testing every tap in 64-bit signed math (a carry chain and
+ *  a two-word compare per tap on Cortex-M). An empty range gives *kLo == *kHi.
+ *  dilation 0 is accepted and means every tap hits the same index (all taps or
+ *  none). */
+void convTValidTapRange(size_t inPos, size_t stride, size_t dilation, size_t padLeft,
+                        size_t outputLength, size_t kernelSize, size_t *kLo, size_t *kHi);
+
 /*! BFP epic PR2 (D9): enumerate the contributors of ConvT1d output position
  *  outPos: kernel taps k with (outPos + padLeft - k*dilation) % stride == 0 and
  *  inPos = (outPos + padLeft - k*dilation) / stride in [0, inputLength).

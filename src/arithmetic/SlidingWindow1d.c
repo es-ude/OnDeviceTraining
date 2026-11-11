@@ -128,6 +128,36 @@ void windowTapOutputRange1d(windowGeometry1d_t const *geometry, size_t k, size_t
     *outHi = hi;
 }
 
+void convTValidTapRange(size_t inPos, size_t stride, size_t dilation, size_t padLeft,
+                        size_t outputLength, size_t kernelSize, size_t *kLo, size_t *kHi) {
+    // Tap k writes output inPos*stride + k*dilation - padLeft; it is valid
+    // while that index lies in [0, outputLength), i.e.
+    // padLeft - base <= k*dilation < outputLength + padLeft - base.
+    size_t const base = inPos * stride;
+    size_t const limit = outputLength + padLeft;
+    size_t lo = 0;
+    size_t hi = 0;
+    if (base < limit) {
+        if (dilation == 0) {
+            // every tap hits the same index base - padLeft
+            hi = (base >= padLeft) ? kernelSize : 0;
+        } else {
+            if (base < padLeft) {
+                lo = ceilDivSize(padLeft - base, dilation);
+            }
+            hi = ceilDivSize(limit - base, dilation);
+            if (hi > kernelSize) {
+                hi = kernelSize;
+            }
+            if (lo > hi) {
+                lo = hi;
+            }
+        }
+    }
+    *kLo = lo;
+    *kHi = hi;
+}
+
 size_t convTranspose1dTapsAt(size_t outPos, size_t inputLength, size_t kernelSize, size_t stride,
                              size_t dilation, size_t padLeft, convTransposeTap_t *taps) {
     size_t count = 0;

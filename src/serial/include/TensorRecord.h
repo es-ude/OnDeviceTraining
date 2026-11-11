@@ -9,18 +9,19 @@
  * exceeds rank 8. */
 #define ODTS_TENSOR_RECORD_MAX_RANK 8u
 
-/* Layout version of the bytes serializeTensor writes: 5 is the ODTS version
- * that last changed them (v5 SYM/ASYM/BFP qconfig records). Containers that
- * embed tensor records (ODTR) store it so a file written under another record
+/* Layout version of the bytes serializeTensor writes: 9 is the ODTS version
+ * that last changed them (v9 {u16 m, i16 e} scales in the SYM / SYM_INT32 /
+ * ASYM qconfig records; before it, 5). Containers that embed tensor records
+ * (ODTR PPCA checkpoints, ODTA example datasets) store it so a file written under another record
  * layout fails at load by name. Changing those bytes is caught by the tensor
  * golden-bytes tests in UnitTestSerialize.c going RED; the fix is to bump this
  * together with SERIALIZE_FORMAT_VERSION and regenerate the goldens. */
-#define ODTS_TENSOR_RECORD_VERSION 5u
+#define ODTS_TENSOR_RECORD_VERSION 9u
 
 /* ODTS container format version, written by serializeModel and the only value
  * deserializeModel accepts. One definition shared by writer, reader and the
  * golden pins in UnitTestSerialize.c (version history: Serialize.c). */
-#define SERIALIZE_FORMAT_VERSION 8u
+#define SERIALIZE_FORMAT_VERSION 9u
 _Static_assert(SERIALIZE_FORMAT_VERSION >= ODTS_TENSOR_RECORD_VERSION,
                "the tensor-record version names the ODTS version that introduced its layout");
 

@@ -428,7 +428,7 @@ Notes on the qualified cells:
   `exponentBits` + rounding (v5) — see Model format below). Packed tensor data
   (SYM/ASYM sub-byte, BFP sub-byte mantissas, BOOL 1-bit) is byte-tight via
   `calcNumberOfBytesForData` and round-trips exactly.
-- **Model format** — `"ODTS"` magic + `version` (=8) + `layerCount` + `u8` wiring kind (0 = chain,
+- **Model format** — `"ODTS"` magic + `version` (=9) + `layerCount` + `u8` wiring kind (0 = chain,
   also for a chain the graph builder spelled as a CSR; 1 = graph) + for kind 1 the CSR record
   (`u16 inputStart[layerCount + 1]`, then `u16 inputIds[inputStart[layerCount]]`, LE) +
   per-layer type tag. Deserialize fail-fasts on magic / version / count / wiring kind /
@@ -486,7 +486,14 @@ Notes on the qualified cells:
   reader fails fast when the byte is not 0/1 or disagrees with the skeleton's
   bias presence; pre-v7 files fail at the version check. Since v8 the wiring kind
   and, for graph models, the CSR record follow the layer count, and the ADD
-  record exists; pre-v8 files fail at the version check.
+  record exists; pre-v8 files fail at the version check. Since v9 (linq S4)
+  every SYM / SYM_INT32 / ASYM scale field (each `f32 scale` / `f32 scales[]`
+  entry above) is the integer dyadic scale `u16 m`, `i16 e` (LE, value
+  `m·2^e`, `DyadicScale.h`) — same 4 bytes, so record sizes are unchanged; the
+  reader accepts only the canonical form (`m` in [16384, 32767], `e` in
+  [`ODT_SCALE_E_MIN`, `ODT_SCALE_E_MAX`]) and the writer fails fast on a
+  non-canonical in-memory scale. Tensor-record version 9; v8 files fail at the
+  version check (no v8 compatibility shim).
 - **Contract** — deserialize **fills a pre-constructed model in place** (no
   model/tensor allocation in the serial path — only a qconfig's group arrays,
   `scales[]`/`zeroPoints[]`/`exponents[]`, are freed and re-reserved on a
@@ -546,7 +553,8 @@ checkpointing, limitations, literature).
   (`PpcaReplaySerialize.h`), the repo's first non-layer checkpoint format
   (`"ODTR"` magic), with a peek-validate-rewind guard against the
   #316-class deserialize-overwrite hazard; requires a seekable stream. ODTR v3
-  embeds `ODTS_TENSOR_RECORD_VERSION` and rejects a mismatch by name (#401).
+  embeds `ODTS_TENSOR_RECORD_VERSION` (9 since linq S4) and rejects a mismatch by
+  name (#401).
 
 ## Other subsystems
 

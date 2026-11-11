@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #include "ArithmeticType.h"
+#include "DyadicScale.h"
 #include "Kernel.h"
 #include "Layer.h"
 #include "Tensor.h"
@@ -38,6 +39,14 @@ static void serializeArithmetic(arithmetic_t *arithmetic, FILE *f);
  * \param f: Pointer of file to serialize to
  */
 static void serializeKernel(kernel_t *kernel, FILE *f);
+
+/*! Writes one stored scale as its v9 dyadic fields: u16 LE m, i16 LE e.
+ *
+ * \param s: the scale, loaded from its field with odtScaleLoad; fails fast
+ *           (PRINT_ERROR + exit(1)) when it is not canonical
+ * \param f: Pointer of file to serialize to
+ */
+static void serializeScale(odtScale_t s, FILE *f);
 
 /*! Serializes quantization config of tensor to given file.
  *

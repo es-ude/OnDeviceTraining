@@ -11,6 +11,7 @@
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
 #include "Dropout.h"
+#include "DyadicScale.h"
 #include "GroupNorm.h"
 #include "Kernel.h"
 #include "Layer.h"
@@ -21,7 +22,6 @@
 #include "QuantizationLayer.h"
 #include "Relu.h"
 #include "Rounding.h"
-#include "ScaleCanon.h"
 #include "SerialWire.h"
 #include "Serialize.h"
 #include "SerializeInternal.h"
@@ -29,7 +29,14 @@
 #include "Tensor.h"
 #include "TensorRecord.h"
 
-/* v8: a `u8 wiringKind` follows `u32 layerCount`, ahead of the first layer
+/* v9 (linq S4): every stored SYM / SYM_INT32 / ASYM scale is written as its
+ * integer dyadic fields, `u16 m` then `i16 e` (both LE, value m * 2^e,
+ * DyadicScale.h), in place of v8's `f32` scale -- the same 4 bytes, so every
+ * record keeps its size. A non-canonical in-memory scale fails fast here
+ * instead of reaching the file. The tensor record changes with it
+ * (ODTS_TENSOR_RECORD_VERSION 9). The v8 wiring is unchanged; every other byte
+ * is unchanged; v8 files fail at the version check (no v8 compatibility shim).
+ * v8: a `u8 wiringKind` follows `u32 layerCount`, ahead of the first layer
  * record. 0 = chain: node j reads the output of node j - 1, for every model
  * modelIsChain accepts, so a chain the graph builder spelled as an explicit
  * CSR writes the same bytes as a MODEL_CHAIN. 1 = graph wiring: the model's
@@ -182,6 +189,17 @@ static void serializeKernel(kernel_t *kernel, FILE *f) {
     serialWriteSizeAsU32LE(kernel->padding, f);
 }
 
+static void serializeScale(odtScale_t s, FILE *f) {
+    if (s.m < ODT_SCALE_M_MIN || s.m > ODT_SCALE_M_MAX || s.e < ODT_SCALE_E_MIN ||
+        s.e > ODT_SCALE_E_MAX) {
+        PRINT_ERROR("serializeQConfig: scale {m=%u, e=%d} is not canonical", (unsigned)s.m,
+                    (int)s.e);
+        exit(1);
+    }
+    serialWriteU16LE(s.m, f);
+    serialWriteI16LE(s.e, f);
+}
+
 static void serializeQConfig(quantization_t *q, FILE *f) {
     switch (q->type) {
     case INT32:
@@ -190,7 +208,7 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
         break;
     case SYM_INT32: {
         symInt32QConfig_t *symIntQC = q->qConfig;
-        serialWriteF32LE(loadCanonScale(&symIntQC->scale), f);
+        serializeScale(odtScaleLoad(&symIntQC->scale), f);
         serialWriteU8((uint8_t)symIntQC->roundingMode, f);
         serialWriteU8(symIntQC->qMaxBits, f);
         break;
@@ -207,7 +225,7 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
         serialWriteSizeAsU32LE(symQC->numGroups, f);
         serialWriteSizeAsU32LE(symQC->groupSize, f);
         for (size_t g = 0; g < symQC->numGroups; g++) {
-            serialWriteF32LE(loadCanonScale(&symQC->scales[g]), f);
+            serializeScale(odtScaleLoad(&symQC->scales[g]), f);
         }
         serialWriteU8(symQC->qBits, f);
         serialWriteU8((uint8_t)symQC->roundingMode, f);
@@ -227,7 +245,7 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
         serialWriteSizeAsU32LE(asymQC->numGroups, f);
         serialWriteSizeAsU32LE(asymQC->groupSize, f);
         for (size_t g = 0; g < asymQC->numGroups; g++) {
-            serialWriteF32LE(loadCanonScale(&asymQC->scales[g]), f);
+            serializeScale(odtScaleLoad(&asymQC->scales[g]), f);
         }
         for (size_t g = 0; g < asymQC->numGroups; g++) {
             serialWriteU16LE(asymQC->zeroPoints[g], f);

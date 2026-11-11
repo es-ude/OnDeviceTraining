@@ -185,7 +185,7 @@ static void bdWriteRaw(const char *name, const char *bytes, size_t n) {
     fclose(f);
 }
 static void bdReadBadMagic(void) {
-    bdWriteRaw("bd_badmagic.odta", "ODTX\x05\x00\x00\x00\x00\x00\x00\x00", 12);
+    bdWriteRaw("bd_badmagic.odta", "ODTX\x09\x00\x00\x00\x00\x00\x00\x00", 12);
     (void)tensorArrayReadFile(bdPath("bd_badmagic.odta"));
 }
 static void bdReadBadVersion(void) {
@@ -193,7 +193,7 @@ static void bdReadBadVersion(void) {
     (void)tensorArrayReadFile(bdPath("bd_badversion.odta"));
 }
 static void bdReadTrailingBytes(void) {
-    bdWriteRaw("bd_trailing.odta", "ODTA\x05\x00\x00\x00\x00\x00\x00\x00Z", 13);
+    bdWriteRaw("bd_trailing.odta", "ODTA\x09\x00\x00\x00\x00\x00\x00\x00Z", 13);
     (void)tensorArrayReadFile(bdPath("bd_trailing.odta"));
 }
 static void bdReadMissing(void) {
@@ -227,7 +227,7 @@ void testTensorArrayCountBoundCatchesThe32BitWrap(void) {
 static void bdReadHostileCount(void) {
     tensor_t *t = bdTensor2D(1, 1, quantizationInitFloat());
     FILE *f = fopen(bdPath("bd_hostile.odta"), "wb");
-    fwrite("ODTA\x05\x00\x00\x00\x01\x00\x00\x40", 1, 12, f);
+    fwrite("ODTA\x09\x00\x00\x00\x01\x00\x00\x40", 1, 12, f);
     serializeTensor(t, f);
     serializeTensor(t, f);
     fclose(f);
@@ -242,7 +242,7 @@ static void bdReadHugePayload(void) {
                              'D',
                              'T',
                              'A',
-                             5,
+                             9,
                              0,
                              0,
                              0,

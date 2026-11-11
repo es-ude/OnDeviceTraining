@@ -100,7 +100,7 @@ bool paramGateCheck(const tensor_t *tensor, const paramGateExpect_t *expect, cha
 /* Byte accounting for the sweep's memory report. Payload mirrors
  * calcNumberOfBytesForData (packed widths round up per TENSOR); metadata is
  * the per-group side table the qconfig carries: BFP one u8 exponent, SYM one
- * float scale, ASYM scale + u16 zero-point. FLOAT32 carries neither. Any
+ * 4-byte dyadic scale (odtScale_t), ASYM scale + u16 zero-point. FLOAT32 carries neither. Any
  * other dtype fails fast -- it has no sweep meaning. */
 size_t packedPayloadBytes(qtype_t type, uint8_t bits, size_t N);
 size_t packedMetadataBytes(qtype_t type, size_t numGroups);

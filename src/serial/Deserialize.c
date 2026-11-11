@@ -16,6 +16,7 @@
 #include "Deserialize.h"
 #include "DeserializeInternal.h"
 #include "Dropout.h"
+#include "DyadicScale.h"
 #include "GroupNorm.h"
 #include "Kernel.h"
 #include "LayerNorm.h"
@@ -25,14 +26,20 @@
 #include "QuantizationLayer.h"
 #include "Relu.h"
 #include "Rounding.h"
-#include "ScaleCanon.h"
 #include "SerialWire.h"
 #include "Softmax.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorRecord.h"
 
-/* v8: the `u8 wiringKind` after the layer count (0 = chain, 1 = CSR, see
+/* v9 (linq S4): a stored SYM / SYM_INT32 / ASYM scale is read as `u16 m`,
+ * `i16 e` (Serialize.c's v9 comment) and stored only in canonical form:
+ * m outside [ODT_SCALE_M_MIN, ODT_SCALE_M_MAX] or e outside
+ * [ODT_SCALE_E_MIN, ODT_SCALE_E_MAX] fails fast (deserializeScale). The v8
+ * float scale had the same width, so a v8 record would misparse silently; a
+ * v8 file fails cleanly at the version check below (no v8 compatibility
+ * shim).
+ * v8: the `u8 wiringKind` after the layer count (0 = chain, 1 = CSR, see
  * Serialize.c) and a kind-1 file's CSR must equal the skeleton's, so a file
  * never loads into a model whose layers read different buffers. The CSR is
  * compared as it streams in, nothing is allocated. The ADD record must carry
@@ -322,21 +329,23 @@ static void deserializeKernel(kernel_t *kernel, FILE *f) {
  * for it. */
 #define SERIAL_MAX_QCONFIG_GROUPS 65536u
 
-/* A stored SYM / SYM_INT32 / ASYM scale is an exact 15-bit dyadic value. A v7
- * float that is not is snapped NEAREST (the user-given rule) and accepted; a
- * non-positive, non-finite or subnormal one fails fast. */
-static float deserializeScale(FILE *f) {
-    float raw = serialReadF32LE(f);
-    if (!(raw > 0.0f && isfinite(raw))) {
-        PRINT_ERROR("deserializeQConfig: scale %a is not a positive finite value", (double)raw);
+/* v9 scale field: `u16 m`, `i16 e`, read into locals (never through a cast
+ * of the stream buffer). Only the canonical form is accepted: a non-canonical
+ * or out-of-range field is a corrupt record, not something to snap. */
+static odtScale_t deserializeScale(FILE *f) {
+    uint16_t m = serialReadU16LE(f);
+    int16_t e = serialReadI16LE(f);
+    if (m < ODT_SCALE_M_MIN || m > ODT_SCALE_M_MAX) {
+        PRINT_ERROR("deserializeQConfig: scale mantissa %u outside [%d, %d]", (unsigned)m,
+                    ODT_SCALE_M_MIN, ODT_SCALE_M_MAX);
         exit(1);
     }
-    float s = canonFixedScale(raw);
-    if (s != raw) {
-        PRINT_DEBUG("deserializeQConfig: scale %a is not dyadic, snapped to %a", (double)raw,
-                    (double)s);
+    if (e < ODT_SCALE_E_MIN || e > ODT_SCALE_E_MAX) {
+        PRINT_ERROR("deserializeQConfig: scale exponent %d outside [%d, %d]", (int)e,
+                    ODT_SCALE_E_MIN, ODT_SCALE_E_MAX);
+        exit(1);
     }
-    return s;
+    return (odtScale_t){.m = m, .e = e};
 }
 
 static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElements) {
@@ -347,7 +356,7 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
         break;
     case SYM_INT32: {
         symInt32QConfig_t *symIntQC = q->qConfig;
-        storeCanonScale(&symIntQC->scale, deserializeScale(f));
+        odtScaleStore(&symIntQC->scale, deserializeScale(f));
         symIntQC->roundingMode = (roundingMode_t)serialReadU8(f);
         symIntQC->qMaxBits = serialReadU8(f);
         break;
@@ -409,7 +418,7 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
         }
         symQC->groupSize = fileGroupSize;
         for (size_t g = 0; g < fileNumGroups; g++) {
-            storeCanonScale(&symQC->scales[g], deserializeScale(f));
+            odtScaleStore(&symQC->scales[g], deserializeScale(f));
         }
         uint8_t fileQBits = serialReadU8(f);
         /* #479: unconditional, like the ASYM arm -- the wire-config sites (numberOfElements == 0)
@@ -493,7 +502,7 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
          * an immediate golden-bytes and round-trip failure, never a silent
          * pass). */
         for (size_t g = 0; g < fileNumGroups; g++) {
-            storeCanonScale(&asymQC->scales[g], deserializeScale(f));
+            odtScaleStore(&asymQC->scales[g], deserializeScale(f));
         }
         for (size_t g = 0; g < fileNumGroups; g++) {
             asymQC->zeroPoints[g] = serialReadU16LE(f);

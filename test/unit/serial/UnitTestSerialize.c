@@ -2095,8 +2095,8 @@ static void testSerializeTensorBoolRoundTripsPackedData(void) {
     }
 }
 
-/* Ties the golden fixtures below to ODTS format version 8 and tensor-record
- * version 5, in both directions:
+/* Ties the golden fixtures below to ODTS format version 9 and tensor-record
+ * version 9, in both directions:
  * - bumping either constant without updating its pin here is a compile error;
  *   regenerate the goldens and move the pin in the same change.
  * - changing the bytes the writer produces without a bump turns the goldens
@@ -2104,11 +2104,11 @@ static void testSerializeTensorBoolRoundTripsPackedData(void) {
  *   regeneration under the old version. The literal version bytes inside the
  *   model goldens stay literals on purpose: spelling them via the macro would
  *   let the goldens follow a bump unseen. */
-_Static_assert(SERIALIZE_FORMAT_VERSION == 8u,
-               "these golden fixtures are tied to ODTS format version 8: regenerate them and "
+_Static_assert(SERIALIZE_FORMAT_VERSION == 9u,
+               "these golden fixtures are tied to ODTS format version 9: regenerate them and "
                "update this pin when bumping SERIALIZE_FORMAT_VERSION");
-_Static_assert(ODTS_TENSOR_RECORD_VERSION == 5u,
-               "these golden fixtures are tied to tensor-record version 5: regenerate them and "
+_Static_assert(ODTS_TENSOR_RECORD_VERSION == 9u,
+               "these golden fixtures are tied to tensor-record version 9: regenerate them and "
                "update this pin when bumping ODTS_TENSOR_RECORD_VERSION");
 
 /*! GOLDEN BYTES (#370, wire format v2): serializeTensor's exact encoding,
@@ -2229,17 +2229,17 @@ static void testGoldenBytesModelReluV5(void) {
 
     static const uint8_t expected[] = {
         /* magic */ 'O', 'D', 'T', 'S',
-        /* version u32 LE */ 0x08, 0x00, 0x00, 0x00,
+        /* version u32 LE */ 0x09, 0x00, 0x00, 0x00,
         /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
         /* wiring: chain */ 0x00,
         /* tag RELU */ 0x01,
         /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
         /* propLossMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
-        /* outputQ: SYM_INT32, scale 0.5f f32 LE, SR_HALF_AWAY, qMaxBits 12 */
-        0x02, 0x00, 0x00, 0x00, 0x3F, 0x01, 0x0C,
+        /* outputQ: SYM_INT32, scale 0.5 = m 16384, e -15, SR_HALF_AWAY, qMaxBits 12 */
+        0x02, 0x00, 0x40, 0xF1, 0xFF, 0x01, 0x0C,
         /* propLossQ: ASYM, numGroups 1 u32 LE, groupSize 0 u32 LE, scales[0]
-         * 0.25f f32 LE, zeroPoints[0] 3 u16 LE, qBits 8, HALF_AWAY */
-        0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3E, 0x03, 0x00,
+         * 0.25 = m 16384, e -16, zeroPoints[0] 3 u16 LE, qBits 8, HALF_AWAY */
+        0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0xF0, 0xFF, 0x03, 0x00,
         0x08, 0x00};
 
     uint8_t got[sizeof(expected) + 8] = {0};
@@ -2249,6 +2249,89 @@ static void testGoldenBytesModelReluV5(void) {
 
     TEST_ASSERT_EQUAL_size_t(sizeof(expected), fileBytes);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
+}
+
+/*! GOLDEN BYTES (linq S4, wire format v9): a stored scale is written as its
+ *  dyadic fields, `u16 m` then `i16 e` (both LE), never as a float. The
+ *  scales are not powers of two, so a float encoding or swapped fields
+ *  cannot produce these bytes: 0.375 = 24576 * 2^-16, 3.0 = 24576 * 2^-13. */
+static void testSerializeScaleRecordIsDyadicV9(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *symIntOutputQ = quantizationInitSymInt32WithBits(SR_HALF_AWAY, 12);
+    quantization_t *asymPropLossQ = quantizationInitAsym(8, HALF_AWAY);
+
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    lq.outputQ = symIntOutputQ;
+    lq.propLossQ = asymPropLossQ;
+
+    layer_t *layer = reluLayerInitOwning(&lq);
+    reluConfig_t *cfg = layer->config->relu;
+    symInt32QConfig_t *outputCfg = cfg->outputQ->qConfig;
+    outputCfg->scale = odtTestScale(0.375f);
+    asymQConfig_t *propLossCfg = cfg->propLossQ->qConfig;
+    propLossCfg->scales[0] = odtTestScale(3.0f);
+    propLossCfg->zeroPoints[0] = 3;
+
+    layer_t *model[] = {layer};
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(&MODEL_CHAIN(model, 1), f);
+    fclose(f);
+    freeReluLayer(layer);
+    freeQuantization(asymPropLossQ);
+    freeQuantization(symIntOutputQ);
+    freeQuantization(floatQ);
+
+    static const uint8_t expected[] = {
+        /* magic */ 'O', 'D', 'T', 'S',
+        /* version u32 LE */ 0x09, 0x00, 0x00, 0x00,
+        /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
+        /* wiring: chain */ 0x00,
+        /* tag RELU */ 0x01,
+        /* forwardMath, propLossMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00, 0x00, 0x00,
+        /* outputQ: SYM_INT32, scale m 24576 u16 LE, e -16 i16 LE, SR_HALF_AWAY,
+         * qMaxBits 12 */
+        0x02, 0x00, 0x60, 0xF0, 0xFF, 0x01, 0x0C,
+        /* propLossQ: ASYM, numGroups 1, groupSize 0, scales[0] m 24576 e -13,
+         * zeroPoints[0] 3, qBits 8, HALF_AWAY */
+        0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x60, 0xF3, 0xFF, 0x03, 0x00,
+        0x08, 0x00};
+
+    uint8_t got[sizeof(expected) + 8] = {0};
+    f = fopen(FILE_PATH, "rb");
+    size_t fileBytes = fread(got, 1, sizeof(got), f);
+    fclose(f);
+
+    TEST_ASSERT_EQUAL_size_t(sizeof(expected), fileBytes);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
+}
+
+static void serializeReluWithOutputScale(odtScale_t scale) {
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *symIntOutputQ = quantizationInitSymInt32WithBits(HALF_AWAY, 12);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    lq.outputQ = symIntOutputQ;
+    layer_t *layer = reluLayerInitOwning(&lq);
+    symInt32QConfig_t *outputCfg = layer->config->relu->outputQ->qConfig;
+    outputCfg->scale = scale;
+
+    layer_t *model[] = {layer};
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(&MODEL_CHAIN(model, 1), f);
+    fclose(f);
+    freeReluLayer(layer);
+    freeQuantization(symIntOutputQ);
+    freeQuantization(floatQ);
+}
+
+/*! The writer never puts a non-canonical scale on the wire: the reader would
+ *  reject the file, so the error belongs at the save. */
+static void testSerializeRejectsNonCanonicalScale(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "scale {m=0, e=0} is not canonical",
+                             serializeReluWithOutputScale((odtScale_t){.m = 0, .e = 0}));
+    ASSERT_EXITS_WITH_OUTPUT(1, "scale {m=16384, e=114} is not canonical",
+                             serializeReluWithOutputScale((odtScale_t){.m = 16384, .e = 114}));
 }
 
 /*! GOLDEN BYTES (group-quant PR4, Task 4, wire format v5): the numGroups>1
@@ -2283,21 +2366,21 @@ static void testGoldenBytesModelReluAsymGroupedPropLossV5(void) {
     freeQuantization(asymGroupedPropLossQ);
     freeQuantization(floatQ);
 
-    static const uint8_t expected[] = {/* magic */ 'O', 'D', 'T', 'S',
-                                       /* version u32 LE */ 0x08, 0x00, 0x00, 0x00,
-                                       /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
-                                       /* wiring: chain */ 0x00,
-                                       /* tag RELU */ 0x01,
-                                       /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
-                                       /* propLossMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
-                                       /* outputQ FLOAT32 */ 0x01,
-                                       /* propLossQ: ASYM, numGroups 2 u32 LE, groupSize 3 u32 LE,
-                                        * scales[0] 0.5f / scales[1] 0.25f f32 LE,
-                                        * zeroPoints[0] 3 / zeroPoints[1] 0x1234 u16 LE,
-                                        * qBits 8, HALF_AWAY */
-                                       0x04, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
-                                       0x00, 0x00, 0x3F, 0x00, 0x00, 0x80, 0x3E, 0x03, 0x00, 0x34,
-                                       0x12, 0x08, 0x00};
+    static const uint8_t expected[] = {
+        /* magic */ 'O', 'D', 'T', 'S',
+        /* version u32 LE */ 0x09, 0x00, 0x00, 0x00,
+        /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
+        /* wiring: chain */ 0x00,
+        /* tag RELU */ 0x01,
+        /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
+        /* propLossMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
+        /* outputQ FLOAT32 */ 0x01,
+        /* propLossQ: ASYM, numGroups 2 u32 LE, groupSize 3 u32 LE,
+         * scales[0] 0.5 = {16384, -15} / scales[1] 0.25 = {16384, -16},
+         * zeroPoints[0] 3 / zeroPoints[1] 0x1234 u16 LE,
+         * qBits 8, HALF_AWAY */
+        0x04, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x40, 0xF1, 0xFF, 0x00, 0x40,
+        0xF0, 0xFF, 0x03, 0x00, 0x34, 0x12, 0x08, 0x00};
 
     uint8_t got[sizeof(expected) + 8] = {0};
     f = fopen(FILE_PATH, "rb");
@@ -2343,16 +2426,16 @@ static void testGoldenBytesModelReluSymOutputV5(void) {
     freeQuantization(floatQ);
 
     static const uint8_t expected[] = {/* magic */ 'O', 'D', 'T', 'S',
-                                       /* version u32 LE */ 0x08, 0x00, 0x00, 0x00,
+                                       /* version u32 LE */ 0x09, 0x00, 0x00, 0x00,
                                        /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
                                        /* wiring: chain */ 0x00,
                                        /* tag RELU */ 0x01,
                                        /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
                                        /* propLossMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
                                        /* outputQ: SYM, numGroups 1 u32 LE, groupSize 0 u32 LE,
-                                        * scales[0] 0.5f f32 LE, qBits 6, HALF_AWAY */
+                                        * scales[0] 0.5 = {16384, -15}, qBits 6, HALF_AWAY */
                                        0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                       0x00, 0x00, 0x3F, 0x06, 0x00,
+                                       0x40, 0xF1, 0xFF, 0x06, 0x00,
                                        /* propLossQ FLOAT32 */ 0x01};
 
     uint8_t got[sizeof(expected) + 8] = {0};
@@ -2395,17 +2478,17 @@ static void testGoldenBytesModelReluSymGroupedOutputV5(void) {
     freeQuantization(floatQ);
 
     static const uint8_t expected[] = {/* magic */ 'O', 'D', 'T', 'S',
-                                       /* version u32 LE */ 0x08, 0x00, 0x00, 0x00,
+                                       /* version u32 LE */ 0x09, 0x00, 0x00, 0x00,
                                        /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
                                        /* wiring: chain */ 0x00,
                                        /* tag RELU */ 0x01,
                                        /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
                                        /* propLossMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
                                        /* outputQ: SYM, numGroups 2 u32 LE, groupSize 3 u32 LE,
-                                        * scales[0] 0.5f / scales[1] 0.25f f32 LE, qBits 6,
-                                        * HALF_AWAY */
+                                        * scales[0] 0.5 = {16384, -15} / scales[1] 0.25 = {16384,
+                                        * -16}, qBits 6, HALF_AWAY */
                                        0x03, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
-                                       0x00, 0x00, 0x3F, 0x00, 0x00, 0x80, 0x3E, 0x06, 0x00,
+                                       0x40, 0xF1, 0xFF, 0x00, 0x40, 0xF0, 0xFF, 0x06, 0x00,
                                        /* propLossQ FLOAT32 */ 0x01};
 
     uint8_t got[sizeof(expected) + 8] = {0};
@@ -2442,7 +2525,7 @@ static void testGoldenBytesModelMaxPool1dV5(void) {
                                        'D',
                                        'T',
                                        'S',
-                                       /* version u32 LE */ 0x08,
+                                       /* version u32 LE */ 0x09,
                                        0x00,
                                        0x00,
                                        0x00,
@@ -2523,7 +2606,7 @@ static void testGoldenBytesModelLinearFrozenV7(void) {
                                        'D',
                                        'T',
                                        'S',
-                                       /* version u32 LE */ 0x08,
+                                       /* version u32 LE */ 0x09,
                                        0x00,
                                        0x00,
                                        0x00,
@@ -2630,7 +2713,7 @@ static void testGoldenBytesModelBatchNorm1dV6(void) {
     freeQuantization(floatQ);
 
     static const uint8_t expected[] = {
-        'O', 'D', 'T', 'S', /* version */ 0x08, 0x00, 0x00, 0x00,
+        'O', 'D', 'T', 'S', /* version */ 0x09, 0x00, 0x00, 0x00,
         /* layerCount */ 0x01, 0x00, 0x00, 0x00,
         /* wiring: chain */ 0x00,
         /* tag BATCHNORM1D */ 0x0D,
@@ -3095,7 +3178,7 @@ void testGoldenBytesModelReluAddCsrV8(void) {
                                        'D',
                                        'T',
                                        'S',
-                                       /* version u32 LE */ 0x08,
+                                       /* version u32 LE */ 0x09,
                                        0x00,
                                        0x00,
                                        0x00,
@@ -3187,6 +3270,8 @@ int main(void) {
     RUN_TEST(testSerializeTensorBoolRoundTripsPackedData);
     RUN_TEST(testGoldenBytesTensorFloat32V2);
     RUN_TEST(testGoldenBytesModelReluV5);
+    RUN_TEST(testSerializeScaleRecordIsDyadicV9);
+    RUN_TEST(testSerializeRejectsNonCanonicalScale);
     RUN_TEST(testGoldenBytesModelReluAsymGroupedPropLossV5);
     RUN_TEST(testGoldenBytesModelReluSymOutputV5);
     RUN_TEST(testGoldenBytesModelReluSymGroupedOutputV5);

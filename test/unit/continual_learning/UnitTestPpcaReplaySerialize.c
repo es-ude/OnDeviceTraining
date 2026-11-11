@@ -834,7 +834,7 @@ static void patchByte(long offset, uint8_t value) {
 
 void testSerializeWritesContainerAndRecordVersion(void) {
     writeFloatSet();
-    const uint8_t expected[12] = {'O', 'D', 'T', 'R', 3, 0, 0, 0, 5, 0, 0, 0};
+    const uint8_t expected[12] = {'O', 'D', 'T', 'R', 3, 0, 0, 0, 9, 0, 0, 0};
     uint8_t got[12];
     FILE *f = fopen(FILE_PATH, "rb");
     TEST_ASSERT_EQUAL_size_t(12, fread(got, 1, 12, f));
@@ -849,6 +849,21 @@ void testDeserializeRejectsTensorRecordVersionMismatch(void) {
     ppcaReplaySet_t *skeleton = ppcaReplaySetCreate(1, &cfg);
     FILE *f = fopen(FILE_PATH, "rb");
     ASSERT_EXITS_WITH_OUTPUT(1, "tensor-record version 4", ppcaReplaySetDeserialize(skeleton, f));
+    fclose(f);
+    freePpcaReplaySet(skeleton);
+}
+
+/* A checkpoint written under ODTS v8 embeds tensor-record version 5 (the v8
+ * records' layout dates from v5) with f32 scales; v9 records carry {m, e}.
+ * Same byte count, so only the record version stops a misparse. */
+void testPpcaRejectsV8EmbeddedRecord(void) {
+    writeFloatSet();
+    patchByte(8, 5);
+    ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
+    ppcaReplaySet_t *skeleton = ppcaReplaySetCreate(1, &cfg);
+    FILE *f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "tensor-record version 5, this build reads 9",
+                             ppcaReplaySetDeserialize(skeleton, f));
     fclose(f);
     freePpcaReplaySet(skeleton);
 }
@@ -880,6 +895,7 @@ int main(void) {
     RUN_TEST(testDeserializeRejectsPayloadTruncation);
     RUN_TEST(testSerializeWritesContainerAndRecordVersion);
     RUN_TEST(testDeserializeRejectsTensorRecordVersionMismatch);
+    RUN_TEST(testPpcaRejectsV8EmbeddedRecord);
     RUN_TEST(testDeserializeRejectsV2Container);
     return UNITY_END();
 }

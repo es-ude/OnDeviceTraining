@@ -35,7 +35,7 @@
 /* Current ODTS format version for hand-crafted fixtures. Bump together with
  * SERIALIZE_FORMAT_VERSION: a stale value makes every fixture below die at
  * the version check instead of at the guard it targets (a vacuous pass). */
-#define ODTS_VERSION 8u
+#define ODTS_VERSION 9u
 
 /* Fixture writer for hand-crafted v2 files: explicit little-endian bytes, so
  * the fixtures stay valid even on a big-endian test host. */
@@ -49,9 +49,7 @@ static void writeU8(FILE *f, uint8_t value) {
     fwrite(&value, 1, 1, f);
 }
 
-/* Companion to writeU32LE for fixtures that need to write more than a
- * handful of scale floats (e.g. an over-cap group count) without hand-typing
- * every byte. */
+/* Companion to writeU32LE for FLOAT32 payload values. */
 static void writeF32LE(FILE *f, float value) {
     uint32_t bits;
     memcpy(&bits, &value, sizeof(bits));
@@ -63,6 +61,19 @@ static void writeF32LE(FILE *f, float value) {
 static void writeU16LE(FILE *f, uint16_t value) {
     uint8_t bytes[2] = {(uint8_t)value, (uint8_t)(value >> 8)};
     fwrite(bytes, 1, 2, f);
+}
+
+/* A v9 scale field: `u16 m`, `i16 e`, both LE. Takes the raw fields so a
+ * fixture can write a non-canonical scale. */
+static void writeScaleLE(FILE *f, uint16_t m, int16_t e) {
+    writeU16LE(f, m);
+    writeU16LE(f, (uint16_t)e);
+}
+
+/* A v9 scale field holding the canonical form of x (x must be canonical). */
+static void writeCanonScaleLE(FILE *f, float x) {
+    odtScale_t s = odtTestScale(x);
+    writeScaleLE(f, s.m, s.e);
 }
 
 static tensor_t *makeFloatTensor2D(size_t d0, size_t d1, const float *src, size_t count) {
@@ -297,7 +308,30 @@ static void testDeserializeRejectsV7Version(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_OUTPUT(1, "unsupported format version 7 (expected 8)",
+    ASSERT_EXITS_WITH_OUTPUT(1, "unsupported format version 7 (expected 9)",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
+    fclose(f);
+
+    freeFlattenLayer(layer);
+}
+
+/*! v8 = the wiring format whose SYM / SYM_INT32 / ASYM records still carry
+ *  `f32` scales where v9 (linq S4) carries `u16 m, i16 e`. Same 4 bytes, so a
+ *  v8 record would misparse rather than truncate. No v8 compatibility shim. */
+static void testDeserializeRejectsV8Version(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fwrite("ODTS", 1, 4, f);
+    writeU32LE(f, 8); /* v8: f32 scales */
+    writeU32LE(f, 1); /* layerCount */
+    writeU8(f, 0);    /* wiring: chain */
+    writeU8(f, (uint8_t)FLATTEN);
+    fclose(f);
+
+    layer_t *layer = flattenLayerInit();
+    layer_t *model[] = {layer};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "unsupported format version 8 (expected 9)",
                              deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
@@ -683,11 +717,10 @@ static void testDeserializeQConfigAcceptsWideZeroPoint(void) {
     writeU32LE(f, 0); /* orderOfDimensions[0] */
     uint8_t asymType = (uint8_t)ASYM;
     fwrite(&asymType, 1, 1, f);
-    writeU32LE(f, 1);                                 /* numGroups */
-    writeU32LE(f, 0);                                 /* groupSize */
-    uint8_t scaleBytes[4] = {0x00, 0x00, 0x00, 0x3F}; /* scales[0] 0.5f LE */
-    fwrite(scaleBytes, 1, 4, f);
-    writeU16LE(f, 40000u); /* zeroPoints[0] u16 LE, > INT16_MAX */
+    writeU32LE(f, 1);           /* numGroups */
+    writeU32LE(f, 0);           /* groupSize */
+    writeCanonScaleLE(f, 0.5f); /* scales[0] */
+    writeU16LE(f, 40000u);      /* zeroPoints[0] u16 LE, > INT16_MAX */
     uint8_t qBits = 8;
     fwrite(&qBits, 1, 1, f);
     uint8_t roundingMode = 0; /* HALF_AWAY */
@@ -755,8 +788,8 @@ static void testDeserializeQConfigAcceptsNumGroupsMismatchViaReallocation(void) 
     fwrite(&symType, 1, 1, f);
     writeU32LE(f, 2); /* numGroups = 2, mismatches the skeleton's 1 */
     writeU32LE(f, 2); /* groupSize = 2; 2*2 == 4 == the skeleton's element count */
-    uint8_t scaleBytes[8] = {0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x80, 0x3E}; /* 0.5f, 0.25f */
-    fwrite(scaleBytes, 1, 8, f);
+    writeCanonScaleLE(f, 0.5f);
+    writeCanonScaleLE(f, 0.25f);
     uint8_t qBits = 4;
     fwrite(&qBits, 1, 1, f);
     uint8_t roundingMode = 0; /* HALF_AWAY */
@@ -808,9 +841,9 @@ static void testDeserializeGroupedSymRejectsBadDivisibility(void) {
     fwrite(&symType, 1, 1, f);
     writeU32LE(f, 3); /* numGroups = 3 */
     writeU32LE(f, 2); /* groupSize = 2 -> 3*2 == 6 != 4 elements */
-    uint8_t scaleBytes[12] = {0x00, 0x00, 0x00, 0x3F, 0x00, 0x00,
-                              0x00, 0x3F, 0x00, 0x00, 0x00, 0x3F}; /* three 0.5f scales */
-    fwrite(scaleBytes, 1, 12, f);
+    writeCanonScaleLE(f, 0.5f);
+    writeCanonScaleLE(f, 0.5f);
+    writeCanonScaleLE(f, 0.5f); /* three scales */
     uint8_t qBits = 4;
     fwrite(&qBits, 1, 1, f);
     uint8_t roundingMode = 0; /* HALF_AWAY */
@@ -904,8 +937,7 @@ static void testDeserializeQConfigRejectsSentinelViolation(void) {
     fwrite(&symType, 1, 1, f);
     writeU32LE(f, 1); /* numGroups = 1, matches the skeleton */
     writeU32LE(f, 3); /* groupSize = 3, violates numGroups==1 <=> groupSize==0 */
-    uint8_t scaleBytes[4] = {0x00, 0x00, 0x00, 0x3F};
-    fwrite(scaleBytes, 1, 4, f);
+    writeCanonScaleLE(f, 0.5f);
     uint8_t qBits = 4;
     fwrite(&qBits, 1, 1, f);
     uint8_t roundingMode = 0; /* HALF_AWAY */
@@ -1678,7 +1710,7 @@ static void testDeserializeSymRejectsOversizedNumGroupsInWireConfig(void) {
     writeU32LE(f, oversizedNumGroups); /* fileNumGroups: past the cap */
     writeU32LE(f, 1);                  /* groupSize: nonzero, satisfies the sentinel */
     for (uint32_t g = 0; g < oversizedNumGroups; g++) {
-        writeF32LE(f, 0.5f);
+        writeCanonScaleLE(f, 0.5f);
     }
     uint8_t qBits = 6;
     fwrite(&qBits, 1, 1, f);
@@ -1735,7 +1767,7 @@ static void testDeserializeAsymRejectsOversizedNumGroupsInWireConfig(void) {
     writeU32LE(f, oversizedNumGroups); /* fileNumGroups: past the cap */
     writeU32LE(f, 1);                  /* groupSize: nonzero, satisfies the sentinel */
     for (uint32_t g = 0; g < oversizedNumGroups; g++) {
-        writeF32LE(f, 0.5f); /* scales[g] */
+        writeCanonScaleLE(f, 0.5f); /* scales[g] */
     }
     for (uint32_t g = 0; g < oversizedNumGroups; g++) {
         writeU16LE(f, 0); /* zeroPoints[g] */
@@ -1885,7 +1917,7 @@ static void testDeserializeAsymRejectsWireQBitsAboveSixteen(void) {
     fwrite(&asymType, 1, 1, f);
     writeU32LE(f, 1); /* numGroups */
     writeU32LE(f, 0); /* groupSize */
-    writeF32LE(f, 0.5f);
+    writeCanonScaleLE(f, 0.5f);
     writeU16LE(f, 3);
     uint8_t qBits = 17; /* > 16, group-quant D6 ceiling */
     fwrite(&qBits, 1, 1, f);
@@ -1912,7 +1944,7 @@ static void writeSymTensorRecordWithQBits(uint8_t qBits) {
     fwrite(&symType, 1, 1, f);
     writeU32LE(f, 1); /* numGroups */
     writeU32LE(f, 0); /* groupSize */
-    writeF32LE(f, 0.5f);
+    writeCanonScaleLE(f, 0.5f);
     fwrite(&qBits, 1, 1, f);
     uint8_t roundingMode = 0; /* HALF_AWAY */
     fwrite(&roundingMode, 1, 1, f);
@@ -1940,7 +1972,7 @@ static void writeReluSymOutputWireRecordWithQBits(uint8_t qBits) {
     fwrite(&symType, 1, 1, f);
     writeU32LE(f, 1); /* numGroups */
     writeU32LE(f, 0); /* groupSize */
-    writeF32LE(f, 0.5f);
+    writeCanonScaleLE(f, 0.5f);
     fwrite(&qBits, 1, 1, f);
     uint8_t roundingMode = 0;
     fwrite(&roundingMode, 1, 1, f);
@@ -2056,9 +2088,9 @@ static void testDeserializeGroupedAsymRejectsBadDivisibility(void) {
     fwrite(&asymType, 1, 1, f);
     writeU32LE(f, 3); /* numGroups = 3 */
     writeU32LE(f, 2); /* groupSize = 2 -> 3*2 == 6 != 4 elements */
-    writeF32LE(f, 0.5f);
-    writeF32LE(f, 0.5f);
-    writeF32LE(f, 0.5f); /* three scales */
+    writeCanonScaleLE(f, 0.5f);
+    writeCanonScaleLE(f, 0.5f);
+    writeCanonScaleLE(f, 0.5f); /* three scales */
     writeU16LE(f, 1);
     writeU16LE(f, 2);
     writeU16LE(f, 3); /* three zeroPoints */
@@ -2232,9 +2264,9 @@ static void testSkipSerializedGroupedAsymGradRejectsBadDivisibility(void) {
     fwrite(&asymType, 1, 1, f);
     writeU32LE(f, 3); /* numGroups = 3 */
     writeU32LE(f, 3); /* groupSize = 3 -> 3*3 == 9 != 6 elements */
-    writeF32LE(f, 0.5f);
-    writeF32LE(f, 0.5f);
-    writeF32LE(f, 0.5f); /* three scales */
+    writeCanonScaleLE(f, 0.5f);
+    writeCanonScaleLE(f, 0.5f);
+    writeCanonScaleLE(f, 0.5f); /* three scales */
     writeU16LE(f, 1);
     writeU16LE(f, 2);
     writeU16LE(f, 3); /* three zeroPoints */
@@ -2284,9 +2316,9 @@ static void testSkipSerializedGroupedSymGradRejectsBadDivisibility(void) {
     fwrite(&symType, 1, 1, f);
     writeU32LE(f, 3); /* numGroups = 3 */
     writeU32LE(f, 3); /* groupSize = 3 -> 3*3 == 9 != 6 elements */
-    uint8_t scaleBytes[12] = {0x00, 0x00, 0x00, 0x3F, 0x00, 0x00,
-                              0x00, 0x3F, 0x00, 0x00, 0x00, 0x3F}; /* three 0.5f scales */
-    fwrite(scaleBytes, 1, 12, f);
+    writeCanonScaleLE(f, 0.5f);
+    writeCanonScaleLE(f, 0.5f);
+    writeCanonScaleLE(f, 0.5f); /* three scales */
     uint8_t qBits = 4;
     fwrite(&qBits, 1, 1, f);
     uint8_t roundingMode = 0; /* HALF_AWAY */
@@ -3028,6 +3060,50 @@ static void testDeserializeAddRejectsNonFloat32Math(void) {
     dagFree(&r);
 }
 
+/* A complete rank-1, one-element SYM_INT32 record whose scale field is
+ * {m, e}, read back through readTensorRecordHeader. */
+static odtScale_t readSymInt32RecordScale(uint16_t m, int16_t e) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    writeU32LE(f, 1); /* numberOfDimensions */
+    writeU32LE(f, 1); /* dimensions[0] */
+    writeU32LE(f, 0); /* orderOfDimensions[0] */
+    uint8_t type = (uint8_t)SYM_INT32;
+    fwrite(&type, 1, 1, f);
+    writeScaleLE(f, m, e);
+    uint8_t tail[2] = {(uint8_t)HALF_AWAY, 12}; /* roundingMode, qMaxBits */
+    fwrite(tail, 1, 2, f);
+    writeU32LE(f, 0); /* payload: one int32 */
+    fclose(f);
+
+    tensorRecordHeader_t header;
+    f = fopen(FILE_PATH, "rb");
+    readTensorRecordHeader(&header, f);
+    fclose(f);
+    odtScale_t s = odtScaleLoad(&header.qConfigStorage.symInt32.scale);
+    freeTensorRecordHeader(&header);
+    return s;
+}
+
+/*! A v9 scale field is accepted only in canonical form: m in [16384, 32767]
+ *  and e in [ODT_SCALE_E_MIN, ODT_SCALE_E_MAX]. Each bound is probed one past
+ *  its edge (rejected) and at its edge (accepted, field for field). */
+static void testDeserializeRejectsInvalidDyadicScale(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "scale mantissa 16383", (void)readSymInt32RecordScale(16383, 0));
+    ASSERT_EXITS_WITH_OUTPUT(1, "scale mantissa 32768", (void)readSymInt32RecordScale(32768, 0));
+    ASSERT_EXITS_WITH_OUTPUT(1, "scale mantissa 0", (void)readSymInt32RecordScale(0, 0));
+    ASSERT_EXITS_WITH_OUTPUT(1, "scale exponent -141",
+                             (void)readSymInt32RecordScale(16384, ODT_SCALE_E_MIN - 1));
+    ASSERT_EXITS_WITH_OUTPUT(1, "scale exponent 114",
+                             (void)readSymInt32RecordScale(16384, ODT_SCALE_E_MAX + 1));
+
+    odtScale_t low = readSymInt32RecordScale(ODT_SCALE_M_MIN, ODT_SCALE_E_MIN);
+    odtScale_t high = readSymInt32RecordScale(ODT_SCALE_M_MAX, ODT_SCALE_E_MAX);
+    TEST_ASSERT_EQUAL_UINT16(ODT_SCALE_M_MIN, low.m);
+    TEST_ASSERT_EQUAL_INT16(ODT_SCALE_E_MIN, low.e);
+    TEST_ASSERT_EQUAL_UINT16(ODT_SCALE_M_MAX, high.m);
+    TEST_ASSERT_EQUAL_INT16(ODT_SCALE_E_MAX, high.e);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -3041,6 +3117,7 @@ int main(void) {
     RUN_TEST(testDeserializeRejectsV5Version);
     RUN_TEST(testDeserializeRejectsV6Version);
     RUN_TEST(testDeserializeRejectsV7Version);
+    RUN_TEST(testDeserializeRejectsV8Version);
     RUN_TEST(testDeserializeRejectsWiringKindMismatch);
     RUN_TEST(testDeserializeRejectsLayerCountMismatch);
     RUN_TEST(testDeserializeRejectsTagMismatch);
@@ -3119,5 +3196,6 @@ int main(void) {
     RUN_TEST(testDeserializeRejectsADifferentInputStart);
     RUN_TEST(testDeserializeRejectsATruncatedWiringRecord);
     RUN_TEST(testDeserializeAddRejectsNonFloat32Math);
+    RUN_TEST(testDeserializeRejectsInvalidDyadicScale);
     return UNITY_END();
 }

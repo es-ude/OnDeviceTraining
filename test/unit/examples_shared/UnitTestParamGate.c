@@ -379,7 +379,7 @@ void testPackedPayloadBytesMatchesFrameworkAccounting(void) {
 
 void testPackedMetadataBytesPerDtype(void) {
     TEST_ASSERT_EQUAL_size_t(128, packedMetadataBytes(BFP, 128));  /* 1 B exponent per group */
-    TEST_ASSERT_EQUAL_size_t(512, packedMetadataBytes(SYM, 128));  /* 4 B float scale */
+    TEST_ASSERT_EQUAL_size_t(512, packedMetadataBytes(SYM, 128));  /* 4 B {m, e} scale */
     TEST_ASSERT_EQUAL_size_t(768, packedMetadataBytes(ASYM, 128)); /* 4 B scale + 2 B zero-point */
     TEST_ASSERT_EQUAL_size_t(0, packedMetadataBytes(FLOAT32, 1));
 }

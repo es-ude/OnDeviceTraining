@@ -5,10 +5,10 @@
 # entry reads or writes a scale value.
 src/tensor/Quantization.c	qC->scales = reserveMemory(numGroups * sizeof(*qC->scales));	init: allocates the scales array (SYM and ASYM init); every element is then written with odtScaleStore(ODT_SCALE_ONE)
 src/serial/Deserialize.c	freeReservedMemory(symQC->scales);	ownership: frees the skeleton's scales array before reallocating it to the file's numGroups
-src/serial/Deserialize.c	symQC->scales = reserveMemory(fileNumGroups * sizeof(*symQC->scales));	init: allocates the scales array for the file's numGroups; every element is then written with storeCanonScale
+src/serial/Deserialize.c	symQC->scales = reserveMemory(fileNumGroups * sizeof(*symQC->scales));	init: allocates the scales array for the file's numGroups; every element is then written with odtScaleStore
 src/serial/Deserialize.c	freeReservedMemory(asymQC->scales);	ownership: ASYM twin of the SYM free above
-src/serial/Deserialize.c	asymQC->scales = reserveMemory(fileNumGroups * sizeof(*asymQC->scales));	init: ASYM twin of the SYM allocation above; elements written with storeCanonScale
-src/serial/Deserialize.c	sym->scales = reserveMemory(sizeof(*sym->scales));	init: header skeleton's one-element scales array; filled by deserializeQConfig through storeCanonScale
+src/serial/Deserialize.c	asymQC->scales = reserveMemory(fileNumGroups * sizeof(*asymQC->scales));	init: ASYM twin of the SYM allocation above; elements written with odtScaleStore
+src/serial/Deserialize.c	sym->scales = reserveMemory(sizeof(*sym->scales));	init: header skeleton's one-element scales array; filled by deserializeQConfig through odtScaleStore
 src/serial/Deserialize.c	asym->scales = reserveMemory(sizeof(*asym->scales));	init: ASYM twin of the header skeleton allocation above
 src/serial/Deserialize.c	freeReservedMemory(header->qConfigStorage.sym.scales);	ownership: frees the header skeleton's scales array
 src/serial/Deserialize.c	header->qConfigStorage.sym.scales = NULL;	ownership: clears the freed pointer

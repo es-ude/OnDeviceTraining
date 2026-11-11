@@ -27,6 +27,8 @@ void serialWriteU8(uint8_t value, FILE *f);
  *  always fits u16) -- same checked, endian-pinned pattern as the other
  *  fixed-width primitives below. */
 void serialWriteU16LE(uint16_t value, FILE *f);
+/*! linq S4 (ODTS v9): i16 carrier for a dyadic scale's exponent (odtScale_t.e). */
+void serialWriteI16LE(int16_t value, FILE *f);
 void serialWriteU32LE(uint32_t value, FILE *f);
 void serialWriteI32LE(int32_t value, FILE *f);
 void serialWriteF32LE(float value, FILE *f);
@@ -41,6 +43,7 @@ void serialWriteSizeAsU32LE(size_t value, FILE *f);
 void serialReadBytes(void *bytes, size_t numberOfBytes, FILE *f);
 uint8_t serialReadU8(FILE *f);
 uint16_t serialReadU16LE(FILE *f);
+int16_t serialReadI16LE(FILE *f);
 uint32_t serialReadU32LE(FILE *f);
 int32_t serialReadI32LE(FILE *f);
 float serialReadF32LE(FILE *f);

@@ -699,6 +699,117 @@ void testConvTValidTapRangeMatchesBoundsTest() {
     TEST_ASSERT_TRUE(checks > 0);
 }
 
+/* Ceil-division wrap (advrev A2): with n + d - 1 > SIZE_MAX, (n + d - 1) / d wraps
+ * on any size_t width. On the 32-bit MCU size_t that needs n + d > 2^32; on the
+ * 64-bit host it needs a stride or dilation near SIZE_MAX, which these cases use.
+ * The reference is a brute-force per-tap membership test in 128-bit math, which
+ * does not overflow for the operands below (every product stays under 2^127). */
+__extension__ typedef __int128 wide_t;
+
+static bool tapIndexInRange(size_t pos, size_t step, size_t k, size_t dilation, size_t padLeft,
+                            size_t length) {
+    wide_t const idx = (wide_t)pos * step + (wide_t)k * dilation - (wide_t)padLeft;
+    return idx >= 0 && idx < (wide_t)length;
+}
+
+static void assertSliceMatchesWideReference(windowGeometry1d_t const *g, size_t outPos) {
+    size_t firstK = g->kernelSize;
+    size_t count = 0;
+    for (size_t k = 0; k < g->kernelSize; k++) {
+        if (tapIndexInRange(outPos, g->stride, k, g->dilation, g->padLeft, g->inputLength)) {
+            if (count == 0) {
+                firstK = k;
+            }
+            count++;
+        }
+    }
+    windowSlice1d_t s = windowSlice1dAt(g, outPos);
+    TEST_ASSERT_EQUAL_size_t(count, s.validCount);
+    TEST_ASSERT_EQUAL_size_t(firstK, s.firstValidKernelOffset);
+    if (count > 0) {
+        size_t const firstIdx =
+            (size_t)((wide_t)outPos * g->stride + (wide_t)firstK * g->dilation - g->padLeft);
+        TEST_ASSERT_EQUAL_size_t(firstIdx, s.firstValidInputIdx);
+    }
+}
+
+void testWindowSlice1dAtCeilDivDoesNotWrapNearSizeMax() {
+    size_t const half = SIZE_MAX / 2 + 1; /* 2^63 on the host */
+    /* neg = padLeft = half + 5, dilation = half + 10: neg + dilation - 1 wraps to 14,
+     * so the old ceil gave firstK = 0 and an empty slice; tap 1 reads input 5. */
+    windowGeometry1d_t g = {.inputLength = 10,
+                            .kernelSize = 3,
+                            .stride = 1,
+                            .dilation = half + 10,
+                            .padLeft = half + 5,
+                            .padRight = 0,
+                            .outputLength = 1};
+    assertSliceMatchesWideReference(&g, 0);
+    windowSlice1d_t s = windowSlice1dAt(&g, 0);
+    TEST_ASSERT_EQUAL_size_t(1, s.validCount);
+    TEST_ASSERT_EQUAL_size_t(1, s.firstValidKernelOffset);
+    TEST_ASSERT_EQUAL_size_t(5, s.firstValidInputIdx);
+}
+
+void testWindowTapOutputRange1dCeilDivDoesNotWrapNearSizeMax() {
+    size_t const half = SIZE_MAX / 2 + 1;
+    /* tap 0, neg = half + 5, stride = half + 10: output 1 reads input 5. */
+    windowGeometry1d_t g = {.inputLength = 10,
+                            .kernelSize = 1,
+                            .stride = half + 10,
+                            .dilation = 1,
+                            .padLeft = half + 5,
+                            .padRight = 0,
+                            .outputLength = 2};
+    size_t lo = 0;
+    size_t count = 0;
+    for (size_t o = 0; o < g.outputLength; o++) {
+        if (tapIndexInRange(o, g.stride, 0, g.dilation, g.padLeft, g.inputLength)) {
+            if (count == 0) {
+                lo = o;
+            }
+            count++;
+        }
+    }
+    TEST_ASSERT_EQUAL_size_t(1, count);
+    size_t outLo = 0;
+    size_t outHi = 0;
+    windowTapOutputRange1d(&g, 0, &outLo, &outHi);
+    TEST_ASSERT_EQUAL_size_t(lo, outLo);
+    TEST_ASSERT_EQUAL_size_t(lo + count, outHi);
+}
+
+void testConvTValidTapRangeCeilDivDoesNotWrapNearSizeMax() {
+    struct {
+        size_t inPos, stride, dilation, padLeft, outputLength, kernelSize;
+    } const cases[] = {
+        /* hi = ceil(2 / SIZE_MAX): 2 + SIZE_MAX - 1 wraps to 0, dropping tap 0 */
+        {0, 1, SIZE_MAX, 0, 2, 4},
+        /* lo = ceil(5 / dilation) with dilation > 2^63: tap 1 writes output 5 */
+        {0, 1, SIZE_MAX / 2 + 11, SIZE_MAX / 2 + 6, 10, 3},
+    };
+    for (size_t c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+        size_t lo = 0;
+        size_t count = 0;
+        for (size_t k = 0; k < cases[c].kernelSize; k++) {
+            if (tapIndexInRange(cases[c].inPos, cases[c].stride, k, cases[c].dilation,
+                                cases[c].padLeft, cases[c].outputLength)) {
+                if (count == 0) {
+                    lo = k;
+                }
+                count++;
+            }
+        }
+        TEST_ASSERT_EQUAL_size_t(1, count);
+        size_t kLo = 0;
+        size_t kHi = 0;
+        convTValidTapRange(cases[c].inPos, cases[c].stride, cases[c].dilation, cases[c].padLeft,
+                           cases[c].outputLength, cases[c].kernelSize, &kLo, &kHi);
+        TEST_ASSERT_EQUAL_size_t(lo, kLo);
+        TEST_ASSERT_EQUAL_size_t(lo + count, kHi);
+    }
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -736,5 +847,8 @@ int main(void) {
     RUN_TEST(testWindowSlice1dAtMatchesReferenceExhaustive);
     RUN_TEST(testWindowTapOutputRange1dMatchesReferenceExhaustive);
     RUN_TEST(testConvTValidTapRangeMatchesBoundsTest);
+    RUN_TEST(testWindowSlice1dAtCeilDivDoesNotWrapNearSizeMax);
+    RUN_TEST(testWindowTapOutputRange1dCeilDivDoesNotWrapNearSizeMax);
+    RUN_TEST(testConvTValidTapRangeCeilDivDoesNotWrapNearSizeMax);
     return UNITY_END();
 }

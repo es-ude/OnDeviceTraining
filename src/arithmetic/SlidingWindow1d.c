@@ -49,9 +49,14 @@ windowGeometry1d_t windowGeometry1dCalc(size_t inputLength, kernel_t const *kern
 
 /* Unsigned, divide-free geometry (B6). These run once per output position or
  * tap in every conv/pool kernel, so they avoid 64-bit math (a libgcc call on
- * Cortex-M) and skip the divide entirely for the common stride/dilation 1. */
+ * Cortex-M) and skip the divide entirely for the common stride/dilation 1.
+ * ceilDivSize uses (n - 1) / d + 1, not (n + d - 1) / d: the latter wraps once
+ * n + d > SIZE_MAX (2^32 on the MCU); this form is exact for every n and d >= 1. */
 static inline size_t ceilDivSize(size_t numerator, size_t denominator) {
-    return (denominator == 1) ? numerator : (numerator + denominator - 1) / denominator;
+    if (denominator == 1) {
+        return numerator;
+    }
+    return (numerator == 0) ? 0 : (numerator - 1) / denominator + 1;
 }
 
 static inline size_t floorDivSize(size_t numerator, size_t denominator) {

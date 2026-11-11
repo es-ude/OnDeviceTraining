@@ -161,3 +161,10 @@ target_link_libraries(UnitTestBfpIntegerParamUpdate PRIVATE
         odt_test_rng_pin
 )
 __register_target_as_unit_test(UnitTestBfpIntegerParamUpdate)
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        DyadicScale
+        MORE_LIBS
+        odt_test_death
+        m
+)

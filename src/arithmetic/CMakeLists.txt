@@ -276,6 +276,17 @@ add_library(SymAccumGuard INTERFACE)
 target_include_directories(SymAccumGuard INTERFACE include)
 target_link_libraries(SymAccumGuard INTERFACE Mul Tensor DTypes Common)
 
+# Grouped-scale SYM fold: int32-only multiply-shift + per-kernel group-fold setup.
+add_library(SymGroupFold SymGroupFold.c)
+target_include_directories(SymGroupFold PUBLIC include)
+target_link_libraries(SymGroupFold PRIVATE
+        DyadicScale
+        SymAccumGuard
+        Quantization
+        RNG
+        Common
+)
+
 # Header-only grouped-weight ctx of the SYM GEMM-family kernels (group config +
 # code domain, the layers' builder and the kernels' operand range).
 add_library(SymGroupedWeight INTERFACE)

@@ -409,6 +409,17 @@ add_elastic_ai_unit_test(
 
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
+        SymGroupFold
+        MORE_LIBS
+        Quantization
+        DyadicScale
+        RNG
+        Common
+        odt_test_death
+)
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
         SymGroupedWeight
         MORE_LIBS
         odt_test_scale

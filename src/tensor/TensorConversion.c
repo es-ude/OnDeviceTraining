@@ -187,7 +187,7 @@ void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, f
         memcpy(out, (const float *)src->data + elemOffset, count * sizeof(float));
         return;
     case SYM_INT32: {
-        float scale = ((symInt32QConfig_t *)src->quantization->qConfig)->scale;
+        float scale = loadCanonScale(&((symInt32QConfig_t *)src->quantization->qConfig)->scale);
         const int32_t *in = (const int32_t *)src->data + elemOffset;
         for (size_t i = 0; i < count; i++) {
             out[i] = (float)in[i] * scale;
@@ -212,7 +212,7 @@ void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, f
                         qc->numGroups);
             exit(1);
         }
-        float scale = qc->scales[0]; /* hoisted: no per-element array indexing */
+        float scale = loadCanonScale(&qc->scales[0]); /* hoisted: no per-element array indexing */
         int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
         unpackSignExtendChunk(src->data, qc->qBits, elemOffset, count, mant);
         for (size_t i = 0; i < count; i++) {
@@ -223,7 +223,7 @@ void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, f
     case ASYM: {
         asymQConfig_t *qc = src->quantization->qConfig;
         requirePerTensorAsym(qc, "dequantChunkToFloat");
-        float scale = qc->scales[0]; /* hoisted like the SYM arm above */
+        float scale = loadCanonScale(&qc->scales[0]); /* hoisted like the SYM arm above */
         int32_t zp = (int32_t)qc->zeroPoints[0];
         int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
         unpackZeroExtendChunk(src->data, qc->qBits, elemOffset, count, codes);
@@ -332,7 +332,7 @@ static void deriveAsymGridForGroup(float mn, float mx, asymQConfig_t *outQC, siz
 static void emitAsymChunk(const float *vals, size_t count, const asymQConfig_t *qc,
                           uint8_t *dstBase, size_t elemOffset, rngStream_t *rs) {
     const float qMax = powf(2, (float)qc->qBits) - 1;
-    const float scale = qc->scales[0];
+    const float scale = loadCanonScale(&qc->scales[0]);
     const int32_t zp = (int32_t)qc->zeroPoints[0];
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t i = 0; i < count; i++) {
@@ -412,7 +412,7 @@ static void quantizeFloatToAsym(const float *values, size_t n, asymQConfig_t *ou
             size_t groupEnd = (g + 1) * groupSize;
             size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
             size_t runLen = runEnd - idx;
-            const float scale = outQC->scales[g];
+            const float scale = loadCanonScale(&outQC->scales[g]);
             const int32_t zp = (int32_t)outQC->zeroPoints[g];
             for (size_t i = 0; i < runLen; i++) {
                 codes[idx - off + i] =
@@ -551,7 +551,7 @@ void convertSymInt32TensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outpu
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     const int32_t *in = (const int32_t *)inputTensor->data;
     float *out = (float *)outputTensor->data;
-    float scale = ((symInt32QConfig_t *)inputTensor->quantization->qConfig)->scale;
+    float scale = loadCanonScale(&((symInt32QConfig_t *)inputTensor->quantization->qConfig)->scale);
     /* same-index read-then-write: safe for the in-place (shared-buffer) case */
     for (size_t i = 0; i < n; i++) {
         out[i] = (float)in[i] * scale;
@@ -565,8 +565,7 @@ void requantSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStr
     symInt32QConfig_t *outputSymInt32QC = outputTensor->quantization->qConfig;
     /* latch BEFORE writing outputSymInt32QC->scale: when called in-place
      * (inputTensor == outputTensor) both pointers alias the same config */
-    odtScaleAssertCanonical(inputSymInt32QC->scale); /* stored input: strict checks it */
-    const float inScale = canonFixedScale(inputSymInt32QC->scale);
+    const float inScale = canonFixedScale(loadCanonScale(&inputSymInt32QC->scale));
 
     int32_t *inputInt32 = (int32_t *)inputTensor->data;
     int32_t *outputInt32 = (int32_t *)outputTensor->data;
@@ -601,8 +600,8 @@ void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor,
 
     symInt32QConfig_t *inputSymInt32QC = inputTensor->quantization->qConfig;
     symInt32QConfig_t *outputSymInt32QC = outputTensor->quantization->qConfig;
-    float inScale = inputSymInt32QC->scale;
-    float targetScale = outputSymInt32QC->scale;
+    float inScale = loadCanonScale(&inputSymInt32QC->scale);
+    float targetScale = loadCanonScale(&outputSymInt32QC->scale);
 
     /* NaN-robust: !(x > 0.f) is also true for NaN, unlike (x <= 0.f) */
     if (!(targetScale > 0.f)) {
@@ -648,7 +647,7 @@ void convertSymInt32TensorToAsymTensor(tensor_t *inputTensor, tensor_t *outputTe
          * New code no-ops (matches packFloatBufferAsSym's n=0 no-op; #296 Stage 2). */
         return;
     }
-    float scale = inQC->scale;
+    float scale = loadCanonScale(&inQC->scale);
     const int32_t *in = (const int32_t *)inputTensor->data;
     /* pass 1: min/max over dequantized values, direct loop -- input is already a
      * flat int32 array, no unpack staging needed */
@@ -704,7 +703,7 @@ void convertAsymTensorToFloatTensor(tensor_t *inputTensor, tensor_t *outputTenso
 
     if (inQC->numGroups == 1) {
         /* Per-tensor fast path -- byte-identical to the pre-group-quant code. */
-        const float scale = inQC->scales[0];
+        const float scale = loadCanonScale(&inQC->scales[0]);
         const int32_t zp = (int32_t)inQC->zeroPoints[0];
         for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
             size_t count =
@@ -733,7 +732,7 @@ void convertAsymTensorToFloatTensor(tensor_t *inputTensor, tensor_t *outputTenso
             size_t groupEnd = (g + 1) * groupSize;
             size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
             size_t runLen = runEnd - idx;
-            const float scale = inQC->scales[g];
+            const float scale = loadCanonScale(&inQC->scales[g]);
             const int32_t zp = (int32_t)inQC->zeroPoints[g];
             for (size_t i = 0; i < runLen; i++) {
                 out[idx + i] = (float)(codes[idx - off + i] - zp) * scale;
@@ -760,7 +759,7 @@ void convertAsymTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTe
             out[off + i] = codes[i] - zp;
         }
     }
-    storeCanonScale(&outQC->scale, inQC->scales[0]); /* scale copy unchanged */
+    storeCanonScale(&outQC->scale, loadCanonScale(&inQC->scales[0])); /* scale copy unchanged */
     /* code - zp spans [-(2^qBits - 1), 2^qBits - 1]: one signed bit wider than
      * the stored qBits. The accumulator guard sizes its static proof from this
      * declared width. */
@@ -830,7 +829,7 @@ void convertSymTensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outputTens
 
     if (inQC->numGroups == 1) {
         /* Per-tensor fast path -- byte-identical to the pre-group-quant code. */
-        float scale = inQC->scales[0]; /* hoisted: no per-element array indexing */
+        float scale = loadCanonScale(&inQC->scales[0]); /* hoisted: no per-element array indexing */
         for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
             size_t count =
                 n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -855,7 +854,7 @@ void convertSymTensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outputTens
             size_t groupEnd = (g + 1) * groupSize;
             size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
             size_t runLen = runEnd - idx;
-            const float scale = inQC->scales[g];
+            const float scale = loadCanonScale(&inQC->scales[g]);
             for (size_t i = 0; i < runLen; i++) {
                 out[idx + i] = (float)mant[idx - off + i] * scale;
             }
@@ -878,7 +877,7 @@ void convertSymTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTen
     }
 
     unpackSignExtend(inputTensor->data, inQC->qBits, 0, (int32_t *)outputTensor->data, n);
-    storeCanonScale(&outQC->scale, inQC->scales[0]);
+    storeCanonScale(&outQC->scale, loadCanonScale(&inQC->scales[0]));
     outQC->qMaxBits = inQC->qBits;
 }
 
@@ -899,7 +898,7 @@ void convertSymTensorToAsymTensor(tensor_t *inputTensor, tensor_t *outputTensor,
          * (matches packFloatBufferAsSym's n=0 no-op; #296 Stage 2). */
         return;
     }
-    float scale = inQC->scales[0]; /* hoisted: no per-element array indexing */
+    float scale = loadCanonScale(&inQC->scales[0]); /* hoisted: no per-element array indexing */
     int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
     /* pass 1: min/max over dequantized values, chunked unpack (no O(n) scratch) */
     float mn = 0.f, mx = 0.f;
@@ -941,8 +940,7 @@ void convertAsymTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor,
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     asymQConfig_t *inQC = inputTensor->quantization->qConfig;
     requirePerTensorAsym(inQC, "convertAsymTensorToSymTensor");
-    odtScaleAssertCanonical(inQC->scales[0]); /* a stored input scale: strict checks it */
-    const float inScale = canonFixedScale(inQC->scales[0]);
+    const float inScale = canonFixedScale(loadCanonScale(&inQC->scales[0]));
     const int32_t inZp = (int32_t)inQC->zeroPoints[0];
     size_t inBits = calcBitsPerElement(inputTensor->quantization);
     symQConfig_t *outQC = outputTensor->quantization->qConfig;
@@ -1064,7 +1062,7 @@ static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *ou
             size_t groupEnd = (g + 1) * groupSize;
             size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
             size_t runLen = runEnd - idx;
-            const float scale = outQC->scales[g];
+            const float scale = loadCanonScale(&outQC->scales[g]);
             for (size_t i = 0; i < runLen; i++) {
                 codes[idx - off + i] =
                     clampInt32(roundByMode(values[idx + i] / scale, outQC->roundingMode, rs),
@@ -1357,7 +1355,7 @@ static void dequantGroupedSymChunkToFloat(const tensor_t *src, size_t elemOffset
         size_t groupEnd = (g + 1) * groupSize;
         size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
         size_t runLen = runEnd - idx;
-        const float scale = qc->scales[g];
+        const float scale = loadCanonScale(&qc->scales[g]);
         for (size_t i = 0; i < runLen; i++) {
             out[idx - elemOffset + i] = (float)mant[idx - elemOffset + i] * scale;
         }
@@ -1385,7 +1383,7 @@ static void dequantGroupedAsymChunkToFloat(const tensor_t *src, size_t elemOffse
         size_t groupEnd = (g + 1) * groupSize;
         size_t runEnd = groupEnd < chunkEnd ? groupEnd : chunkEnd;
         size_t runLen = runEnd - idx;
-        const float scale = qc->scales[g];
+        const float scale = loadCanonScale(&qc->scales[g]);
         const int32_t zp = (int32_t)qc->zeroPoints[g];
         for (size_t i = 0; i < runLen; i++) {
             out[idx - elemOffset + i] = (float)(codes[idx - elemOffset + i] - zp) * scale;
@@ -1848,8 +1846,7 @@ void convertSymInt32TensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTen
                     outQC->numGroups);
         exit(1);
     }
-    odtScaleAssertCanonical(inQC->scale); /* a stored input scale: strict checks it */
-    const float inScale = canonFixedScale(inQC->scale);
+    const float inScale = canonFixedScale(loadCanonScale(&inQC->scale));
     const int32_t *in = (const int32_t *)inputTensor->data;
     /* pass 1: the largest code magnitude (requantSymInt32Tensor precedent: the
      * grid is fitted from the exact absMax maxAbsCode * inScale) */
@@ -1888,7 +1885,7 @@ void repackSymInt32ToSymNoRescale(tensor_t *inputTensor, tensor_t *outputTensor)
                     outQC->numGroups);
         exit(1);
     }
-    storeCanonScale(&outQC->scales[0], inQC->scale);
+    storeCanonScale(&outQC->scales[0], loadCanonScale(&inQC->scale));
     const int32_t *in = (const int32_t *)inputTensor->data;
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -2125,7 +2122,7 @@ static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *i
      * derivation, never an overflow. The integer clamp after rounding is the
      * whole fix: a float clamp before rounding would yield the same code
      * from the same draw at every width. */
-    float scale = qc->scales[0];
+    float scale = loadCanonScale(&qc->scales[0]);
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackSignExtendChunk(target->data, qc->qBits, off, count, mant);
@@ -2170,7 +2167,7 @@ static void accumulateIntoSymRescaleEngine(tensor_t *target, const incSrc_t *inc
     /* latch the OLD scale before phase B overwrites qc->scales[0] below --
      * dequanting the packed accumulator always uses the grid it was stored
      * under, never the freshly derived one. */
-    float oldScale = qc->scales[0];
+    float oldScale = loadCanonScale(&qc->scales[0]);
 
     /* phase A: chunked absmax of (mant*oldScale + inc), no rounding, no
      * writes -- fresh absmax every call, no carried grid (unlike the
@@ -2238,7 +2235,7 @@ static void accumulateIntoAsymRescaleEngine(tensor_t *target, const incSrc_t *in
 
     /* latch the OLD grid (element 0: per-tensor by the gate above) before
      * deriveAsymGridFromMinMax overwrites it below. */
-    float oldScale = qc->scales[0];
+    float oldScale = loadCanonScale(&qc->scales[0]);
     int32_t oldZeroPoint = (int32_t)qc->zeroPoints[0];
 
     /* phase A: chunked min/max of the decoded-plus-increment values (no
@@ -3397,8 +3394,8 @@ void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *inc
     }
     symInt32QConfig_t *tQC = target->quantization->qConfig;
     symInt32QConfig_t *iQC = increment->quantization->qConfig;
-    float tScale = tQC->scale;
-    float iScale = iQC->scale;
+    float tScale = loadCanonScale(&tQC->scale);
+    float iScale = loadCanonScale(&iQC->scale);
     int32_t *tg = (int32_t *)target->data;
     const int32_t *in = (const int32_t *)increment->data;
     /* pass 1: absmax of the float sums (no rounding, no writes) */
@@ -3551,7 +3548,7 @@ static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTe
     case SYM_INT32: {
         symInt32QConfig_t *inputSymIntQC = inputTensor->quantization->qConfig;
         symInt32QConfig_t *outputSymIntQC = outputTensor->quantization->qConfig;
-        storeCanonScale(&outputSymIntQC->scale, inputSymIntQC->scale);
+        storeCanonScale(&outputSymIntQC->scale, loadCanonScale(&inputSymIntQC->scale));
         /* the codes were copied verbatim: declare their width, not the
          * destination's old one (the accumulator guard trusts it) */
         outputSymIntQC->qMaxBits = inputSymIntQC->qMaxBits;
@@ -3572,7 +3569,7 @@ static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTe
                         inputSymQC->groupSize);
             exit(1);
         }
-        memcpy(outputSymQC->scales, inputSymQC->scales, inputSymQC->numGroups * sizeof(float));
+        copyCanonScales(outputSymQC->scales, inputSymQC->scales, inputSymQC->numGroups);
         outputSymQC->groupSize = inputSymQC->groupSize;
         break;
     }
@@ -3589,7 +3586,7 @@ static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTe
                         inputAsymQC->groupSize);
             exit(1);
         }
-        memcpy(outputAsymQC->scales, inputAsymQC->scales, inputAsymQC->numGroups * sizeof(float));
+        copyCanonScales(outputAsymQC->scales, inputAsymQC->scales, inputAsymQC->numGroups);
         memcpy(outputAsymQC->zeroPoints, inputAsymQC->zeroPoints,
                inputAsymQC->numGroups * sizeof(uint16_t));
         outputAsymQC->groupSize = inputAsymQC->groupSize;

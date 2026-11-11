@@ -70,6 +70,7 @@ target_link_libraries(StorageApi PRIVATE
 add_library(LayerQuant LayerQuant.c)
 target_include_directories(LayerQuant PUBLIC include)
 target_link_libraries(LayerQuant PRIVATE
+        DyadicScale
         ArithmeticType
         Common
         ExecuteOp

@@ -14,6 +14,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "TestScale.h"
 #include "unity.h"
 
 void testFlattenLayerInit_ReturnsFlattenTypedLayer(void) {
@@ -142,15 +143,15 @@ void testFlattenForwardSymInt32_PropagatesScaleAndValues(void) {
 
     /* Clobber the output's scale so we can verify flattenForward writes it. */
     symInt32QConfig_t *outputQC = output->quantization->qConfig;
-    outputQC->scale = 0.0f;
+    outputQC->scale = (odtScale_t){0}; /* invalid sentinel: never a stored value */
 
     layer_t *flatten = flattenLayerInit();
     flattenForward(flatten, input, output, NULL);
 
     /* 3. Capture scale-propagation observation before frees. */
     symInt32QConfig_t *inputQC = input->quantization->qConfig;
-    float capturedInputScale = inputQC->scale;
-    float capturedOutputScale = outputQC->scale;
+    float capturedInputScale = odtScaleToFloat(inputQC->scale);
+    float capturedOutputScale = odtScaleToFloat(outputQC->scale);
 
     /* 4. Build heap roundtrip Float tensor (shape 1x6) and convert. */
     size_t *roundTripDims = reserveMemory(2 * sizeof(size_t));
@@ -279,15 +280,15 @@ void testFlattenBackwardSymInt32_PropagatesScale(void) {
 
     /* Clobber propLoss scale so we can verify flattenBackward writes it. */
     symInt32QConfig_t *propLossQC = propLoss->quantization->qConfig;
-    propLossQC->scale = 0.0f;
+    propLossQC->scale = (odtScale_t){0}; /* invalid sentinel: never a stored value */
 
     layer_t *flatten = flattenLayerInit();
     flattenBackward(flatten, forwardInput, loss, propLoss, NULL);
 
     /* 4. Capture scale-propagation observation before frees. */
     symInt32QConfig_t *lossQC = loss->quantization->qConfig;
-    float capturedLossScale = lossQC->scale;
-    float capturedPropLossScale = propLossQC->scale;
+    float capturedLossScale = odtScaleToFloat(lossQC->scale);
+    float capturedPropLossScale = odtScaleToFloat(propLossQC->scale);
 
     /* 5. Build heap roundtrip Float tensor (shape 1x2x3) and convert. */
     size_t *roundTripDims = reserveMemory(3 * sizeof(size_t));
@@ -493,8 +494,8 @@ void testFlattenBackwardAliasedIsIdentity(void) {
     symInt32QConfig_t symPropLossQC;
     initSymInt32QConfig(HALF_AWAY, &symLossQC);
     initSymInt32QConfig(HALF_AWAY, &symPropLossQC);
-    symLossQC.scale = 0.5f;
-    symPropLossQC.scale = 1.f;
+    symLossQC.scale = odtTestScale(0.5f);
+    symPropLossQC.scale = odtTestScale(1.f);
     quantization_t symLossQ;
     quantization_t symPropLossQ;
     initSymInt32Quantization(&symLossQC, &symLossQ);
@@ -503,7 +504,7 @@ void testFlattenBackwardAliasedIsIdentity(void) {
                                &loss, &propLoss);
     flattenBackward(NULL, NULL, &loss, &propLoss, NULL);
     TEST_ASSERT_EQUAL_MEMORY(symBefore, symBlock, sizeof symBlock);
-    TEST_ASSERT_EQUAL_FLOAT(0.5f, symPropLossQC.scale);
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, odtScaleToFloat(symPropLossQC.scale));
 
     uint8_t bfpBlock[6] = {0x11, 0xEE, 0x22, 0xDD, 0x33, 0xCC}; /* six 8-bit codes */
     uint8_t bfpBefore[6];

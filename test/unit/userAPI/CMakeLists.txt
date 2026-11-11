@@ -508,6 +508,7 @@ __register_target_as_unit_test(UnitTestBiaslessConvOptim)
 add_executable(UnitTestOptimizerScaling UnitTestOptimizerScaling.c)
 target_link_libraries(UnitTestOptimizerScaling PRIVATE
         LossType
+        odt_test_scale
         unity
         DyadicScale
         OptimizerApi
@@ -855,6 +856,7 @@ add_elastic_ai_unit_test(
 # boundary case, captured before the storage type became odtScale_t.
 add_executable(UnitTestScaleStorageIdentity UnitTestScaleStorageIdentity.c)
 target_link_libraries(UnitTestScaleStorageIdentity PRIVATE
+        odt_test_scale
         unity
         LossType
         TensorApi

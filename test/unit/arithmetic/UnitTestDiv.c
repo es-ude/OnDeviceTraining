@@ -1,6 +1,7 @@
 #include "Arithmetic.h"
 #include "Div.h"
 #include "Tensor.h"
+#include "TestScale.h"
 #include "unity.h"
 
 void testDivFloatTensors() {
@@ -99,7 +100,7 @@ void testDivSymInt32ScaleIsCanonicalQuotient() {
 
     symInt32QConfig_t aQC;
     initSymInt32QConfig(HALF_AWAY, &aQC);
-    aQC.scale = 0.5f;
+    aQC.scale = odtTestScale(0.5f);
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);
     tensor_t aTensor;
@@ -107,7 +108,7 @@ void testDivSymInt32ScaleIsCanonicalQuotient() {
 
     symInt32QConfig_t bQC;
     initSymInt32QConfig(HALF_AWAY, &bQC);
-    bQC.scale = 0.75f;
+    bQC.scale = odtTestScale(0.75f);
     quantization_t bQ;
     initSymInt32Quantization(&bQC, &bQ);
     tensor_t bTensor;
@@ -117,7 +118,7 @@ void testDivSymInt32ScaleIsCanonicalQuotient() {
 
     int32_t expected[] = {3, -3};
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, aData, 2);
-    TEST_ASSERT_TRUE(aQC.scale == 21845.0f / 32768.0f);
+    TEST_ASSERT_TRUE(odtScaleToFloat(aQC.scale) == 21845.0f / 32768.0f);
 }
 
 void setUp() {}

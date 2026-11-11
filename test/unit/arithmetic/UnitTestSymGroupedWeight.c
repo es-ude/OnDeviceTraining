@@ -5,12 +5,13 @@
 
 #include "DeathTest.h"
 #include "SymGroupedWeight.h"
+#include "TestScale.h"
 #include "unity.h"
 
 void setUp(void) {}
 void tearDown(void) {}
 
-static float gScales[2] = {0.5f, 0.25f};
+static odtScale_t gScales[2] = {ODT_SCALE_POW2(-1), ODT_SCALE_POW2(-2)};
 static uint16_t gZps[2] = {3, 9};
 
 static symQConfig_t symGroups(size_t numGroups, size_t groupSize, uint8_t qBits) {
@@ -111,7 +112,8 @@ void testBuilderViewsAStoredGroupedAsymWeightAsAnImage(void) {
 void testBuilderReturnsNullForEveryUngroupedWeight(void) {
     symQConfig_t perTensorSym = symGroups(1, 0, 4);
     asymQConfig_t perTensorAsym = asymGroups(1, 0, 4);
-    symInt32QConfig_t symInt32 = {.scale = 1.f, .roundingMode = HALF_AWAY, .qMaxBits = 12};
+    symInt32QConfig_t symInt32 = {
+        .scale = odtTestScale(1.f), .roundingMode = HALF_AWAY, .qMaxBits = 12};
     quantization_t qs[] = {{.type = SYM, .qConfig = &perTensorSym},
                            {.type = ASYM, .qConfig = &perTensorAsym},
                            {.type = SYM_INT32, .qConfig = &symInt32},

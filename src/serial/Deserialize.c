@@ -393,7 +393,7 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
         }
         if (fileNumGroups != symQC->numGroups) {
             freeReservedMemory(symQC->scales);
-            symQC->scales = reserveMemory(fileNumGroups * sizeof(float));
+            symQC->scales = reserveMemory(fileNumGroups * sizeof(*symQC->scales));
             symQC->numGroups = fileNumGroups;
         }
         size_t fileGroupSize = (size_t)serialReadU32LE(f);
@@ -473,7 +473,7 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
              * zeroPoints loop below writes past it). */
             freeReservedMemory(asymQC->scales);
             freeReservedMemory(asymQC->zeroPoints);
-            asymQC->scales = reserveMemory(fileNumGroups * sizeof(float));
+            asymQC->scales = reserveMemory(fileNumGroups * sizeof(*asymQC->scales));
             asymQC->zeroPoints = reserveMemory(fileNumGroups * sizeof(uint16_t));
             asymQC->numGroups = fileNumGroups;
         }
@@ -671,14 +671,14 @@ void readTensorRecordHeader(tensorRecordHeader_t *header, FILE *f) {
         break;
     case SYM: {
         symQConfig_t *sym = &header->qConfigStorage.sym;
-        sym->scales = reserveMemory(sizeof(float));
+        sym->scales = reserveMemory(sizeof(*sym->scales));
         sym->numGroups = 1;
         header->quantization.qConfig = sym;
         break;
     }
     case ASYM: {
         asymQConfig_t *asym = &header->qConfigStorage.asym;
-        asym->scales = reserveMemory(sizeof(float));
+        asym->scales = reserveMemory(sizeof(*asym->scales));
         asym->zeroPoints = reserveMemory(sizeof(uint16_t));
         asym->numGroups = 1;
         header->quantization.qConfig = asym;

@@ -873,8 +873,8 @@ static void writeOneOutput(FILE *json, const char *outDir, const outputEntry_t *
     fprintf(json, "]");
     if (t->quantization->type == SYM_INT32) {
         const symInt32QConfig_t *qc = t->quantization->qConfig;
-        fprintf(json, ",\n      \"scale_hex\": \"%a\",\n", (double)qc->scale);
-        fprintf(json, "      \"scale\": %.9g,\n", (double)qc->scale);
+        fprintf(json, ",\n      \"scale_hex\": \"%a\",\n", (double)odtScaleToFloat(qc->scale));
+        fprintf(json, "      \"scale\": %.9g,\n", (double)odtScaleToFloat(qc->scale));
         fprintf(json, "      \"qMaxBits\": %u,\n", (unsigned)qc->qMaxBits);
         fprintf(json, "      \"rounding\": \"%s\"", roundingName(qc->roundingMode));
     } else if (t->quantization->type == BFP) {

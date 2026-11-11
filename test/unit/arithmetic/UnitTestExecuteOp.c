@@ -15,6 +15,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "TestScale.h"
 #include "unity.h"
 
 void setUp() {}
@@ -33,7 +34,7 @@ static tensor_t *buildSym(size_t n, const int32_t *mantissas, float scale) {
     for (size_t i = 0; i < n; i++) {
         ((int32_t *)t->data)[i] = mantissas[i];
     }
-    ((symInt32QConfig_t *)t->quantization->qConfig)->scale = scale;
+    ((symInt32QConfig_t *)t->quantization->qConfig)->scale = odtTestScale(scale);
     return t;
 }
 
@@ -80,7 +81,8 @@ static tensor_t *buildPackedSym(size_t n, const int32_t *mantissas, uint8_t qBit
     setShape(shape, dims, 1, order);
     tensor_t *t = initTensor(shape, quantizationInitSym(qBits, HALF_AWAY), NULL);
     byteConversion((uint8_t *)mantissas, 32, t->data, qBits, n);
-    ((symQConfig_t *)t->quantization->qConfig)->scales[0] = scale;
+    ((symQConfig_t *)t->quantization->qConfig)->scales[0] =
+        odtScaleFromFloat(scale, ODT_SCALE_NEAREST);
     return t;
 }
 
@@ -98,7 +100,7 @@ static tensor_t *buildAsymPacked(size_t n, const int32_t *codes, uint8_t qBits, 
     tensor_t *t = initTensor(shape, quantizationInitAsym(qBits, HALF_AWAY), NULL);
     byteConversion((uint8_t *)codes, 32, t->data, qBits, n);
     asymQConfig_t *qc = t->quantization->qConfig;
-    qc->scales[0] = scale;
+    qc->scales[0] = odtTestScale(scale);
     qc->zeroPoints[0] = zeroPoint;
     return t;
 }
@@ -139,7 +141,7 @@ void testProloguePassesMatchingOperandThroughUntouched(void) {
         out);
 
     int32_t srcM0 = ((int32_t *)in->data)[0];
-    float srcScale = ((symInt32QConfig_t *)in->quantization->qConfig)->scale;
+    float srcScale = odtScaleToFloat(((symInt32QConfig_t *)in->quantization->qConfig)->scale);
     freeTensor(out);
     freeTensor(in);
     TEST_ASSERT_EQUAL_INT(100, srcM0);
@@ -180,8 +182,8 @@ void testPrologueConvertsFloatOperandIntoSymArithmetic(void) {
         got[i] = ((int32_t *)out->data)[i];
         want[i] = ((int32_t *)ref->data)[i];
     }
-    float gotScale = ((symInt32QConfig_t *)out->quantization->qConfig)->scale;
-    float wantScale = ((symInt32QConfig_t *)ref->quantization->qConfig)->scale;
+    float gotScale = odtScaleToFloat(((symInt32QConfig_t *)out->quantization->qConfig)->scale);
+    float wantScale = odtScaleToFloat(((symInt32QConfig_t *)ref->quantization->qConfig)->scale);
     float srcV0 = ((float *)in->data)[0];
     freeTensor(inSym);
     freeTensor(ref);
@@ -270,8 +272,8 @@ void testOutWriteSymToSymBitEqualsDiagonalRequant(void) {
         got[i] = ((int32_t *)out->data)[i];
         want[i] = ((int32_t *)ref->data)[i];
     }
-    float gotScale = ((symInt32QConfig_t *)out->quantization->qConfig)->scale;
-    float wantScale = ((symInt32QConfig_t *)ref->quantization->qConfig)->scale;
+    float gotScale = odtScaleToFloat(((symInt32QConfig_t *)out->quantization->qConfig)->scale);
+    float wantScale = odtScaleToFloat(((symInt32QConfig_t *)ref->quantization->qConfig)->scale);
     freeTensor(ref);
     freeTensor(out);
     freeTensor(in);
@@ -396,8 +398,8 @@ void testAccDynamicSymIntoSymBitEqualsAddSymInplace(void) {
         got[i] = ((int32_t *)grad->data)[i];
         want[i] = ((int32_t *)refGrad->data)[i];
     }
-    float gotScale = ((symInt32QConfig_t *)grad->quantization->qConfig)->scale;
-    float wantScale = ((symInt32QConfig_t *)refGrad->quantization->qConfig)->scale;
+    float gotScale = odtScaleToFloat(((symInt32QConfig_t *)grad->quantization->qConfig)->scale);
+    float wantScale = odtScaleToFloat(((symInt32QConfig_t *)refGrad->quantization->qConfig)->scale);
     freeTensor(refGrad);
     freeTensor(refInc);
     freeTensor(grad);
@@ -439,8 +441,8 @@ void testAccDynamicFloatIncIntoSymTargetMatchesLayerNormReference(void) {
         got[i] = ((int32_t *)grad->data)[i];
         want[i] = ((int32_t *)refGrad->data)[i];
     }
-    float gotScale = ((symInt32QConfig_t *)grad->quantization->qConfig)->scale;
-    float wantScale = ((symInt32QConfig_t *)refGrad->quantization->qConfig)->scale;
+    float gotScale = odtScaleToFloat(((symInt32QConfig_t *)grad->quantization->qConfig)->scale);
+    float wantScale = odtScaleToFloat(((symInt32QConfig_t *)refGrad->quantization->qConfig)->scale);
     freeTensor(refIncSym);
     freeTensor(refIncFloat);
     freeTensor(refGrad);
@@ -478,7 +480,7 @@ void testAccFixedSymIntoSymRescalesIntoExistingScale(void) {
 
     int32_t g0 = ((int32_t *)grad->data)[0];
     int32_t g1 = ((int32_t *)grad->data)[1];
-    float gScale = ((symInt32QConfig_t *)grad->quantization->qConfig)->scale;
+    float gScale = odtScaleToFloat(((symInt32QConfig_t *)grad->quantization->qConfig)->scale);
     freeTensor(grad);
     freeTensor(inc);
     TEST_ASSERT_EQUAL_INT(355, g0);
@@ -523,7 +525,8 @@ void testAccFixedIntoPackedSymDerivesThenCarriesGrid(void) {
         target);
     float inc1[] = {2.0f, -0.9f, 0.37f};
     accumulateFloatIntoSymTensorFixedGrid(ref, inc1, n, NULL);
-    float scaleAfterCall1 = ((symQConfig_t *)target->quantization->qConfig)->scales[0];
+    float scaleAfterCall1 =
+        odtScaleToFloat(((symQConfig_t *)target->quantization->qConfig)->scales[0]);
 
     tensor_t *inc2T = buildFloat(n, (float[]){-1.8f, 0.05f, -0.1f});
     executeOp(
@@ -542,8 +545,8 @@ void testAccFixedIntoPackedSymDerivesThenCarriesGrid(void) {
     int32_t want[3];
     symTestUnpackSignExtend(target->data, 8, got, n);
     symTestUnpackSignExtend(ref->data, 8, want, n);
-    float gotScale = ((symQConfig_t *)target->quantization->qConfig)->scales[0];
-    float wantScale = ((symQConfig_t *)ref->quantization->qConfig)->scales[0];
+    float gotScale = odtScaleToFloat(((symQConfig_t *)target->quantization->qConfig)->scales[0]);
+    float wantScale = odtScaleToFloat(((symQConfig_t *)ref->quantization->qConfig)->scales[0]);
     freeTensor(inc2T);
     freeTensor(inc1T);
     freeTensor(ref);
@@ -602,8 +605,10 @@ void testAccFixedSymPackedAcceptsSymInt32IntermediateBitIdenticalToFloatBridge(v
     int32_t gotSymInt32[3];
     symTestUnpackSignExtend(targetViaFloat->data, 8, gotFloat, n);
     symTestUnpackSignExtend(targetViaSymInt32->data, 8, gotSymInt32, n);
-    float scaleFloat = ((symQConfig_t *)targetViaFloat->quantization->qConfig)->scales[0];
-    float scaleSymInt32 = ((symQConfig_t *)targetViaSymInt32->quantization->qConfig)->scales[0];
+    float scaleFloat =
+        odtScaleToFloat(((symQConfig_t *)targetViaFloat->quantization->qConfig)->scales[0]);
+    float scaleSymInt32 =
+        odtScaleToFloat(((symQConfig_t *)targetViaSymInt32->quantization->qConfig)->scales[0]);
     freeTensor(incSymInt32);
     freeTensor(incFloat);
     freeTensor(targetViaSymInt32);
@@ -644,8 +649,8 @@ void testAccDynamicSymPackedRederivesScaleMatchesRescalePrimitive(void) {
     int32_t want[2];
     symTestUnpackSignExtend(target->data, 8, got, n);
     symTestUnpackSignExtend(ref->data, 8, want, n);
-    float gotScale = ((symQConfig_t *)target->quantization->qConfig)->scales[0];
-    float wantScale = ((symQConfig_t *)ref->quantization->qConfig)->scales[0];
+    float gotScale = odtScaleToFloat(((symQConfig_t *)target->quantization->qConfig)->scales[0]);
+    float wantScale = odtScaleToFloat(((symQConfig_t *)ref->quantization->qConfig)->scales[0]);
     freeTensor(inc);
     freeTensor(ref);
     freeTensor(target);
@@ -703,8 +708,10 @@ void testAccDynamicSymPackedAcceptsSymInt32IntermediateBitIdenticalToFloatBridge
     int32_t gotSymInt32[3];
     symTestUnpackSignExtend(targetViaFloat->data, 8, gotFloat, n);
     symTestUnpackSignExtend(targetViaSymInt32->data, 8, gotSymInt32, n);
-    float scaleFloat = ((symQConfig_t *)targetViaFloat->quantization->qConfig)->scales[0];
-    float scaleSymInt32 = ((symQConfig_t *)targetViaSymInt32->quantization->qConfig)->scales[0];
+    float scaleFloat =
+        odtScaleToFloat(((symQConfig_t *)targetViaFloat->quantization->qConfig)->scales[0]);
+    float scaleSymInt32 =
+        odtScaleToFloat(((symQConfig_t *)targetViaSymInt32->quantization->qConfig)->scales[0]);
     freeTensor(incSymInt32);
     freeTensor(incFloat);
     freeTensor(targetViaSymInt32);
@@ -744,8 +751,8 @@ void testAccDynamicAsymPackedMatchesRescalePrimitive(void) {
     byteConversion(target->data, 5, (uint8_t *)got, 32,
                    n); /* asym codes: non-negative, no sign-extend */
     byteConversion(ref->data, 5, (uint8_t *)want, 32, n);
-    float gotScale = ((asymQConfig_t *)target->quantization->qConfig)->scales[0];
-    float wantScale = ((asymQConfig_t *)ref->quantization->qConfig)->scales[0];
+    float gotScale = odtScaleToFloat(((asymQConfig_t *)target->quantization->qConfig)->scales[0]);
+    float wantScale = odtScaleToFloat(((asymQConfig_t *)ref->quantization->qConfig)->scales[0]);
     uint16_t gotZp = ((asymQConfig_t *)target->quantization->qConfig)->zeroPoints[0];
     uint16_t wantZp = ((asymQConfig_t *)ref->quantization->qConfig)->zeroPoints[0];
     freeTensor(inc);
@@ -802,8 +809,10 @@ void testAccDynamicAsymPackedAcceptsSymInt32IntermediateBitIdenticalToFloatBridg
     int32_t gotSymInt32[4];
     byteConversion(targetViaFloat->data, 5, (uint8_t *)gotFloat, 32, n);
     byteConversion(targetViaSymInt32->data, 5, (uint8_t *)gotSymInt32, 32, n);
-    float scaleFloat = ((asymQConfig_t *)targetViaFloat->quantization->qConfig)->scales[0];
-    float scaleSymInt32 = ((asymQConfig_t *)targetViaSymInt32->quantization->qConfig)->scales[0];
+    float scaleFloat =
+        odtScaleToFloat(((asymQConfig_t *)targetViaFloat->quantization->qConfig)->scales[0]);
+    float scaleSymInt32 =
+        odtScaleToFloat(((asymQConfig_t *)targetViaSymInt32->quantization->qConfig)->scales[0]);
     uint16_t zpFloat = ((asymQConfig_t *)targetViaFloat->quantization->qConfig)->zeroPoints[0];
     uint16_t zpSymInt32 =
         ((asymQConfig_t *)targetViaSymInt32->quantization->qConfig)->zeroPoints[0];
@@ -1241,7 +1250,8 @@ static void kernelWritesAuxVerbatim(tensor_t **ops, size_t nOps, tensor_t *rawOu
         dst[i] = src[i];
         aux[i] = (int32_t)(i + 7); /* sentinel indices, unrelated to op values */
     }
-    ((symInt32QConfig_t *)auxOut->quantization->qConfig)->scale = 0.777f;
+    ((symInt32QConfig_t *)auxOut->quantization->qConfig)->scale =
+        odtScaleFromFloat(0.777f, ODT_SCALE_NEAREST);
 }
 
 void testAuxOutIsKernelWrittenVerbatimAndNeverFunnelConverted(void) {
@@ -1266,7 +1276,7 @@ void testAuxOutIsKernelWrittenVerbatimAndNeverFunnelConverted(void) {
     float outGot1 = ((float *)out->data)[1];
     int32_t auxGot0 = ((int32_t *)aux->data)[0];
     int32_t auxGot1 = ((int32_t *)aux->data)[1];
-    float auxScale = ((symInt32QConfig_t *)aux->quantization->qConfig)->scale;
+    float auxScale = odtScaleToFloat(((symInt32QConfig_t *)aux->quantization->qConfig)->scale);
     freeTensor(aux);
     freeTensor(out);
     freeTensor(in);
@@ -1329,7 +1339,7 @@ void testAccFixedScaleHonorsTargetSrRoundingMode(void) {
 
     int32_t g0 = ((int32_t *)grad->data)[0];
     int32_t g1 = ((int32_t *)grad->data)[1];
-    float gScale = ((symInt32QConfig_t *)grad->quantization->qConfig)->scale;
+    float gScale = odtScaleToFloat(((symInt32QConfig_t *)grad->quantization->qConfig)->scale);
     freeTensor(grad);
     freeTensor(inc);
     TEST_ASSERT_EQUAL_INT(353, g0);
@@ -1474,7 +1484,7 @@ void testOutWriteEpilogueRoundsByArithmeticNotTargetQConfig(void) {
 
     int32_t got0 = ((int32_t *)out->data)[0];
     int32_t got1 = ((int32_t *)out->data)[1];
-    float gotScale = ((symInt32QConfig_t *)out->quantization->qConfig)->scale;
+    float gotScale = odtScaleToFloat(((symInt32QConfig_t *)out->quantization->qConfig)->scale);
     roundingMode_t storageModeAfter =
         ((symInt32QConfig_t *)out->quantization->qConfig)->roundingMode;
     freeTensor(out);
@@ -1549,7 +1559,7 @@ void testOutWriteSymDiagonalRoundsByArithmetic(void) {
 
     int32_t got0 = ((int32_t *)out->data)[0];
     int32_t got1 = ((int32_t *)out->data)[1];
-    float gotScale = ((symInt32QConfig_t *)out->quantization->qConfig)->scale;
+    float gotScale = odtScaleToFloat(((symInt32QConfig_t *)out->quantization->qConfig)->scale);
     roundingMode_t storageModeAfter =
         ((symInt32QConfig_t *)out->quantization->qConfig)->roundingMode;
     freeTensor(out);
@@ -1663,8 +1673,8 @@ void testExecuteConvertSymToSymRequantsThroughDiagonal(void) {
         got[i] = ((int32_t *)out->data)[i];
         want[i] = ((int32_t *)gold->data)[i];
     }
-    float gotScale = ((symInt32QConfig_t *)out->quantization->qConfig)->scale;
-    float wantScale = ((symInt32QConfig_t *)gold->quantization->qConfig)->scale;
+    float gotScale = odtScaleToFloat(((symInt32QConfig_t *)out->quantization->qConfig)->scale);
+    float wantScale = odtScaleToFloat(((symInt32QConfig_t *)gold->quantization->qConfig)->scale);
     int32_t srcM0 = ((int32_t *)in->data)[0];
     freeTensor(gold);
     freeTensor(out);
@@ -1776,7 +1786,7 @@ static tensor_t *buildPackedSymGrouped(size_t n, const int32_t *mantissas, uint8
     byteConversion((uint8_t *)mantissas, 32, t->data, qBits, n);
     symQConfig_t *qc = t->quantization->qConfig;
     for (size_t g = 0; g < numGroups; g++) {
-        qc->scales[g] = scales[g];
+        qc->scales[g] = odtScaleFromFloat(scales[g], ODT_SCALE_NEAREST);
     }
     return t;
 }
@@ -1853,7 +1863,7 @@ static void captureGroupedOperandKernel(tensor_t **operands, size_t nOperands, t
         g_capturedGroupedMantissas[i] = ((int32_t *)operands[0]->data)[i];
     }
     symInt32QConfig_t *qc = operands[0]->quantization->qConfig;
-    g_capturedGroupedScale = qc->scale;
+    g_capturedGroupedScale = odtScaleToFloat(qc->scale);
     g_capturedGroupedQMaxBits = qc->qMaxBits;
     /* rawOut written deterministically (zero) -- this test only inspects the
      * PROLOGUE's scratch, not the epilogue. */
@@ -1943,7 +1953,7 @@ static tensor_t *buildPackedAsymGrouped(size_t n, const int32_t *codes, uint8_t 
     byteConversion((uint8_t *)codes, 32, t->data, qBits, n);
     asymQConfig_t *qc = t->quantization->qConfig;
     for (size_t g = 0; g < numGroups; g++) {
-        qc->scales[g] = scales[g];
+        qc->scales[g] = odtScaleFromFloat(scales[g], ODT_SCALE_NEAREST);
         qc->zeroPoints[g] = zeroPoints[g];
     }
     return t;

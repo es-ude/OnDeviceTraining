@@ -7,13 +7,14 @@
 
 #include "CheckedSize.h"
 #include "Common.h"
+#include "DyadicScale.h"
 #include "Quantization.h"
 #include "Rounding.h"
 #include "StorageApi.h"
 
 void initSymInt32QConfig(roundingMode_t roundingMode, symInt32QConfig_t *symInt32QConfig) {
     symInt32QConfig->roundingMode = roundingMode;
-    symInt32QConfig->scale = 1.f;
+    odtScaleStore(&symInt32QConfig->scale, ODT_SCALE_ONE);
     symInt32QConfig->qMaxBits = ODT_SYM_OPERAND_QMAXBITS; /* was 16 — #227 int12 operands */
 }
 
@@ -31,7 +32,7 @@ void initSymInt32QConfigWithQMaxBits(roundingMode_t roundingMode,
         exit(1);
     }
     symInt32QConfig->roundingMode = roundingMode;
-    symInt32QConfig->scale = 1.f;
+    odtScaleStore(&symInt32QConfig->scale, ODT_SCALE_ONE);
     symInt32QConfig->qMaxBits = qMaxBits;
 }
 
@@ -97,9 +98,9 @@ void initSymQConfigGrouped(uint8_t qBits, roundingMode_t roundingMode, size_t nu
                     numGroups, groupSize);
         exit(1);
     }
-    qC->scales = reserveMemory(numGroups * sizeof(float));
+    qC->scales = reserveMemory(numGroups * sizeof(*qC->scales));
     for (size_t g = 0; g < numGroups; g++) {
-        qC->scales[g] = 1.f;
+        odtScaleStore(&qC->scales[g], ODT_SCALE_ONE);
     }
     qC->numGroups = numGroups;
     qC->groupSize = groupSize;
@@ -140,10 +141,10 @@ void initAsymQConfigGrouped(uint8_t qBits, roundingMode_t rm, size_t numGroups, 
                     numGroups, groupSize);
         exit(1);
     }
-    qC->scales = reserveMemory(numGroups * sizeof(float));
+    qC->scales = reserveMemory(numGroups * sizeof(*qC->scales));
     qC->zeroPoints = reserveMemory(numGroups * sizeof(uint16_t));
     for (size_t g = 0; g < numGroups; g++) {
-        qC->scales[g] = 1.f;
+        odtScaleStore(&qC->scales[g], ODT_SCALE_ONE);
         qC->zeroPoints[g] = 0;
     }
     qC->numGroups = numGroups;

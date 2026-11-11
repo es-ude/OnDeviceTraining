@@ -221,12 +221,12 @@ static inline size_t keyedSymForwardRun(void *ctx, uint64_t seed, bool stochasti
 
     size_t n = calcNumberOfElementsByTensor(output);
     TEST_ASSERT_TRUE_MESSAGE(n >= KEYED_DRAW_MIN_ELEMENTS, "the fixture rounds >= 16 outputs");
-    TEST_ASSERT_TRUE(n * sizeof(int32_t) + sizeof(float) <= KEYED_DRAW_MAX_BYTES);
+    TEST_ASSERT_TRUE(n * sizeof(int32_t) + sizeof(odtScale_t) <= KEYED_DRAW_MAX_BYTES);
     memcpy(out, output->data, n * sizeof(int32_t));
     memcpy(out + n * sizeof(int32_t), &((symInt32QConfig_t *)output->quantization->qConfig)->scale,
-           sizeof(float));
+           sizeof(odtScale_t));
     freeTensor(output);
-    return n * sizeof(int32_t) + sizeof(float);
+    return n * sizeof(int32_t) + sizeof(odtScale_t);
 }
 
 /* The forward's SR epilogue draws from the stream of chainState (pinned to the

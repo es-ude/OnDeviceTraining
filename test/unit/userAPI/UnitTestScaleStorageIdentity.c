@@ -18,6 +18,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "TestScale.h"
 #include "unity.h"
 
 #include <stdint.h>
@@ -39,19 +40,19 @@
  * comparing it. */
 
 static float si32Scale(const symInt32QConfig_t *qc) {
-    return qc->scale;
+    return odtScaleToFloat(odtScaleLoad(&qc->scale));
 }
 
 static void setSi32Scale(symInt32QConfig_t *qc, float s) {
-    qc->scale = s;
+    odtScaleStore(&qc->scale, odtTestScale(s));
 }
 
 static float symScale(const symQConfig_t *qc, size_t g) {
-    return qc->scales[g];
+    return odtScaleToFloat(odtScaleLoad(&qc->scales[g]));
 }
 
 static float asymScale(const asymQConfig_t *qc, size_t g) {
-    return qc->scales[g];
+    return odtScaleToFloat(odtScaleLoad(&qc->scales[g]));
 }
 
 #define N 8
@@ -205,7 +206,7 @@ void testS3MatchesS2OnBoundaryCases(void) {
 
     /* 5: FLOAT32 -> packed SYM, two groups, CEIL15 per group. */
     uint8_t gBytes[N] = {0};
-    float gScales[2] = {1.f, 1.f};
+    odtScale_t gScales[2] = {ODT_SCALE_ONE, ODT_SCALE_ONE};
     symQConfig_t gQC = {
         .scales = gScales, .numGroups = 2, .groupSize = 4, .roundingMode = HALF_AWAY, .qBits = 6};
     quantization_t gQ;
@@ -220,7 +221,7 @@ void testS3MatchesS2OnBoundaryCases(void) {
 
     /* 6: FLOAT32 -> ASYM, range fit (CEIL scale, then zp), SR. */
     uint8_t asBytes[N] = {0};
-    float asScales[1] = {1.f};
+    odtScale_t asScales[1] = {ODT_SCALE_ONE};
     uint16_t asZps[1] = {0};
     asymQConfig_t asQC = {.scales = asScales,
                           .zeroPoints = asZps,
@@ -241,7 +242,7 @@ void testS3MatchesS2OnBoundaryCases(void) {
 
     /* 7: SYM_INT32 -> packed SYM, CEIL15 from the codes, SR. */
     uint8_t sBytes[N] = {0};
-    float sScales[1] = {1.f};
+    odtScale_t sScales[1] = {ODT_SCALE_ONE};
     symQConfig_t sQC = {.scales = sScales,
                         .numGroups = 1,
                         .groupSize = 0,
@@ -259,7 +260,7 @@ void testS3MatchesS2OnBoundaryCases(void) {
 
     /* 8: ASYM -> packed SYM, CEIL15 from the codes. */
     uint8_t s2Bytes[N] = {0};
-    float s2Scales[1] = {1.f};
+    odtScale_t s2Scales[1] = {ODT_SCALE_ONE};
     symQConfig_t s2QC = {
         .scales = s2Scales, .numGroups = 1, .groupSize = 0, .roundingMode = HALF_AWAY, .qBits = 6};
     quantization_t s2Q;

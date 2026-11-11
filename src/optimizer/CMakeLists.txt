@@ -2,6 +2,7 @@ add_library(Optimizer Optimizer.c)
 target_include_directories(Optimizer PUBLIC include)
 target_link_libraries(Optimizer PRIVATE
         LossType
+        DyadicScale
         Quantization
         Rounding
         Layer

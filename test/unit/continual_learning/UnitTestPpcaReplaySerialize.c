@@ -50,13 +50,13 @@ static ppcaReplayConfig_t packedConfig(size_t dim, size_t rank, size_t maxM, qty
      * scales array on every call after the first. Build the config directly
      * instead (same values initSymQConfig(8, HALF_AWAY, ...) would produce);
      * never freed, per the stack-fixture convention. */
-    static float symScale[1] = {1.f};
+    static odtScale_t symScale[1] = {ODT_SCALE_POW2(0)};
     static symQConfig_t symQc = {
         .scales = symScale, .numGroups = 1, .groupSize = 0, .roundingMode = HALF_AWAY, .qBits = 8};
     static quantization_t symQ;
     /* PR4: same idiom for ASYM's TWO arrays (initAsymQConfig would leak two
      * heap blocks per call after the first). */
-    static float asymScale[1] = {1.f};
+    static odtScale_t asymScale[1] = {ODT_SCALE_POW2(0)};
     static uint16_t asymZp[1] = {0};
     static asymQConfig_t asymQc = {.scales = asymScale,
                                    .zeroPoints = asymZp,
@@ -87,7 +87,8 @@ static ppcaReplayConfig_t packedConfig(size_t dim, size_t rank, size_t maxM, qty
  *  stack-fixture convention (see packedConfig above). */
 static ppcaReplayConfig_t groupedPackedConfig(size_t dim, size_t rank, size_t maxM) {
     ppcaReplayConfig_t cfg = floatConfig(dim, rank, maxM);
-    static float groupedScales[3] = {0.1f, 0.2f, 0.3f};
+    static odtScale_t groupedScales[3] = {
+        ODT_SCALE_POW2(-3), ODT_SCALE_POW2(-2), {.m = 24576, .e = -16}};
     static symQConfig_t groupedSymQc = {.scales = groupedScales,
                                         .numGroups = 3,
                                         .groupSize = 4,
@@ -95,7 +96,7 @@ static ppcaReplayConfig_t groupedPackedConfig(size_t dim, size_t rank, size_t ma
                                         .qBits = 8};
     static quantization_t groupedSymQ;
     initSymQuantization(&groupedSymQc, &groupedSymQ);
-    static float asymScale[1] = {1.f};
+    static odtScale_t asymScale[1] = {ODT_SCALE_POW2(0)};
     static uint16_t asymZp[1] = {0};
     static asymQConfig_t asymQc = {.scales = asymScale,
                                    .zeroPoints = asymZp,
@@ -118,7 +119,8 @@ static ppcaReplayConfig_t groupedPackedConfig(size_t dim, size_t rank, size_t ma
  *  Never freed, per the stack-fixture convention (see packedConfig above). */
 static ppcaReplayConfig_t groupedAsymPackedConfig(size_t dim, size_t rank, size_t maxM) {
     ppcaReplayConfig_t cfg = floatConfig(dim, rank, maxM);
-    static float groupedAsymScales[3] = {0.1f, 0.2f, 0.3f};
+    static odtScale_t groupedAsymScales[3] = {
+        ODT_SCALE_POW2(-3), ODT_SCALE_POW2(-2), {.m = 24576, .e = -16}};
     static uint16_t groupedAsymZps[3] = {5, 120, 250};
     static asymQConfig_t groupedAsymQc = {.scales = groupedAsymScales,
                                           .zeroPoints = groupedAsymZps,
@@ -128,7 +130,7 @@ static ppcaReplayConfig_t groupedAsymPackedConfig(size_t dim, size_t rank, size_
                                           .qBits = 8};
     static quantization_t groupedAsymQ;
     initAsymQuantization(&groupedAsymQc, &groupedAsymQ);
-    static float meanAsymScale[1] = {1.f};
+    static odtScale_t meanAsymScale[1] = {ODT_SCALE_POW2(0)};
     static uint16_t meanAsymZp[1] = {0};
     static asymQConfig_t meanAsymQc = {.scales = meanAsymScale,
                                        .zeroPoints = meanAsymZp,
@@ -229,11 +231,15 @@ void testRoundTripPacked(void) {
      * tensor) -- pin it so packed payload bytes can never silently decode
      * against a drifted grid (PR #366 review). */
     TEST_ASSERT_EQUAL_FLOAT(
-        ((symQConfig_t *)serial->generators[0]->basis->quantization->qConfig)->scales[0],
-        ((symQConfig_t *)deserial->generators[0]->basis->quantization->qConfig)->scales[0]);
+        odtScaleToFloat(
+            ((symQConfig_t *)serial->generators[0]->basis->quantization->qConfig)->scales[0]),
+        odtScaleToFloat(
+            ((symQConfig_t *)deserial->generators[0]->basis->quantization->qConfig)->scales[0]));
     TEST_ASSERT_EQUAL_FLOAT(
-        ((asymQConfig_t *)serial->generators[0]->mean->quantization->qConfig)->scales[0],
-        ((asymQConfig_t *)deserial->generators[0]->mean->quantization->qConfig)->scales[0]);
+        odtScaleToFloat(
+            ((asymQConfig_t *)serial->generators[0]->mean->quantization->qConfig)->scales[0]),
+        odtScaleToFloat(
+            ((asymQConfig_t *)deserial->generators[0]->mean->quantization->qConfig)->scales[0]));
     TEST_ASSERT_EQUAL_UINT16(
         ((asymQConfig_t *)serial->generators[0]->mean->quantization->qConfig)->zeroPoints[0],
         ((asymQConfig_t *)deserial->generators[0]->mean->quantization->qConfig)->zeroPoints[0]);
@@ -285,8 +291,8 @@ void testRoundTripPackedGroupedSym(void) {
     float capturedSerialScales[3];
     float capturedDeserialScales[3];
     for (size_t g = 0; g < 3; g++) {
-        capturedSerialScales[g] = serialBasisQc->scales[g];
-        capturedDeserialScales[g] = deserialBasisQc->scales[g];
+        capturedSerialScales[g] = odtScaleToFloat(serialBasisQc->scales[g]);
+        capturedDeserialScales[g] = odtScaleToFloat(deserialBasisQc->scales[g]);
     }
     uint8_t capturedSerialBasisData[64];
     uint8_t capturedDeserialBasisData[64];
@@ -350,8 +356,8 @@ void testRoundTripPackedGroupedAsym(void) {
     uint16_t capturedSerialZps[3];
     uint16_t capturedDeserialZps[3];
     for (size_t g = 0; g < 3; g++) {
-        capturedSerialScales[g] = serialBasisQc->scales[g];
-        capturedDeserialScales[g] = deserialBasisQc->scales[g];
+        capturedSerialScales[g] = odtScaleToFloat(serialBasisQc->scales[g]);
+        capturedDeserialScales[g] = odtScaleToFloat(deserialBasisQc->scales[g]);
         capturedSerialZps[g] = serialBasisQc->zeroPoints[g];
         capturedDeserialZps[g] = deserialBasisQc->zeroPoints[g];
     }
@@ -662,13 +668,13 @@ void testDeserializeRejectsQBitsMismatch(void) {
 
     ppcaReplayConfig_t cfg4 = floatConfig(6, 2, 8);
     /* Stack-fixture idiom (group-quant PR1): see packedConfig above. */
-    static float qc4Scale[1] = {1.f};
+    static odtScale_t qc4Scale[1] = {ODT_SCALE_POW2(0)};
     static symQConfig_t qc4 = {
         .scales = qc4Scale, .numGroups = 1, .groupSize = 0, .roundingMode = HALF_AWAY, .qBits = 4};
     static quantization_t q4;
     initSymQuantization(&qc4, &q4);
     cfg4.basisQ = &q4;
-    static float aqcScale[1] = {1.f};
+    static odtScale_t aqcScale[1] = {ODT_SCALE_POW2(0)};
     static uint16_t aqcZp[1] = {0};
     static asymQConfig_t aqc = {.scales = aqcScale,
                                 .zeroPoints = aqcZp,
@@ -697,7 +703,7 @@ void testDeserializeRejectsAsymQBitsMismatch(void) {
     fclose(f);
 
     ppcaReplayConfig_t cfg4 = packedConfig(6, 2, 8, ASYM);
-    static float aqc4Scale[1] = {1.f};
+    static odtScale_t aqc4Scale[1] = {ODT_SCALE_POW2(0)};
     static uint16_t aqc4Zp[1] = {0};
     static asymQConfig_t aqc4 = {.scales = aqc4Scale,
                                  .zeroPoints = aqc4Zp,

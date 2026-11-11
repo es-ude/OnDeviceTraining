@@ -517,8 +517,10 @@ static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tens
         exit(1);
     }
 
-    float inScale = ((symInt32QConfig_t *)forwardInput->quantization->qConfig)->scale;
-    float lossScale = ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->scale;
+    float inScale =
+        loadCanonScale(&((symInt32QConfig_t *)forwardInput->quantization->qConfig)->scale);
+    float lossScale =
+        loadCanonScale(&((symInt32QConfig_t *)lossGrad->quantization->qConfig)->scale);
 
     int32_t *interData = (int32_t *)rawOut->data;
     memset(interData, 0,
@@ -918,7 +920,8 @@ static void biasGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
 
     int32_t const *gyArr = (int32_t const *)lossGrad->data;
     int32_t *rawArr = (int32_t *)rawOut->data;
-    float lossScale = ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->scale;
+    float lossScale =
+        loadCanonScale(&((symInt32QConfig_t *)lossGrad->quantization->qConfig)->scale);
 
     /* int32 accumulator (NO int64). The loss wire's declared qMaxBits bounds each
      * code, so N * 2^(q-1) <= INT32_MAX proves the sum safe (16-bit wire:

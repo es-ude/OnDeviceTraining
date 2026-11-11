@@ -23,6 +23,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorRecord.h"
+#include "TestScale.h"
 #include "unity.h"
 
 /* SERIALIZE_TEST_FILE_PATH is injected by the CMake target_compile_definitions
@@ -646,7 +647,7 @@ static tensor_t *makeAsymTensor1D(size_t d0) {
 static void testDeserializeTensorRoundTripsAsymZeroPoint(void) {
     tensor_t *src = makeAsymTensor1D(4);
     asymQConfig_t *srcQc = src->quantization->qConfig;
-    srcQc->scales[0] = 0.5f;
+    srcQc->scales[0] = odtTestScale(0.5f);
     srcQc->zeroPoints[0] = 40000;
 
     FILE *f = fopen(FILE_PATH, "wb");
@@ -659,7 +660,7 @@ static void testDeserializeTensorRoundTripsAsymZeroPoint(void) {
     fclose(f);
 
     asymQConfig_t *dstQc = dst->quantization->qConfig;
-    float capturedScale = dstQc->scales[0];
+    float capturedScale = odtScaleToFloat(dstQc->scales[0]);
     uint16_t capturedZeroPoint = dstQc->zeroPoints[0];
     freeTensor(dst);
     freeTensor(src);
@@ -773,8 +774,8 @@ static void testDeserializeQConfigAcceptsNumGroupsMismatchViaReallocation(void) 
     /* CAPTURE before any free. */
     size_t capturedNumGroups = dstQc->numGroups;
     size_t capturedGroupSize = dstQc->groupSize;
-    float capturedScale0 = dstQc->scales[0];
-    float capturedScale1 = dstQc->scales[1];
+    float capturedScale0 = odtScaleToFloat(dstQc->scales[0]);
+    float capturedScale1 = odtScaleToFloat(dstQc->scales[1]);
     uint8_t capturedPayload[2];
     memcpy(capturedPayload, skeleton->data, 2);
 
@@ -839,9 +840,9 @@ static void testDeserializeGroupedSymIntoPerTensorSkeleton(void) {
     int32_t mantissas[] = {1, -2, 3, -4, 5, -6};
     byteConversion((uint8_t *)mantissas, 32, src->data, 8, 6);
     symQConfig_t *srcQc = src->quantization->qConfig;
-    srcQc->scales[0] = 0.125f;
-    srcQc->scales[1] = 0.25f;
-    srcQc->scales[2] = 0.375f;
+    srcQc->scales[0] = odtTestScale(0.125f);
+    srcQc->scales[1] = odtTestScale(0.25f);
+    srcQc->scales[2] = odtTestScale(0.375f);
 
     FILE *f = fopen(FILE_PATH, "wb");
     serializeTensor(src, f);
@@ -859,7 +860,7 @@ static void testDeserializeGroupedSymIntoPerTensorSkeleton(void) {
     size_t capturedGroupSize = dstQc->groupSize;
     float capturedScales[3];
     for (size_t g = 0; g < 3; g++) {
-        capturedScales[g] = dstQc->scales[g];
+        capturedScales[g] = odtScaleToFloat(dstQc->scales[g]);
     }
     size_t dataBytes = calcNumberOfBytesForData(skeleton->quantization, 6);
     uint8_t capturedSrcData[8];
@@ -1583,9 +1584,9 @@ static void testSkipSerializedGroupedSymGrad(void) {
     int32_t gradMantissas[] = {1, -2, 3, -4, 5, -6};
     byteConversion((uint8_t *)gradMantissas, 32, gradTensor->data, 8, 6);
     symQConfig_t *gradQc = gradTensor->quantization->qConfig;
-    gradQc->scales[0] = 0.1f;
-    gradQc->scales[1] = 0.2f;
-    gradQc->scales[2] = 0.3f;
+    gradQc->scales[0] = odtScaleFromFloat(0.1f, ODT_SCALE_NEAREST);
+    gradQc->scales[1] = odtScaleFromFloat(0.2f, ODT_SCALE_NEAREST);
+    gradQc->scales[2] = odtScaleFromFloat(0.3f, ODT_SCALE_NEAREST);
 
     float siblingData[] = {9.f, 8.f, 7.f};
     tensor_t *siblingTensor = makeFloatTensor2D(1, 3, siblingData, 3);
@@ -2094,9 +2095,9 @@ static void testDeserializeGroupedAsymIntoPerTensorSkeleton(void) {
     int32_t codes[] = {10, 20, 30, 40, 50, 60};
     byteConversion((uint8_t *)codes, 32, src->data, 8, 6);
     asymQConfig_t *srcQc = src->quantization->qConfig;
-    srcQc->scales[0] = 0.125f;
-    srcQc->scales[1] = 0.25f;
-    srcQc->scales[2] = 0.375f;
+    srcQc->scales[0] = odtTestScale(0.125f);
+    srcQc->scales[1] = odtTestScale(0.25f);
+    srcQc->scales[2] = odtTestScale(0.375f);
     srcQc->zeroPoints[0] = 5;
     srcQc->zeroPoints[1] = 120;
     srcQc->zeroPoints[2] = 250;
@@ -2118,7 +2119,7 @@ static void testDeserializeGroupedAsymIntoPerTensorSkeleton(void) {
     float capturedScales[3];
     uint16_t capturedZps[3];
     for (size_t g = 0; g < 3; g++) {
-        capturedScales[g] = dstQc->scales[g];
+        capturedScales[g] = odtScaleToFloat(dstQc->scales[g]);
         capturedZps[g] = dstQc->zeroPoints[g];
     }
     size_t dataBytes = calcNumberOfBytesForData(skeleton->quantization, 6);
@@ -2160,9 +2161,9 @@ static void testSkipSerializedGroupedAsymGrad(void) {
     int32_t gradCodes[] = {10, 20, 30, 40, 50, 60};
     byteConversion((uint8_t *)gradCodes, 32, gradTensor->data, 8, 6);
     asymQConfig_t *gradQc = gradTensor->quantization->qConfig;
-    gradQc->scales[0] = 0.1f;
-    gradQc->scales[1] = 0.2f;
-    gradQc->scales[2] = 0.3f;
+    gradQc->scales[0] = odtScaleFromFloat(0.1f, ODT_SCALE_NEAREST);
+    gradQc->scales[1] = odtScaleFromFloat(0.2f, ODT_SCALE_NEAREST);
+    gradQc->scales[2] = odtScaleFromFloat(0.3f, ODT_SCALE_NEAREST);
     gradQc->zeroPoints[0] = 5;
     gradQc->zeroPoints[1] = 120;
     gradQc->zeroPoints[2] = 250;

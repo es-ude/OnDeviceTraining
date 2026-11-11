@@ -18,6 +18,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "TestScale.h"
 #include "unity.h"
 
 #include "BfpScatterRef.h"
@@ -77,7 +78,7 @@ void testQuantizationForwardSymToSymMatchesDirectRequant(void) {
     tensor_t *input = buildSym2D(2, 3);
     memcpy(input->data, mantissas, sizeof(mantissas));
     ((symInt32QConfig_t *)input->quantization->qConfig)->scale =
-        0.0001220703125f; /* 2^-13, a canonical stored scale */
+        odtTestScale(0.0001220703125f); /* 2^-13, a canonical stored scale */
 
     tensor_t *expected = buildSym2D(2, 3);
     requantSymInt32Tensor(input, expected, NULL);
@@ -85,8 +86,9 @@ void testQuantizationForwardSymToSymMatchesDirectRequant(void) {
     /* Fixture sanity: the requant must actually change mantissas + scale,
      * otherwise the differential assert below is vacuous (scale-freeze class). */
     TEST_ASSERT_TRUE(((int32_t *)expected->data)[0] != 1500000);
-    TEST_ASSERT_TRUE(((symInt32QConfig_t *)expected->quantization->qConfig)->scale !=
-                     0.0001220703125f);
+    TEST_ASSERT_TRUE(
+        odtScaleToFloat(((symInt32QConfig_t *)expected->quantization->qConfig)->scale) !=
+        0.0001220703125f);
 
     tensor_t *actual = buildSym2D(2, 3);
     layer_t qLayer = {.type = QUANTIZATION, .config = NULL}; /* kernel reads only tensors */
@@ -96,8 +98,10 @@ void testQuantizationForwardSymToSymMatchesDirectRequant(void) {
     int32_t actualMantissas[6];
     memcpy(expectedMantissas, expected->data, sizeof(expectedMantissas));
     memcpy(actualMantissas, actual->data, sizeof(actualMantissas));
-    float expectedScale = ((symInt32QConfig_t *)expected->quantization->qConfig)->scale;
-    float actualScale = ((symInt32QConfig_t *)actual->quantization->qConfig)->scale;
+    float expectedScale =
+        odtScaleToFloat(((symInt32QConfig_t *)expected->quantization->qConfig)->scale);
+    float actualScale =
+        odtScaleToFloat(((symInt32QConfig_t *)actual->quantization->qConfig)->scale);
 
     freeTensor(actual);
     freeTensor(expected);
@@ -111,7 +115,7 @@ void testQuantizationForwardSymToFloatMatchesConvertTensor(void) {
     const int32_t mantissas[4] = {12000, -32767, 5, 32767};
     tensor_t *input = buildSym2D(2, 2);
     memcpy(input->data, mantissas, sizeof(mantissas));
-    ((symInt32QConfig_t *)input->quantization->qConfig)->scale = 0.5f;
+    ((symInt32QConfig_t *)input->quantization->qConfig)->scale = odtTestScale(0.5f);
 
     tensor_t *expected = buildFloat2D(2, 2);
     convertTensor(input, expected, NULL);
@@ -151,7 +155,7 @@ void testQuantLayerConvertsAsymToSymInt32MatchesConvertTensor(void) {
     asymQConfig_t *inputAsymQC = input->quantization->qConfig;
     /* code-domain re-pin (group-quant PR4, D6): old value-domain zp -10 becomes +10;
      * mantissa image code - 10 reproduces the same integers. */
-    inputAsymQC->scales[0] = 0.25f;
+    inputAsymQC->scales[0] = odtTestScale(0.25f);
     inputAsymQC->zeroPoints[0] = 10;
     const uint8_t codes[4] = {0, 40, 80, 255};
     memcpy(input->data, codes, sizeof(codes));
@@ -162,7 +166,8 @@ void testQuantLayerConvertsAsymToSymInt32MatchesConvertTensor(void) {
     /* Fixture sanity: the direct conversion must preserve the ASYM scale
      * verbatim (not re-derive one), otherwise the differential assert below
      * is vacuous. */
-    TEST_ASSERT_EQUAL_FLOAT(0.25f, ((symInt32QConfig_t *)expected->quantization->qConfig)->scale);
+    TEST_ASSERT_EQUAL_FLOAT(
+        0.25f, odtScaleToFloat(((symInt32QConfig_t *)expected->quantization->qConfig)->scale));
 
     tensor_t *actual = buildSym2D(2, 2);
     layer_t qLayer = {.type = QUANTIZATION, .config = NULL};
@@ -172,8 +177,10 @@ void testQuantLayerConvertsAsymToSymInt32MatchesConvertTensor(void) {
     int32_t actualMantissas[4];
     memcpy(expectedMantissas, expected->data, sizeof(expectedMantissas));
     memcpy(actualMantissas, actual->data, sizeof(actualMantissas));
-    float expectedScale = ((symInt32QConfig_t *)expected->quantization->qConfig)->scale;
-    float actualScale = ((symInt32QConfig_t *)actual->quantization->qConfig)->scale;
+    float expectedScale =
+        odtScaleToFloat(((symInt32QConfig_t *)expected->quantization->qConfig)->scale);
+    float actualScale =
+        odtScaleToFloat(((symInt32QConfig_t *)actual->quantization->qConfig)->scale);
 
     freeTensor(actual);
     freeTensor(expected);
@@ -205,7 +212,7 @@ void testQuantizationBackwardRequantsDyMantissasLikeDirectRequant(void) {
     tensor_t *loss = buildSym2D(2, 3);
     memcpy(loss->data, dyMantissas, sizeof(dyMantissas));
     ((symInt32QConfig_t *)loss->quantization->qConfig)->scale =
-        1.52587890625e-05f; /* 2^-16, a canonical stored scale */
+        odtTestScale(1.52587890625e-05f); /* 2^-16, a canonical stored scale */
 
     tensor_t *expected = buildSym2D(2, 3);
     requantSymInt32Tensor(loss, expected, NULL);
@@ -219,8 +226,10 @@ void testQuantizationBackwardRequantsDyMantissasLikeDirectRequant(void) {
     int32_t actualMantissas[6];
     memcpy(expectedMantissas, expected->data, sizeof(expectedMantissas));
     memcpy(actualMantissas, propLoss->data, sizeof(actualMantissas));
-    float expectedScale = ((symInt32QConfig_t *)expected->quantization->qConfig)->scale;
-    float actualScale = ((symInt32QConfig_t *)propLoss->quantization->qConfig)->scale;
+    float expectedScale =
+        odtScaleToFloat(((symInt32QConfig_t *)expected->quantization->qConfig)->scale);
+    float actualScale =
+        odtScaleToFloat(((symInt32QConfig_t *)propLoss->quantization->qConfig)->scale);
 
     freeTensor(propLoss);
     freeTensor(forwardInput);

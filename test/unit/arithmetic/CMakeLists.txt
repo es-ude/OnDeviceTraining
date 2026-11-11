@@ -56,6 +56,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Add
         MORE_LIBS
+        odt_test_scale
+        DyadicScale
         Tensor
         TensorApi
         Quantization
@@ -78,6 +80,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         ArithmeticType
         MORE_LIBS
+        odt_test_scale
+        DyadicScale
         Quantization
         Rounding
         Common
@@ -144,6 +148,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Div
         MORE_LIBS
+        odt_test_scale
+        DyadicScale
         Arithmetic
         Tensor
 )
@@ -183,6 +189,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Matmul
         MORE_LIBS
+        odt_test_scale
         Arithmetic
         DyadicScale
         SymAccumGuard
@@ -202,6 +209,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Mul
         MORE_LIBS
+        odt_test_scale
+        DyadicScale
         Arithmetic
         Tensor
         Quantization
@@ -289,6 +298,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Conv1dKernel
         MORE_LIBS
+        odt_test_scale
+        DyadicScale
         SlidingWindow1d
         RNG
         Kernel
@@ -325,6 +336,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         ConvTranspose1dKernel
         MORE_LIBS
+        odt_test_scale
+        DyadicScale
         Kernel
         RNG
         SymAccumGuard
@@ -346,6 +359,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         ExecuteOp
         MORE_LIBS
+        odt_test_scale
+        DyadicScale
         Tensor
         TensorApi
         TensorConversion
@@ -396,6 +411,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         SymGroupedWeight
         MORE_LIBS
+        odt_test_scale
+        DyadicScale
         Common
         odt_test_death
 )

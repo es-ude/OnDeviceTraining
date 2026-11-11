@@ -13,6 +13,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "TestScale.h"
 #include "unity.h"
 
 void testReluForwardFloat() {
@@ -651,7 +652,7 @@ void testReluBackwardBfpArmRejectsUnequalElementCounts(void) {
 void testReluBackwardExitsOnDtypeMismatch() {
     symInt32QConfig_t qc;
     initSymInt32QConfig(HALF_AWAY, &qc);
-    qc.scale = 1.f;
+    qc.scale = odtTestScale(1.f);
     quantization_t symQ;
     initSymInt32Quantization(&qc, &symQ);
 
@@ -760,11 +761,11 @@ void testReluBackwardSymInt32AliasedMatchesDisjoint(void) {
     quantization_t q[5]; /* forwardInput, loss, propLoss, aliased loss, aliased propLoss */
     for (size_t i = 0; i < 5; i++) {
         initSymInt32QConfig(HALF_AWAY, &qc[i]);
-        qc[i].scale = 1.f;
+        qc[i].scale = odtTestScale(1.f);
         initSymInt32Quantization(&qc[i], &q[i]);
     }
-    qc[1].scale = lossScale;
-    qc[3].scale = lossScale;
+    qc[1].scale = odtTestScale(lossScale);
+    qc[3].scale = odtTestScale(lossScale);
     reluConfig_t cfg = {0};
     cfg.propLossMath = (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = HALF_AWAY};
     layerConfig_t lc = {.relu = &cfg};
@@ -791,8 +792,8 @@ void testReluBackwardSymInt32AliasedMatchesDisjoint(void) {
     int32_t expected[6] = {0, 0, -4, 6, 3, 0};
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, disjointCodes, 6);
     TEST_ASSERT_EQUAL_MEMORY(disjointCodes, block, sizeof block);
-    TEST_ASSERT_EQUAL_MEMORY(&qc[2].scale, &qc[4].scale, sizeof(float));
-    TEST_ASSERT_EQUAL_MEMORY(&lossScale, &qc[3].scale, sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(&qc[2].scale, &qc[4].scale, sizeof(odtScale_t));
+    TEST_ASSERT_EQUAL_MEMORY(&lossScale, &(float){odtScaleToFloat(qc[3].scale)}, sizeof(float));
 }
 
 /* BFP wires never alias: the kernel rejects a loss/propLoss pair that shares

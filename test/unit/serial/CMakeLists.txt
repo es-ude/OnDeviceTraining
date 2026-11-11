@@ -11,6 +11,8 @@ add_elastic_ai_unit_test(
         LinearApi
         RNG
         LossType
+        odt_test_scale
+        DyadicScale
         Common
         TensorApi
         Tensor
@@ -56,6 +58,8 @@ add_elastic_ai_unit_test(
         RematScheduler
         LayerExec
         DataLoader
+        odt_test_scale
+        DyadicScale
         Common
         RNG
         Deserialize

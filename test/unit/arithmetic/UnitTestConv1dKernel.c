@@ -13,6 +13,7 @@
 #include "SymGroupedWeight.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "TestScale.h"
 #include "expected_bfp_conv1d.h"
 #include "expected_conv1d_kernel.h"
 #include "unity.h"
@@ -600,7 +601,7 @@ void testConv1dKernelBfpPowerOfTwoBitIdenticalToGroupedSym(void) {
     tensor_t inSymTensor;
     symInt32QConfig_t inSymQC;
     initSymInt32QConfig(HALF_AWAY, &inSymQC);
-    inSymQC.scale = 0.5f;
+    inSymQC.scale = odtTestScale(0.5f);
     quantization_t inSymQ;
     initSymInt32Quantization(&inSymQC, &inSymQ);
     setTensorValues(&inSymTensor, (uint8_t *)kBfpConvInCodes, &inShape, &inSymQ, NULL);
@@ -608,12 +609,14 @@ void testConv1dKernelBfpPowerOfTwoBitIdenticalToGroupedSym(void) {
     tensor_t wSymTensor;
     symInt32QConfig_t wSymQC;
     initSymInt32QConfig(HALF_AWAY, &wSymQC);
-    wSymQC.scale = 1.0f; /* poisoned scratch scale -- never read, scales live in weightGroups */
+    wSymQC.scale =
+        odtTestScale(1.0f); /* poisoned scratch scale -- never read, scales live in weightGroups */
     quantization_t wSymQ;
     initSymInt32Quantization(&wSymQC, &wSymQ);
     setTensorValues(&wSymTensor, (uint8_t *)kBfpConvWCodes, &wShape, &wSymQ, NULL);
 
-    float scales[6] = {0.25f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f};
+    odtScale_t scales[6] = {odtTestScale(0.25f), odtTestScale(0.25f), odtTestScale(0.25f),
+                            odtTestScale(0.25f), odtTestScale(0.25f), odtTestScale(0.25f)};
     symQConfig_t weightGroups = {
         .scales = scales, .numGroups = 6, .groupSize = 2, .qBits = 8, .roundingMode = HALF_AWAY};
 
@@ -630,7 +633,7 @@ void testConv1dKernelBfpPowerOfTwoBitIdenticalToGroupedSym(void) {
                                 &groupedWeight, NULL);
 
     for (size_t i = 0; i < 10; i++) {
-        float symDequant = (float)outSymData[i] * outSymQC.scale;
+        float symDequant = (float)outSymData[i] * odtScaleToFloat(outSymQC.scale);
         TEST_ASSERT_EQUAL_MEMORY(&symDequant, &outBfpData[i], sizeof(float));
     }
 }
@@ -1427,7 +1430,8 @@ static int32_t cgRun(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t w
     if (numGroups == 0) {
         conv1dKernelSymInt32(&x, &w, biasCode ? &bias : NULL, &kernel, 1, &yT, NULL);
     } else {
-        float scales[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+        odtScale_t scales[8] = {odtTestScale(1), odtTestScale(1), odtTestScale(1), odtTestScale(1),
+                                odtTestScale(1), odtTestScale(1), odtTestScale(1), odtTestScale(1)};
         symQConfig_t groups = {.scales = scales,
                                .numGroups = numGroups,
                                .groupSize = inCh * k / numGroups,
@@ -1790,11 +1794,12 @@ static void cgGoldRun(const cgGoldCase_t *c, roundingMode_t rm, rngStream_t *rs,
     for (size_t i = 0; i < c->outC; i++) {
         out->bias[i] = cgGoldCode(&s, 200);
     }
-    float scales[10];
+    odtScale_t scales[10];
     float maxScale = 0.0f;
     for (size_t g = 0; g < numGroups; g++) {
-        scales[g] = cgGoldGroupScale(g, numGroups);
-        maxScale = scales[g] > maxScale ? scales[g] : maxScale;
+        scales[g] = odtTestScale(cgGoldGroupScale(g, numGroups));
+        maxScale =
+            cgGoldGroupScale(g, numGroups) > maxScale ? cgGoldGroupScale(g, numGroups) : maxScale;
     }
     symQConfig_t groups = {.scales = scales,
                            .numGroups = numGroups,
@@ -1816,8 +1821,8 @@ static void cgGoldRun(const cgGoldCase_t *c, roundingMode_t rm, rngStream_t *rs,
     initSymInt32QConfigWithQMaxBits(rm, &wQC, 8); /* grouped scratch: mode = the op's */
     initSymInt32QConfigWithQMaxBits(rm, &yQC, UNSTAMPED_WIDTH);
     initSymInt32QConfigWithQMaxBits(rm, &bQC, 12);
-    xQC.scale = 0.25f;
-    bQC.scale = 0.3f;
+    xQC.scale = odtTestScale(0.25f);
+    bQC.scale = odtScaleFromFloat(0.3f, ODT_SCALE_NEAREST);
     quantization_t xQ, wQ, yQ, bQ;
     initSymInt32Quantization(&xQC, &xQ);
     initSymInt32Quantization(&wQC, &wQ);
@@ -1835,10 +1840,10 @@ static void cgGoldRun(const cgGoldCase_t *c, roundingMode_t rm, rngStream_t *rs,
         initKernelExplicit(&kernel, 5, c->padding, 2, 2);
     }
     conv1dKernelSymInt32Grouped(&xT, &wT, &bT, &kernel, 1, &yT, &groupedWeight, rs);
-    out->scale = yQC.scale;
+    out->scale = odtScaleToFloat(yQC.scale);
     out->bits = yQC.qMaxBits;
     out->sAcc = 0.25f * maxScale;
-    out->biasScale = bQC.scale;
+    out->biasScale = odtScaleToFloat(bQC.scale);
 }
 
 void testConv1dGroupedGoldenHalfAway(void) {
@@ -1914,9 +1919,9 @@ static void cg2GoldRun(size_t groupSize, roundingMode_t rm, rngStream_t *rs, cg2
     for (size_t i = 0; i < CG2_GOLD_OUTC; i++) {
         bias[i] = cgGoldCode(&s, 200);
     }
-    float scales[10];
+    odtScale_t scales[10];
     for (size_t g = 0; g < numGroups; g++) {
-        scales[g] = cgGoldGroupScale(g, numGroups);
+        scales[g] = odtTestScale(cgGoldGroupScale(g, numGroups));
     }
     symQConfig_t groups = {.scales = scales,
                            .numGroups = numGroups,
@@ -1938,8 +1943,8 @@ static void cg2GoldRun(size_t groupSize, roundingMode_t rm, rngStream_t *rs, cg2
     initSymInt32QConfigWithQMaxBits(rm, &wQC, 8);
     initSymInt32QConfigWithQMaxBits(rm, &yQC, UNSTAMPED_WIDTH);
     initSymInt32QConfigWithQMaxBits(rm, &bQC, 12);
-    xQC.scale = 0.25f;
-    bQC.scale = 0.3f;
+    xQC.scale = odtTestScale(0.25f);
+    bQC.scale = odtScaleFromFloat(0.3f, ODT_SCALE_NEAREST);
     quantization_t xQ, wQ, yQ, bQ;
     initSymInt32Quantization(&xQC, &xQ);
     initSymInt32Quantization(&wQC, &wQ);
@@ -1953,7 +1958,7 @@ static void cg2GoldRun(size_t groupSize, roundingMode_t rm, rngStream_t *rs, cg2
     kernel_t kernel;
     initKernelExplicit(&kernel, 5, 3, 2, 2);
     conv1dKernelSymInt32Grouped(&xT, &wT, &bT, &kernel, 2, &yT, &groupedWeight, rs);
-    out->scale = yQC.scale;
+    out->scale = odtScaleToFloat(yQC.scale);
     out->bits = yQC.qMaxBits;
 }
 

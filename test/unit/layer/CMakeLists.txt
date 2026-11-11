@@ -136,6 +136,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Conv1d
         MORE_LIBS
+        odt_test_scale
         CommonLayerLibs
         DyadicScale
         TensorApi
@@ -171,6 +172,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Linear
         MORE_LIBS
+        odt_test_scale
+        DyadicScale
         CommonLayerLibs
         TensorApi
         QuantizationApi
@@ -205,6 +208,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Relu
         MORE_LIBS
+        odt_test_scale
+        DyadicScale
         ArithmeticType
         CommonLayerLibs
         ReluApi
@@ -284,6 +289,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Flatten
         MORE_LIBS
+        odt_test_scale
+        DyadicScale
         CommonLayerLibs
         FlattenApi
         TensorApi
@@ -296,6 +303,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Conv1dTransposed
         MORE_LIBS
+        odt_test_scale
         CommonLayerLibs
         DyadicScale
         TensorApi
@@ -395,6 +403,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Dropout
         MORE_LIBS
+        odt_test_scale
         CommonLayerLibs
         DyadicScale
         Bernoulli
@@ -474,6 +483,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         LayerNorm
         MORE_LIBS
+        odt_test_scale
         ArithmeticType
         CommonLayerLibs
         TensorApi
@@ -513,6 +523,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         GroupNorm
         MORE_LIBS
+        odt_test_scale
         ArithmeticType
         CommonLayerLibs
         TensorApi
@@ -570,6 +581,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         QuantizationLayer
         MORE_LIBS
+        odt_test_scale
+        DyadicScale
         LayerExec
         RNG
         CommonLayerLibs

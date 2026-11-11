@@ -25,7 +25,7 @@ void executeOpIdentityKernel(tensor_t **operands, size_t nOperands, tensor_t *ra
     memcpy(rawOut->data, src->data, bytes);
     if (src->quantization->type == SYM_INT32) {
         storeCanonScale(&((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale,
-                        ((symInt32QConfig_t *)src->quantization->qConfig)->scale);
+                        loadCanonScale(&((symInt32QConfig_t *)src->quantization->qConfig)->scale));
     }
 }
 
@@ -156,8 +156,9 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
                             (int)intermediate->quantization->type);
                 exit(1);
             }
-            float intermScale = ((symInt32QConfig_t *)intermediate->quantization->qConfig)->scale;
-            float targetScale = targetQC->scale;
+            float intermScale =
+                loadCanonScale(&((symInt32QConfig_t *)intermediate->quantization->qConfig)->scale);
+            float targetScale = loadCanonScale(&targetQC->scale);
             int32_t *tg = (int32_t *)target->data;
             int32_t *in = (int32_t *)intermediate->data;
             for (size_t i = 0; i < n; i++) {
@@ -463,7 +464,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
                 /* Poison: a grouped operand has no single scalar scale — the
                  * group-aware kernel MUST read per-group scales via its own
                  * ctx (e.g. Matmul's weightGroups), never this field. */
-                scratchQC[i].scale = 1.0f;
+                odtScaleStore(&scratchQC[i].scale, ODT_SCALE_ONE);
             } else if (inputs[i]->quantization->type == INT32) {
                 stageInt32Raw(inputs[i], &scratchTensors[i], &scratchQC[i]);
             } else {

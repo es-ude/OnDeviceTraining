@@ -23,6 +23,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "TestScale.h"
 #include "unity.h"
 
 void setUp() {}
@@ -200,7 +201,7 @@ static optimizer_t *buildSymInt32OneLayerOptim(layer_t **modelOut, parameter_t *
         int32_t *gradData = (int32_t *)wGrad->data;
         memcpy(gradData, wInitialGradInt32, 6 * sizeof(int32_t));
         symInt32QConfig_t *gradQ = wGrad->quantization->qConfig;
-        gradQ->scale = wInitialScale;
+        gradQ->scale = odtTestScale(wInitialScale);
     }
     parameter_t *w = parameterInit(wParam, wGrad);
 
@@ -221,7 +222,7 @@ static optimizer_t *buildSymInt32OneLayerOptim(layer_t **modelOut, parameter_t *
         int32_t *gradData = (int32_t *)bGrad->data;
         memcpy(gradData, bInitialGradInt32, 2 * sizeof(int32_t));
         symInt32QConfig_t *gradQ = bGrad->quantization->qConfig;
-        gradQ->scale = bInitialScale;
+        gradQ->scale = odtTestScale(bInitialScale);
     }
     parameter_t *b = parameterInit(bParam, bGrad);
 
@@ -259,8 +260,10 @@ void testScaleOptimizerGradients_SymInt32_ScalesScaleOnly() {
     memcpy(capturedWInt, w->grad->data, 6 * sizeof(int32_t));
     int32_t capturedBInt[2];
     memcpy(capturedBInt, b->grad->data, 2 * sizeof(int32_t));
-    float capturedWScale = ((symInt32QConfig_t *)w->grad->quantization->qConfig)->scale;
-    float capturedBScale = ((symInt32QConfig_t *)b->grad->quantization->qConfig)->scale;
+    float capturedWScale =
+        odtScaleToFloat(((symInt32QConfig_t *)w->grad->quantization->qConfig)->scale);
+    float capturedBScale =
+        odtScaleToFloat(((symInt32QConfig_t *)b->grad->quantization->qConfig)->scale);
 
     freeOptim(sgd);
     freeLinearLayerShellOnly(model[0]);
@@ -308,7 +311,8 @@ void testScaleOptimizerGradients_SymInt32_DequantEquivalence() {
     float wDequantAfter[6];
     {
         int32_t *gradInt = (int32_t *)w->grad->data;
-        float postScale = ((symInt32QConfig_t *)w->grad->quantization->qConfig)->scale;
+        float postScale =
+            odtScaleToFloat(((symInt32QConfig_t *)w->grad->quantization->qConfig)->scale);
         for (size_t i = 0; i < 6; i++) {
             wDequantAfter[i] = (float)gradInt[i] * postScale;
         }
@@ -316,7 +320,8 @@ void testScaleOptimizerGradients_SymInt32_DequantEquivalence() {
     float bDequantAfter[2];
     {
         int32_t *gradInt = (int32_t *)b->grad->data;
-        float postScale = ((symInt32QConfig_t *)b->grad->quantization->qConfig)->scale;
+        float postScale =
+            odtScaleToFloat(((symInt32QConfig_t *)b->grad->quantization->qConfig)->scale);
         for (size_t i = 0; i < 2; i++) {
             bDequantAfter[i] = (float)gradInt[i] * postScale;
         }
@@ -374,7 +379,8 @@ void testScaleOptimizerGradients_SymInt32_MomentumSgdAppliesScaledGradient() {
     float wParamAfter[6];
     {
         int32_t *paramInt = (int32_t *)w->param->data;
-        float pScale = ((symInt32QConfig_t *)w->param->quantization->qConfig)->scale;
+        float pScale =
+            odtScaleToFloat(((symInt32QConfig_t *)w->param->quantization->qConfig)->scale);
         for (size_t i = 0; i < 6; i++) {
             wParamAfter[i] = (float)paramInt[i] * pScale;
         }
@@ -382,7 +388,8 @@ void testScaleOptimizerGradients_SymInt32_MomentumSgdAppliesScaledGradient() {
     float bParamAfter[2];
     {
         int32_t *paramInt = (int32_t *)b->param->data;
-        float pScale = ((symInt32QConfig_t *)b->param->quantization->qConfig)->scale;
+        float pScale =
+            odtScaleToFloat(((symInt32QConfig_t *)b->param->quantization->qConfig)->scale);
         for (size_t i = 0; i < 2; i++) {
             bParamAfter[i] = (float)paramInt[i] * pScale;
         }
@@ -492,8 +499,10 @@ void testScaleOptimizerGradients_Sym_ScalesScaleOnly(void) {
     uint8_t bBytesBefore[bBytes];
     memcpy(wBytesBefore, w->grad->data, wBytes);
     memcpy(bBytesBefore, b->grad->data, bBytes);
-    float wScaleBefore = ((symQConfig_t *)w->grad->quantization->qConfig)->scales[0];
-    float bScaleBefore = ((symQConfig_t *)b->grad->quantization->qConfig)->scales[0];
+    float wScaleBefore =
+        odtScaleToFloat(((symQConfig_t *)w->grad->quantization->qConfig)->scales[0]);
+    float bScaleBefore =
+        odtScaleToFloat(((symQConfig_t *)b->grad->quantization->qConfig)->scales[0]);
 
     scaleOptimizerGradients(sgd, factor, NULL);
 
@@ -502,8 +511,10 @@ void testScaleOptimizerGradients_Sym_ScalesScaleOnly(void) {
     uint8_t bBytesAfter[bBytes];
     memcpy(wBytesAfter, w->grad->data, wBytes);
     memcpy(bBytesAfter, b->grad->data, bBytes);
-    float wScaleAfter = ((symQConfig_t *)w->grad->quantization->qConfig)->scales[0];
-    float bScaleAfter = ((symQConfig_t *)b->grad->quantization->qConfig)->scales[0];
+    float wScaleAfter =
+        odtScaleToFloat(((symQConfig_t *)w->grad->quantization->qConfig)->scales[0]);
+    float bScaleAfter =
+        odtScaleToFloat(((symQConfig_t *)b->grad->quantization->qConfig)->scales[0]);
 
     freeOptim(sgd);
     freeLinearLayerShellOnly(model[0]);
@@ -623,8 +634,8 @@ void testScaleOptimizerGradients_Asym_ScalesScaleOnly(void) {
     memcpy(bBytesBefore, b->grad->data, bBytes);
     asymQConfig_t *wQ = w->grad->quantization->qConfig;
     asymQConfig_t *bQ = b->grad->quantization->qConfig;
-    float wScaleBefore = wQ->scales[0];
-    float bScaleBefore = bQ->scales[0];
+    float wScaleBefore = odtScaleToFloat(wQ->scales[0]);
+    float bScaleBefore = odtScaleToFloat(bQ->scales[0]);
     uint16_t wZeroPointBefore = wQ->zeroPoints[0];
     uint16_t bZeroPointBefore = bQ->zeroPoints[0];
 
@@ -635,8 +646,8 @@ void testScaleOptimizerGradients_Asym_ScalesScaleOnly(void) {
     uint8_t bBytesAfter[bBytes];
     memcpy(wBytesAfter, w->grad->data, wBytes);
     memcpy(bBytesAfter, b->grad->data, bBytes);
-    float wScaleAfter = wQ->scales[0];
-    float bScaleAfter = bQ->scales[0];
+    float wScaleAfter = odtScaleToFloat(wQ->scales[0]);
+    float bScaleAfter = odtScaleToFloat(bQ->scales[0]);
     uint16_t wZeroPointAfter = wQ->zeroPoints[0];
     uint16_t bZeroPointAfter = bQ->zeroPoints[0];
 
@@ -1150,11 +1161,11 @@ static float foldMean(float s, size_t divisor) {
 static float gradScaleOf(const parameter_t *p) {
     switch (p->grad->quantization->type) {
     case SYM_INT32:
-        return ((symInt32QConfig_t *)p->grad->quantization->qConfig)->scale;
+        return odtScaleToFloat(((symInt32QConfig_t *)p->grad->quantization->qConfig)->scale);
     case SYM:
-        return ((symQConfig_t *)p->grad->quantization->qConfig)->scales[0];
+        return odtScaleToFloat(((symQConfig_t *)p->grad->quantization->qConfig)->scales[0]);
     case ASYM:
-        return ((asymQConfig_t *)p->grad->quantization->qConfig)->scales[0];
+        return odtScaleToFloat(((asymQConfig_t *)p->grad->quantization->qConfig)->scales[0]);
     default:
         TEST_FAIL_MESSAGE("not a SYM-family grad");
         return 0.f;

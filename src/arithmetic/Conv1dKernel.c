@@ -195,8 +195,8 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
     int32_t const *wArr = (int32_t const *)weight->data;
     int32_t *yArr = (int32_t *)output->data;
 
-    float inScale = ((symInt32QConfig_t *)input->quantization->qConfig)->scale;
-    float wScale = ((symInt32QConfig_t *)weight->quantization->qConfig)->scale;
+    float inScale = loadCanonScale(&((symInt32QConfig_t *)input->quantization->qConfig)->scale);
+    float wScale = loadCanonScale(&((symInt32QConfig_t *)weight->quantization->qConfig)->scale);
     /* the stored product scale, rounded once from the exact mantissa product;
      * the bias seed is refolded onto this same value */
     const float outputScale = canonProductScale(inScale, wScale, ODT_SCALE_NEAREST);
@@ -209,8 +209,8 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
         int32_t const *bArr = (int32_t const *)bias->data;
         symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
         for (size_t oc = 0; oc < outChannels; oc++) {
-            seed[oc] = rescaleIntoAccumulatorScale(bArr[oc], biasQC->scale, outputScale,
-                                                   biasQC->roundingMode, rs);
+            seed[oc] = rescaleIntoAccumulatorScale(bArr[oc], loadCanonScale(&biasQC->scale),
+                                                   outputScale, biasQC->roundingMode, rs);
         }
     } else {
         for (size_t oc = 0; oc < outChannels; oc++) {
@@ -332,12 +332,14 @@ conv1dSymGroupedLoops(const convSymView_t *v, const symQConfig_t *weightGroups, 
                                      * honoring the op's rounding mode). A group
                                      * that goes on into the next ic row does not
                                      * combine at the row end. */
-                                    acc = symAdd(acc,
-                                                 rescalePartialIntoAccumulatorScale(
-                                                     partial,
-                                                     inScale * weightGroups->scales[cursor.group],
-                                                     sAcc, roundingMode, rs),
-                                                 checked, accSite);
+                                    acc = symAdd(
+                                        acc,
+                                        rescalePartialIntoAccumulatorScale(
+                                            partial,
+                                            inScale *
+                                                loadCanonScale(&weightGroups->scales[cursor.group]),
+                                            sAcc, roundingMode, rs),
+                                        checked, accSite);
                                     partial = 0;
                                 }
                                 symGroupCursorSeek(&cursor, wIdx, groupSize);
@@ -357,11 +359,13 @@ conv1dSymGroupedLoops(const convSymView_t *v, const symQConfig_t *weightGroups, 
                      * mid-loop branch at all -- this is their ONLY weight
                      * combine. */
                     if (visited) {
-                        acc = symAdd(acc,
-                                     rescalePartialIntoAccumulatorScale(
-                                         partial, inScale * weightGroups->scales[cursor.group],
-                                         sAcc, roundingMode, rs),
-                                     checked, accSite);
+                        acc = symAdd(
+                            acc,
+                            rescalePartialIntoAccumulatorScale(
+                                partial,
+                                inScale * loadCanonScale(&weightGroups->scales[cursor.group]), sAcc,
+                                roundingMode, rs),
+                            checked, accSite);
                     }
 
                     yArr[(b * outChannels + oc) * outputLength + outPos] = acc;
@@ -423,15 +427,16 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
     int32_t const *wArr = (int32_t const *)weight->data;
     int32_t *yArr = (int32_t *)output->data;
 
-    float inScale = ((symInt32QConfig_t *)input->quantization->qConfig)->scale;
+    float inScale = loadCanonScale(&((symInt32QConfig_t *)input->quantization->qConfig)->scale);
 
     /* s_acc = inScale * max_g(weightGroups->scales[g]) (GGUF pattern, #189):
      * a single linear pass over scales[], NEVER scales[0] alone -- see
      * matmulSymInt32TensorsGroupedWeight's identical derivation. */
-    float maxScale = weightGroups->scales[0];
+    float maxScale = loadCanonScale(&weightGroups->scales[0]);
     for (size_t g = 1; g < weightGroups->numGroups; g++) {
-        if (weightGroups->scales[g] > maxScale) {
-            maxScale = weightGroups->scales[g];
+        const float groupScale = loadCanonScale(&weightGroups->scales[g]);
+        if (groupScale > maxScale) {
+            maxScale = groupScale;
         }
     }
     /* Stored, so canonical. CEIL, not the product rule's NEAREST: the rescaled
@@ -453,7 +458,7 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
         int32_t const *bArr = (int32_t const *)bias->data;
         symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
         for (size_t oc = 0; oc < outChannels; oc++) {
-            seed[oc] = rescaleIntoAccumulatorScale(bArr[oc], biasQC->scale, sAcc,
+            seed[oc] = rescaleIntoAccumulatorScale(bArr[oc], loadCanonScale(&biasQC->scale), sAcc,
                                                    biasQC->roundingMode, rs);
         }
     } else {

@@ -48,6 +48,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         RematPlan
         MORE_LIBS
+        odt_test_scale
+        DyadicScale
         RematScheduler
         CommonLayerLibs
         Conv1dApi

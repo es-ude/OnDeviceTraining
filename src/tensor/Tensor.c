@@ -10,6 +10,7 @@
 #include "DTypes.h"
 #include "MinMax.h"
 #include "Quantization.h"
+#include "ScaleCanon.h"
 #include "Tensor.h"
 
 size_t calcNumberOfElementsByShape(shape_t *shape) {
@@ -470,7 +471,7 @@ void printTensor(tensor_t *t) {
     case SYM_INT32: {
         symInt32QConfig_t *symQC = q->qConfig;
         printf("SYM_INT32 \n");
-        printf("scale=%e\n", symQC->scale);
+        printf("scale=%e\n", loadCanonScale(&symQC->scale));
         printf("Data \n");
         for (size_t i = 0; i < numValues; i++) {
             size_t byteIndex = i * sizeof(int32_t);
@@ -484,7 +485,7 @@ void printTensor(tensor_t *t) {
         printf("ASYM\n");
         printf("numGroups=%zu groupSize=%zu\n", lq->numGroups, lq->groupSize);
         for (size_t g = 0; g < lq->numGroups; g++) {
-            printf("scale[%zu]=%e zeroPoint[%zu]=%u\n", g, lq->scales[g], g,
+            printf("scale[%zu]=%e zeroPoint[%zu]=%u\n", g, loadCanonScale(&lq->scales[g]), g,
                    (unsigned)lq->zeroPoints[g]);
         }
         printf("Data \n");
@@ -600,7 +601,7 @@ static void copySymQConfigInto(quantization_t *dest, quantization_t *src) {
                     dstQC->numGroups, dstQC->groupSize, srcQC->numGroups, srcQC->groupSize);
         exit(1);
     }
-    memcpy(dstQC->scales, srcQC->scales, srcQC->numGroups * sizeof(float));
+    copyCanonScales(dstQC->scales, srcQC->scales, srcQC->numGroups);
     dstQC->groupSize = srcQC->groupSize;
     dstQC->roundingMode = srcQC->roundingMode;
     dstQC->qBits = srcQC->qBits;
@@ -625,7 +626,7 @@ static void copyAsymQConfigInto(quantization_t *dest, quantization_t *src) {
                     dstQC->numGroups, dstQC->groupSize, srcQC->numGroups, srcQC->groupSize);
         exit(1);
     }
-    memcpy(dstQC->scales, srcQC->scales, srcQC->numGroups * sizeof(float));
+    copyCanonScales(dstQC->scales, srcQC->scales, srcQC->numGroups);
     memcpy(dstQC->zeroPoints, srcQC->zeroPoints, srcQC->numGroups * sizeof(uint16_t));
     dstQC->groupSize = srcQC->groupSize;
     dstQC->roundingMode = srcQC->roundingMode;

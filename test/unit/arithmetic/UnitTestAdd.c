@@ -8,6 +8,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "TestScale.h"
 #include "unity.h"
 
 void setUp() {}
@@ -146,7 +147,7 @@ void testAddSymInt32TensorsInplace() {
 
     symInt32QConfig_t aQC;
     initSymInt32QConfig(HALF_AWAY, &aQC);
-    aQC.scale = 1.f;
+    aQC.scale = odtTestScale(1.f);
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);
 
@@ -164,7 +165,7 @@ void testAddSymInt32TensorsInplace() {
 
     symInt32QConfig_t bQC;
     initSymInt32QConfig(HALF_AWAY, &bQC);
-    bQC.scale = 2.f;
+    bQC.scale = odtTestScale(2.f);
     quantization_t bQ;
     initSymInt32Quantization(&bQC, &bQ);
 
@@ -212,7 +213,7 @@ void testAddSymInt32TensorsInplace() {
 void testAddSymInt32TensorsInplaceExitsOnCountMismatch() {
     symInt32QConfig_t aQC;
     initSymInt32QConfig(HALF_AWAY, &aQC);
-    aQC.scale = 1.f;
+    aQC.scale = odtTestScale(1.f);
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);
     int32_t aData[] = {1, 2};
@@ -224,7 +225,7 @@ void testAddSymInt32TensorsInplaceExitsOnCountMismatch() {
 
     symInt32QConfig_t bQC;
     initSymInt32QConfig(HALF_AWAY, &bQC);
-    bQC.scale = 1.f;
+    bQC.scale = odtTestScale(1.f);
     quantization_t bQ;
     initSymInt32Quantization(&bQC, &bQ);
     int32_t bData[1024] = {0};
@@ -242,7 +243,7 @@ void testAddInt32TensorWithSymInt32TensorInplace() {
 
     symInt32QConfig_t aQC;
     initSymInt32QConfig(HALF_AWAY, &aQC);
-    aQC.scale = 100.f;
+    aQC.scale = odtTestScale(100.f);
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);
     int32_t aData[] = {1, 2, 3, 4, 5, 6};
@@ -274,7 +275,7 @@ void testAddFloat32TensorToSymInt32TensorInplace() {
 
     symInt32QConfig_t aQC;
     initSymInt32QConfig(HALF_AWAY, &aQC);
-    aQC.scale = 100.f;
+    aQC.scale = odtTestScale(100.f);
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);
     int32_t aData[] = {1, 2, 3, 4, 5, 6};
@@ -318,7 +319,7 @@ static void symWireInit(symWire_t *w, int32_t *codes, size_t n, uint8_t qMaxBits
     w->order[0] = 0;
     setShape(&w->shape, w->dims, 1, w->order);
     initSymInt32QConfigWithQMaxBits(HALF_AWAY, &w->qc, qMaxBits);
-    w->qc.scale = scale;
+    w->qc.scale = odtTestScale(scale);
     initSymInt32Quantization(&w->qc, &w->q);
     setTensorValues(&w->t, (uint8_t *)codes, &w->shape, &w->q, NULL);
 }
@@ -339,7 +340,7 @@ void testAddSymInt32TensorsEqualScaleStampsSumWidth(void) {
     addSymInt32Tensors(&a.t, &b.t, &out.t, NULL);
     TEST_ASSERT_EQUAL_INT32(-4096, outCodes[0]);
     TEST_ASSERT_EQUAL_INT32(8, outCodes[1]);
-    TEST_ASSERT_EQUAL_FLOAT(0.5f, out.qc.scale);
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, odtScaleToFloat(out.qc.scale));
     TEST_ASSERT_EQUAL_UINT8(13, out.qc.qMaxBits);
     TEST_ASSERT_EQUAL_UINT8(12, a.qc.qMaxBits);
     TEST_ASSERT_EQUAL_UINT8(12, b.qc.qMaxBits);

@@ -76,7 +76,7 @@ static __attribute__((noinline)) void scaleNonBfpGradient(parameter_t *param, gr
          * be absorbed into the per-tensor scale, leaving the int32 storage
          * untouched. O(1) and avoids quantization round-trip loss. */
         symInt32QConfig_t *gradQ = param->grad->quantization->qConfig;
-        storeCanonScale(&gradQ->scale, foldStoredScale(gradQ->scale, fold, what));
+        storeCanonScale(&gradQ->scale, foldStoredScale(loadCanonScale(&gradQ->scale), fold, what));
         break;
     }
     case SYM: {
@@ -102,7 +102,8 @@ static __attribute__((noinline)) void scaleNonBfpGradient(parameter_t *param, gr
                         what, gradQ->numGroups);
             exit(1);
         }
-        storeCanonScale(&gradQ->scales[0], foldStoredScale(gradQ->scales[0], fold, what));
+        storeCanonScale(&gradQ->scales[0],
+                        foldStoredScale(loadCanonScale(&gradQ->scales[0]), fold, what));
         break;
     }
     case ASYM: {
@@ -121,7 +122,8 @@ static __attribute__((noinline)) void scaleNonBfpGradient(parameter_t *param, gr
                         what, gradQ->numGroups);
             exit(1);
         }
-        storeCanonScale(&gradQ->scales[0], foldStoredScale(gradQ->scales[0], fold, what));
+        storeCanonScale(&gradQ->scales[0],
+                        foldStoredScale(loadCanonScale(&gradQ->scales[0]), fold, what));
         break;
     }
     default:
@@ -244,7 +246,7 @@ float optimizerClipGradNorm(optimizer_t *optimizer, float maxNorm) {
             size_t numberOfValues = calcNumberOfElementsByParameter(param);
             int32_t *mantissas = (int32_t *)grad->data;
             symInt32QConfig_t *gradQ = grad->quantization->qConfig;
-            double scale = (double)gradQ->scale;
+            double scale = (double)loadCanonScale(&gradQ->scale);
             double tensorSumSquares = 0.0;
             for (size_t j = 0; j < numberOfValues; j++) {
                 double m = (double)mantissas[j];

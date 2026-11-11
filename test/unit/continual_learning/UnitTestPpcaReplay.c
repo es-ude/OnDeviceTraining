@@ -878,13 +878,13 @@ static ppcaReplayConfig_t packedConfig(size_t dim, size_t rank, size_t maxM, qty
      * scales array on every call after the first. Build the config directly
      * instead (same values initSymQConfig(8, HALF_AWAY, ...) would produce);
      * never freed, per the stack-fixture convention. */
-    static float symScale[1] = {1.f};
+    static odtScale_t symScale[1] = {ODT_SCALE_POW2(0)};
     static symQConfig_t symQc = {
         .scales = symScale, .numGroups = 1, .groupSize = 0, .roundingMode = HALF_AWAY, .qBits = 8};
     static quantization_t symQ;
     /* PR4: same idiom for ASYM's TWO arrays (initAsymQConfig would leak two
      * heap blocks per call after the first). */
-    static float asymScale[1] = {1.f};
+    static odtScale_t asymScale[1] = {ODT_SCALE_POW2(0)};
     static uint16_t asymZp[1] = {0};
     static asymQConfig_t asymQc = {.scales = asymScale,
                                    .zeroPoints = asymZp,

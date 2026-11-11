@@ -100,8 +100,8 @@ void subSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
     symInt32QConfig_t *bSymInt32QConfig = bTensor->quantization->qConfig;
     symInt32QConfig_t *outputSymInt32QConfig = outputTensor->quantization->qConfig;
 
-    float aScale = aSymInt32QConfig->scale;
-    float bScale = bSymInt32QConfig->scale;
+    float aScale = loadCanonScale(&aSymInt32QConfig->scale);
+    float bScale = loadCanonScale(&bSymInt32QConfig->scale);
 
     if (aScale == bScale) {
         storeCanonScale(&outputSymInt32QConfig->scale, aScale);
@@ -149,8 +149,8 @@ void subSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor, rngStream_t
     symInt32QConfig_t *aSymInt32QConfig = aTensor->quantization->qConfig;
     symInt32QConfig_t *bSymInt32QConfig = bTensor->quantization->qConfig;
 
-    float aScale = aSymInt32QConfig->scale;
-    float bScale = bSymInt32QConfig->scale;
+    float aScale = loadCanonScale(&aSymInt32QConfig->scale);
+    float bScale = loadCanonScale(&bSymInt32QConfig->scale);
 
     if (aScale == bScale) {
         int32_t aValues[aNumberOfValues];

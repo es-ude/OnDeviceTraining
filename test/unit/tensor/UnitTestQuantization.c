@@ -5,6 +5,7 @@
 #include "Quantization.h"
 #include "Rounding.h"
 #include "StorageApi.h"
+#include "TestScale.h"
 #include "unity.h"
 
 void setUp(void) {}
@@ -36,7 +37,7 @@ void testInitSymQConfigProducesPerTensorSentinel(void) {
     size_t groupSize = qc.groupSize;
     uint8_t qBits = qc.qBits;
     roundingMode_t roundingMode = qc.roundingMode;
-    float scale0 = qc.scales[0];
+    float scale0 = odtScaleToFloat(qc.scales[0]);
 
     freeReservedMemory(qc.scales);
 
@@ -57,8 +58,8 @@ void testInitSymQConfigAllocatesIndependentScalesArrays(void) {
     initSymQConfig(4, HALF_AWAY, &a);
     initSymQConfig(4, HALF_AWAY, &b);
 
-    float *aScales = a.scales;
-    float *bScales = b.scales;
+    odtScale_t *aScales = a.scales;
+    odtScale_t *bScales = b.scales;
 
     freeReservedMemory(a.scales);
     freeReservedMemory(b.scales);
@@ -77,9 +78,9 @@ void testInitSymQConfigGroupedAllocatesPerGroupScales(void) {
     initSymQConfigGrouped(4, SR_HALF_AWAY, 3, 5, &qc);
     size_t numGroups = qc.numGroups;
     size_t groupSize = qc.groupSize;
-    float s0 = qc.scales[0], s2 = qc.scales[2];
-    qc.scales[2] = 7.f; /* writable per-group slot */
-    float s2w = qc.scales[2];
+    float s0 = odtScaleToFloat(qc.scales[0]), s2 = odtScaleToFloat(qc.scales[2]);
+    qc.scales[2] = odtTestScale(7.f); /* writable per-group slot */
+    float s2w = odtScaleToFloat(qc.scales[2]);
     freeReservedMemory(qc.scales);
     TEST_ASSERT_EQUAL_size_t(3, numGroups);
     TEST_ASSERT_EQUAL_size_t(5, groupSize);
@@ -130,7 +131,7 @@ void testInitSymQConfigAcceptsQBitsBounds(void) {
 }
 
 void testValidateSymQConfigShapeDivisibility(void) {
-    float s[2] = {1.f, 1.f};
+    odtScale_t s[2] = {odtTestScale(1.f), odtTestScale(1.f)};
     symQConfig_t ok = {
         .scales = s, .numGroups = 2, .groupSize = 5, .roundingMode = HALF_AWAY, .qBits = 4};
     validateSymQConfigShape(&ok, 10); /* must NOT exit */
@@ -142,7 +143,7 @@ void testValidateSymQConfigShapeDivisibility(void) {
 
 void testValidateSymQConfigShapeRejectsFieldAssignedQBits(void) {
     /* #479: a field-assigned config never passed the init funnel, so attach re-checks the width */
-    float s[1] = {1.f};
+    odtScale_t s[1] = {odtTestScale(1.f)};
     symQConfig_t zero = {.scales = s, .numGroups = 1, .groupSize = 0, .qBits = 0};
     ASSERT_EXITS_WITH_OUTPUT(1, "validateSymQConfigShape: qBits",
                              validateSymQConfigShape(&zero, 4));
@@ -154,7 +155,7 @@ void testValidateSymQConfigShapeRejectsFieldAssignedQBits(void) {
 }
 
 void testValidateSymQConfigShapeAcceptsQBitsBounds(void) {
-    float s[1] = {1.f};
+    odtScale_t s[1] = {odtTestScale(1.f)};
     symQConfig_t lo = {.scales = s, .numGroups = 1, .groupSize = 0, .qBits = 2};
     symQConfig_t hi = {.scales = s, .numGroups = 1, .groupSize = 0, .qBits = 31};
     validateSymQConfigShape(&lo, 4); /* must NOT exit */
@@ -177,7 +178,7 @@ void testInitAsymQConfigProducesPerTensorSentinelWithZeroZp(void) {
     size_t groupSize = qc.groupSize;
     uint8_t qBits = qc.qBits;
     roundingMode_t roundingMode = qc.roundingMode;
-    float scale0 = qc.scales[0];
+    float scale0 = odtScaleToFloat(qc.scales[0]);
     uint16_t zp0 = qc.zeroPoints[0];
 
     freeReservedMemory(qc.zeroPoints);
@@ -200,8 +201,8 @@ void testInitAsymQConfigAllocatesIndependentArrays(void) {
     initAsymQConfig(4, HALF_AWAY, &a);
     initAsymQConfig(4, HALF_AWAY, &b);
 
-    float *aScales = a.scales;
-    float *bScales = b.scales;
+    odtScale_t *aScales = a.scales;
+    odtScale_t *bScales = b.scales;
     uint16_t *aZps = a.zeroPoints;
     uint16_t *bZps = b.zeroPoints;
 
@@ -222,11 +223,11 @@ void testInitAsymQConfigGroupedAllocatesPerGroupArrays(void) {
     initAsymQConfigGrouped(4, SR_HALF_AWAY, 3, 5, &qc);
     size_t numGroups = qc.numGroups;
     size_t groupSize = qc.groupSize;
-    float s0 = qc.scales[0], s2 = qc.scales[2];
+    float s0 = odtScaleToFloat(qc.scales[0]), s2 = odtScaleToFloat(qc.scales[2]);
     uint16_t z0 = qc.zeroPoints[0], z2 = qc.zeroPoints[2];
-    qc.scales[2] = 7.f; /* writable per-group slots */
+    qc.scales[2] = odtTestScale(7.f); /* writable per-group slots */
     qc.zeroPoints[2] = 9;
-    float s2w = qc.scales[2];
+    float s2w = odtScaleToFloat(qc.scales[2]);
     uint16_t z2w = qc.zeroPoints[2];
     freeReservedMemory(qc.zeroPoints);
     freeReservedMemory(qc.scales);
@@ -259,7 +260,7 @@ void testInitAsymQConfigGroupedRejectsQBitsOutside1To16(void) {
 }
 
 void testValidateAsymQConfigShapeDivisibilityAndQBits(void) {
-    float s[2] = {1.f, 1.f};
+    odtScale_t s[2] = {odtTestScale(1.f), odtTestScale(1.f)};
     uint16_t z[2] = {0, 0};
     asymQConfig_t ok = {.scales = s,
                         .zeroPoints = z,
@@ -443,7 +444,7 @@ _Static_assert((size_t)(WRAPPING_NUM_GROUPS * WRAPPING_GROUP_SIZE) == WRAPPED_EL
                "the fixture product must wrap onto WRAPPED_ELEMENTS");
 
 void testValidateSymQConfigShapeRejectsWrappingGroupProduct(void) {
-    float s[1] = {1.f};
+    odtScale_t s[1] = {odtTestScale(1.f)};
     symQConfig_t qc = {.scales = s,
                        .numGroups = WRAPPING_NUM_GROUPS,
                        .groupSize = WRAPPING_GROUP_SIZE,
@@ -454,7 +455,7 @@ void testValidateSymQConfigShapeRejectsWrappingGroupProduct(void) {
 }
 
 void testValidateAsymQConfigShapeRejectsWrappingGroupProduct(void) {
-    float s[1] = {1.f};
+    odtScale_t s[1] = {odtTestScale(1.f)};
     uint16_t z[1] = {0};
     asymQConfig_t qc = {.scales = s,
                         .zeroPoints = z,

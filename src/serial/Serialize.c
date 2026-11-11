@@ -21,6 +21,7 @@
 #include "QuantizationLayer.h"
 #include "Relu.h"
 #include "Rounding.h"
+#include "ScaleCanon.h"
 #include "SerialWire.h"
 #include "Serialize.h"
 #include "SerializeInternal.h"
@@ -189,7 +190,7 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
         break;
     case SYM_INT32: {
         symInt32QConfig_t *symIntQC = q->qConfig;
-        serialWriteF32LE(symIntQC->scale, f);
+        serialWriteF32LE(loadCanonScale(&symIntQC->scale), f);
         serialWriteU8((uint8_t)symIntQC->roundingMode, f);
         serialWriteU8(symIntQC->qMaxBits, f);
         break;
@@ -206,7 +207,7 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
         serialWriteSizeAsU32LE(symQC->numGroups, f);
         serialWriteSizeAsU32LE(symQC->groupSize, f);
         for (size_t g = 0; g < symQC->numGroups; g++) {
-            serialWriteF32LE(symQC->scales[g], f);
+            serialWriteF32LE(loadCanonScale(&symQC->scales[g]), f);
         }
         serialWriteU8(symQC->qBits, f);
         serialWriteU8((uint8_t)symQC->roundingMode, f);
@@ -226,7 +227,7 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
         serialWriteSizeAsU32LE(asymQC->numGroups, f);
         serialWriteSizeAsU32LE(asymQC->groupSize, f);
         for (size_t g = 0; g < asymQC->numGroups; g++) {
-            serialWriteF32LE(asymQC->scales[g], f);
+            serialWriteF32LE(loadCanonScale(&asymQC->scales[g]), f);
         }
         for (size_t g = 0; g < asymQC->numGroups; g++) {
             serialWriteU16LE(asymQC->zeroPoints[g], f);

@@ -43,6 +43,7 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "TestScale.h"
 #include "unity.h"
 
 void setUp(void) {}
@@ -1005,7 +1006,7 @@ void testTableInitExitsOnAnInputRankAboveTheRankField(void) {
 }
 
 void testTableInitExitsOnAnUnsupportedWireDtype(void) {
-    float scale = 1.f;
+    odtScale_t scale = odtTestScale(1.f);
     symQConfig_t symQc = {
         .scales = &scale, .numGroups = 1, .groupSize = 0, .roundingMode = HALF_AWAY, .qBits = 8};
     quantization_t symQ = {.type = SYM, .qConfig = &symQc};
@@ -1108,7 +1109,7 @@ void testAWidthNarrowedAfterSetupIsTrustedAsTheCallersResponsibility(void) {
 /* The borrowed ACT 0 may be any dtype, packed ones included;
  * its bytes are exact for the checker's disjointness test. */
 void testTableInitAcceptsAPackedBorrowedInputAndSizesItExactly(void) {
-    float scale = 1.f;
+    odtScale_t scale = odtTestScale(1.f);
     uint16_t zeroPoint = 0;
     symQConfig_t symQc = {
         .scales = &scale, .numGroups = 1, .groupSize = 0, .roundingMode = HALF_AWAY, .qBits = 4};
@@ -1360,11 +1361,11 @@ void testBindRederivesSymQMaxBitsAndResetsScale(void) {
     symInt32QConfig_t *slabQc = rematActHdr(t, 1)->quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8(8, slabQc->qMaxBits);
 
-    slabQc->scale = 0.25f; /* a producer's OUT_WRITE epilogue */
-    symQc.qMaxBits = 16;   /* key-preserving template edit between calls */
+    slabQc->scale = odtTestScale(0.25f); /* a producer's OUT_WRITE epilogue */
+    symQc.qMaxBits = 16;                 /* key-preserving template edit between calls */
     rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x);
     TEST_ASSERT_EQUAL_UINT8(16, slabQc->qMaxBits);
-    TEST_ASSERT_EQUAL_FLOAT(1.0f, slabQc->scale);
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, odtScaleToFloat(slabQc->scale));
 
     rematWireTableFree(t);
     freeModel(model, 1);
@@ -1476,7 +1477,7 @@ void testBindCarriesSymQMaxBitsOntoTheFlattenWire(void) {
 /* A packed borrowed input re-quantized between calls (8 -> 4 bits) is a
  * config edit, not a key change; the checker sizes ACT 0 from the live input. */
 void testBindFollowsTheLivePackedInputBytes(void) {
-    float scale = 1.f;
+    odtScale_t scale = odtTestScale(1.f);
     symQConfig_t inputQc = {
         .scales = &scale, .numGroups = 1, .groupSize = 0, .roundingMode = HALF_AWAY, .qBits = 8};
     quantization_t inputQ = {.type = SYM, .qConfig = &inputQc};
@@ -2215,12 +2216,12 @@ void testWireBindInheritedSymTakesConfigNotScale(void) {
     uint32_t seed[4];
     rematWireBind(t, 2, (uint8_t *)act2);
     symInt32QConfig_t *act2Qc = rematActHdr(t, 2)->quantization->qConfig;
-    act2Qc->scale = 0.25f;
+    act2Qc->scale = odtTestScale(0.25f);
     rematWireBind(t, rematGradId(t, 2), (uint8_t *)seed);
     symInt32QConfig_t *seedQc = rematGradHdr(t, 2)->quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8(10, seedQc->qMaxBits);
     TEST_ASSERT_EQUAL_INT(SR_HALF_AWAY, seedQc->roundingMode);
-    TEST_ASSERT_EQUAL_FLOAT(1.0f, seedQc->scale);
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, odtScaleToFloat(seedQc->scale));
     rematWireTableFree(t);
     freeModel(model, 2);
 }

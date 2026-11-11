@@ -13,6 +13,7 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "TestScale.h"
 #include "unity.h"
 
 /* Compile-time contract: initTensor takes shape_t *, quantization_t *,
@@ -806,7 +807,8 @@ void testGetQLikeSymPreservesWidthAndRoundingResetsScale(void) {
      * reset to 1.f — a fresh clone is an ungridded zero-state. Mutation guard:
      * re-removing the SYM arm exits the run ("Unknown QType"). */
     quantization_t *src = quantizationInitSym(6, SR_HALF_AWAY);
-    ((symQConfig_t *)src->qConfig)->scales[0] = 0.25f; /* carried scale must NOT be cloned */
+    ((symQConfig_t *)src->qConfig)->scales[0] =
+        odtTestScale(0.25f); /* carried scale must NOT be cloned */
     quantization_t *like = getQLike(src);
 
     qtype_t likeType = like->type;
@@ -818,7 +820,7 @@ void testGetQLikeSymPreservesWidthAndRoundingResetsScale(void) {
     symQConfig_t *likeQC = (symQConfig_t *)like->qConfig;
     uint8_t likeQBits = likeQC->qBits;
     roundingMode_t likeRoundingMode = likeQC->roundingMode;
-    float likeScale = likeQC->scales[0];
+    float likeScale = odtScaleToFloat(likeQC->scales[0]);
     freeQuantization(src);
     freeQuantization(like);
 
@@ -839,12 +841,12 @@ void testGetQLikeSymDeepCopiesScalesArray(void) {
     quantization_t *src = quantizationInitSym(6, SR_HALF_AWAY);
     quantization_t *like = getQLike(src);
 
-    float *srcScales = ((symQConfig_t *)src->qConfig)->scales;
-    float *likeScales = ((symQConfig_t *)like->qConfig)->scales;
+    odtScale_t *srcScales = ((symQConfig_t *)src->qConfig)->scales;
+    odtScale_t *likeScales = ((symQConfig_t *)like->qConfig)->scales;
 
-    ((symQConfig_t *)src->qConfig)->scales[0] = 0.75f; /* mutate AFTER clone */
+    ((symQConfig_t *)src->qConfig)->scales[0] = odtTestScale(0.75f); /* mutate AFTER clone */
 
-    float likeScaleAfterSrcMutation = likeScales[0];
+    float likeScaleAfterSrcMutation = odtScaleToFloat(likeScales[0]);
 
     freeQuantization(src);
     freeQuantization(like);
@@ -863,7 +865,7 @@ void testFreeQuantizationSymFreesScalesArrayWithoutLeak(void) {
      * this test still "passing" under the default ASan build (no crash),
      * but LSan flags the leak (see report). */
     quantization_t *q = quantizationInitSym(4, HALF_AWAY);
-    float *scales = ((symQConfig_t *)q->qConfig)->scales;
+    odtScale_t *scales = ((symQConfig_t *)q->qConfig)->scales;
 
     freeQuantization(q);
 
@@ -933,11 +935,11 @@ void testInitTensorValidatesGroupedSymShape(void) {
 
 void testGetQLikeSymPreservesGroups(void) {
     quantization_t *src = quantizationInitSymGrouped(4, HALF_AWAY, 2, 5);
-    ((symQConfig_t *)src->qConfig)->scales[1] = 0.25f;
+    ((symQConfig_t *)src->qConfig)->scales[1] = odtTestScale(0.25f);
     quantization_t *like = getQLike(src);
     symQConfig_t *likeQC = like->qConfig;
     size_t ng = likeQC->numGroups, gs = likeQC->groupSize;
-    float s1 = likeQC->scales[1];
+    float s1 = odtScaleToFloat(likeQC->scales[1]);
     int distinct = likeQC->scales != ((symQConfig_t *)src->qConfig)->scales;
     freeQuantization(like);
     freeQuantization(src);
@@ -986,7 +988,7 @@ void testGetQLikeAsymPreservesWidthAndRoundingResetsGrid(void) {
      * code 0 decode to exactly 0.0, the zero-grad reset state). */
     quantization_t *src = quantizationInitAsym(5, SR_HALF_AWAY);
     asymQConfig_t *srcQC = src->qConfig;
-    srcQC->scales[0] = 0.25f; /* carried grid must NOT be cloned */
+    srcQC->scales[0] = odtTestScale(0.25f); /* carried grid must NOT be cloned */
     srcQC->zeroPoints[0] = 7;
     quantization_t *like = getQLike(src);
 
@@ -996,7 +998,7 @@ void testGetQLikeAsymPreservesWidthAndRoundingResetsGrid(void) {
     roundingMode_t likeRoundingMode = likeQC->roundingMode;
     size_t likeNumGroups = likeQC->numGroups;
     size_t likeGroupSize = likeQC->groupSize;
-    float likeScale = likeQC->scales[0];
+    float likeScale = odtScaleToFloat(likeQC->scales[0]);
     uint16_t likeZp = likeQC->zeroPoints[0];
     freeQuantization(src);
     freeQuantization(like);
@@ -1018,18 +1020,18 @@ void testGetQLikeAsymGroupedDeepCopiesGridValues(void) {
      * distinctness asserts (and the mutate-after-clone probe) FAIL. */
     quantization_t *src = quantizationInitAsymGrouped(4, HALF_AWAY, 2, 5);
     asymQConfig_t *srcQC = src->qConfig;
-    srcQC->scales[1] = 0.25f;
+    srcQC->scales[1] = odtTestScale(0.25f);
     srcQC->zeroPoints[1] = 9;
     quantization_t *like = getQLike(src);
     asymQConfig_t *likeQC = like->qConfig;
     size_t ng = likeQC->numGroups, gs = likeQC->groupSize;
-    float s1 = likeQC->scales[1];
+    float s1 = odtScaleToFloat(likeQC->scales[1]);
     uint16_t z1 = likeQC->zeroPoints[1];
     int scalesDistinct = likeQC->scales != srcQC->scales;
     int zpsDistinct = likeQC->zeroPoints != srcQC->zeroPoints;
-    srcQC->scales[1] = 0.75f; /* mutate AFTER clone */
+    srcQC->scales[1] = odtTestScale(0.75f); /* mutate AFTER clone */
     srcQC->zeroPoints[1] = 3;
-    float s1AfterSrcMutation = likeQC->scales[1];
+    float s1AfterSrcMutation = odtScaleToFloat(likeQC->scales[1]);
     uint16_t z1AfterSrcMutation = likeQC->zeroPoints[1];
     freeQuantization(like);
     freeQuantization(src);

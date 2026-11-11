@@ -29,6 +29,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "TestScale.h"
 #include "expected_bfp_layer_forward.h"
 #include "expected_linear_grouped_asym.h"
 #include "unity.h"
@@ -871,7 +872,7 @@ void testLinearBackwardPackedSymWeightGradFixedScaleFirstStore(void) {
     symQConfig_t *gradQC = (symQConfig_t *)weightsGrad->quantization->qConfig;
     bool gradTypeIsSym = (weightsGrad->quantization->type == SYM);
     uint8_t gradQBits = gradQC->qBits;
-    float scaleAfterCall1 = gradQC->scales[0];
+    float scaleAfterCall1 = odtScaleToFloat(gradQC->scales[0]);
 
     int32_t mant1[6];
     symTestUnpackSignExtend(weightsGrad->data, gradQC->qBits, mant1, numberOfWeights);
@@ -893,7 +894,7 @@ void testLinearBackwardPackedSymWeightGradFixedScaleFirstStore(void) {
     tensor_t *loss2 = initTensor(getShapeLike(loss->shape), quantizationInitFloat(), NULL);
     tensorFillFromFloatBuffer(loss2, (float[]){4.f, 3.f}, 2);
     linearBackward(linearLayer, forwardInput, loss2, propLoss, NULL);
-    float scaleAfterCall2 = gradQC->scales[0];
+    float scaleAfterCall2 = odtScaleToFloat(gradQC->scales[0]);
 
     freeTensor(loss2);
     freeLinearLayer(linearLayer);
@@ -1851,7 +1852,7 @@ static void linearSrForwardUnder(layer_t *layer, tensor_t *input, uint64_t seed,
     linearForward(layer, input, output, &exec);
 
     memcpy(codes, output->data, LINEAR_PURITY_OUT * sizeof(int32_t));
-    *scale = ((symInt32QConfig_t *)output->quantization->qConfig)->scale;
+    *scale = odtScaleToFloat(((symInt32QConfig_t *)output->quantization->qConfig)->scale);
     freeTensor(output);
 }
 
@@ -2385,7 +2386,7 @@ static layer_t *buildGroupedFixtureLayer(quantization_t *q, tensor_t **inputOut)
     byteConversion((uint8_t *)kGroupedWMantissas, 32, weightsParam->data, 8, 18);
     symQConfig_t *weightQC = weightsParam->quantization->qConfig;
     for (size_t g = 0; g < 3; g++) {
-        weightQC->scales[g] = kGroupedWScales[g];
+        weightQC->scales[g] = odtTestScale(kGroupedWScales[g]);
     }
     parameter_t *weights = parameterInit(weightsParam, NULL);
 
@@ -2399,7 +2400,8 @@ static layer_t *buildGroupedFixtureLayer(quantization_t *q, tensor_t **inputOut)
     for (size_t i = 0; i < 3; i++) {
         ((int32_t *)biasParam->data)[i] = kGroupedBiasMantissas[i];
     }
-    ((symInt32QConfig_t *)biasParam->quantization->qConfig)->scale = kGroupedBiasScale;
+    ((symInt32QConfig_t *)biasParam->quantization->qConfig)->scale =
+        odtTestScale(kGroupedBiasScale);
     parameter_t *bias = parameterInit(biasParam, NULL);
 
     size_t *inputDims = reserveMemory(2 * sizeof(size_t));
@@ -2413,7 +2415,7 @@ static layer_t *buildGroupedFixtureLayer(quantization_t *q, tensor_t **inputOut)
     for (size_t i = 0; i < 12; i++) {
         ((int32_t *)input->data)[i] = kGroupedAMantissas[i];
     }
-    ((symInt32QConfig_t *)input->quantization->qConfig)->scale = kGroupedAScale;
+    ((symInt32QConfig_t *)input->quantization->qConfig)->scale = odtTestScale(kGroupedAScale);
     *inputOut = input;
 
     return buildBorrowedLinearLayer(weights, bias, q);
@@ -2578,7 +2580,7 @@ static void runGroupedDxBackward(quantization_t *mathQ, quantization_t *wireQ,
     for (size_t i = 0; i < 6; i++) {
         ((int32_t *)loss->data)[i] = kGroupedDxLossMantissas[i];
     }
-    ((symInt32QConfig_t *)loss->quantization->qConfig)->scale = kGroupedDxLossScale;
+    ((symInt32QConfig_t *)loss->quantization->qConfig)->scale = odtTestScale(kGroupedDxLossScale);
 
     size_t *propLossDims = reserveMemory(2 * sizeof(size_t));
     propLossDims[0] = 2;
@@ -2686,7 +2688,7 @@ static layer_t *buildGroupedAsymFixtureLayer(quantization_t *q, tensor_t **input
                    kLinAsymWCodes_len);
     asymQConfig_t *weightQC = weightsParam->quantization->qConfig;
     for (size_t g = 0; g < (size_t)kLinAsymNumGroups; g++) {
-        weightQC->scales[g] = kLinAsymWScales[g];
+        weightQC->scales[g] = odtTestScale(kLinAsymWScales[g]);
         weightQC->zeroPoints[g] = (uint16_t)kLinAsymWZps[g];
     }
     parameter_t *weights = parameterInit(weightsParam, NULL);
@@ -2701,7 +2703,8 @@ static layer_t *buildGroupedAsymFixtureLayer(quantization_t *q, tensor_t **input
     for (size_t i = 0; i < 3; i++) {
         ((int32_t *)biasParam->data)[i] = kLinAsymBiasMantissas[i];
     }
-    ((symInt32QConfig_t *)biasParam->quantization->qConfig)->scale = kLinAsymBiasScale;
+    ((symInt32QConfig_t *)biasParam->quantization->qConfig)->scale =
+        odtTestScale(kLinAsymBiasScale);
     parameter_t *bias = parameterInit(biasParam, NULL);
 
     size_t *inputDims = reserveMemory(2 * sizeof(size_t));
@@ -2715,7 +2718,7 @@ static layer_t *buildGroupedAsymFixtureLayer(quantization_t *q, tensor_t **input
     for (size_t i = 0; i < 12; i++) {
         ((int32_t *)input->data)[i] = kLinAsymAMantissas[i];
     }
-    ((symInt32QConfig_t *)input->quantization->qConfig)->scale = kLinAsymAScale;
+    ((symInt32QConfig_t *)input->quantization->qConfig)->scale = odtTestScale(kLinAsymAScale);
     *inputOut = input;
 
     return buildBorrowedLinearLayer(weights, bias, q);
@@ -2838,7 +2841,7 @@ void testLinearForwardGroupedAsymEqualScalesEqualZpBitIdenticalToPerTensor(void)
     byteConversion((uint8_t *)codes, 32, groupedWParam->data, 8, 18);
     asymQConfig_t *groupedWQC = groupedWParam->quantization->qConfig;
     for (size_t g = 0; g < 3; g++) {
-        groupedWQC->scales[g] = commonScale;
+        groupedWQC->scales[g] = odtTestScale(commonScale);
         groupedWQC->zeroPoints[g] = kCommonZp;
     }
     parameter_t *groupedWeights = parameterInit(groupedWParam, NULL);
@@ -2854,7 +2857,7 @@ void testLinearForwardGroupedAsymEqualScalesEqualZpBitIdenticalToPerTensor(void)
     tensor_t *scalarWParam = initTensor(swShape, quantizationInitAsym(8, HALF_AWAY), NULL);
     byteConversion((uint8_t *)codes, 32, scalarWParam->data, 8, 18);
     asymQConfig_t *scalarWQC = scalarWParam->quantization->qConfig;
-    scalarWQC->scales[0] = commonScale;
+    scalarWQC->scales[0] = odtTestScale(commonScale);
     scalarWQC->zeroPoints[0] = kCommonZp;
     parameter_t *scalarWeights = parameterInit(scalarWParam, NULL);
 
@@ -2873,7 +2876,8 @@ void testLinearForwardGroupedAsymEqualScalesEqualZpBitIdenticalToPerTensor(void)
         for (size_t i = 0; i < 3; i++) {
             ((int32_t *)biasParam->data)[i] = kGroupedBiasMantissas[i];
         }
-        ((symInt32QConfig_t *)biasParam->quantization->qConfig)->scale = kGroupedBiasScale;
+        ((symInt32QConfig_t *)biasParam->quantization->qConfig)->scale =
+            odtTestScale(kGroupedBiasScale);
         parameter_t *bias = parameterInit(biasParam, NULL);
 
         size_t *inputDims = reserveMemory(2 * sizeof(size_t));
@@ -2887,7 +2891,7 @@ void testLinearForwardGroupedAsymEqualScalesEqualZpBitIdenticalToPerTensor(void)
         for (size_t i = 0; i < 12; i++) {
             ((int32_t *)input->data)[i] = kGroupedAMantissas[i];
         }
-        ((symInt32QConfig_t *)input->quantization->qConfig)->scale = kGroupedAScale;
+        ((symInt32QConfig_t *)input->quantization->qConfig)->scale = odtTestScale(kGroupedAScale);
 
         layer_t *linearLayer = buildBorrowedLinearLayer(weightsPerRun[run], bias, testQ);
 
@@ -2940,7 +2944,7 @@ void testLinearBackwardGroupedAsymDxMatchesGold(void) {
     for (size_t i = 0; i < 6; i++) {
         ((int32_t *)loss->data)[i] = kLinAsymDxLossMantissas[i];
     }
-    ((symInt32QConfig_t *)loss->quantization->qConfig)->scale = kLinAsymDxLossScale;
+    ((symInt32QConfig_t *)loss->quantization->qConfig)->scale = odtTestScale(kLinAsymDxLossScale);
 
     size_t *propLossDims = reserveMemory(2 * sizeof(size_t));
     propLossDims[0] = 2;
@@ -3115,7 +3119,7 @@ void testLinearForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer(void) {
         byteConversion((uint8_t *)kGroupedWMantissas, 32, weightsParam->data, 8, 18);
         symQConfig_t *weightQC = weightsParam->quantization->qConfig;
         for (size_t g = 0; g < 3; g++) {
-            weightQC->scales[g] = 0.25f;
+            weightQC->scales[g] = odtTestScale(0.25f);
         }
         parameter_t *weights = parameterInit(weightsParam, NULL);
 
@@ -3130,7 +3134,7 @@ void testLinearForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer(void) {
         for (size_t i = 0; i < 12; i++) {
             ((int32_t *)input->data)[i] = kGroupedAMantissas[i];
         }
-        ((symInt32QConfig_t *)input->quantization->qConfig)->scale = 0.5f;
+        ((symInt32QConfig_t *)input->quantization->qConfig)->scale = odtTestScale(0.5f);
 
         layer_t *linearLayer = buildBorrowedLinearLayer(weights, NULL, symQ);
 
@@ -3732,7 +3736,7 @@ void testLinearForwardGroupedAsymWideMantissaAbortsInsteadOfWrapping(void) {
     memset(weightsParam->data, 0, (IN * 12 + 7) / 8); /* all codes 0 */
     asymQConfig_t *weightQC = weightsParam->quantization->qConfig;
     for (size_t g = 0; g < GROUPS; g++) {
-        weightQC->scales[g] = 1.f;
+        weightQC->scales[g] = odtTestScale(1.f);
         weightQC->zeroPoints[g] = 4095; /* mantissa = 0 - 4095 */
     }
     parameter_t *weights = parameterInit(weightsParam, NULL);
@@ -3748,7 +3752,7 @@ void testLinearForwardGroupedAsymWideMantissaAbortsInsteadOfWrapping(void) {
     for (size_t i = 0; i < IN; i++) {
         ((int32_t *)input->data)[i] = -2047;
     }
-    ((symInt32QConfig_t *)input->quantization->qConfig)->scale = 1.f;
+    ((symInt32QConfig_t *)input->quantization->qConfig)->scale = odtTestScale(1.f);
 
     quantization_t *q = quantizationInitSymInt32(HALF_AWAY);
     layer_t *linearLayer = buildBorrowedLinearLayer(weights, NULL, q);
@@ -3785,7 +3789,7 @@ static tensor_t *symInt32RowOf(size_t n, int32_t code) {
     for (size_t i = 0; i < n; i++) {
         ((int32_t *)t->data)[i] = code;
     }
-    ((symInt32QConfig_t *)t->quantization->qConfig)->scale = 1.f;
+    ((symInt32QConfig_t *)t->quantization->qConfig)->scale = odtTestScale(1.f);
     return t;
 }
 
@@ -3794,7 +3798,7 @@ static tensor_t *asymRowOfZeroCodes(size_t n, uint8_t qBits, uint16_t zp) {
     tensor_t *t = initTensor(shape2(1, n), quantizationInitAsym(qBits, HALF_AWAY), NULL);
     memset(t->data, 0, (n * qBits + 7) / 8);
     asymQConfig_t *qc = t->quantization->qConfig;
-    qc->scales[0] = 1.f;
+    qc->scales[0] = odtTestScale(1.f);
     qc->zeroPoints[0] = zp;
     return t;
 }
@@ -3909,7 +3913,7 @@ static tensor_t *symSumLoss(size_t batch, int32_t code, uint8_t bits) {
     for (size_t i = 0; i < batch; i++) {
         ((int32_t *)t->data)[i] = code;
     }
-    ((symInt32QConfig_t *)t->quantization->qConfig)->scale = 1.f;
+    ((symInt32QConfig_t *)t->quantization->qConfig)->scale = odtTestScale(1.f);
     return t;
 }
 

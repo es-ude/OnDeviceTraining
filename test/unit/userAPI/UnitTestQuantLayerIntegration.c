@@ -239,7 +239,9 @@ void testInferenceLinearSymThenQuantOutputsInt16RangeMantissas(void) {
     bool dequantFinite = true;
     int32_t maxAbsMantissa = 0;
     float scale =
-        predictedNotNull ? ((symInt32QConfig_t *)predicted->quantization->qConfig)->scale : NAN;
+        predictedNotNull
+            ? odtScaleToFloat(((symInt32QConfig_t *)predicted->quantization->qConfig)->scale)
+            : NAN;
     for (size_t i = 0; predictedNotNull && i < 6; i++) {
         int32_t m = ((int32_t *)predicted->data)[i];
         dequantFinite = dequantFinite && isfinite((float)m * scale);
@@ -295,7 +297,8 @@ static const float LABEL_VALS[4] = {1.f, -1.f, 0.5f, 2.f};
 
 static void dequantParam(parameter_t *p, float *out, size_t n, bool sym) {
     if (sym) {
-        float scale = ((symInt32QConfig_t *)p->param->quantization->qConfig)->scale;
+        float scale =
+            odtScaleToFloat(((symInt32QConfig_t *)p->param->quantization->qConfig)->scale);
         for (size_t i = 0; i < n; i++) {
             out[i] = (float)((int32_t *)p->param->data)[i] * scale;
         }

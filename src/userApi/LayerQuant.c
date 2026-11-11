@@ -5,6 +5,7 @@
 
 #include "Common.h"
 #include "LayerQuant.h"
+#include "ScaleCanon.h"
 #include "StorageApi.h"
 
 void layerQuantInitUniform(layerQuant_t *lq, quantization_t *q) {
@@ -79,8 +80,8 @@ quantization_t *deepCopyQuantization(quantization_t *src) {
              * src's own numGroups (PR1: always 1), values copied. */
             symQConfig_t *srcQC = src->qConfig;
             symQConfig_t *dstQC = dst->qConfig;
-            float *scales = reserveMemory(srcQC->numGroups * sizeof(float));
-            memcpy(scales, srcQC->scales, srcQC->numGroups * sizeof(float));
+            odtScale_t *scales = reserveMemory(srcQC->numGroups * sizeof(*scales));
+            copyCanonScales(scales, srcQC->scales, srcQC->numGroups);
             dstQC->scales = scales;
         }
         if (src->type == ASYM) {
@@ -88,8 +89,8 @@ quantization_t *deepCopyQuantization(quantization_t *src) {
              * fresh owned blocks for scales AND zeroPoints. */
             asymQConfig_t *srcQC = src->qConfig;
             asymQConfig_t *dstQC = dst->qConfig;
-            float *scales = reserveMemory(srcQC->numGroups * sizeof(float));
-            memcpy(scales, srcQC->scales, srcQC->numGroups * sizeof(float));
+            odtScale_t *scales = reserveMemory(srcQC->numGroups * sizeof(*scales));
+            copyCanonScales(scales, srcQC->scales, srcQC->numGroups);
             dstQC->scales = scales;
             uint16_t *zeroPoints = reserveMemory(srcQC->numGroups * sizeof(uint16_t));
             memcpy(zeroPoints, srcQC->zeroPoints, srcQC->numGroups * sizeof(uint16_t));

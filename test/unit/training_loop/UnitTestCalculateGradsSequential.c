@@ -1377,7 +1377,7 @@ static void assertSameSymWire(tensor_t *expected, tensor_t *actual, const char *
                                      what);
     TEST_ASSERT_EQUAL_MEMORY_MESSAGE(&((symInt32QConfig_t *)expected->quantization->qConfig)->scale,
                                      &((symInt32QConfig_t *)actual->quantization->qConfig)->scale,
-                                     sizeof(float), what);
+                                     sizeof(odtScale_t), what);
 }
 
 /* Draws depend on the call key and the layer's index only: draws interposed

@@ -60,3 +60,9 @@ target_include_directories(odt_test_bfp_scatter_ref INTERFACE ${CMAKE_CURRENT_SO
 # the layer/tensor libraries every layer test already lists.
 add_library(odt_test_dag_fixtures INTERFACE)
 target_include_directories(odt_test_dag_fixtures INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# Canonical fixture scales (TestScale.h): odtTestScale(x) converts an exact
+# canonical float to odtScale_t and fails the test otherwise. Header-only; a
+# consumer also links DyadicScale and unity.
+add_library(odt_test_scale INTERFACE)
+target_include_directories(odt_test_scale INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)

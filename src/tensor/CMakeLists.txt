@@ -18,6 +18,7 @@ add_library(Quantization
 )
 target_include_directories(Quantization PUBLIC include)
 target_link_libraries(Quantization PRIVATE
+        DyadicScale
         Common
         Rounding
         StorageApi
@@ -42,6 +43,7 @@ add_library(Tensor
 )
 target_include_directories(Tensor PUBLIC include)
 target_link_libraries(Tensor PRIVATE
+        DyadicScale
         DTypes
         DataStorage
         MinMax

@@ -2,6 +2,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Quantization
         MORE_LIBS
+        odt_test_scale
+        DyadicScale
         Tensor
         Rounding
         Quantization
@@ -12,6 +14,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Tensor
         MORE_LIBS
+        odt_test_scale
+        DyadicScale
         Rounding
         Quantization
         StorageApi
@@ -22,6 +26,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         TensorConversion
         MORE_LIBS
+        odt_test_scale
         DyadicScale
         Tensor
         Rounding
@@ -81,6 +86,8 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         TensorApi
         MORE_LIBS
+        odt_test_scale
+        DyadicScale
         Tensor
         Rounding
         Quantization

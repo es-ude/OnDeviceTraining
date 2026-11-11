@@ -138,7 +138,7 @@ static void initBufferInput(tensor_t *input, tensor_t *buffer) {
         symInt32QConfig_t *currentQC = currentQ->qConfig;
         symInt32QConfig_t *symInt32QC = reserveMemory(sizeof(symInt32QConfig_t));
         symInt32QC->roundingMode = currentQC->roundingMode;
-        storeCanonScale(&symInt32QC->scale, currentQC->scale);
+        storeCanonScale(&symInt32QC->scale, loadCanonScale(&currentQC->scale));
         symInt32QC->qMaxBits = currentQC->qMaxBits;
         q->qConfig = symInt32QC;
         break;

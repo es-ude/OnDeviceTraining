@@ -112,7 +112,8 @@ void divSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
 
     writeInt32ArrayToByteArray(aNumberOfValues, output, outputTensor->data);
     symInt32QConfig_t *outputConfig = outputTensor->quantization->qConfig;
-    storeCanonScale(&outputConfig->scale, canonQuotientScale(aConfig->scale, bConfig->scale));
+    storeCanonScale(&outputConfig->scale, canonQuotientScale(loadCanonScale(&aConfig->scale),
+                                                             loadCanonScale(&bConfig->scale)));
 }
 
 void divSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor) {
@@ -139,7 +140,8 @@ void divSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor) {
     symInt32QConfig_t *aConfig = aTensor->quantization->qConfig;
     symInt32QConfig_t *bConfig = bTensor->quantization->qConfig;
 
-    storeCanonScale(&aConfig->scale, canonQuotientScale(aConfig->scale, bConfig->scale));
+    storeCanonScale(&aConfig->scale, canonQuotientScale(loadCanonScale(&aConfig->scale),
+                                                        loadCanonScale(&bConfig->scale)));
 }
 
 size_t getDivInstructionCounter() {

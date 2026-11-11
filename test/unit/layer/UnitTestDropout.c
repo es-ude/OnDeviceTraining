@@ -19,6 +19,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "TestScale.h"
 #include "expected_bfp_dropout.h"
 #include "unity.h"
 
@@ -129,7 +130,7 @@ void testForwardEvalIdentitySymInt32(void) {
     for (size_t i = 0; i < n; i++) {
         ((int32_t *)symIn->data)[i] = inInts[i];
     }
-    ((symInt32QConfig_t *)symIn->quantization->qConfig)->scale = 0.125f;
+    ((symInt32QConfig_t *)symIn->quantization->qConfig)->scale = odtTestScale(0.125f);
 
     size_t *odims = reserveMemory(sizeof(size_t));
     odims[0] = n;
@@ -153,7 +154,7 @@ void testForwardEvalIdentitySymInt32(void) {
     for (size_t i = 0; i < n; i++) {
         capturedInts[i] = ((int32_t *)symOut->data)[i];
     }
-    float outScale = ((symInt32QConfig_t *)symOut->quantization->qConfig)->scale;
+    float outScale = odtScaleToFloat(((symInt32QConfig_t *)symOut->quantization->qConfig)->scale);
 
     freeQuantization(bq);
     freeQuantization(fq);
@@ -374,7 +375,7 @@ void testForwardTrainingSymInt32ScaleFold(void) {
     for (size_t i = 0; i < n; i++) {
         ((int32_t *)symIn->data)[i] = inInts[i];
     }
-    ((symInt32QConfig_t *)symIn->quantization->qConfig)->scale = 0.125f;
+    ((symInt32QConfig_t *)symIn->quantization->qConfig)->scale = odtTestScale(0.125f);
 
     size_t *odims = reserveMemory(sizeof(size_t));
     odims[0] = n;
@@ -402,7 +403,7 @@ void testForwardTrainingSymInt32ScaleFold(void) {
     for (size_t i = 0; i < n; i++) {
         capturedInts[i] = ((int32_t *)symOut->data)[i];
     }
-    float outScale = ((symInt32QConfig_t *)symOut->quantization->qConfig)->scale;
+    float outScale = odtScaleToFloat(((symInt32QConfig_t *)symOut->quantization->qConfig)->scale);
 
     freeQuantization(bq);
     freeQuantization(fq);
@@ -687,7 +688,7 @@ void testBackwardSymInt32UsesMaskAndScaleFold(void) {
     for (size_t i = 0; i < n; i++) {
         ((int32_t *)loss->data)[i] = gradInts[i];
     }
-    ((symInt32QConfig_t *)loss->quantization->qConfig)->scale = 0.25f;
+    ((symInt32QConfig_t *)loss->quantization->qConfig)->scale = odtTestScale(0.25f);
 
     size_t *pdims = reserveMemory(sizeof(size_t));
     pdims[0] = n;
@@ -714,7 +715,7 @@ void testBackwardSymInt32UsesMaskAndScaleFold(void) {
     for (size_t i = 0; i < n; i++) {
         capturedInts[i] = ((int32_t *)propLoss->data)[i];
     }
-    float outScale = ((symInt32QConfig_t *)propLoss->quantization->qConfig)->scale;
+    float outScale = odtScaleToFloat(((symInt32QConfig_t *)propLoss->quantization->qConfig)->scale);
 
     freeQuantization(bq);
     freeQuantization(fq);
@@ -1283,11 +1284,11 @@ void testDropoutBackwardSymInt32AliasedMatchesDisjoint(void) {
     quantization_t q[4]; /* loss, propLoss, aliased loss, aliased propLoss */
     for (size_t i = 0; i < 4; i++) {
         initSymInt32QConfig(HALF_AWAY, &qc[i]);
-        qc[i].scale = 1.f;
+        qc[i].scale = odtTestScale(1.f);
         initSymInt32Quantization(&qc[i], &q[i]);
     }
-    qc[0].scale = lossScale;
-    qc[2].scale = lossScale;
+    qc[0].scale = odtScaleFromFloat(lossScale, ODT_SCALE_NEAREST);
+    qc[2].scale = odtScaleFromFloat(lossScale, ODT_SCALE_NEAREST);
     tensor_t *mask = buildBoolMask(4);
     fillMaskKeepEven(mask);
     quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
@@ -1320,8 +1321,8 @@ void testDropoutBackwardSymInt32AliasedMatchesDisjoint(void) {
     int32_t expected[4] = {5, 0, 7, 0};
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, disjointCodes, 4);
     TEST_ASSERT_EQUAL_MEMORY(disjointCodes, block, sizeof block);
-    TEST_ASSERT_EQUAL_MEMORY(&qc[1].scale, &qc[3].scale, sizeof(float));
-    TEST_ASSERT_EQUAL_MEMORY(&lossScale, &qc[2].scale, sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(&qc[1].scale, &qc[3].scale, sizeof(odtScale_t));
+    TEST_ASSERT_EQUAL_MEMORY(&lossScale, &(float){odtScaleToFloat(qc[2].scale)}, sizeof(float));
 }
 
 /* The backward's BFP bridge re-reads the source in its second pass, so it
@@ -1384,7 +1385,7 @@ static void assertSymInt32FoldFor(float p) {
     for (size_t i = 0; i < n; i++) {
         ((int32_t *)in->data)[i] = (int32_t)(i * 7) - 9;
     }
-    ((symInt32QConfig_t *)in->quantization->qConfig)->scale = inScale;
+    ((symInt32QConfig_t *)in->quantization->qConfig)->scale = odtTestScale(inScale);
 
     tensor_t *mask = buildBoolMask(n);
     quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
@@ -1399,10 +1400,10 @@ static void assertSymInt32FoldFor(float p) {
     bernoulliSetFillMaskFn(stubKeepEven);
     dropoutForward(&layer, in, out, NULL);
     bernoulliSetFillMaskFn(saved);
-    float fwdScale = ((symInt32QConfig_t *)out->quantization->qConfig)->scale;
+    float fwdScale = odtScaleToFloat(((symInt32QConfig_t *)out->quantization->qConfig)->scale);
 
     dropoutBackward(&layer, NULL, in, out, NULL);
-    float bwdScale = ((symInt32QConfig_t *)out->quantization->qConfig)->scale;
+    float bwdScale = odtScaleToFloat(((symInt32QConfig_t *)out->quantization->qConfig)->scale);
 
     freeQuantization(bq);
     freeQuantization(fq);

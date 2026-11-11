@@ -24,6 +24,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "TestScale.h"
 #include "unity.h"
 
 #include <ReluApi.h>
@@ -471,7 +472,8 @@ void testSgdZeroGradOnSymInt32GradZeroesMantissasAndResetsScale(void) {
     for (size_t i = 0; i < nW; i++) {
         ((int32_t *)wGrad->data)[i] = 123 + (int32_t)i;
     }
-    ((symInt32QConfig_t *)wGrad->quantization->qConfig)->scale = 0.07f;
+    ((symInt32QConfig_t *)wGrad->quantization->qConfig)->scale =
+        odtScaleFromFloat(0.07f, ODT_SCALE_NEAREST);
 
     layer_t *model[] = {layer};
     quantization_t *momentumQ = quantizationInitFloat();
@@ -488,7 +490,8 @@ void testSgdZeroGradOnSymInt32GradZeroesMantissasAndResetsScale(void) {
             allZero = 0;
         }
     }
-    float scaleAfterZero = ((symInt32QConfig_t *)wGrad->quantization->qConfig)->scale;
+    float scaleAfterZero =
+        odtScaleToFloat(((symInt32QConfig_t *)wGrad->quantization->qConfig)->scale);
 
     /* Prove subsequent accumulation works: load a fresh int mantissa. */
     ((int32_t *)wGrad->data)[0] = 5;
@@ -757,7 +760,8 @@ void testSgdStepSymInt32DoesNotRoundTripGrad(void) {
     ((int32_t *)g->data)[0] = 10;
     ((int32_t *)g->data)[1] = -20;
     ((int32_t *)g->data)[2] = 30;
-    ((symInt32QConfig_t *)g->quantization->qConfig)->scale = 0.05f;
+    ((symInt32QConfig_t *)g->quantization->qConfig)->scale =
+        odtScaleFromFloat(0.05f, ODT_SCALE_NEAREST);
 
     /* Minimal stack optimizer around one parameter; hand-assembled momentum==0
      * optimizer; SYM_INT32 param. sgdStepM's unified momentum==0 fast path reads only
@@ -782,7 +786,7 @@ void testSgdStepSymInt32DoesNotRoundTripGrad(void) {
     int32_t m0 = ((int32_t *)g->data)[0];
     int32_t m1 = ((int32_t *)g->data)[1];
     int32_t m2 = ((int32_t *)g->data)[2];
-    float gScale = ((symInt32QConfig_t *)g->quantization->qConfig)->scale;
+    float gScale = odtScaleToFloat(((symInt32QConfig_t *)g->quantization->qConfig)->scale);
 
     freeParameter(param);
 
@@ -862,7 +866,7 @@ void testSgdZeroGradAsymSubByteZeroesAllPackedBytes(void) {
      * domain) — the config
      * reset asserted below is the fix for the PR2 watch-list item. */
     asymQConfig_t *gAsymQ = g->quantization->qConfig;
-    gAsymQ->scales[0] = 0.42f;
+    gAsymQ->scales[0] = odtScaleFromFloat(0.42f, ODT_SCALE_NEAREST);
     gAsymQ->zeroPoints[0] = 5;
 
     /* Hand-built optimizer: sgdMCreateOptim rejects sub-byte grad storage until
@@ -888,7 +892,7 @@ void testSgdZeroGradAsymSubByteZeroesAllPackedBytes(void) {
     uint8_t b1 = g->data[1];
     uint8_t b2 = g->data[2];
     uint8_t b3 = g->data[3];
-    float scaleAfter = gAsymQ->scales[0];
+    float scaleAfter = odtScaleToFloat(gAsymQ->scales[0]);
     uint16_t zeroPointAfter = gAsymQ->zeroPoints[0];
     freeParameter(param);
 
@@ -922,7 +926,7 @@ void testSgdZeroGradSymSubByteZeroesAllPackedBytesAndResetsScale(void) {
     parameter_t *param = parameterInit(p, g);
     memset(g->data, 0xFF, 4); /* poison all packed grad bytes */
     symQConfig_t *gSymQ = g->quantization->qConfig;
-    gSymQ->scales[0] = 0.42f; /* poison the scale too */
+    gSymQ->scales[0] = odtScaleFromFloat(0.42f, ODT_SCALE_NEAREST); /* poison the scale too */
 
     sgd_t sgd;
     sgdInit(&sgd, 0.1f, 0.0f, 0.0f,
@@ -944,7 +948,7 @@ void testSgdZeroGradSymSubByteZeroesAllPackedBytesAndResetsScale(void) {
     uint8_t b1 = g->data[1];
     uint8_t b2 = g->data[2];
     uint8_t b3 = g->data[3];
-    float scaleAfter = gSymQ->scales[0];
+    float scaleAfter = odtScaleToFloat(gSymQ->scales[0]);
     freeParameter(param);
 
     TEST_ASSERT_EQUAL_UINT8(0, b0);
@@ -1959,7 +1963,7 @@ void testOptimizerClipGradNormSymInt32FoldsCoefIntoScaleMantissasUntouched(void)
     ((int32_t *)g->data)[2] = 30;
     symInt32QConfig_t *gradQ = g->quantization->qConfig;
     const float scaleBefore = 0.05f;
-    gradQ->scale = scaleBefore;
+    gradQ->scale = odtScaleFromFloat(scaleBefore, ODT_SCALE_NEAREST);
 
     parameter_t *params[1] = {param};
     optimizer_t optim = {.parameter = params, .sizeStates = 1, .writeBackRounding = HALF_AWAY};
@@ -1973,7 +1977,7 @@ void testOptimizerClipGradNormSymInt32FoldsCoefIntoScaleMantissasUntouched(void)
     int32_t m0 = ((int32_t *)g->data)[0];
     int32_t m1 = ((int32_t *)g->data)[1];
     int32_t m2 = ((int32_t *)g->data)[2];
-    float scaleAfter = gradQ->scale;
+    float scaleAfter = odtScaleToFloat(gradQ->scale);
 
     freeParameter(param);
 
@@ -2202,7 +2206,7 @@ static tensor_t *buildGroupedSymParam1D(const int32_t *mantissas, const float *s
     byteConversion((uint8_t *)mantissas, 32, t->data, qBits, n);
     symQConfig_t *qc = t->quantization->qConfig;
     for (size_t g = 0; g < numGroups; g++) {
-        qc->scales[g] = scales[g];
+        qc->scales[g] = odtScaleFromFloat(scales[g], ODT_SCALE_NEAREST);
     }
     return t;
 }
@@ -2236,8 +2240,8 @@ void testSgdStepGroupedSymParamMatchesGold(void) {
     /* CAPTURE -> free -> assert (file convention). */
     int32_t mant[6];
     unpackSignExtend(p->data, (size_t)sgdGroupedQBits, 0, mant, 6);
-    float scale0 = ((symQConfig_t *)p->quantization->qConfig)->scales[0];
-    float scale1 = ((symQConfig_t *)p->quantization->qConfig)->scales[1];
+    float scale0 = odtScaleToFloat(((symQConfig_t *)p->quantization->qConfig)->scales[0]);
+    float scale1 = odtScaleToFloat(((symQConfig_t *)p->quantization->qConfig)->scales[1]);
     freeParameter(param);
 
     for (size_t i = 0; i < 6; i++) {
@@ -2283,8 +2287,8 @@ void testSgdStepGroupedSymParamMomentumMatchesGold(void) {
     /* CAPTURE -> free -> assert. */
     int32_t mant[6];
     unpackSignExtend(p->data, (size_t)sgdGroupedQBits, 0, mant, 6);
-    float scale0 = ((symQConfig_t *)p->quantization->qConfig)->scales[0];
-    float scale1 = ((symQConfig_t *)p->quantization->qConfig)->scales[1];
+    float scale0 = odtScaleToFloat(((symQConfig_t *)p->quantization->qConfig)->scales[0]);
+    float scale1 = odtScaleToFloat(((symQConfig_t *)p->quantization->qConfig)->scales[1]);
     float stateOut[6];
     memcpy(stateOut, state->data, sizeof stateOut);
     freeTensor(state);
@@ -2424,7 +2428,7 @@ static tensor_t *buildGroupedAsymParam1D(const int32_t *codes, const float *scal
     byteConversion((uint8_t *)codes, 32, t->data, qBits, n);
     asymQConfig_t *qc = t->quantization->qConfig;
     for (size_t g = 0; g < numGroups; g++) {
-        qc->scales[g] = scales[g];
+        qc->scales[g] = odtScaleFromFloat(scales[g], ODT_SCALE_NEAREST);
         qc->zeroPoints[g] = (uint16_t)zps[g];
     }
     return t;
@@ -2462,8 +2466,8 @@ void testSgdStepGroupedAsymParamMatchesGold(void) {
     int32_t codes[6] = {0};
     byteConversion(p->data, (size_t)sgdGroupedQBits, (uint8_t *)codes, 32, 6);
     asymQConfig_t *qc = p->quantization->qConfig;
-    float scale0 = qc->scales[0];
-    float scale1 = qc->scales[1];
+    float scale0 = odtScaleToFloat(qc->scales[0]);
+    float scale1 = odtScaleToFloat(qc->scales[1]);
     int32_t zp0 = (int32_t)qc->zeroPoints[0];
     int32_t zp1 = (int32_t)qc->zeroPoints[1];
     freeParameter(param);

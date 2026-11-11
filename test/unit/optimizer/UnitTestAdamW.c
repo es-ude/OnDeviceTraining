@@ -22,6 +22,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "TestScale.h"
 #include "unity.h"
 
 #include "expected_adamw.h"
@@ -551,10 +552,10 @@ void testAdamWCreateOptimSymMomentSmoke(void) {
     memcpy(mSFinal, mSDecoded->data, sizeof mSFinal);
     memcpy(vSFinal, vSDecoded->data, sizeof vSFinal);
     memcpy(pSFinal, weightsS->param->data, sizeof pSFinal);
-    float finalMScale =
-        ((symQConfig_t *)optimS->states[0]->stateBuffers[0]->quantization->qConfig)->scales[0];
-    float finalVScale =
-        ((symQConfig_t *)optimS->states[0]->stateBuffers[1]->quantization->qConfig)->scales[0];
+    float finalMScale = odtScaleToFloat(
+        ((symQConfig_t *)optimS->states[0]->stateBuffers[0]->quantization->qConfig)->scales[0]);
+    float finalVScale = odtScaleToFloat(
+        ((symQConfig_t *)optimS->states[0]->stateBuffers[1]->quantization->qConfig)->scales[0]);
 
     int allFinite = 1;
     for (size_t i = 0; i < 32; i++) {
@@ -1094,7 +1095,7 @@ void testAdamWStepGroupedSymParamRunsAndRequantsPerGroup(void) {
     byteConversion((uint8_t *)paramMantissas, 32, p->data, qBits, n);
     symQConfig_t *paramQC = p->quantization->qConfig;
     for (size_t grp = 0; grp < numGroups; grp++) {
-        paramQC->scales[grp] = paramScales[grp];
+        paramQC->scales[grp] = odtScaleFromFloat(paramScales[grp], ODT_SCALE_NEAREST);
     }
     tensor_t *g = gradInitFloat(p, NULL);
     tensorFillFromFloatBuffer(g, gradVals, n);
@@ -1124,8 +1125,8 @@ void testAdamWStepGroupedSymParamRunsAndRequantsPerGroup(void) {
     /* CAPTURE -> free -> assert (file convention). */
     int32_t mant[6];
     unpackSignExtend(p->data, qBits, 0, mant, n);
-    float scale0 = ((symQConfig_t *)p->quantization->qConfig)->scales[0];
-    float scale1 = ((symQConfig_t *)p->quantization->qConfig)->scales[1];
+    float scale0 = odtScaleToFloat(((symQConfig_t *)p->quantization->qConfig)->scales[0]);
+    float scale1 = odtScaleToFloat(((symQConfig_t *)p->quantization->qConfig)->scales[1]);
     float mOut[6], vOut[6];
     memcpy(mOut, m->data, sizeof mOut);
     memcpy(vOut, v->data, sizeof vOut);

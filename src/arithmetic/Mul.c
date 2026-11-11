@@ -123,7 +123,8 @@ void mulSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
     writeInt32ArrayToByteArray(aNumberOfValues, output, outputTensor->data);
     symInt32QConfig_t *outputConfig = outputTensor->quantization->qConfig;
     storeCanonScale(&outputConfig->scale,
-                    canonProductScale(aConfig->scale, bConfig->scale, ODT_SCALE_NEAREST));
+                    canonProductScale(loadCanonScale(&aConfig->scale),
+                                      loadCanonScale(&bConfig->scale), ODT_SCALE_NEAREST));
     outputConfig->qMaxBits = width;
 }
 
@@ -154,7 +155,8 @@ void mulSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor) {
     /* a's config is the output: read both widths before writing it */
     uint8_t width = symProductWidth(aConfig->qMaxBits, bConfig->qMaxBits);
     storeCanonScale(&aConfig->scale,
-                    canonProductScale(aConfig->scale, bConfig->scale, ODT_SCALE_NEAREST));
+                    canonProductScale(loadCanonScale(&aConfig->scale),
+                                      loadCanonScale(&bConfig->scale), ODT_SCALE_NEAREST));
     aConfig->qMaxBits = width;
 }
 

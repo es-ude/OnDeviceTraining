@@ -259,7 +259,7 @@ static void layerNormAffineSymInt32(size_t numNormDims, tensor_t *gamma, tensor_
 
     /* stored product of two stored scales: rounded once from the exact
      * mantissa product; the beta seeds below rescale onto this same value */
-    const float sY = canonProductScale(sNorm, gammaQC->scale, ODT_SCALE_NEAREST);
+    const float sY = canonProductScale(sNorm, loadCanonScale(&gammaQC->scale), ODT_SCALE_NEAREST);
 
     size_t G, N;
     layerNormGroupSizes(output, numNormDims, &G, &N);
@@ -270,8 +270,8 @@ static void layerNormAffineSymInt32(size_t numNormDims, tensor_t *gamma, tensor_
     for (size_t g = 0; g < G; g++) {
         for (size_t j = 0; j < N; j++) {
             size_t off = layerNormPhysOffset(output, numNormDims, g, j);
-            int32_t seed =
-                rescaleIntoAccumulatorScale(betaQ[j], betaQC->scale, sY, outQC->roundingMode, rs);
+            int32_t seed = rescaleIntoAccumulatorScale(betaQ[j], loadCanonScale(&betaQC->scale), sY,
+                                                       outQC->roundingMode, rs);
             out[off] = out[off] * gammaQ[j] + seed;
         }
     }
@@ -308,7 +308,7 @@ static void layerNormForwardSymInt32(layerNormConfig_t *cfg, tensor_t *gamma, te
     symInt32QConfig_t *outQC = output->quantization->qConfig;
     int32_t *in = (int32_t *)input->data;
     int32_t *out = (int32_t *)output->data;
-    float inScale = inQC->scale;
+    float inScale = loadCanonScale(&inQC->scale);
     const float qMax = powf(2, (float)outQC->qMaxBits - 1) - 1;
     const float qMin = -powf(2, (float)outQC->qMaxBits - 1);
 
@@ -687,9 +687,11 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
     int32_t *dyq = (int32_t *)loss->data;
     int32_t *gammaQ = (int32_t *)cfg->gamma->param->data;
     int32_t *dxq = (propLoss != NULL) ? (int32_t *)propLoss->data : NULL;
-    float inScale = ((symInt32QConfig_t *)forwardInput->quantization->qConfig)->scale;
-    float dyScale = ((symInt32QConfig_t *)loss->quantization->qConfig)->scale;
-    float gammaScale = ((symInt32QConfig_t *)cfg->gamma->param->quantization->qConfig)->scale;
+    float inScale =
+        loadCanonScale(&((symInt32QConfig_t *)forwardInput->quantization->qConfig)->scale);
+    float dyScale = loadCanonScale(&((symInt32QConfig_t *)loss->quantization->qConfig)->scale);
+    float gammaScale =
+        loadCanonScale(&((symInt32QConfig_t *)cfg->gamma->param->quantization->qConfig)->scale);
     symInt32QConfig_t *plQC =
         (propLoss != NULL) ? (symInt32QConfig_t *)propLoss->quantization->qConfig : NULL;
 

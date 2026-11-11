@@ -155,8 +155,8 @@ void addSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
     symInt32QConfig_t *bSymInt32QConfig = bTensor->quantization->qConfig;
     symInt32QConfig_t *outputSymInt32QConfig = outputTensor->quantization->qConfig;
 
-    float aScale = aSymInt32QConfig->scale;
-    float bScale = bSymInt32QConfig->scale;
+    float aScale = loadCanonScale(&aSymInt32QConfig->scale);
+    float bScale = loadCanonScale(&bSymInt32QConfig->scale);
 
     if (aScale == bScale) {
         /* read both widths before any config write: the output may alias an operand */

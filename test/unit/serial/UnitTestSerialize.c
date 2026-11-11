@@ -49,6 +49,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorRecord.h"
+#include "TestScale.h"
 #include "unity.h"
 
 /* WIRE-FORMAT PINS (#serial): the serialized layer record's uint8 tag IS the
@@ -593,8 +594,8 @@ static void testRoundTripRelu(void) {
     qtype_t capturedDeserialOutputQType = deserialCfg->outputQ->type;
     symQConfig_t *serialOutputCfg = serialCfg->outputQ->qConfig;
     symQConfig_t *deserialOutputCfg = deserialCfg->outputQ->qConfig;
-    float capturedSerialOutputScale = serialOutputCfg->scales[0];
-    float capturedDeserialOutputScale = deserialOutputCfg->scales[0];
+    float capturedSerialOutputScale = odtScaleToFloat(serialOutputCfg->scales[0]);
+    float capturedDeserialOutputScale = odtScaleToFloat(deserialOutputCfg->scales[0]);
     uint8_t capturedSerialOutputQBits = serialOutputCfg->qBits;
     uint8_t capturedDeserialOutputQBits = deserialOutputCfg->qBits;
     roundingMode_t capturedSerialOutputRM = serialOutputCfg->roundingMode;
@@ -666,8 +667,8 @@ static void testRoundTripSoftmax(void) {
     qtype_t capturedDeserialOutputQType = deserialCfg->outputQ->type;
     symInt32QConfig_t *serialOutputCfg = serialCfg->outputQ->qConfig;
     symInt32QConfig_t *deserialOutputCfg = deserialCfg->outputQ->qConfig;
-    float capturedSerialOutputScale = serialOutputCfg->scale;
-    float capturedDeserialOutputScale = deserialOutputCfg->scale;
+    float capturedSerialOutputScale = odtScaleToFloat(serialOutputCfg->scale);
+    float capturedDeserialOutputScale = odtScaleToFloat(deserialOutputCfg->scale);
     roundingMode_t capturedSerialOutputRM = serialOutputCfg->roundingMode;
     roundingMode_t capturedDeserialOutputRM = deserialOutputCfg->roundingMode;
     uint8_t capturedSerialOutputQMaxBits = serialOutputCfg->qMaxBits;
@@ -1856,8 +1857,8 @@ static void testRoundTripQuantizationLayer(void) {
     qtype_t capturedDeserialOutputQType = deserialCfg->outputQ->type;
     symQConfig_t *serialOutputCfg = serialCfg->outputQ->qConfig;
     symQConfig_t *deserialOutputCfg = deserialCfg->outputQ->qConfig;
-    float capturedSerialOutputScale = serialOutputCfg->scales[0];
-    float capturedDeserialOutputScale = deserialOutputCfg->scales[0];
+    float capturedSerialOutputScale = odtScaleToFloat(serialOutputCfg->scales[0]);
+    float capturedDeserialOutputScale = odtScaleToFloat(deserialOutputCfg->scales[0]);
     uint8_t capturedSerialOutputQBits = serialOutputCfg->qBits;
     uint8_t capturedDeserialOutputQBits = deserialOutputCfg->qBits;
     roundingMode_t capturedSerialOutputRM = serialOutputCfg->roundingMode;
@@ -1867,8 +1868,8 @@ static void testRoundTripQuantizationLayer(void) {
     qtype_t capturedDeserialPropLossQType = deserialCfg->propLossQ->type;
     asymQConfig_t *serialPropLossCfg = serialCfg->propLossQ->qConfig;
     asymQConfig_t *deserialPropLossCfg = deserialCfg->propLossQ->qConfig;
-    float capturedSerialPropLossScale = serialPropLossCfg->scales[0];
-    float capturedDeserialPropLossScale = deserialPropLossCfg->scales[0];
+    float capturedSerialPropLossScale = odtScaleToFloat(serialPropLossCfg->scales[0]);
+    float capturedDeserialPropLossScale = odtScaleToFloat(deserialPropLossCfg->scales[0]);
     uint8_t capturedSerialPropLossQBits = serialPropLossCfg->qBits;
     uint8_t capturedDeserialPropLossQBits = deserialPropLossCfg->qBits;
     roundingMode_t capturedSerialPropLossRM = serialPropLossCfg->roundingMode;
@@ -1954,8 +1955,8 @@ static void testRoundTripLinearSymPackedWeights(void) {
     memcpy(deserialWeightBytes, deserialWeightsParam->data, 3);
     symQConfig_t *serialWeightsQC = serialWeightsParam->quantization->qConfig;
     symQConfig_t *deserialWeightsQC = deserialWeightsParam->quantization->qConfig;
-    float capturedSerialScale = serialWeightsQC->scales[0];
-    float capturedDeserialScale = deserialWeightsQC->scales[0];
+    float capturedSerialScale = odtScaleToFloat(serialWeightsQC->scales[0]);
+    float capturedDeserialScale = odtScaleToFloat(deserialWeightsQC->scales[0]);
     size_t capturedSerialNumGroups = serialWeightsQC->numGroups;
     size_t capturedDeserialNumGroups = deserialWeightsQC->numGroups;
     size_t capturedSerialGroupSize = serialWeightsQC->groupSize;
@@ -2006,7 +2007,7 @@ static void testSerializeTensorSymSubByteRoundTripsPackedData(void) {
     tensor_t *src = initTensor(shape, quantizationInitSym(4, HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(src, (float[]){1.f, -2.f, 3.f, -4.f, 5.f, -6.f, 7.f, -6.f, 5.f, -4.f},
                               10);
-    float srcScale = ((symQConfig_t *)src->quantization->qConfig)->scales[0];
+    float srcScale = odtScaleToFloat(((symQConfig_t *)src->quantization->qConfig)->scales[0]);
     uint8_t srcBytes[5];
     memcpy(srcBytes, src->data, 5);
 
@@ -2032,7 +2033,7 @@ static void testSerializeTensorSymSubByteRoundTripsPackedData(void) {
     fclose(f);
 
     /* CAPTURE -> free -> assert (file convention). */
-    float dstScale = ((symQConfig_t *)dst->quantization->qConfig)->scales[0];
+    float dstScale = odtScaleToFloat(((symQConfig_t *)dst->quantization->qConfig)->scales[0]);
     uint8_t dstBytes[5];
     memcpy(dstBytes, dst->data, 5);
     freeTensor(src);
@@ -2210,11 +2211,11 @@ static void testGoldenBytesModelReluV5(void) {
     layer_t *layer = reluLayerInitOwning(&lq);
     reluConfig_t *cfg = layer->config->relu;
     symInt32QConfig_t *outputCfg = cfg->outputQ->qConfig;
-    outputCfg->scale = 0.5f;
+    outputCfg->scale = odtTestScale(0.5f);
     asymQConfig_t *propLossCfg = cfg->propLossQ->qConfig;
     /* code-domain re-pin (group-quant PR4, D6): the in-memory zp is a
      * uint16 CODE-domain value; +3 replaces the old value-domain -3. */
-    propLossCfg->scales[0] = 0.25f;
+    propLossCfg->scales[0] = odtTestScale(0.25f);
     propLossCfg->zeroPoints[0] = 3;
 
     layer_t *model[] = {layer};
@@ -2269,8 +2270,8 @@ static void testGoldenBytesModelReluAsymGroupedPropLossV5(void) {
     layer_t *layer = reluLayerInitOwning(&lq);
     reluConfig_t *cfg = layer->config->relu;
     asymQConfig_t *propLossCfg = cfg->propLossQ->qConfig;
-    propLossCfg->scales[0] = 0.5f;
-    propLossCfg->scales[1] = 0.25f;
+    propLossCfg->scales[0] = odtTestScale(0.5f);
+    propLossCfg->scales[1] = odtTestScale(0.25f);
     propLossCfg->zeroPoints[0] = 3;
     propLossCfg->zeroPoints[1] = 0x1234;
 
@@ -2331,7 +2332,7 @@ static void testGoldenBytesModelReluSymOutputV5(void) {
     layer_t *layer = reluLayerInitOwning(&lq);
     reluConfig_t *cfg = layer->config->relu;
     symQConfig_t *outputCfg = cfg->outputQ->qConfig;
-    outputCfg->scales[0] = 0.5f;
+    outputCfg->scales[0] = odtTestScale(0.5f);
 
     layer_t *model[] = {layer};
     FILE *f = fopen(FILE_PATH, "wb");
@@ -2382,8 +2383,8 @@ static void testGoldenBytesModelReluSymGroupedOutputV5(void) {
     layer_t *layer = reluLayerInitOwning(&lq);
     reluConfig_t *cfg = layer->config->relu;
     symQConfig_t *outputCfg = cfg->outputQ->qConfig;
-    outputCfg->scales[0] = 0.5f;
-    outputCfg->scales[1] = 0.25f;
+    outputCfg->scales[0] = odtTestScale(0.5f);
+    outputCfg->scales[1] = odtTestScale(0.25f);
 
     layer_t *model[] = {layer};
     FILE *f = fopen(FILE_PATH, "wb");

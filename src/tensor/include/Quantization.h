@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 
+#include "DyadicScale.h"
 #include "Rounding.h"
 
 /* BFP_RAW is appended last: stored tags (Serialize.c writes the enum value)
@@ -10,7 +11,7 @@
 typedef enum qtype { INT32, FLOAT32, SYM_INT32, SYM, ASYM, BOOL, BFP, BFP_RAW } qtype_t;
 
 typedef struct symInt32QConfig {
-    float scale;
+    odtScale_t scale; /* canonical dyadic (DyadicScale.h); read/write via ScaleCanon.h */
     roundingMode_t roundingMode;
     uint8_t qMaxBits;
 } symInt32QConfig_t;
@@ -96,10 +97,10 @@ typedef struct symInt32QConfig {
  * tensors stay per-tensor unconditionally -- gradInit fail-fasts if handed a
  * SYM template with numGroups > 1 (grouped grads are a future #300 axis). */
 typedef struct symQConfig {
-    float *scales;    /* [numGroups], owned by the qconfig (see ownership note above) */
-    size_t numGroups; /* 1 = per-tensor sentinel; >1 = real groups (PR2+) */
-    size_t groupSize; /* 0 = "whole tensor" sentinel (per-tensor, N-agnostic);
-                        >0 only for real groups (PR2+), numGroups*groupSize == N */
+    odtScale_t *scales; /* [numGroups], owned by the qconfig (see ownership note above) */
+    size_t numGroups;   /* 1 = per-tensor sentinel; >1 = real groups (PR2+) */
+    size_t groupSize;   /* 0 = "whole tensor" sentinel (per-tensor, N-agnostic);
+                          >0 only for real groups (PR2+), numGroups*groupSize == N */
     roundingMode_t roundingMode;
     uint8_t qBits;
 } symQConfig_t;
@@ -198,7 +199,7 @@ typedef struct bfpRawQConfig {
  * zp = round(min/scale)), whose #246 rationale -- wide all-negative bands
  * pushing zp past int16/int32 -- is void under the nudge. */
 typedef struct asymQConfig {
-    float *scales;        /* [numGroups], owned (symQConfig ownership rules) */
+    odtScale_t *scales;   /* [numGroups], owned (symQConfig ownership rules) */
     uint16_t *zeroPoints; /* [numGroups], owned; CODE-domain zp in
                              [0, 2^qBits - 1] (see block comment above) */
     size_t numGroups;     /* 1 = per-tensor sentinel; >1 = real groups */

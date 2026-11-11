@@ -9,6 +9,7 @@ target_include_directories(Serialize PUBLIC include)
 target_link_libraries(Serialize PRIVATE
         LossType
         Model
+        DyadicScale
         Common
         SerialWire
         Tensor

@@ -311,7 +311,7 @@ void testInferenceLayerNormSymInt32(void) {
     tensor_t *output = inference(&MODEL_CHAIN(model, 1), input);
 
     bool typeOk = (output->quantization->type == SYM_INT32);
-    float scale = ((symInt32QConfig_t *)output->quantization->qConfig)->scale;
+    float scale = odtScaleToFloat(((symInt32QConfig_t *)output->quantization->qConfig)->scale);
     float deqMean = 0.f;
     for (size_t i = 0; i < 8; i++) {
         deqMean += (float)((int32_t *)output->data)[i] * scale;

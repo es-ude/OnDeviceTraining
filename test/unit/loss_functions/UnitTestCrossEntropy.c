@@ -383,7 +383,7 @@ void testCrossEntropySoftmaxBackwardSymWritesRequantizedGrad(void) {
 
     crossEntropySoftmaxBackward(&pSym.tensor, &label, &grad.tensor, NULL);
 
-    float scale = grad.qc.scale;
+    float scale = odtScaleToFloat(grad.qc.scale);
     TEST_ASSERT_FLOAT_WITHIN(expectedGradScale_ceSym_symMicrobatch * scaleTol_ceSym_symMicrobatch,
                              expectedGradScale_ceSym_symMicrobatch, scale);
     for (size_t i = 0; i < expectedGradMantissas_ceSym_symMicrobatch_len; i++) {

@@ -9,6 +9,7 @@
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
+#include "DyadicScale.h"
 #include "Layer.h"
 #include "Linear.h"
 #include "OdtHook.h"
@@ -45,21 +46,21 @@ void optimizerZeroGrad(optimizer_t *optimizer) {
         switch (param->grad->quantization->type) {
         case SYM_INT32: {
             symInt32QConfig_t *symIntQ = param->grad->quantization->qConfig;
-            symIntQ->scale = 1.f;
+            odtScaleStore(&symIntQ->scale, ODT_SCALE_ONE);
             break;
         }
         case SYM: {
             symQConfig_t *symQ = param->grad->quantization->qConfig;
-            symQ->scales[0] = 1.f;
+            odtScaleStore(&symQ->scales[0], ODT_SCALE_ONE);
             break;
         }
         case ASYM: {
             /* grads are per-tensor (gradInit carrier gate), so element 0 IS
              * the whole grid; zeroPoints[0]=0 is the load-bearing half (code
              * 0 must decode to exactly 0.0f -- (0 - 0)*scale under the group-quant D6
-             * code-domain decode), scales[0]=1.f is hygiene. */
+             * code-domain decode), scales[0]=1 is hygiene. */
             asymQConfig_t *asymQ = param->grad->quantization->qConfig;
-            asymQ->scales[0] = 1.f;
+            odtScaleStore(&asymQ->scales[0], ODT_SCALE_ONE);
             asymQ->zeroPoints[0] = 0;
             break;
         }

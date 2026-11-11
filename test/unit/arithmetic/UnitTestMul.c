@@ -2,6 +2,7 @@
 #include "Mul.h"
 #include "Quantization.h"
 #include "Tensor.h"
+#include "TestScale.h"
 #include "unity.h"
 
 void testMulFloatTensors() {
@@ -111,7 +112,7 @@ static void symWireInit(symWire_t *w, int32_t *codes, size_t n, uint8_t qMaxBits
     w->order[0] = 0;
     setShape(&w->shape, w->dims, 1, w->order);
     initSymInt32QConfigWithQMaxBits(HALF_AWAY, &w->qc, qMaxBits);
-    w->qc.scale = scale;
+    w->qc.scale = odtTestScale(scale);
     initSymInt32Quantization(&w->qc, &w->q);
     setTensorValues(&w->t, (uint8_t *)codes, &w->shape, &w->q, NULL);
 }
@@ -131,7 +132,7 @@ void testMulSymInt32TensorsStampsProductWidth(void) {
     mulSymInt32Tensors(&a.t, &b.t, &out.t);
     TEST_ASSERT_EQUAL_INT32(4194304, outCodes[0]);
     TEST_ASSERT_EQUAL_INT32(15, outCodes[1]);
-    TEST_ASSERT_EQUAL_FLOAT(0.125f, out.qc.scale);
+    TEST_ASSERT_EQUAL_FLOAT(0.125f, odtScaleToFloat(out.qc.scale));
     TEST_ASSERT_EQUAL_UINT8(24, out.qc.qMaxBits);
     /* operands untouched */
     TEST_ASSERT_EQUAL_UINT8(12, a.qc.qMaxBits);
@@ -148,7 +149,7 @@ void testMulSymInt32TensorsInplaceStampsProductWidth(void) {
     mulSymInt32TensorsInplace(&a.t, &b.t);
     TEST_ASSERT_EQUAL_INT32(4194304, aCodes[0]);
     TEST_ASSERT_EQUAL_INT32(15, aCodes[1]);
-    TEST_ASSERT_EQUAL_FLOAT(0.125f, a.qc.scale);
+    TEST_ASSERT_EQUAL_FLOAT(0.125f, odtScaleToFloat(a.qc.scale));
     TEST_ASSERT_EQUAL_UINT8(24, a.qc.qMaxBits);
     TEST_ASSERT_EQUAL_UINT8(12, b.qc.qMaxBits);
 }

@@ -10,6 +10,7 @@
 #include "Distributions.h"
 #include "QuantizationApi.h"
 #include "Rounding.h"
+#include "ScaleCanon.h"
 #include "StorageApi.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
@@ -277,8 +278,8 @@ quantization_t *getQLike(quantization_t *quantization) {
              * grid is an attach-time fact the clone must retain: preserve
              * numGroups/groupSize and deep-copy BOTH per-group arrays'
              * VALUES into fresh owned blocks. */
-            float *likeScales = reserveMemory(asymQC->numGroups * sizeof(float));
-            memcpy(likeScales, asymQC->scales, asymQC->numGroups * sizeof(float));
+            odtScale_t *likeScales = reserveMemory(asymQC->numGroups * sizeof(*likeScales));
+            copyCanonScales(likeScales, asymQC->scales, asymQC->numGroups);
             uint16_t *likeZps = reserveMemory(asymQC->numGroups * sizeof(uint16_t));
             memcpy(likeZps, asymQC->zeroPoints, asymQC->numGroups * sizeof(uint16_t));
             likeAsymQC->scales = likeScales;
@@ -305,8 +306,8 @@ quantization_t *getQLike(quantization_t *quantization) {
              * numGroups/groupSize and deep-copy the scales VALUES (matches
              * deepCopyQuantization's semantics, LayerQuant.c:71-82), unlike
              * the per-tensor fresh-reset clone below. */
-            float *likeScales = reserveMemory(symQC->numGroups * sizeof(float));
-            memcpy(likeScales, symQC->scales, symQC->numGroups * sizeof(float));
+            odtScale_t *likeScales = reserveMemory(symQC->numGroups * sizeof(*likeScales));
+            copyCanonScales(likeScales, symQC->scales, symQC->numGroups);
             likeSymQC->scales = likeScales;
             likeSymQC->numGroups = symQC->numGroups;
             likeSymQC->groupSize = symQC->groupSize;

@@ -3,6 +3,7 @@ add_elastic_ai_unit_test(
         Sgd
         MORE_LIBS
         LossType
+        odt_test_scale
         CommonLayerLibs
         OptimizerApi
         SgdApi
@@ -87,6 +88,8 @@ add_elastic_ai_unit_test(
         AdamW
         MORE_LIBS
         LossType
+        odt_test_scale
+        DyadicScale
         Optimizer
         Sgd
         LrScheduler

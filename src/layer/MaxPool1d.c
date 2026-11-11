@@ -195,7 +195,7 @@ static void maxPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
     }
 
     storeCanonScale(&((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale,
-                    ((symInt32QConfig_t *)input->quantization->qConfig)->scale);
+                    loadCanonScale(&((symInt32QConfig_t *)input->quantization->qConfig)->scale));
 }
 
 /* Integer-only forward (arithmetic-bfp.md section 13), ARITH_BFP arm. Raw BFP
@@ -633,7 +633,7 @@ static void maxPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
     }
 
     storeCanonScale(&((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale,
-                    ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->scale);
+                    loadCanonScale(&((symInt32QConfig_t *)lossGrad->quantization->qConfig)->scale));
 }
 
 /* An argmax inside the input but outside the span of its own window: a stale

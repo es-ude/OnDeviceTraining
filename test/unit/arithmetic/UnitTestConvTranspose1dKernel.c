@@ -13,6 +13,7 @@
 #include "SymGroupedWeight.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "TestScale.h"
 #include "expected_bfp_convT1d.h"
 #include "expected_conv_transpose_1d_kernel.h"
 #include "unity.h"
@@ -635,7 +636,7 @@ void testConvTranspose1dKernelBfpGatherPowerOfTwoBitIdenticalToGroupedSym(void) 
     tensor_t inSymTensor;
     symInt32QConfig_t inSymQC;
     initSymInt32QConfig(HALF_AWAY, &inSymQC);
-    inSymQC.scale = 0.5f;
+    inSymQC.scale = odtTestScale(0.5f);
     quantization_t inSymQ;
     initSymInt32Quantization(&inSymQC, &inSymQ);
     setTensorValues(&inSymTensor, (uint8_t *)kBfpConvTInCodes, &inShape, &inSymQ, NULL);
@@ -643,12 +644,13 @@ void testConvTranspose1dKernelBfpGatherPowerOfTwoBitIdenticalToGroupedSym(void) 
     tensor_t wSymTensor;
     symInt32QConfig_t wSymQC;
     initSymInt32QConfig(HALF_AWAY, &wSymQC);
-    wSymQC.scale = 1.0f; /* poisoned scratch scale -- never read, scales live in weightGroups */
+    wSymQC.scale =
+        odtTestScale(1.0f); /* poisoned scratch scale -- never read, scales live in weightGroups */
     quantization_t wSymQ;
     initSymInt32Quantization(&wSymQC, &wSymQ);
     setTensorValues(&wSymTensor, (uint8_t *)kBfpConvTWCodes, &wShape, &wSymQ, NULL);
 
-    float scales[3] = {0.25f, 0.25f, 0.25f};
+    odtScale_t scales[3] = {odtTestScale(0.25f), odtTestScale(0.25f), odtTestScale(0.25f)};
     symQConfig_t weightGroups = {
         .scales = scales, .numGroups = 3, .groupSize = 8, .qBits = 8, .roundingMode = HALF_AWAY};
 
@@ -666,7 +668,7 @@ void testConvTranspose1dKernelBfpGatherPowerOfTwoBitIdenticalToGroupedSym(void) 
                                          &groupedWeight, NULL);
 
     for (size_t i = 0; i < 24; i++) {
-        float symDequant = (float)outSymData[i] * outSymQC.scale;
+        float symDequant = (float)outSymData[i] * odtScaleToFloat(outSymQC.scale);
         TEST_ASSERT_EQUAL_MEMORY(&symDequant, &outBfpData[i], sizeof(float));
     }
 }
@@ -1081,7 +1083,8 @@ static void ctRunOutCh(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t
     if (numGroups == 0) {
         convTranspose1dKernelSymInt32(&x, &w, biasCodes ? &bias : NULL, &kernel, 1, 0, &yT, NULL);
     } else {
-        float scales[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+        odtScale_t scales[8] = {odtTestScale(1), odtTestScale(1), odtTestScale(1), odtTestScale(1),
+                                odtTestScale(1), odtTestScale(1), odtTestScale(1), odtTestScale(1)};
         symQConfig_t groups = {.scales = scales,
                                .numGroups = numGroups,
                                .groupSize = inCh * outCh * k / numGroups,
@@ -1909,7 +1912,7 @@ static void ctGoldSym(ctGoldTensor_t *g, size_t ndim, const size_t *dims, int32_
                       float scale, uint8_t bits, roundingMode_t rm) {
     ctGoldShape(g, ndim, dims);
     initSymInt32QConfigWithQMaxBits(rm, &g->qc, bits);
-    g->qc.scale = scale;
+    g->qc.scale = odtScaleFromFloat(scale, ODT_SCALE_NEAREST);
     initSymInt32Quantization(&g->qc, &g->q);
     setTensorValues(&g->t, (uint8_t *)data, &g->s, &g->q, NULL);
 }
@@ -1983,7 +1986,7 @@ static void ctGoldRunSym(const ctGoldGeom_t *geom, ctGoldSymOut_t *out) {
     kernel_t kernel;
     ctGoldKernel(&kernel, geom);
     convTranspose1dKernelSymInt32(&xT.t, &wT.t, &bT.t, &kernel, CT_GOLD_GROUPS, 0, &yT.t, NULL);
-    out->scale = yT.qc.scale;
+    out->scale = odtScaleToFloat(yT.qc.scale);
     out->bits = yT.qc.qMaxBits;
 }
 
@@ -2097,9 +2100,9 @@ static void ctGoldRunGrouped(const ctGoldGeom_t *geom, roundingMode_t rm, rngStr
     for (size_t i = 0; i < CT_GOLD_G_COUT; i++) {
         bias[i] = ctGoldCode(&s, 200);
     }
-    float scales[CT_GOLD_G_NUM_GROUPS];
+    odtScale_t scales[CT_GOLD_G_NUM_GROUPS];
     for (size_t g = 0; g < CT_GOLD_G_NUM_GROUPS; g++) {
-        scales[g] = ctGoldGroupScale(g, CT_GOLD_G_NUM_GROUPS);
+        scales[g] = odtTestScale(ctGoldGroupScale(g, CT_GOLD_G_NUM_GROUPS));
     }
     symQConfig_t groups = {.scales = scales,
                            .numGroups = CT_GOLD_G_NUM_GROUPS,
@@ -2118,7 +2121,7 @@ static void ctGoldRunGrouped(const ctGoldGeom_t *geom, roundingMode_t rm, rngStr
     ctGoldKernel(&kernel, geom);
     convTranspose1dKernelSymInt32Grouped(&xT.t, &wT.t, &bT.t, &kernel, 1, 0, &yT.t, &groupedWeight,
                                          rs);
-    out->scale = yT.qc.scale;
+    out->scale = odtScaleToFloat(yT.qc.scale);
     out->bits = yT.qc.qMaxBits;
 }
 

@@ -14,6 +14,7 @@
 #include "SymAccumGuard.h"
 #include "SymGroupedWeight.h"
 #include "Tensor.h"
+#include "TestScale.h"
 #include "unity.h"
 
 #include <DTypes.h>
@@ -248,7 +249,7 @@ void testMatmulSymInt32Tensors() {
     setShape(&aShape, aDims, aNumberOfDims, aOrderOfDims);
     symInt32QConfig_t aSymInt32QC;
     initSymInt32QConfig(HALF_AWAY, &aSymInt32QC);
-    aSymInt32QC.scale = 2.f;
+    aSymInt32QC.scale = odtTestScale(2.f);
     quantization_t aQ;
     initSymInt32Quantization(&aSymInt32QC, &aQ);
     setTensorValues(&aTensor, (uint8_t *)aData, &aShape, &aQ, NULL);
@@ -383,7 +384,7 @@ void testMatmulSymInt32TensorsWithBiasRescalesBias() {
     setShape(&aShape, aDims, 2, aOrder);
     symInt32QConfig_t aQC;
     initSymInt32QConfig(HALF_AWAY, &aQC);
-    aQC.scale = 2.f;
+    aQC.scale = odtTestScale(2.f);
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);
     setTensorValues(&aTensor, (uint8_t *)aData, &aShape, &aQ, NULL);
@@ -396,7 +397,7 @@ void testMatmulSymInt32TensorsWithBiasRescalesBias() {
     setShape(&bShape, bDims, 2, bOrder);
     symInt32QConfig_t bQC;
     initSymInt32QConfig(HALF_AWAY, &bQC);
-    bQC.scale = 1.f;
+    bQC.scale = odtTestScale(1.f);
     quantization_t bQ;
     initSymInt32Quantization(&bQC, &bQ);
     setTensorValues(&bTensor, (uint8_t *)bData, &bShape, &bQ, NULL);
@@ -409,7 +410,7 @@ void testMatmulSymInt32TensorsWithBiasRescalesBias() {
     setShape(&biasShape, biasDims, 1, biasOrder);
     symInt32QConfig_t biasQC;
     initSymInt32QConfig(HALF_AWAY, &biasQC);
-    biasQC.scale = 4.f;
+    biasQC.scale = odtTestScale(4.f);
     quantization_t biasQ;
     initSymInt32Quantization(&biasQC, &biasQ);
     setTensorValues(&biasTensor, (uint8_t *)biasData, &biasShape, &biasQ, NULL);
@@ -529,7 +530,7 @@ void testMatmulGroupedWeightPerChannelMatchesGold(void) {
     setShape(&aShape, aDims, 2, aOrder);
     symInt32QConfig_t aQC;
     initSymInt32QConfig(HALF_AWAY, &aQC);
-    aQC.scale = kPerChannelAScale;
+    aQC.scale = odtTestScale(kPerChannelAScale);
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);
     setTensorValues(&aTensor, (uint8_t *)kPerChannelAMantissas, &aShape, &aQ, NULL);
@@ -541,14 +542,16 @@ void testMatmulGroupedWeightPerChannelMatchesGold(void) {
     setShape(&bShape, bDims, 2, bOrder);
     symInt32QConfig_t bQC;
     initSymInt32QConfig(HALF_AWAY, &bQC);
-    bQC.scale = 1.0f; /* poison, per the funnel's grouped-scratch contract */
+    bQC.scale = odtTestScale(1.0f); /* poison, per the funnel's grouped-scratch contract */
     bQC.qMaxBits = 8;
     quantization_t bQ;
     initSymInt32Quantization(&bQC, &bQ);
     setTensorValues(&bTensor, (uint8_t *)kPerChannelWMantissas, &bShape, &bQ, NULL);
 
-    float wScales[3];
-    memcpy(wScales, kPerChannelWScales, sizeof(wScales));
+    odtScale_t wScales[3];
+    for (size_t g = 0; g < 3; g++) {
+        wScales[g] = odtTestScale(kPerChannelWScales[g]);
+    }
     symQConfig_t weightGroups = {.scales = wScales,
                                  .numGroups = (size_t)kPerChannelNumGroups,
                                  .groupSize = (size_t)kPerChannelGroupSize,
@@ -562,7 +565,7 @@ void testMatmulGroupedWeightPerChannelMatchesGold(void) {
     setShape(&biasShape, biasDims, 1, biasOrder);
     symInt32QConfig_t biasQC;
     initSymInt32QConfig(HALF_AWAY, &biasQC);
-    biasQC.scale = kPerChannelBiasScale;
+    biasQC.scale = odtTestScale(kPerChannelBiasScale);
     quantization_t biasQ;
     initSymInt32Quantization(&biasQC, &biasQ);
     setTensorValues(&biasTensor, (uint8_t *)kPerChannelBiasMantissas, &biasShape, &biasQ, NULL);
@@ -584,7 +587,7 @@ void testMatmulGroupedWeightPerChannelMatchesGold(void) {
                                        &groupedWeight, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(kPerChannelOutMantissas, outputData, 6);
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, kPerChannelOutScale, outputQC.scale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, kPerChannelOutScale, odtScaleToFloat(outputQC.scale));
 }
 
 void testMatmulGroupedWeightGeneralGroupsMatchesGold(void) {
@@ -595,7 +598,7 @@ void testMatmulGroupedWeightGeneralGroupsMatchesGold(void) {
     setShape(&aShape, aDims, 2, aOrder);
     symInt32QConfig_t aQC;
     initSymInt32QConfig(HALF_AWAY, &aQC);
-    aQC.scale = kGeneralAScale;
+    aQC.scale = odtTestScale(kGeneralAScale);
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);
     setTensorValues(&aTensor, (uint8_t *)kGeneralAMantissas, &aShape, &aQ, NULL);
@@ -607,14 +610,16 @@ void testMatmulGroupedWeightGeneralGroupsMatchesGold(void) {
     setShape(&bShape, bDims, 2, bOrder);
     symInt32QConfig_t bQC;
     initSymInt32QConfig(HALF_AWAY, &bQC);
-    bQC.scale = 1.0f;
+    bQC.scale = odtTestScale(1.0f);
     bQC.qMaxBits = 8;
     quantization_t bQ;
     initSymInt32Quantization(&bQC, &bQ);
     setTensorValues(&bTensor, (uint8_t *)kGeneralWMantissas, &bShape, &bQ, NULL);
 
-    float wScales[6];
-    memcpy(wScales, kGeneralWScales, sizeof(wScales));
+    odtScale_t wScales[6];
+    for (size_t g = 0; g < 6; g++) {
+        wScales[g] = odtTestScale(kGeneralWScales[g]);
+    }
     symQConfig_t weightGroups = {.scales = wScales,
                                  .numGroups = (size_t)kGeneralNumGroups,
                                  .groupSize = (size_t)kGeneralGroupSize,
@@ -628,7 +633,7 @@ void testMatmulGroupedWeightGeneralGroupsMatchesGold(void) {
     setShape(&biasShape, biasDims, 1, biasOrder);
     symInt32QConfig_t biasQC;
     initSymInt32QConfig(HALF_AWAY, &biasQC);
-    biasQC.scale = kGeneralBiasScale;
+    biasQC.scale = odtTestScale(kGeneralBiasScale);
     quantization_t biasQ;
     initSymInt32Quantization(&biasQC, &biasQ);
     setTensorValues(&biasTensor, (uint8_t *)kGeneralBiasMantissas, &biasShape, &biasQ, NULL);
@@ -650,7 +655,7 @@ void testMatmulGroupedWeightGeneralGroupsMatchesGold(void) {
                                        &groupedWeight, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(kGeneralOutMantissas, outputData, 6);
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, kGeneralOutScale, outputQC.scale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, kGeneralOutScale, odtScaleToFloat(outputQC.scale));
 }
 
 /* Equal-scales grouped twin: every group's scale is the SAME power-of-two
@@ -678,7 +683,7 @@ void testMatmulGroupedEqualScalesBitIdenticalToScalar(void) {
     setShape(&aShape, aDims, 2, aOrder);
     symInt32QConfig_t aQC;
     initSymInt32QConfig(HALF_AWAY, &aQC);
-    aQC.scale = aScaleVal;
+    aQC.scale = odtTestScale(aScaleVal);
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);
     setTensorValues(&aTensor, (uint8_t *)kPerChannelAMantissas, &aShape, &aQ, NULL);
@@ -691,12 +696,13 @@ void testMatmulGroupedEqualScalesBitIdenticalToScalar(void) {
     tensor_t bTensorGrouped;
     symInt32QConfig_t bGroupedQC;
     initSymInt32QConfig(HALF_AWAY, &bGroupedQC);
-    bGroupedQC.scale = 1.0f;
+    bGroupedQC.scale = odtTestScale(1.0f);
     quantization_t bGroupedQ;
     initSymInt32Quantization(&bGroupedQC, &bGroupedQ);
     setTensorValues(&bTensorGrouped, (uint8_t *)kPerChannelWMantissas, &bShape, &bGroupedQ, NULL);
 
-    float scales[3] = {commonScale, commonScale, commonScale};
+    odtScale_t scales[3] = {odtTestScale(commonScale), odtTestScale(commonScale),
+                            odtTestScale(commonScale)};
     symQConfig_t weightGroups = {
         .scales = scales, .numGroups = 3, .groupSize = 6, .qBits = 8, .roundingMode = HALF_AWAY};
 
@@ -720,7 +726,7 @@ void testMatmulGroupedEqualScalesBitIdenticalToScalar(void) {
     tensor_t bTensorScalar;
     symInt32QConfig_t bScalarQC;
     initSymInt32QConfig(HALF_AWAY, &bScalarQC);
-    bScalarQC.scale = commonScale;
+    bScalarQC.scale = odtTestScale(commonScale);
     quantization_t bScalarQ;
     initSymInt32Quantization(&bScalarQC, &bScalarQ);
     setTensorValues(&bTensorScalar, (uint8_t *)kPerChannelWMantissas, &bShape, &bScalarQ, NULL);
@@ -736,7 +742,8 @@ void testMatmulGroupedEqualScalesBitIdenticalToScalar(void) {
     matmulSymInt32TensorsWithBias(&aTensor, &bTensorScalar, &outScalar, NULL, NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(outScalarData, outGroupedData, 6);
-    TEST_ASSERT_EQUAL_FLOAT(outScalarQC.scale, outGroupedQC.scale);
+    TEST_ASSERT_EQUAL_FLOAT(odtScaleToFloat(outScalarQC.scale),
+                            odtScaleToFloat(outGroupedQC.scale));
 }
 
 /* Rounding-mode-honored check (substitutes for a Python-emulated SR-mode
@@ -757,7 +764,7 @@ void testMatmulGroupedHonorsOpRoundingMode(void) {
     setShape(&aShape, aDims, 2, aOrder);
     symInt32QConfig_t aQC;
     initSymInt32QConfig(HALF_AWAY, &aQC);
-    aQC.scale = kGeneralAScale;
+    aQC.scale = odtTestScale(kGeneralAScale);
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);
     setTensorValues(&aTensor, (uint8_t *)kGeneralAMantissas, &aShape, &aQ, NULL);
@@ -769,14 +776,16 @@ void testMatmulGroupedHonorsOpRoundingMode(void) {
     setShape(&bShape, bDims, 2, bOrder);
     symInt32QConfig_t bQC;
     initSymInt32QConfig(SR_HALF_AWAY, &bQC); /* the op's rounding mode */
-    bQC.scale = 1.0f;
+    bQC.scale = odtTestScale(1.0f);
     bQC.qMaxBits = 8;
     quantization_t bQ;
     initSymInt32Quantization(&bQC, &bQ);
     setTensorValues(&bTensor, (uint8_t *)kGeneralWMantissas, &bShape, &bQ, NULL);
 
-    float wScales[6];
-    memcpy(wScales, kGeneralWScales, sizeof(wScales));
+    odtScale_t wScales[6];
+    for (size_t g = 0; g < 6; g++) {
+        wScales[g] = odtTestScale(kGeneralWScales[g]);
+    }
     symQConfig_t weightGroups = {.scales = wScales,
                                  .numGroups = (size_t)kGeneralNumGroups,
                                  .groupSize = (size_t)kGeneralGroupSize,
@@ -840,7 +849,7 @@ void testMatmulGroupedWeightStridedReductionMatchesGold(void) {
     setShape(&aShape, aDims, 2, aOrder);
     symInt32QConfig_t aQC;
     initSymInt32QConfig(HALF_AWAY, &aQC);
-    aQC.scale = kDxPerChannelLossScale;
+    aQC.scale = odtTestScale(kDxPerChannelLossScale);
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);
     setTensorValues(&aTensor, (uint8_t *)kDxPerChannelLossMantissas, &aShape, &aQ, NULL);
@@ -852,14 +861,16 @@ void testMatmulGroupedWeightStridedReductionMatchesGold(void) {
     setShape(&bShape, bDims, 2, bOrder);
     symInt32QConfig_t bQC;
     initSymInt32QConfig(HALF_AWAY, &bQC);
-    bQC.scale = 1.0f; /* poison, per the funnel's grouped-scratch contract */
+    bQC.scale = odtTestScale(1.0f); /* poison, per the funnel's grouped-scratch contract */
     bQC.qMaxBits = 8;
     quantization_t bQ;
     initSymInt32Quantization(&bQC, &bQ);
     setTensorValues(&bTensor, (uint8_t *)kDxPerChannelWMantissas, &bShape, &bQ, NULL);
 
-    float wScales[3];
-    memcpy(wScales, kDxPerChannelWScales, sizeof(wScales));
+    odtScale_t wScales[3];
+    for (size_t g = 0; g < 3; g++) {
+        wScales[g] = odtTestScale(kDxPerChannelWScales[g]);
+    }
     symQConfig_t weightGroups = {.scales = wScales,
                                  .numGroups = (size_t)kDxPerChannelNumGroups,
                                  .groupSize = (size_t)kDxPerChannelGroupSize,
@@ -883,7 +894,7 @@ void testMatmulGroupedWeightStridedReductionMatchesGold(void) {
                                        NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(kDxPerChannelOutMantissas, outputData, 12);
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, kDxPerChannelOutScale, outputQC.scale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, kDxPerChannelOutScale, odtScaleToFloat(outputQC.scale));
 }
 
 void testMatmulGroupedWeightStridedGeneralGroupsMatchesGold(void) {
@@ -894,7 +905,7 @@ void testMatmulGroupedWeightStridedGeneralGroupsMatchesGold(void) {
     setShape(&aShape, aDims, 2, aOrder);
     symInt32QConfig_t aQC;
     initSymInt32QConfig(HALF_AWAY, &aQC);
-    aQC.scale = kDxGeneralLossScale;
+    aQC.scale = odtTestScale(kDxGeneralLossScale);
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);
     setTensorValues(&aTensor, (uint8_t *)kDxGeneralLossMantissas, &aShape, &aQ, NULL);
@@ -906,14 +917,16 @@ void testMatmulGroupedWeightStridedGeneralGroupsMatchesGold(void) {
     setShape(&bShape, bDims, 2, bOrder);
     symInt32QConfig_t bQC;
     initSymInt32QConfig(HALF_AWAY, &bQC);
-    bQC.scale = 1.0f;
+    bQC.scale = odtTestScale(1.0f);
     bQC.qMaxBits = 8;
     quantization_t bQ;
     initSymInt32Quantization(&bQC, &bQ);
     setTensorValues(&bTensor, (uint8_t *)kDxGeneralWMantissas, &bShape, &bQ, NULL);
 
-    float wScales[6];
-    memcpy(wScales, kDxGeneralWScales, sizeof(wScales));
+    odtScale_t wScales[6];
+    for (size_t g = 0; g < 6; g++) {
+        wScales[g] = odtTestScale(kDxGeneralWScales[g]);
+    }
     symQConfig_t weightGroups = {.scales = wScales,
                                  .numGroups = (size_t)kDxGeneralNumGroups,
                                  .groupSize = (size_t)kDxGeneralGroupSize,
@@ -937,7 +950,7 @@ void testMatmulGroupedWeightStridedGeneralGroupsMatchesGold(void) {
                                        NULL);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(kDxGeneralOutMantissas, outputData, 12);
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, kDxGeneralOutScale, outputQC.scale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, kDxGeneralOutScale, odtScaleToFloat(outputQC.scale));
 }
 
 /* dx-orientation twin of testMatmulGroupedEqualScalesBitIdenticalToScalar
@@ -959,7 +972,7 @@ void testMatmulGroupedDxEqualScalesBitIdenticalToScalar(void) {
     setShape(&aShape, aDims, 2, aOrder);
     symInt32QConfig_t aQC;
     initSymInt32QConfig(HALF_AWAY, &aQC);
-    aQC.scale = aScaleVal;
+    aQC.scale = odtTestScale(aScaleVal);
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);
     setTensorValues(&aTensor, (uint8_t *)kDxPerChannelLossMantissas, &aShape, &aQ, NULL);
@@ -972,12 +985,13 @@ void testMatmulGroupedDxEqualScalesBitIdenticalToScalar(void) {
     tensor_t bTensorGrouped;
     symInt32QConfig_t bGroupedQC;
     initSymInt32QConfig(HALF_AWAY, &bGroupedQC);
-    bGroupedQC.scale = 1.0f;
+    bGroupedQC.scale = odtTestScale(1.0f);
     quantization_t bGroupedQ;
     initSymInt32Quantization(&bGroupedQC, &bGroupedQ);
     setTensorValues(&bTensorGrouped, (uint8_t *)kDxPerChannelWMantissas, &bShape, &bGroupedQ, NULL);
 
-    float scales[3] = {commonScale, commonScale, commonScale};
+    odtScale_t scales[3] = {odtTestScale(commonScale), odtTestScale(commonScale),
+                            odtTestScale(commonScale)};
     symQConfig_t weightGroups = {
         .scales = scales, .numGroups = 3, .groupSize = 6, .qBits = 8, .roundingMode = HALF_AWAY};
 
@@ -1001,7 +1015,7 @@ void testMatmulGroupedDxEqualScalesBitIdenticalToScalar(void) {
     tensor_t bTensorScalar;
     symInt32QConfig_t bScalarQC;
     initSymInt32QConfig(HALF_AWAY, &bScalarQC);
-    bScalarQC.scale = commonScale;
+    bScalarQC.scale = odtTestScale(commonScale);
     quantization_t bScalarQ;
     initSymInt32Quantization(&bScalarQC, &bScalarQ);
     setTensorValues(&bTensorScalar, (uint8_t *)kDxPerChannelWMantissas, &bShape, &bScalarQ, NULL);
@@ -1017,7 +1031,8 @@ void testMatmulGroupedDxEqualScalesBitIdenticalToScalar(void) {
     matmulSymInt32Tensors(&aTensor, &bTensorScalar, &outScalar);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(outScalarData, outGroupedData, 12);
-    TEST_ASSERT_EQUAL_FLOAT(outScalarQC.scale, outGroupedQC.scale);
+    TEST_ASSERT_EQUAL_FLOAT(odtScaleToFloat(outScalarQC.scale),
+                            odtScaleToFloat(outGroupedQC.scale));
 }
 
 /* The public grouped entry must reject the per-tensor sentinel {numGroups=1,
@@ -1051,7 +1066,7 @@ void testMatmulGroupedWeightRejectsPerTensorSentinel(void) {
     initSymInt32Quantization(&bQC, &bQ);
     setTensorValues(&bTensor, (uint8_t *)bData, &bShape, &bQ, NULL);
 
-    float sentinelScale = 1.0f;
+    odtScale_t sentinelScale = odtTestScale(1.0f);
     symQConfig_t weightGroups = {.scales = &sentinelScale,
                                  .numGroups = 1,
                                  .groupSize = 0,
@@ -1340,7 +1355,7 @@ void testMatmulBfpPowerOfTwoBitIdenticalToGroupedSym(void) {
     tensor_t aSymTensor;
     symInt32QConfig_t aSymQC;
     initSymInt32QConfig(HALF_AWAY, &aSymQC);
-    aSymQC.scale = 0.5f;
+    aSymQC.scale = odtTestScale(0.5f);
     quantization_t aSymQ;
     initSymInt32Quantization(&aSymQC, &aSymQ);
     setTensorValues(&aSymTensor, (uint8_t *)kPerChannelAMantissas, &aShape, &aSymQ, NULL);
@@ -1348,12 +1363,12 @@ void testMatmulBfpPowerOfTwoBitIdenticalToGroupedSym(void) {
     tensor_t bSymTensor;
     symInt32QConfig_t bSymQC;
     initSymInt32QConfig(HALF_AWAY, &bSymQC);
-    bSymQC.scale = 1.0f;
+    bSymQC.scale = odtTestScale(1.0f);
     quantization_t bSymQ;
     initSymInt32Quantization(&bSymQC, &bSymQ);
     setTensorValues(&bSymTensor, (uint8_t *)kPerChannelWMantissas, &bShape, &bSymQ, NULL);
 
-    float scales[3] = {0.25f, 0.25f, 0.25f};
+    odtScale_t scales[3] = {odtTestScale(0.25f), odtTestScale(0.25f), odtTestScale(0.25f)};
     symQConfig_t weightGroups = {
         .scales = scales, .numGroups = 3, .groupSize = 6, .qBits = 8, .roundingMode = HALF_AWAY};
 
@@ -1370,7 +1385,7 @@ void testMatmulBfpPowerOfTwoBitIdenticalToGroupedSym(void) {
                                        &groupedWeight, NULL);
 
     for (size_t i = 0; i < 6; i++) {
-        float symDequant = (float)outSymData[i] * outSymQC.scale;
+        float symDequant = (float)outSymData[i] * odtScaleToFloat(outSymQC.scale);
         TEST_ASSERT_EQUAL_MEMORY(&symDequant, &outBfpData[i], sizeof(float));
     }
 }
@@ -2085,7 +2100,7 @@ void testMatmulBfpDxPowerOfTwoBitIdenticalToGroupedSym(void) {
     tensor_t aSymTensor;
     symInt32QConfig_t aSymQC;
     initSymInt32QConfig(HALF_AWAY, &aSymQC);
-    aSymQC.scale = 0.5f;
+    aSymQC.scale = odtTestScale(0.5f);
     quantization_t aSymQ;
     initSymInt32Quantization(&aSymQC, &aSymQ);
     setTensorValues(&aSymTensor, (uint8_t *)kDxPerChannelLossMantissas, &aShape, &aSymQ, NULL);
@@ -2093,12 +2108,12 @@ void testMatmulBfpDxPowerOfTwoBitIdenticalToGroupedSym(void) {
     tensor_t bSymTensor;
     symInt32QConfig_t bSymQC;
     initSymInt32QConfig(HALF_AWAY, &bSymQC);
-    bSymQC.scale = 1.0f;
+    bSymQC.scale = odtTestScale(1.0f);
     quantization_t bSymQ;
     initSymInt32Quantization(&bSymQC, &bSymQ);
     setTensorValues(&bSymTensor, (uint8_t *)kDxPerChannelWMantissas, &bShape, &bSymQ, NULL);
 
-    float scales[3] = {0.25f, 0.25f, 0.25f};
+    odtScale_t scales[3] = {odtTestScale(0.25f), odtTestScale(0.25f), odtTestScale(0.25f)};
     symQConfig_t weightGroups = {
         .scales = scales, .numGroups = 3, .groupSize = 6, .qBits = 8, .roundingMode = HALF_AWAY};
 
@@ -2115,7 +2130,7 @@ void testMatmulBfpDxPowerOfTwoBitIdenticalToGroupedSym(void) {
                                        &groupedWeight, NULL);
 
     for (size_t i = 0; i < 12; i++) {
-        float symDequant = (float)outSymData[i] * outSymQC.scale;
+        float symDequant = (float)outSymData[i] * odtScaleToFloat(outSymQC.scale);
         TEST_ASSERT_EQUAL_MEMORY(&symDequant, &outBfpData[i], sizeof(float));
     }
 }
@@ -2783,7 +2798,8 @@ static int32_t guardGroupedDotIn(size_t n, size_t numGroups, uint8_t weightQBits
     setTensorValues(&a, (uint8_t *)gGuardA, &aS, &aQ, NULL);
     setTensorValues(&b, (uint8_t *)gGuardB, &bS, &bQ, NULL);
     setTensorValues(&o, (uint8_t *)&out, &oS, &oQ, NULL);
-    float scales[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    odtScale_t scales[8] = {odtTestScale(1), odtTestScale(1), odtTestScale(1), odtTestScale(1),
+                            odtTestScale(1), odtTestScale(1), odtTestScale(1), odtTestScale(1)};
     symQConfig_t groups = {.scales = scales,
                            .numGroups = numGroups,
                            .groupSize = n / numGroups,
@@ -3049,7 +3065,7 @@ static uint8_t groupedInt4StampBits(symCodeDomain_t domain, int32_t biasCode, in
     initSymInt32Quantization(&bQC, &bQ);
     tensor_t b;
     setTensorValues(&b, (uint8_t *)gGuardB, &bS, &bQ, NULL);
-    float scales[2] = {1.f, 1.f};
+    odtScale_t scales[2] = {odtTestScale(1.f), odtTestScale(1.f)};
     symQConfig_t groups = {
         .scales = scales, .numGroups = 2, .groupSize = 4, .qBits = 4, .roundingMode = HALF_AWAY};
     symGroupedWeight_t groupedWeight = {.groups = &groups, .domain = domain};
@@ -3141,7 +3157,7 @@ void testMatmulProductScaleIsIntegerNearestAndSeedsOnIt(void) {
     setShape(&aShape, aDims, 2, aOrder);
     symInt32QConfig_t aQC;
     initSymInt32QConfig(HALF_AWAY, &aQC);
-    aQC.scale = sa;
+    aQC.scale = odtTestScale(sa);
     quantization_t aQ;
     initSymInt32Quantization(&aQC, &aQ);
     tensor_t aTensor;
@@ -3154,7 +3170,7 @@ void testMatmulProductScaleIsIntegerNearestAndSeedsOnIt(void) {
     setShape(&bShape, bDims, 2, bOrder);
     symInt32QConfig_t bQC;
     initSymInt32QConfig(HALF_AWAY, &bQC);
-    bQC.scale = sb;
+    bQC.scale = odtTestScale(sb);
     quantization_t bQ;
     initSymInt32Quantization(&bQC, &bQ);
     tensor_t bTensor;
@@ -3168,7 +3184,7 @@ void testMatmulProductScaleIsIntegerNearestAndSeedsOnIt(void) {
     symInt32QConfig_t biasQC;
     initSymInt32QConfig(HALF_AWAY, &biasQC);
     biasQC.qMaxBits = 22;
-    biasQC.scale = expected;
+    biasQC.scale = odtTestScale(expected);
     quantization_t biasQ;
     initSymInt32Quantization(&biasQC, &biasQ);
     tensor_t biasTensor;
@@ -3187,13 +3203,13 @@ void testMatmulProductScaleIsIntegerNearestAndSeedsOnIt(void) {
     setTensorValues(&outTensor, (uint8_t *)outData, &outShape, &outQ, NULL);
 
     matmulSymInt32TensorsWithBias(&aTensor, &bTensor, &outTensor, &biasTensor, NULL);
-    TEST_ASSERT_EQUAL_MEMORY(&expected, &outQC.scale, sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(&expected, &(float){odtScaleToFloat(outQC.scale)}, sizeof(float));
     TEST_ASSERT_EQUAL_INT32(13 + (1 << 20), outData[0]);
 
     /* the bias-free product entry stores the same canonical value */
-    outQC.scale = 1.0f;
+    outQC.scale = odtTestScale(1.0f);
     matmulSymInt32Tensors(&aTensor, &bTensor, &outTensor);
-    TEST_ASSERT_EQUAL_MEMORY(&expected, &outQC.scale, sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(&expected, &(float){odtScaleToFloat(outQC.scale)}, sizeof(float));
     TEST_ASSERT_EQUAL_INT32(13, outData[0]);
 }
 

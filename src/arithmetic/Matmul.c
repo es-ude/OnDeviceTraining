@@ -281,7 +281,8 @@ void matmulSymIntTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputT
     symInt32QConfig_t *outputSymInt32QC = outputTensor->quantization->qConfig;
 
     storeCanonScale(&outputSymInt32QC->scale,
-                    canonProductScale(aSymInt32QC->scale, bSymInt32QC->scale, ODT_SCALE_NEAREST));
+                    canonProductScale(loadCanonScale(&aSymInt32QC->scale),
+                                      loadCanonScale(&bSymInt32QC->scale), ODT_SCALE_NEAREST));
 }
 
 void matmulSymIntTensorsWithInstructionCounter(tensor_t *aTensor, tensor_t *bTensor,
@@ -292,7 +293,8 @@ void matmulSymIntTensorsWithInstructionCounter(tensor_t *aTensor, tensor_t *bTen
     symInt32QConfig_t *bSymInt32QC = bTensor->quantization->qConfig;
     symInt32QConfig_t *outputSymInt32QC = outputTensor->quantization->qConfig;
     storeCanonScale(&outputSymInt32QC->scale,
-                    canonProductScale(aSymInt32QC->scale, bSymInt32QC->scale, ODT_SCALE_NEAREST));
+                    canonProductScale(loadCanonScale(&aSymInt32QC->scale),
+                                      loadCanonScale(&bSymInt32QC->scale), ODT_SCALE_NEAREST));
 
     ++matmulInstructionCounter;
 }
@@ -321,8 +323,9 @@ void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_
     /* The stored product scale, rounded once from the exact mantissa product;
      * the bias seed below is refolded onto this same value. */
     const float outputScale = canonProductScale(
-        ((symInt32QConfig_t *)aTensor->quantization->qConfig)->scale,
-        ((symInt32QConfig_t *)bTensor->quantization->qConfig)->scale, ODT_SCALE_NEAREST);
+        loadCanonScale(&((symInt32QConfig_t *)aTensor->quantization->qConfig)->scale),
+        loadCanonScale(&((symInt32QConfig_t *)bTensor->quantization->qConfig)->scale),
+        ODT_SCALE_NEAREST);
     uint8_t resultBits;
     if (bias == NULL) {
         resultBits = matmulIntCore(aTensor, bTensor, outputTensor, NULL, true, aBits, bBits);
@@ -342,7 +345,7 @@ void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_
         }
 
         symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
-        float biasScale = biasQC->scale;
+        float biasScale = loadCanonScale(&biasQC->scale);
 
         /* Rescale the bias into the accumulator's scale via the shared #189 helper
          * (guarded float->int32 cast): one fixed-point op per output column. */
@@ -408,11 +411,13 @@ matmulGroupedLoops(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
                          * int32 partial into the running accumulator scale
                          * (one rounding here, honoring the caller's rounding
                          * mode — never hardcoded). */
-                        acc = symAdd(acc,
-                                     rescalePartialIntoAccumulatorScale(
-                                         partial, aScale * weightGroups->scales[currentGroup], sAcc,
-                                         roundingMode, rs),
-                                     checked, accSite);
+                        acc =
+                            symAdd(acc,
+                                   rescalePartialIntoAccumulatorScale(
+                                       partial,
+                                       aScale * loadCanonScale(&weightGroups->scales[currentGroup]),
+                                       sAcc, roundingMode, rs),
+                                   checked, accSite);
                         partial = 0;
                     }
                     currentGroup = g;
@@ -439,7 +444,8 @@ matmulGroupedLoops(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
             if (currentGroup != SIZE_MAX) {
                 acc = symAdd(acc,
                              rescalePartialIntoAccumulatorScale(
-                                 partial, aScale * weightGroups->scales[currentGroup], sAcc,
+                                 partial,
+                                 aScale * loadCanonScale(&weightGroups->scales[currentGroup]), sAcc,
                                  roundingMode, rs),
                              checked, accSite);
             }
@@ -558,11 +564,12 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
      * pass over scales[], NEVER scales[0] alone — any other choice would let
      * some group's rescale factor scales[g]/s_wmax exceed 1, growing that
      * group's rescaled mantissa past its accumulator headroom. */
-    float aScale = ((symInt32QConfig_t *)aTensor->quantization->qConfig)->scale;
-    float maxScale = weightGroups->scales[0];
+    float aScale = loadCanonScale(&((symInt32QConfig_t *)aTensor->quantization->qConfig)->scale);
+    float maxScale = loadCanonScale(&weightGroups->scales[0]);
     for (size_t g = 1; g < weightGroups->numGroups; g++) {
-        if (weightGroups->scales[g] > maxScale) {
-            maxScale = weightGroups->scales[g];
+        const float groupScale = loadCanonScale(&weightGroups->scales[g]);
+        if (groupScale > maxScale) {
+            maxScale = groupScale;
         }
     }
     /* Stored, so canonical. CEIL, not the product rule's NEAREST: the rescaled
@@ -594,7 +601,7 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
         symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
         for (size_t c = 0; c < bColumns; c++) {
             int32_t biasIntC = readBytesAsInt32(&bias->data[c * sizeof(int32_t)]);
-            seedBuf[c] = rescaleIntoAccumulatorScale(biasIntC, biasQC->scale, sAcc,
+            seedBuf[c] = rescaleIntoAccumulatorScale(biasIntC, loadCanonScale(&biasQC->scale), sAcc,
                                                      biasQC->roundingMode, rs);
         }
         seedPtr = seedBuf;

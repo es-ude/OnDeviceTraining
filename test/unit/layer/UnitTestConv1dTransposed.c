@@ -16,6 +16,7 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "TestScale.h"
 #include "expected_bfp_convT1d.h"
 #include "expected_bfp_layer_forward.h"
 #include "expected_conv1d_transposed.h"
@@ -114,7 +115,7 @@ static parameter_t *buildSymParam(size_t numDims, const size_t *dimsIn, const fl
 }
 
 static float symScaleOf(tensor_t *t) {
-    return ((symInt32QConfig_t *)t->quantization->qConfig)->scale;
+    return odtScaleToFloat(((symInt32QConfig_t *)t->quantization->qConfig)->scale);
 }
 
 /* Re-gold (PR1b.2 D5): conv1dTransposedForward now routes SYM through
@@ -1319,7 +1320,7 @@ static tensor_t *buildSymInt32TensorExact(size_t numDims, const size_t *dimsIn,
     for (size_t i = 0; i < n; i++) {
         ((int32_t *)t->data)[i] = mantissas[i];
     }
-    ((symInt32QConfig_t *)t->quantization->qConfig)->scale = scale;
+    ((symInt32QConfig_t *)t->quantization->qConfig)->scale = odtTestScale(scale);
     return t;
 }
 
@@ -1354,7 +1355,7 @@ static void buildGroupedConvTFixture(convTGroupedFixture_t *f, quantization_t *q
     byteConversion((uint8_t *)kConvTGroupedWMantissas, 32, weightsParam->data, 12, numWeightElems);
     symQConfig_t *weightQC = weightsParam->quantization->qConfig;
     for (size_t g = 0; g < numGroups; g++) {
-        weightQC->scales[g] = wScales[g];
+        weightQC->scales[g] = odtTestScale(wScales[g]);
     }
     parameter_t *weights = parameterInit(weightsParam, NULL);
 
@@ -1735,7 +1736,7 @@ static void buildGroupedAsymConvTTwinFixture(convTGroupedFixture_t *f, quantizat
     byteConversion((uint8_t *)codes, 32, weightsParam->data, 12, numWeightElems);
     asymQConfig_t *weightQC = weightsParam->quantization->qConfig;
     for (size_t g = 0; g < (size_t)kConvTPerChannelNumGroups; g++) {
-        weightQC->scales[g] = kConvTPerChannelWScales[g];
+        weightQC->scales[g] = odtTestScale(kConvTPerChannelWScales[g]);
         weightQC->zeroPoints[g] = kConvTAsymZps[g];
     }
     parameter_t *weights = parameterInit(weightsParam, NULL);
@@ -1876,7 +1877,7 @@ void testConv1dTransposedForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer(void)
         byteConversion((uint8_t *)kTwinWMantissas, 32, weightsParam->data, 8, 12);
         symQConfig_t *weightQC = weightsParam->quantization->qConfig;
         for (size_t g = 0; g < 3; g++) {
-            weightQC->scales[g] = 0.25f;
+            weightQC->scales[g] = odtTestScale(0.25f);
         }
         parameter_t *weights = parameterInit(weightsParam, NULL);
 
@@ -2812,7 +2813,7 @@ static int32_t runConv1dTransposedSymBiasGradSum(size_t batch, size_t length, in
         ((int32_t *)lossGrad->data)[i] = code;
     }
     ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->qMaxBits = bits;
-    ((symInt32QConfig_t *)bias->grad->quantization->qConfig)->scale = 4.f;
+    ((symInt32QConfig_t *)bias->grad->quantization->qConfig)->scale = odtTestScale(4.f);
 
     kernel_t kernel;
     initKernel(&kernel, 2, VALID, 1, 1);
@@ -2912,7 +2913,7 @@ void testConv1dTransposedLayerWeightGradGolden(void) {
     conv1dTransposedCalcWeightGradsSymInt32(&cfg, input, lossGrad, NULL);
     symInt32QConfig_t *gQC = (symInt32QConfig_t *)weights->grad->quantization->qConfig;
     GOLD_I32(kWgGoldSym, (int32_t *)weights->grad->data, WG_GOLD_W_N);
-    GOLD_F32_SCALAR(kWgGoldSymScale, gQC->scale);
+    GOLD_F32_SCALAR(kWgGoldSymScale, odtScaleToFloat(gQC->scale));
     GOLD_U32_SCALAR(kWgGoldSymBits, gQC->qMaxBits);
 }
 

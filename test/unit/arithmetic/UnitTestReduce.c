@@ -79,7 +79,7 @@ static tensor_t *buildSymInt32TensorNDBits(size_t numDims, const size_t *dimsIn,
 }
 
 static float symScaleOf(tensor_t *t) {
-    return ((symInt32QConfig_t *)t->quantization->qConfig)->scale;
+    return odtScaleToFloat(((symInt32QConfig_t *)t->quantization->qConfig)->scale);
 }
 
 /* ---- MinMax scalar helpers (added for Task 3's SYM kernels; used here by

@@ -24,6 +24,7 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "TestScale.h"
 #include "expected_bfp_conv1d.h"
 #include "expected_bfp_layer_forward.h"
 #include "expected_conv1d.h"
@@ -153,7 +154,7 @@ static parameter_t *buildSymParam(size_t numDims, const size_t *dimsIn, const fl
 }
 
 static float symScaleOf(tensor_t *t) {
-    return ((symInt32QConfig_t *)t->quantization->qConfig)->scale;
+    return odtScaleToFloat(((symInt32QConfig_t *)t->quantization->qConfig)->scale);
 }
 
 void testConv1dForwardMultiChannelWithBias() {
@@ -1689,7 +1690,7 @@ static tensor_t *buildSymInt32TensorExact(size_t numDims, const size_t *dimsIn,
     for (size_t i = 0; i < n; i++) {
         ((int32_t *)t->data)[i] = mantissas[i];
     }
-    ((symInt32QConfig_t *)t->quantization->qConfig)->scale = scale;
+    ((symInt32QConfig_t *)t->quantization->qConfig)->scale = odtTestScale(scale);
     return t;
 }
 
@@ -1718,7 +1719,7 @@ static layer_t *buildGroupedConv1dFixtureLayer(quantization_t *q, size_t numGrou
     byteConversion((uint8_t *)kConv1dGroupedWMantissas, 32, weightsParam->data, 12, numWeightElems);
     symQConfig_t *weightQC = weightsParam->quantization->qConfig;
     for (size_t g = 0; g < numGroups; g++) {
-        weightQC->scales[g] = wScales[g];
+        weightQC->scales[g] = odtTestScale(wScales[g]);
     }
     parameter_t *weights = parameterInit(weightsParam, NULL);
 
@@ -2097,7 +2098,7 @@ static layer_t *buildConvGroupsGroupedFixtureLayer(quantization_t *q, tensor_t *
     byteConversion((uint8_t *)kCgWMantissas, 32, weightsParam->data, 12, kCgWMantissas_len);
     symQConfig_t *weightQC = weightsParam->quantization->qConfig;
     for (size_t g = 0; g < (size_t)kCgNumGroups; g++) {
-        weightQC->scales[g] = kCgWScales[g];
+        weightQC->scales[g] = odtTestScale(kCgWScales[g]);
     }
     parameter_t *weights = parameterInit(weightsParam, NULL);
 
@@ -2178,7 +2179,7 @@ static layer_t *buildGroupedAsymConv1dTwinLayer(quantization_t *q, tensor_t **in
     byteConversion((uint8_t *)codes, 32, weightsParam->data, 12, numWeightElems);
     asymQConfig_t *weightQC = weightsParam->quantization->qConfig;
     for (size_t g = 0; g < 3; g++) {
-        weightQC->scales[g] = kPerChannelWScales[g];
+        weightQC->scales[g] = odtTestScale(kPerChannelWScales[g]);
         weightQC->zeroPoints[g] = kConv1dAsymZps[g];
     }
     parameter_t *weights = parameterInit(weightsParam, NULL);
@@ -2352,7 +2353,7 @@ void testConv1dForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer(void) {
         byteConversion((uint8_t *)kTwinWMantissas, 32, weightsParam->data, 8, 12);
         symQConfig_t *weightQC = weightsParam->quantization->qConfig;
         for (size_t g = 0; g < 3; g++) {
-            weightQC->scales[g] = 0.25f;
+            weightQC->scales[g] = odtTestScale(0.25f);
         }
         parameter_t *weights = parameterInit(weightsParam, NULL);
 
@@ -3234,7 +3235,7 @@ static int32_t runConv1dSymBiasGradSum(size_t batch, size_t length, int32_t code
         ((int32_t *)lossGrad->data)[i] = code;
     }
     ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->qMaxBits = bits;
-    ((symInt32QConfig_t *)bias->grad->quantization->qConfig)->scale = 4.f;
+    ((symInt32QConfig_t *)bias->grad->quantization->qConfig)->scale = odtTestScale(4.f);
 
     kernel_t kernel;
     initKernel(&kernel, 1, VALID, 1, 1);

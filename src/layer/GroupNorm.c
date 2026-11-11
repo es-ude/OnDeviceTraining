@@ -280,7 +280,7 @@ static void groupNormAffineSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, ten
 
     /* stored product of two stored scales: rounded once from the exact
      * mantissa product; the beta seeds below rescale onto this same value */
-    const float sY = canonProductScale(sNorm, gammaQC->scale, ODT_SCALE_NEAREST);
+    const float sY = canonProductScale(sNorm, loadCanonScale(&gammaQC->scale), ODT_SCALE_NEAREST);
 
     size_t K;
     size_t N;
@@ -298,7 +298,8 @@ static void groupNormAffineSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, ten
     size_t C = cfg->numChannels;
     int32_t seed[C];
     for (size_t c = 0; c < C; c++) {
-        seed[c] = rescaleIntoAccumulatorScale(betaQ[c], betaQC->scale, sY, outQC->roundingMode, rs);
+        seed[c] = rescaleIntoAccumulatorScale(betaQ[c], loadCanonScale(&betaQC->scale), sY,
+                                              outQC->roundingMode, rs);
     }
 
     size_t G = cfg->numGroups;
@@ -338,7 +339,7 @@ static void groupNormForwardSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, te
     symInt32QConfig_t *outQC = output->quantization->qConfig;
     int32_t *in = (int32_t *)input->data;
     int32_t *out = (int32_t *)output->data;
-    float inScale = inQC->scale;
+    float inScale = loadCanonScale(&inQC->scale);
     /* One-time range constants from the layer's static qMaxBits knob — powf,
      * the int decrement and the negation are ORCHESTRATION on config, not
      * runtime-data math; the -1 on the max is still routed through
@@ -425,7 +426,7 @@ static void groupNormForwardSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, te
         (void)symGridBoundsForDerivedScaleOrExit(outQC->qMaxBits, "groupNormForwardSymInt32");
         /* the canonical fitted grid first (CEIL); the stretch is its float
          * reciprocal, so the codes land on exactly that grid */
-        sNorm = odtScaleCanonFloat(divFloat32s(absMax, qMax), ODT_SCALE_CEIL);
+        sNorm = canonFitScale(absMax, qMax);
         float stretch = divFloat32s(1.0f, sNorm);
 
         /* Pass 2: normalize from the same stored stats, quantize. The n
@@ -741,9 +742,11 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
     int32_t *dyq = (int32_t *)loss->data;
     int32_t *gammaQ = (int32_t *)cfg->gamma->param->data;
     int32_t *dxq = (propLoss != NULL) ? (int32_t *)propLoss->data : NULL;
-    float inScale = ((symInt32QConfig_t *)forwardInput->quantization->qConfig)->scale;
-    float dyScale = ((symInt32QConfig_t *)loss->quantization->qConfig)->scale;
-    float gammaScale = ((symInt32QConfig_t *)cfg->gamma->param->quantization->qConfig)->scale;
+    float inScale =
+        loadCanonScale(&((symInt32QConfig_t *)forwardInput->quantization->qConfig)->scale);
+    float dyScale = loadCanonScale(&((symInt32QConfig_t *)loss->quantization->qConfig)->scale);
+    float gammaScale =
+        loadCanonScale(&((symInt32QConfig_t *)cfg->gamma->param->quantization->qConfig)->scale);
     symInt32QConfig_t *plQC =
         (propLoss != NULL) ? (symInt32QConfig_t *)propLoss->quantization->qConfig : NULL;
 
@@ -870,7 +873,7 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
         }
 
         (void)symGridBoundsForDerivedScaleOrExit(plQC->qMaxBits, "groupNormBackwardSymInt32");
-        const float dxScale = odtScaleCanonFloat(divFloat32s(absMax, qMax), ODT_SCALE_CEIL);
+        const float dxScale = canonFitScale(absMax, qMax);
         /* Pass B: recompute dx from the stored stats and quantize. The dx
          * expression is IDENTICAL to pass A's absmax expression (all
          * scalar-op calls, no contraction divergence); the clamp absorbs

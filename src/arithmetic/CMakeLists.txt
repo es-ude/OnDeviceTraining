@@ -50,6 +50,7 @@ target_link_libraries(BfpSoftmaxExp PRIVATE
 add_library(Comparison Comparison.c)
 target_include_directories(Comparison PUBLIC include)
 target_link_libraries(Comparison PRIVATE
+        DyadicScale
         Tensor
         DTypes
         TensorConversion

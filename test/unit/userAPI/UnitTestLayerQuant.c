@@ -143,7 +143,7 @@ void testDeepCopyQuantizationSymDeepCopiesScalesArray(void) {
     symQConfig_t *srcCfg = (symQConfig_t *)src->qConfig;
     symQConfig_t *dstCfg = (symQConfig_t *)dst->qConfig;
     TEST_ASSERT_NOT_EQUAL(srcCfg->scales, dstCfg->scales); /* independent arrays */
-    TEST_ASSERT_EQUAL_FLOAT(srcCfg->scales[0], dstCfg->scales[0]);
+    TEST_ASSERT_EQUAL_FLOAT(odtScaleToFloat(srcCfg->scales[0]), odtScaleToFloat(dstCfg->scales[0]));
     TEST_ASSERT_EQUAL_UINT8(srcCfg->qBits, dstCfg->qBits);
     TEST_ASSERT_EQUAL_INT(srcCfg->roundingMode, dstCfg->roundingMode);
     TEST_ASSERT_EQUAL_size_t(srcCfg->numGroups, dstCfg->numGroups);

@@ -9,6 +9,7 @@
 #include "Comparison.h"
 #include "DTypes.h"
 #include "Quantization.h"
+#include "ScaleCanon.h"
 #include "TensorConversion.h"
 
 void gteInt32Value(tensor_t *a, int32_t b, int32_t altNumber, tensor_t *result) {
@@ -102,7 +103,7 @@ void gteSymInt32Value(tensor_t *a, int32_t b, int32_t altNumber, tensor_t *resul
     readBytesAsInt32Array(numberOfValues, a->data, values);
 
     symInt32QConfig_t *aSymInt32QC = a->quantization->qConfig;
-    float scale = aSymInt32QC->scale;
+    float scale = loadCanonScale(&aSymInt32QC->scale);
     float scaledB = (float)b / scale;
 
     for (size_t i = 0; i < numberOfValues; i++) {

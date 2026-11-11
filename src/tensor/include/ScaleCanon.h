@@ -1,12 +1,16 @@
 #ifndef ODT_SCALE_CANON_H
 #define ODT_SCALE_CANON_H
 
+#include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "DyadicScale.h"
 
 /* The float-domain rules that keep every STORED SYM / SYM_INT32 / ASYM scale an
- * exact 15-bit dyadic value (DyadicScale.h) while the fields are still float.
+ * exact 15-bit dyadic value (DyadicScale.h). The fields are odtScale_t; the
+ * rules still compute in float on canonical values (exact), and the store
+ * converts once at the boundary.
  * Each rule rounds once; the value it returns is the one the codes are computed
  * on AND the one stored, so codes and metadata share one grid. Link
  * DyadicScale to use them.
@@ -24,13 +28,25 @@
  * Operands are read with FromFloat(NEAREST), which is exact for a canonical
  * stored value.
  *
- * storeCanonScale is the store: it asserts canonicality under ODT_SCALE_STRICT.
+ * storeCanonScale is the store: it asserts canonicality under ODT_SCALE_STRICT
+ * and stores FromFloat(v, NEAREST), which is exact for a canonical v (the
+ * value the float-storage build stored). loadCanonScale is the read: latch it
+ * once per op into a float local.
  * Every helper fails fast (DyadicScale) on a non-positive, non-finite or
  * out-of-normal-range value. */
 
-static inline void storeCanonScale(float *dst, float v) {
+static inline void storeCanonScale(odtScale_t *dst, float v) {
     odtScaleAssertCanonical(v);
-    *dst = v;
+    odtScaleStore(dst, odtScaleFromFloat(v, ODT_SCALE_NEAREST));
+}
+
+static inline float loadCanonScale(const odtScale_t *src) {
+    return odtScaleToFloat(odtScaleLoad(src));
+}
+
+/* Copy n stored scales verbatim (group arrays of a config clone). */
+static inline void copyCanonScales(odtScale_t *dst, const odtScale_t *src, size_t n) {
+    memcpy(dst, src, n * sizeof(*dst));
 }
 
 static inline float canonFitScale(float absMax, float hi) {

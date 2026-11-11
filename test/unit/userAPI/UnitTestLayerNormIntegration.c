@@ -207,8 +207,10 @@ void testLayerNormSymInt32SingleLayerTrainingStep(void) {
     float gammaSym[4], betaSym[4];
     {
         layerNormConfig_t *cfg = lnSym->config->layerNorm;
-        float gs = ((symInt32QConfig_t *)cfg->gamma->param->quantization->qConfig)->scale;
-        float bs = ((symInt32QConfig_t *)cfg->beta->param->quantization->qConfig)->scale;
+        float gs =
+            odtScaleToFloat(((symInt32QConfig_t *)cfg->gamma->param->quantization->qConfig)->scale);
+        float bs =
+            odtScaleToFloat(((symInt32QConfig_t *)cfg->beta->param->quantization->qConfig)->scale);
         for (size_t i = 0; i < 4; i++) {
             gammaSym[i] = (float)((int32_t *)cfg->gamma->param->data)[i] * gs;
             betaSym[i] = (float)((int32_t *)cfg->beta->param->data)[i] * bs;

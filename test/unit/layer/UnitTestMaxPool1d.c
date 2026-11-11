@@ -389,7 +389,7 @@ static void assertSymTensorMatchesGold(tensor_t *t, int32_t const *mantissas, si
                                        float expectedScale, int32_t mantissaTol, float scaleTol,
                                        float const *dequant, float dequantTol) {
     int32_t const *m = (int32_t const *)t->data;
-    float scale = ((symInt32QConfig_t *)t->quantization->qConfig)->scale;
+    float scale = odtScaleToFloat(((symInt32QConfig_t *)t->quantization->qConfig)->scale);
     TEST_ASSERT_FLOAT_WITHIN(expectedScale * scaleTol, expectedScale, scale);
     for (size_t i = 0; i < len; i++) {
         TEST_ASSERT_INT_WITHIN(mantissaTol, mantissas[i], m[i]);
@@ -2384,7 +2384,7 @@ void testMaxPool1dBackwardSymSkipsMinusOneSentinel(void) {
     maxPool1dBackward(r.layer, NULL, lossGrad, propLoss, NULL);
 
     int32_t const *m = (int32_t const *)propLoss->data;
-    float scale = ((symInt32QConfig_t *)propLoss->quantization->qConfig)->scale;
+    float scale = odtScaleToFloat(((symInt32QConfig_t *)propLoss->quantization->qConfig)->scale);
     for (size_t i = 0; i < 12; i++) {
         if (kArgmaxGuardDxWithSentinel[i] == 0.0f) {
             TEST_ASSERT_EQUAL_INT32(0, m[i]);

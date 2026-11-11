@@ -118,10 +118,12 @@ void testLayerLoadWeightsLinearQuantizesForSymStorage(void) {
 
     int32_t loadedWeightMantissas[6];
     memcpy(loadedWeightMantissas, weightParam->data, sizeof(loadedWeightMantissas));
-    float loadedWeightScale = ((symInt32QConfig_t *)weightParam->quantization->qConfig)->scale;
+    float loadedWeightScale =
+        odtScaleToFloat(((symInt32QConfig_t *)weightParam->quantization->qConfig)->scale);
     int32_t loadedBiasMantissas[2];
     memcpy(loadedBiasMantissas, biasParam->data, sizeof(loadedBiasMantissas));
-    float loadedBiasScale = ((symInt32QConfig_t *)biasParam->quantization->qConfig)->scale;
+    float loadedBiasScale =
+        odtScaleToFloat(((symInt32QConfig_t *)biasParam->quantization->qConfig)->scale);
 
     /* Gold: convertTensor directly on the same float source, independent of
      * layerLoadWeights's own dispatch (a reverted memcpy would reinterpret
@@ -137,7 +139,8 @@ void testLayerLoadWeightsLinearQuantizesForSymStorage(void) {
     convertTensor(&weightSrcView, weightGold, NULL);
     int32_t goldWeightMantissas[6];
     memcpy(goldWeightMantissas, weightGold->data, sizeof(goldWeightMantissas));
-    float goldWeightScale = ((symInt32QConfig_t *)weightGold->quantization->qConfig)->scale;
+    float goldWeightScale =
+        odtScaleToFloat(((symInt32QConfig_t *)weightGold->quantization->qConfig)->scale);
 
     tensor_t *biasGold =
         initTensor(getShapeLike(biasParam->shape), quantizationInitSymInt32(HALF_AWAY), NULL);
@@ -146,7 +149,8 @@ void testLayerLoadWeightsLinearQuantizesForSymStorage(void) {
     convertTensor(&biasSrcView, biasGold, NULL);
     int32_t goldBiasMantissas[2];
     memcpy(goldBiasMantissas, biasGold->data, sizeof(goldBiasMantissas));
-    float goldBiasScale = ((symInt32QConfig_t *)biasGold->quantization->qConfig)->scale;
+    float goldBiasScale =
+        odtScaleToFloat(((symInt32QConfig_t *)biasGold->quantization->qConfig)->scale);
 
     freeParameter(weights);
     freeParameter(bias);
@@ -311,8 +315,10 @@ void testLayerLoadWeightsLayerNormQuantizesForSymStorage(void) {
         g[i] = ((int32_t *)cfg->gamma->param->data)[i];
         b[i] = ((int32_t *)cfg->beta->param->data)[i];
     }
-    float gScale = ((symInt32QConfig_t *)cfg->gamma->param->quantization->qConfig)->scale;
-    float bScale = ((symInt32QConfig_t *)cfg->beta->param->quantization->qConfig)->scale;
+    float gScale =
+        odtScaleToFloat(((symInt32QConfig_t *)cfg->gamma->param->quantization->qConfig)->scale);
+    float bScale =
+        odtScaleToFloat(((symInt32QConfig_t *)cfg->beta->param->quantization->qConfig)->scale);
 
     freeLayerNormLayer(layer);
     freeQuantization(bwd);

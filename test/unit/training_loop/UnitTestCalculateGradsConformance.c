@@ -550,7 +550,7 @@ static void captureTensor(blob_t *b, tensor_t *t) {
     appendBytes(b, t->data, calcNumberOfBytesForData(t->quantization, elements));
     if (t->quantization->type == SYM_INT32) {
         const symInt32QConfig_t *qc = t->quantization->qConfig;
-        appendBytes(b, &qc->scale, sizeof qc->scale);
+        appendBytes(b, &qc->scale, sizeof odtScaleToFloat(qc->scale));
     } else if (t->quantization->type == BFP) {
         const bfpQConfig_t *qc = t->quantization->qConfig;
         appendBytes(b, &qc->numGroups, sizeof qc->numGroups);

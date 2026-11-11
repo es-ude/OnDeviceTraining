@@ -18,6 +18,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TensorConversion.h"
+#include "TestScale.h"
 #include "unity.h"
 
 #include "DeathTest.h"
@@ -86,7 +87,7 @@ static parameter_t *buildSymParam(size_t numDims, const size_t *dimsIn, const fl
 }
 
 static float symScaleOf(tensor_t *t) {
-    return ((symInt32QConfig_t *)t->quantization->qConfig)->scale;
+    return odtScaleToFloat(((symInt32QConfig_t *)t->quantization->qConfig)->scale);
 }
 
 void testConfigStructIsPopulated(void) {
@@ -3716,7 +3717,7 @@ static tensor_t *buildSymCodes(size_t numDims, const size_t *dimsIn, const int32
     if (codes != NULL) {
         memcpy(t->data, codes, NORM_DX_N * sizeof(int32_t));
     }
-    ((symInt32QConfig_t *)t->quantization->qConfig)->scale = scale;
+    ((symInt32QConfig_t *)t->quantization->qConfig)->scale = odtTestScale(scale);
     return t;
 }
 
@@ -3733,7 +3734,7 @@ void testLayerNormSymDxRoundsWithItsNormDxStream(void) {
     for (size_t j = 0; j < NORM_DX_N; j++) {
         ((int32_t *)gamma->param->data)[j] = 1;
     }
-    ((symInt32QConfig_t *)gamma->param->quantization->qConfig)->scale = 1.0f;
+    ((symInt32QConfig_t *)gamma->param->quantization->qConfig)->scale = odtTestScale(1.0f);
     size_t *normShape = reserveMemory(sizeof(size_t));
     normShape[0] = NORM_DX_N;
     quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
@@ -3857,7 +3858,7 @@ void testLayerNormSymDxSrKeepsSaturatedCodeOnTheGrid(void) {
     for (size_t j = 0; j < NORM_DX_N; j++) {
         ((int32_t *)gamma->param->data)[j] = 1;
     }
-    ((symInt32QConfig_t *)gamma->param->quantization->qConfig)->scale = 1.0f;
+    ((symInt32QConfig_t *)gamma->param->quantization->qConfig)->scale = odtTestScale(1.0f);
     size_t *normShape = reserveMemory(sizeof(size_t));
     normShape[0] = NORM_DX_N;
     quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);

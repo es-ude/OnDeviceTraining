@@ -3,6 +3,7 @@
 #include "ArithmeticType.h"
 #include "Quantization.h"
 #include "Rounding.h"
+#include "TestScale.h"
 #include "unity.h"
 
 static void testFloat32QuantizationDerivesFloatArithmeticWithHalfAway(void) {
@@ -61,7 +62,7 @@ static void testStorageOnlyDtypesDeriveFloatArithmetic(void) {
      * (arithmetic-type-split D5, project ASYM design: conversion between native ops). */
     /* Stack-fixture idiom (PR4): initAsymQConfig would heap-allocate two
      * arrays this test never frees. */
-    float aqcScales[1] = {1.f};
+    odtScale_t aqcScales[1] = {odtTestScale(1.f)};
     uint16_t aqcZps[1] = {0};
     asymQConfig_t aqc = {.scales = aqcScales,
                          .zeroPoints = aqcZps,
@@ -77,7 +78,7 @@ static void testStorageOnlyDtypesDeriveFloatArithmetic(void) {
 
     /* Stack-fixture idiom (docs/conventions/testing.md): a heap-allocating
      * initSymQConfig call here would leak its scales array. */
-    float symScales[1] = {1.f};
+    odtScale_t symScales[1] = {odtTestScale(1.f)};
     symQConfig_t sqc = {.scales = symScales,
                         .numGroups = 1,
                         .groupSize = 0,

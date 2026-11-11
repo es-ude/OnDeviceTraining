@@ -54,7 +54,7 @@ void flattenForward(layer_t *flattenLayer, tensor_t *input, tensor_t *output,
     if (input->quantization->type == SYM_INT32) {
         symInt32QConfig_t *inputQC = input->quantization->qConfig;
         symInt32QConfig_t *outputQC = output->quantization->qConfig;
-        storeCanonScale(&outputQC->scale, inputQC->scale);
+        storeCanonScale(&outputQC->scale, loadCanonScale(&inputQC->scale));
     } else if (input->quantization->type == BFP) {
         const bfpQConfig_t *inputQC = input->quantization->qConfig;
         bfpQConfig_t *outputQC = output->quantization->qConfig;
@@ -81,7 +81,7 @@ void flattenBackward(layer_t *flattenLayer, tensor_t *forwardInput, tensor_t *lo
     if (loss->quantization->type == SYM_INT32) {
         symInt32QConfig_t *lossQC = loss->quantization->qConfig;
         symInt32QConfig_t *propLossQC = propLoss->quantization->qConfig;
-        storeCanonScale(&propLossQC->scale, lossQC->scale);
+        storeCanonScale(&propLossQC->scale, loadCanonScale(&lossQC->scale));
     } else if (loss->quantization->type == BFP) {
         const bfpQConfig_t *lossQC = loss->quantization->qConfig;
         bfpQConfig_t *propLossQC = propLoss->quantization->qConfig;

@@ -4,6 +4,7 @@
 #include "ReferenceByteConversion.h"
 #include "StorageApi.h"
 #include "Tensor.h"
+#include "TestScale.h"
 #include "unity.h"
 
 #include <stdbool.h>
@@ -617,7 +618,7 @@ void testCopyTensor() {
 }
 
 void test_calcBitsPerElement_Sym_qBits3() {
-    float cfgScale[1] = {1.0f};
+    odtScale_t cfgScale[1] = {odtTestScale(1.0f)};
     symQConfig_t cfg = {
         .scales = cfgScale, .numGroups = 1, .groupSize = 0, .qBits = 3, .roundingMode = HALF_AWAY};
     quantization_t q;
@@ -626,7 +627,7 @@ void test_calcBitsPerElement_Sym_qBits3() {
 }
 
 void test_calcBytesPerElement_Sym_qBits3() {
-    float cfgScale[1] = {1.0f};
+    odtScale_t cfgScale[1] = {odtTestScale(1.0f)};
     symQConfig_t cfg = {
         .scales = cfgScale, .numGroups = 1, .groupSize = 0, .qBits = 3, .roundingMode = HALF_AWAY};
     quantization_t q;
@@ -636,7 +637,7 @@ void test_calcBytesPerElement_Sym_qBits3() {
 }
 
 void test_calcNumberOfBytesForData_Sym_qBits3_N10() {
-    float cfgScale[1] = {1.0f};
+    odtScale_t cfgScale[1] = {odtTestScale(1.0f)};
     symQConfig_t cfg = {
         .scales = cfgScale, .numGroups = 1, .groupSize = 0, .qBits = 3, .roundingMode = HALF_AWAY};
     quantization_t q;
@@ -646,7 +647,7 @@ void test_calcNumberOfBytesForData_Sym_qBits3_N10() {
 }
 
 void test_calcNumberOfBytesForData_Sym_qBits5_N4() {
-    float cfgScale[1] = {1.0f};
+    odtScale_t cfgScale[1] = {odtTestScale(1.0f)};
     symQConfig_t cfg = {
         .scales = cfgScale, .numGroups = 1, .groupSize = 0, .qBits = 5, .roundingMode = HALF_AWAY};
     quantization_t q;
@@ -661,7 +662,7 @@ void test_calcBytesPerTensor_SymQBits3N10_Ceils() {
     size_t dims[] = {1, 10};
     size_t order[] = {0, 1};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 2, .orderOfDimensions = order};
-    float cfgScale[1] = {1.0f};
+    odtScale_t cfgScale[1] = {odtTestScale(1.0f)};
     symQConfig_t cfg = {
         .scales = cfgScale, .numGroups = 1, .groupSize = 0, .qBits = 3, .roundingMode = HALF_AWAY};
     quantization_t q;
@@ -743,7 +744,7 @@ void testCopyTensorSymCarriesConfigAndPackedBytes() {
     size_t srcOrder[] = {0, 1};
     shape_t srcShape = {
         .dimensions = srcDims, .numberOfDimensions = 2, .orderOfDimensions = srcOrder};
-    float srcQCScale[1] = {0.25f};
+    odtScale_t srcQCScale[1] = {odtTestScale(0.25f)};
     symQConfig_t srcQC = {.scales = srcQCScale,
                           .numGroups = 1,
                           .groupSize = 0,
@@ -759,7 +760,7 @@ void testCopyTensorSymCarriesConfigAndPackedBytes() {
     size_t dstOrder[2];
     shape_t dstShape = {
         .dimensions = dstDims, .numberOfDimensions = 2, .orderOfDimensions = dstOrder};
-    float dstQCScale[1] = {1.f};
+    odtScale_t dstQCScale[1] = {odtTestScale(1.f)};
     symQConfig_t dstQC = {.scales = dstQCScale,
                           .numGroups = 1,
                           .groupSize = 0,
@@ -775,7 +776,7 @@ void testCopyTensorSymCarriesConfigAndPackedBytes() {
     TEST_ASSERT_EQUAL_INT(SYM, dst.quantization->type);
     TEST_ASSERT_EQUAL_PTR(&dstQC, dst.quantization->qConfig);
     TEST_ASSERT_EQUAL_PTR(dstQCScale, dstQC.scales); /* dst keeps its OWN array */
-    TEST_ASSERT_EQUAL_FLOAT(0.25f, dstQC.scales[0]);
+    TEST_ASSERT_EQUAL_FLOAT(0.25f, odtScaleToFloat(dstQC.scales[0]));
     TEST_ASSERT_EQUAL_UINT8(6, dstQC.qBits);
     TEST_ASSERT_EQUAL_INT(HALF_AWAY, dstQC.roundingMode);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(srcData, dstData, 3);
@@ -792,7 +793,7 @@ void testCopyTensorAsymCarriesConfigAndPackedBytes() {
     shape_t srcShape = {
         .dimensions = srcDims, .numberOfDimensions = 2, .orderOfDimensions = srcOrder};
     /* code-domain re-pin (group-quant PR4, D6): old value-domain zp -7 becomes +7. */
-    float srcScales[1] = {0.5f};
+    odtScale_t srcScales[1] = {odtTestScale(0.5f)};
     uint16_t srcZps[1] = {7};
     asymQConfig_t srcQC = {.scales = srcScales,
                            .zeroPoints = srcZps,
@@ -810,7 +811,7 @@ void testCopyTensorAsymCarriesConfigAndPackedBytes() {
     size_t dstOrder[2];
     shape_t dstShape = {
         .dimensions = dstDims, .numberOfDimensions = 2, .orderOfDimensions = dstOrder};
-    float dstScales[1] = {1.f};
+    odtScale_t dstScales[1] = {odtTestScale(1.f)};
     uint16_t dstZps[1] = {0};
     asymQConfig_t dstQC = {.scales = dstScales,
                            .zeroPoints = dstZps,
@@ -828,7 +829,7 @@ void testCopyTensorAsymCarriesConfigAndPackedBytes() {
     TEST_ASSERT_EQUAL_INT(ASYM, dst.quantization->type);
     TEST_ASSERT_EQUAL_PTR(dstScales, dstQC.scales); /* dst keeps its OWN arrays */
     TEST_ASSERT_EQUAL_PTR(dstZps, dstQC.zeroPoints);
-    TEST_ASSERT_EQUAL_FLOAT(0.5f, dstQC.scales[0]);
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, odtScaleToFloat(dstQC.scales[0]));
     TEST_ASSERT_EQUAL_UINT16(7, dstQC.zeroPoints[0]);
     TEST_ASSERT_EQUAL_UINT8(5, dstQC.qBits);
     TEST_ASSERT_EQUAL_INT(HALF_AWAY, dstQC.roundingMode);
@@ -847,7 +848,7 @@ void testCopyTensorSymIntoNullConfigDestDies() {
     size_t srcOrder[] = {0, 1};
     shape_t srcShape = {
         .dimensions = srcDims, .numberOfDimensions = 2, .orderOfDimensions = srcOrder};
-    float srcQCScale[1] = {1.f};
+    odtScale_t srcQCScale[1] = {odtTestScale(1.f)};
     symQConfig_t srcQC = {.scales = srcQCScale,
                           .numGroups = 1,
                           .groupSize = 0,
@@ -1060,7 +1061,7 @@ static wideSize_t ceilBytes(size_t n, size_t bits) {
     return ((wideSize_t)n * bits + 7u) / 8u;
 }
 
-static void initSymBits(symQConfig_t *cfg, float *scale, uint8_t qBits, quantization_t *q) {
+static void initSymBits(symQConfig_t *cfg, odtScale_t *scale, uint8_t qBits, quantization_t *q) {
     *cfg = (symQConfig_t){
         .scales = scale, .numGroups = 1, .groupSize = 0, .qBits = qBits, .roundingMode = HALF_AWAY};
     initSymQuantization(cfg, q);
@@ -1069,7 +1070,7 @@ static void initSymBits(symQConfig_t *cfg, float *scale, uint8_t qBits, quantiza
 /* Tensor.h promises a stop only when the BYTE count overflows; n * bits may
  * wrap while ceil(n * bits / 8) still fits. */
 void testPackedByteCountFitsWhenBitCountWraps() {
-    float scale[1] = {1.0f};
+    odtScale_t scale[1] = {odtTestScale(1.0f)};
     symQConfig_t cfg;
     quantization_t symQ;
 
@@ -1093,7 +1094,7 @@ void testPackedByteCountFitsWhenBitCountWraps() {
 }
 
 void testPackedByteCountOverflowExits() {
-    float scale[1] = {1.0f};
+    odtScale_t scale[1] = {odtTestScale(1.0f)};
     symQConfig_t cfg;
     quantization_t symQ;
 
@@ -1118,7 +1119,7 @@ void testPackedByteCountOverflowExits() {
 #endif
 
 void testPackedByteCountMatchesCeilTable() {
-    float scale[1] = {1.0f};
+    odtScale_t scale[1] = {odtTestScale(1.0f)};
     symQConfig_t cfg;
     quantization_t symQ;
     for (uint8_t bits = 1; bits <= 32; bits++) {

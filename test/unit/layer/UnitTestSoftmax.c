@@ -2093,9 +2093,9 @@ static size_t smSymBackwardRun(void *ctx, uint64_t seed, bool stochastic,
 
     memcpy(out, propLoss->data, SM_KEYED_N * sizeof(int32_t));
     memcpy(out + SM_KEYED_N * sizeof(int32_t),
-           &((symInt32QConfig_t *)propLoss->quantization->qConfig)->scale, sizeof(float));
+           &((symInt32QConfig_t *)propLoss->quantization->qConfig)->scale, sizeof(odtScale_t));
     freeTensor(propLoss);
-    return SM_KEYED_N * sizeof(int32_t) + sizeof(float);
+    return SM_KEYED_N * sizeof(int32_t) + sizeof(odtScale_t);
 }
 
 /* The SYM backward requantizes its float dx through [FLOAT32][SYM_INT32] with

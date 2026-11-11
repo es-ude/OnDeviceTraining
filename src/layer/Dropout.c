@@ -85,7 +85,7 @@ static void dropoutForwardSymInt32(dropoutConfig_t *cfg, tensor_t *input, tensor
         for (size_t i = 0; i < numberOfElements; i++) {
             out[i] = in[i];
         }
-        storeCanonScale(&outQC->scale, inQC->scale);
+        storeCanonScale(&outQC->scale, loadCanonScale(&inQC->scale));
         return;
     }
 
@@ -95,7 +95,7 @@ static void dropoutForwardSymInt32(dropoutConfig_t *cfg, tensor_t *input, tensor
     }
     /* scale-fold: ints copied unchanged, the 1/(1-p) factor goes into the quant
      * scale -- canonicalized NEAREST, folded with odtScaleMul (canonCoeffScale) */
-    storeCanonScale(&outQC->scale, canonCoeffScale(inQC->scale, scale));
+    storeCanonScale(&outQC->scale, canonCoeffScale(loadCanonScale(&inQC->scale), scale));
 }
 
 /* Eval-mode / mask-free carry: identical element count and geometry mean
@@ -376,7 +376,7 @@ static void dropoutBackwardSymInt32(dropoutConfig_t *cfg, tensor_t *loss, tensor
     }
     /* scale-fold: ints copied unchanged, the 1/(1-p) factor goes into the quant
      * scale -- canonicalized NEAREST, folded with odtScaleMul (canonCoeffScale) */
-    storeCanonScale(&propLossQC->scale, canonCoeffScale(lossQC->scale, scale));
+    storeCanonScale(&propLossQC->scale, canonCoeffScale(loadCanonScale(&lossQC->scale), scale));
 }
 
 void dropoutBackward(layer_t *dropoutLayer, tensor_t *forwardInput, tensor_t *loss,

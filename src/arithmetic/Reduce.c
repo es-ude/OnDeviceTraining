@@ -248,7 +248,7 @@ void meanOverTrailingAxesSymInt32(tensor_t *in, size_t k, tensor_t *meanOut) {
     }
     int32_t *q = (int32_t *)in->data;
     float *m = (float *)meanOut->data;
-    float s = ((symInt32QConfig_t *)in->quantization->qConfig)->scale;
+    float s = loadCanonScale(&((symInt32QConfig_t *)in->quantization->qConfig)->scale);
     for (size_t b = 0; b < K; b++) {
         int32_t sumQ = 0; /* value-sum, sound for N < 2^(32-qMaxBits) */
         for (size_t j = 0; j < N; j++) {
@@ -267,7 +267,7 @@ void varianceBiasedOverTrailingAxesSymInt32(tensor_t *in, size_t k, tensor_t *me
     int32_t *q = (int32_t *)in->data;
     float *m = (float *)meanIn->data;
     float *v = (float *)varOut->data;
-    float s = ((symInt32QConfig_t *)in->quantization->qConfig)->scale;
+    float s = loadCanonScale(&((symInt32QConfig_t *)in->quantization->qConfig)->scale);
     for (size_t b = 0; b < K; b++) {
         float acc = 0.0f;
         for (size_t j = 0; j < N; j++) {
@@ -285,7 +285,7 @@ void rsqrtSymInt32(tensor_t *in, float eps, tensor_t *out, rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(in);
     int32_t *qIn = (int32_t *)in->data;
     int32_t *qOut = (int32_t *)out->data;
-    float sIn = ((symInt32QConfig_t *)in->quantization->qConfig)->scale;
+    float sIn = loadCanonScale(&((symInt32QConfig_t *)in->quantization->qConfig)->scale);
     symInt32QConfig_t *outQC = out->quantization->qConfig;
     const float qMax = powf(2, (float)outQC->qMaxBits - 1) - 1;
     const float qMin = -powf(2, (float)outQC->qMaxBits - 1);
@@ -307,7 +307,7 @@ void rsqrtSymInt32(tensor_t *in, float eps, tensor_t *out, rngStream_t *rs) {
     /* Requant into out via the convertFloatTensorToSymInt32Tensor idiom
      * (scale = absMax/qMax, round-clamp), refreshing out's scale on every call. */
     (void)symGridBoundsForDerivedScaleOrExit(outQC->qMaxBits, "rsqrtSymInt32");
-    const float scale = odtScaleCanonFloat(divFloat32s(absMax, qMax), ODT_SCALE_CEIL);
+    const float scale = canonFitScale(absMax, qMax);
     storeCanonScale(&outQC->scale, scale);
     for (size_t i = 0; i < n; i++) {
         float r = rsqrtFloat32(mulFloat32s((float)qIn[i], sIn), eps);

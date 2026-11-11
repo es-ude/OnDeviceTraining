@@ -201,7 +201,7 @@ _MEM_CONFIG_ORDER = [
     "float", "adamw", "sym12", "sym10", "sym8", "sym8w", "sym6", "sym4",
     "sym8cos", "sym4cos", "sym8det", "sym6det", "sym4det",
     # E0 linear-quant baseline arms (sym8b/sym8bw: memory-identical to sym8/sym8w).
-    "sym8b", "sym8bw", "sym8bwg", "asym8",
+    "sym8b", "sym8bw", "sym8bwg", "sym8bwg64", "sym8bwg32", "asym8",
     # #300 granularity axis — keep in sync with CONFIG_ORDER in compare_memory.py.
     "sym6pc", "sym6g64", "sym6g32",
     "sym4pc", "sym4g64", "sym4g32",

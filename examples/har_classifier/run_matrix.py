@@ -130,6 +130,14 @@ CONFIGS: dict[str, tuple[str, dict[str, str]]] = {
     "sym8bw": ("train_c_har_classifier_sym", {"SYM_BITS": "8", "SYM_BWD": "1", "SYM_WIRES": "1"}),
     "sym8bwg": ("train_c_har_classifier_sym",
                 {"SYM_BITS": "8", "SYM_BWD": "1", "SYM_WIRES": "1", "GROUP_MODE": "channel"}),
+    # Fixed-size weight groups on top of sym8bw (twins of the firmware arms of the
+    # same name); conv1 falls back to per-channel, see DIVISIBILITY FALLBACK below.
+    "sym8bwg64": ("train_c_har_classifier_sym",
+                  {"SYM_BITS": "8", "SYM_BWD": "1", "SYM_WIRES": "1", "GROUP_MODE": "size",
+                   "GROUP_SIZE": "64"}),
+    "sym8bwg32": ("train_c_har_classifier_sym",
+                  {"SYM_BITS": "8", "SYM_BWD": "1", "SYM_WIRES": "1", "GROUP_MODE": "size",
+                   "GROUP_SIZE": "32"}),
     "asym8": ("train_c_har_classifier_sym", {"SYM_BITS": "8", "WEIGHT_DTYPE": "asym"}),
     "sym6": ("train_c_har_classifier_sym", {"SYM_BITS": "6"}),
     "sym4": ("train_c_har_classifier_sym", {"SYM_BITS": "4"}),

@@ -270,8 +270,9 @@ def run_one(
     """Run one (config, seed) training job; return (final test_acc, wall seconds).
 
     Raises FileNotFoundError if the binary is missing (a setup error). Non-zero
-    exit propagates as CalledProcessError; non-convergence is NOT an error (the
-    SYM binary records it as an advisory diagnostic and exits 0).
+    exit propagates as CalledProcessError (run_pair counts it as diverged);
+    non-convergence is NOT an error (the SYM binary records it as an advisory
+    diagnostic and exits 0).
     """
     binary_name, extra_env = CONFIGS[config]
     binary = build_dir / binary_name
@@ -301,6 +302,52 @@ def run_one(
     )
     wall = time.monotonic() - t0
     return parse_final_acc(result.stdout), wall
+
+
+def log_diverged(log_path: Path) -> bool:
+    """True iff the run's JSON log records `final.diverged == 1` (graceful stop at
+    the first non-finite loss, #446). A missing/unreadable log is not divergence."""
+    try:
+        final = json.loads(log_path.read_text()).get("final", {})
+    except (json.JSONDecodeError, OSError):
+        return False
+    return bool(final.get("diverged"))
+
+
+def run_pair(
+    config: str, seed: int, epochs: int, logs_dir: Path, build_dir: Path
+) -> dict:
+    """Run one (config, seed) and return its result row, never dropping the seed.
+
+    A trainer that exits non-zero (e.g. the SYM scale fail-fast on a non-finite
+    fit, which is how a diverging SYM run ends) counts as DIVERGED with no
+    accuracy, so per-config averages are never silently taken over fewer seeds.
+    A zero exit reads `diverged` from the run's own log. A missing binary is a
+    setup error and still raises FileNotFoundError.
+    """
+    try:
+        acc, wall = run_one(config, seed, epochs, logs_dir, build_dir)
+    except subprocess.CalledProcessError as exc:
+        return {"config": config, "seed": seed, "test_acc": None, "wall": None,
+                "diverged": 1, "returncode": exc.returncode, "stderr": exc.stderr}
+    diverged = int(log_diverged(logs_dir / f"{config}_seed{seed}.json"))
+    return {"config": config, "seed": seed, "test_acc": acc, "wall": wall,
+            "diverged": diverged, "returncode": 0, "stderr": ""}
+
+
+def format_summary(rows: list[dict]) -> str:
+    """Per-config table (one line per seed, crashed seeds included with
+    diverged=1 and no accuracy) plus the total diverged count."""
+    lines = ["per-config results (diverged=1: stopped at a non-finite loss or crashed):"]
+    for config in sorted({r["config"] for r in rows}):
+        by_seed = sorted((r for r in rows if r["config"] == config), key=lambda r: r["seed"])
+        n_div = sum(r["diverged"] for r in by_seed)
+        lines.append(f"  {config}: {len(by_seed)} seeds, {n_div} diverged")
+        for r in by_seed:
+            acc = f"{r['test_acc']:.4f}" if r["test_acc"] is not None else "N/A"
+            lines.append(f"    seed{r['seed']:<3d} test_acc={acc} diverged={r['diverged']}")
+    lines.append(f"diverged: {sum(r['diverged'] for r in rows)}/{len(rows)} runs")
+    return "\n".join(lines)
 
 
 def main() -> None:
@@ -384,17 +431,18 @@ def main() -> None:
 
     done = 0
     failures = 0
+    rows: list[dict] = []
     t_start = time.monotonic()
     with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
         futures = {
-            pool.submit(run_one, config, seed, args.epochs, logs_dir, build_dir): (config, seed)
+            pool.submit(run_pair, config, seed, args.epochs, logs_dir, build_dir): (config, seed)
             for config, seed in pairs
         }
         for future in as_completed(futures):
             config, seed = futures[future]
             done += 1
             try:
-                acc, wall = future.result()
+                row = future.result()
             except FileNotFoundError as exc:
                 # Binary vanished mid-sweep (preflight passed at launch): a setup
                 # error common to every run. Cancel the queued jobs -- otherwise
@@ -403,11 +451,13 @@ def main() -> None:
                 print(f"\n{exc}", file=sys.stderr)
                 pool.shutdown(wait=False, cancel_futures=True)
                 raise
-            except subprocess.CalledProcessError as exc:
+            rows.append(row)
+            acc, wall = row["test_acc"], row["wall"]
+            if row["returncode"]:
                 failures += 1
                 print(
                     f"[{done:3d}/{total}] {config:42s} seed{seed:<3d} FAILED "
-                    f"(exit {exc.returncode})\n{exc.stderr}",
+                    f"(exit {row['returncode']}), counted as diverged\n{row['stderr']}",
                     file=sys.stderr, flush=True,
                 )
                 continue
@@ -421,6 +471,7 @@ def main() -> None:
     elapsed = time.monotonic() - t_start
     tail = f" ({failures} FAILED)" if failures else ""
     print(f"done: {done} runs in {elapsed/60:.1f} min{tail} -> {logs_dir}", flush=True)
+    print(format_summary(rows), flush=True)
     if failures:
         sys.exit(1)
 

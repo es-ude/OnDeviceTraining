@@ -78,3 +78,29 @@ def test_full_integer_configs_need_pre_converted_bfp_data():
     keys = {run_matrix.bfp_data_key(run_matrix.CONFIGS[n][1])
             for n in ("bfp8full_hflt", "bfp8full_hbfp")}
     assert keys == {("8", "8", "16")}
+
+
+def test_crashed_run_counts_as_diverged_not_dropped(tmp_path, monkeypatch):
+    """A non-zero trainer exit (SYM scale fail-fast on a non-finite fit) must keep
+    its seed in the per-config table as diverged=1 with no accuracy."""
+    import subprocess
+
+    def boom(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, "trainer", stderr="scale fail-fast")
+
+    monkeypatch.setattr(run_matrix, "run_one", boom)
+    row = run_matrix.run_pair("sym8", 3, 2, tmp_path, tmp_path)
+    assert row["diverged"] == 1 and row["test_acc"] is None and row["seed"] == 3
+    ok = {"config": "sym8", "seed": 1, "test_acc": 0.9, "wall": 1.0, "diverged": 0,
+          "returncode": 0, "stderr": ""}
+    text = run_matrix.format_summary([ok, row])
+    assert "sym8: 2 seeds, 1 diverged" in text
+    assert "seed3   test_acc=N/A diverged=1" in text
+    assert "diverged: 1/2 runs" in text
+
+
+def test_clean_run_reads_diverged_from_its_log(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_matrix, "run_one", lambda *a, **k: (0.5, 1.0))
+    (tmp_path / "float_seed1.json").write_text('{"final": {"diverged": 1}}')
+    assert run_matrix.run_pair("float", 1, 2, tmp_path, tmp_path)["diverged"] == 1
+    assert run_matrix.run_pair("float", 2, 2, tmp_path, tmp_path)["diverged"] == 0

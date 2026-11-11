@@ -5,7 +5,7 @@ conversion matrix.
 
 ## SYM_INT32 is a compute format, not storage (#261)
 
-`SYM_INT32` (int32 mantissa + one per-tensor float scale) is the framework's
+`SYM_INT32` (int32 mantissa + one per-tensor dyadic `odtScale_t` scale) is the framework's
 **integer-compute** representation — the only integer-math path the kernels use.
 It is **not** a storage format: it costs the same 4 bytes/element as `FLOAT32`
 but is a single-scale fixed-point approximation, so as storage it is dominated by
@@ -119,7 +119,7 @@ through one shared helper, `quantizeFloatToAsym` (`src/tensor/TensorConversion.c
 — the single source of truth. **Nudged code-domain affine** (TFLite convention):
 the band is first extended to include 0 (`mn = min(mn, 0)`, `mx = max(mx, 0)` —
 guarantees 0 is exactly representable and bounds the zero-point into the code
-domain by construction); `scale = (mx − mn) / (2^qBits − 1)`;
+domain by construction); `scale = CEIL15((mx − mn) / (2^qBits − 1))` (a canonical dyadic scale, see arithmetic-sym.md "Stored scales are canonical dyadic values");
 `zp = clamp(round(−mn/scale), 0, 2^qBits − 1)` stored as **uint16** per group;
 `code = clamp(round(v/scale) + zp, 0, 2^qBits − 1)`. Dequant is
 `(code − zp)·scale` — the same sign convention as PyTorch/TFLite (the old #243

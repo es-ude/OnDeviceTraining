@@ -24,7 +24,9 @@
  * - a stored scale divided by an integer count (mean, pool window):
  *   canonRatioScale, NEAREST.
  * - a stored scale times an arbitrary coefficient: canonCoeffScale, NEAREST.
- * - a user-given or deserialized scale: canonFixedScale, NEAREST.
+ * - a user-given scale: canonFixedScale, NEAREST.
+ * - a deserialized scale (serialized format v9, {u16 m, i16 e}): taken exactly;
+ *   a non-canonical value is rejected, never snapped.
  * Operands are read with FromFloat(NEAREST), which is exact for a canonical
  * stored value.
  *

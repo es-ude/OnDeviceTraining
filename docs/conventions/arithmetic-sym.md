@@ -112,7 +112,8 @@ that is stored (`ScaleCanon.h`):
 | stored scale times a coefficient (Dropout `1/(1-p)`, optimizer factor) | `NEAREST15(s · NEAREST15(c))`; `p = 0` gives exactly `s` |
 | quotient of two stored scales (Div) | `NEAREST15(s_a / s_b)`, exact |
 | raw-int tensor | exactly `1.0` |
-| user-given, fixed-target or deserialized scale | `NEAREST15(x)` (identity on a canonical value) |
+| user-given or fixed-target scale | `NEAREST15(x)` (identity on a canonical value) |
+| deserialized scale | taken exactly; a non-canonical value is rejected (fail-fast), never snapped |
 | copy | unchanged |
 
 `CEIL15` / `NEAREST15` round a positive rational to 15 significant bits
@@ -128,8 +129,8 @@ Field access goes only through the accessors: `loadCanonScale(&qc->scale)`
 `tools/check-scale-access.sh` (a step of the `c-build-and-test` job) rejects
 any other read, write, alias or whole-config copy outside its allow-list
 (`tools/check-scale-access.allow`, ownership sites only). The serialized
-format stays the v7 float: Serialize writes `loadCanonScale`, Deserialize
-stores `NEAREST15` of the read float.
+format is v9: a scale is `u16 m`, `i16 e` (little-endian); the reader accepts
+only canonical values (`deserializeScale` in `Deserialize.c`).
 
 **Staging a FLOAT32 operand under `ARITH_SYM_INT32`** (`executeOp` prologue,
 `src/arithmetic/ExecuteOp.c`). Each storage type has its own route into stack

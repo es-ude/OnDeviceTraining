@@ -32,7 +32,9 @@
  * this module. odtScaleStore / odtScaleLoad copy the 4 bytes alias-safely
  * through one uint32_t; on arm-none-eabi gcc -O2/-Os for Cortex-M0+ and
  * Cortex-M33 each compiles to a single str / ldr (checked, not assumed). They
- * are not atomic read-modify-write operations. */
+ * are not atomic read-modify-write operations. Whole-config copies and
+ * copyCanonScales use memcpy and are NOT atomic per scale: never copy into a
+ * config another thread is reading. */
 
 typedef struct {
     _Alignas(4) uint16_t m;

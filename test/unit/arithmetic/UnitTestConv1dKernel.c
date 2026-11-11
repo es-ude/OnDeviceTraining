@@ -7,6 +7,7 @@
 #include "DeathTest.h"
 #include "Matmul.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "StorageApi.h"
 #include "SymAccumGuard.h"
 #include "SymGroupedWeight.h"
@@ -15,6 +16,12 @@
 #include "expected_bfp_conv1d.h"
 #include "expected_conv1d_kernel.h"
 #include "unity.h"
+
+/* Golden comparisons: exact int32 equality, bitwise float equality. */
+#define GOLD_I32(e, a, n) TEST_ASSERT_EQUAL_INT32_ARRAY((e), (a), (n))
+#define GOLD_F32_SCALAR(e, a) TEST_ASSERT_EQUAL_MEMORY(&(float){(e)}, &(float){(a)}, sizeof(float))
+#define GOLD_U32_SCALAR(e, a) TEST_ASSERT_EQUAL_UINT32((e), (a))
+#include "golden_conv1d_grouped.h"
 
 /* Grouped-weight ctx fixture: the stored dtype's code domain fixes the
  * weight's operand range (SymGroupedWeight.h); the guard runner below picks
@@ -1706,6 +1713,169 @@ CG_DTYPE_DEATH(testConv1dKernelSymGroupedRejectsFloatBias, CG_POISON_BIAS, 2, &k
 CG_DTYPE_DEATH(testConv1dKernelSymGroupedRejectsFloatOutput, CG_POISON_Y, 2, NULL,
                "conv1dKernelSymInt32Grouped: output must be SYM_INT32")
 
+/* ---- Goldens captured before the grouped-kernel range-cursor refactor -----
+ * Outputs of conv1dKernelSymInt32Grouped as it was before its per-element
+ * group division is replaced by a range cursor; the refactor must be
+ * bit-identical, SR stream included. batch 2, Cin 2 (conv groups 1, so
+ * inChPerGroup 2), L 8, K 5, stride 2, dilation 2: one weight row is 10 codes.
+ * Every quantization group size {3, 4, 7, 10 (per channel)} runs under SAME
+ * (padLeft 3), EXPLICIT 3, and EXPLICIT 9 (>= the dilated reach 9: output 0
+ * is fully padded; output 1 sees only tap 4 per channel, weight indices 4 and
+ * 9 of a row, so with group size 3 the walk jumps over a whole group). A row
+ * is entered mid-group wherever left padding clips taps. Group scales are
+ * distinct, dyadic, with one maximum, so all but one group rescale with a
+ * factor != 1. */
+
+typedef struct cgGoldCase {
+    paddingType_t padType;
+    size_t padding, groupSize, outC, outLen;
+} cgGoldCase_t;
+
+#define CG_GOLD_NUM_CASES 12
+#define CG_GOLD_B 2
+#define CG_GOLD_CIN 2
+#define CG_GOLD_L 8
+#define CG_GOLD_MAX_OUT (CG_GOLD_B * 7 * 9)
+
+static const cgGoldCase_t kCgGoldCases[CG_GOLD_NUM_CASES] = {
+    {SAME, 0, 3, 3, 4},     {SAME, 0, 4, 2, 4},     {SAME, 0, 7, 7, 4},     {SAME, 0, 10, 3, 4},
+    {EXPLICIT, 3, 3, 3, 3}, {EXPLICIT, 3, 4, 2, 3}, {EXPLICIT, 3, 7, 7, 3}, {EXPLICIT, 3, 10, 3, 3},
+    {EXPLICIT, 9, 3, 3, 9}, {EXPLICIT, 9, 4, 2, 9}, {EXPLICIT, 9, 7, 7, 9}, {EXPLICIT, 9, 10, 3, 9},
+};
+
+static const int32_t *const kCgGoldHa[CG_GOLD_NUM_CASES] = {
+    kCgGoldHa0, kCgGoldHa1, kCgGoldHa2, kCgGoldHa3, kCgGoldHa4,  kCgGoldHa5,
+    kCgGoldHa6, kCgGoldHa7, kCgGoldHa8, kCgGoldHa9, kCgGoldHa10, kCgGoldHa11};
+static const int32_t *const kCgGoldSr[CG_GOLD_NUM_CASES] = {
+    kCgGoldSr0, kCgGoldSr1, kCgGoldSr2, kCgGoldSr3, kCgGoldSr4,  kCgGoldSr5,
+    kCgGoldSr6, kCgGoldSr7, kCgGoldSr8, kCgGoldSr9, kCgGoldSr10, kCgGoldSr11};
+
+static uint32_t cgGoldLcg(uint32_t *s) {
+    *s = *s * 1664525u + 1013904223u;
+    return *s >> 8;
+}
+
+/* Nonzero code in [-r, -1] u [1, r]. */
+static int32_t cgGoldCode(uint32_t *s, int32_t r) {
+    int32_t v = (int32_t)(cgGoldLcg(s) % (uint32_t)(2 * r)) - r;
+    return v >= 0 ? v + 1 : v;
+}
+
+/* Distinct dyadic scales, unique maximum, non-monotonic in g. */
+static float cgGoldGroupScale(size_t g, size_t numGroups) {
+    return (float)(5 + 3 * ((g * 7) % numGroups)) / 64.0f;
+}
+
+typedef struct cgGoldOut {
+    int32_t y[CG_GOLD_MAX_OUT];
+    float scale;
+    uint8_t bits;
+    float sAcc;      /* recomputed here for the fully-padded check */
+    int32_t bias[7]; /* codes */
+    float biasScale;
+} cgGoldOut_t;
+
+static void cgGoldRun(const cgGoldCase_t *c, roundingMode_t rm, rngStream_t *rs, cgGoldOut_t *out) {
+    uint32_t s = 4049u + (uint32_t)(c->groupSize * 16 + c->padding);
+    size_t wElems = c->outC * CG_GOLD_CIN * 5;
+    size_t numGroups = wElems / c->groupSize;
+    TEST_ASSERT_EQUAL_size_t(wElems, numGroups * c->groupSize);
+    int32_t x[CG_GOLD_B * CG_GOLD_CIN * CG_GOLD_L], w[7 * CG_GOLD_CIN * 5];
+    for (size_t i = 0; i < CG_GOLD_B * CG_GOLD_CIN * CG_GOLD_L; i++) {
+        x[i] = cgGoldCode(&s, 100);
+    }
+    for (size_t i = 0; i < wElems; i++) {
+        w[i] = cgGoldCode(&s, 100);
+    }
+    for (size_t i = 0; i < c->outC; i++) {
+        out->bias[i] = cgGoldCode(&s, 200);
+    }
+    float scales[10];
+    float maxScale = 0.0f;
+    for (size_t g = 0; g < numGroups; g++) {
+        scales[g] = cgGoldGroupScale(g, numGroups);
+        maxScale = scales[g] > maxScale ? scales[g] : maxScale;
+    }
+    symQConfig_t groups = {.scales = scales,
+                           .numGroups = numGroups,
+                           .groupSize = c->groupSize,
+                           .qBits = 8,
+                           .roundingMode = rm};
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&groups);
+
+    size_t xDims[] = {CG_GOLD_B, CG_GOLD_CIN, CG_GOLD_L}, wDims[] = {c->outC, CG_GOLD_CIN, 5};
+    size_t yDims[] = {CG_GOLD_B, c->outC, c->outLen}, bDims[] = {c->outC};
+    size_t order[] = {0, 1, 2};
+    shape_t xS, wS, yS, bS;
+    setShape(&xS, xDims, 3, order);
+    setShape(&wS, wDims, 3, order);
+    setShape(&yS, yDims, 3, order);
+    setShape(&bS, bDims, 1, order);
+    symInt32QConfig_t xQC, wQC, yQC, bQC;
+    initSymInt32QConfigWithQMaxBits(rm, &xQC, 8);
+    initSymInt32QConfigWithQMaxBits(rm, &wQC, 8); /* grouped scratch: mode = the op's */
+    initSymInt32QConfigWithQMaxBits(rm, &yQC, UNSTAMPED_WIDTH);
+    initSymInt32QConfigWithQMaxBits(rm, &bQC, 12);
+    xQC.scale = 0.25f;
+    bQC.scale = 0.3f;
+    quantization_t xQ, wQ, yQ, bQ;
+    initSymInt32Quantization(&xQC, &xQ);
+    initSymInt32Quantization(&wQC, &wQ);
+    initSymInt32Quantization(&yQC, &yQ);
+    initSymInt32Quantization(&bQC, &bQ);
+    tensor_t xT, wT, yT, bT;
+    setTensorValues(&xT, (uint8_t *)x, &xS, &xQ, NULL);
+    setTensorValues(&wT, (uint8_t *)w, &wS, &wQ, NULL);
+    setTensorValues(&yT, (uint8_t *)out->y, &yS, &yQ, NULL);
+    setTensorValues(&bT, (uint8_t *)out->bias, &bS, &bQ, NULL);
+    kernel_t kernel;
+    if (c->padType == SAME) {
+        initKernel(&kernel, 5, SAME, 2, 2);
+    } else {
+        initKernelExplicit(&kernel, 5, c->padding, 2, 2);
+    }
+    conv1dKernelSymInt32Grouped(&xT, &wT, &bT, &kernel, 1, &yT, &groupedWeight, rs);
+    out->scale = yQC.scale;
+    out->bits = yQC.qMaxBits;
+    out->sAcc = 0.25f * maxScale;
+    out->biasScale = bQC.scale;
+}
+
+void testConv1dGroupedGoldenHalfAway(void) {
+    for (size_t ci = 0; ci < CG_GOLD_NUM_CASES; ci++) {
+        const cgGoldCase_t *c = &kCgGoldCases[ci];
+        cgGoldOut_t out;
+        cgGoldRun(c, HALF_AWAY, NULL, &out);
+        GOLD_I32(kCgGoldHa[ci], out.y, CG_GOLD_B * c->outC * c->outLen);
+        GOLD_F32_SCALAR(kCgGoldScale[ci], out.scale);
+        GOLD_U32_SCALAR(kCgGoldBits[ci], out.bits);
+        if (c->padding == 9) {
+            /* output 0 has no valid tap: it is the bias seed alone */
+            for (size_t b = 0; b < CG_GOLD_B; b++) {
+                for (size_t oc = 0; oc < c->outC; oc++) {
+                    int32_t seed = (int32_t)roundf((float)out.bias[oc] * out.biasScale / out.sAcc);
+                    TEST_ASSERT_EQUAL_INT32(seed, out.y[(b * c->outC + oc) * c->outLen]);
+                }
+            }
+        }
+    }
+}
+
+void testConv1dGroupedGoldenSr(void) {
+    for (size_t ci = 0; ci < CG_GOLD_NUM_CASES; ci++) {
+        const cgGoldCase_t *c = &kCgGoldCases[ci];
+        rngStream_t rs = rngOpen(rngKeyFromSeed(0xC1D00000u + ci));
+        uint32_t before = rs.state;
+        cgGoldOut_t out;
+        cgGoldRun(c, SR_HALF_AWAY, &rs, &out);
+        TEST_ASSERT_NOT_EQUAL_UINT32(before, rs.state);
+        GOLD_I32(kCgGoldSr[ci], out.y, CG_GOLD_B * c->outC * c->outLen);
+        GOLD_U32_SCALAR(kCgGoldSrState[ci], rs.state);
+        GOLD_F32_SCALAR(kCgGoldScale[ci], out.scale);
+        GOLD_U32_SCALAR(kCgGoldBits[ci], out.bits);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConv1dKernelSymRejectsFloatInput);
@@ -1774,5 +1944,7 @@ int main(void) {
     RUN_TEST(testConv1dKernelBfpRawRejectsMismatchedRawGeometry);
     RUN_TEST(testConv1dKernelBfpRawZeroInputGroupDoesNotSetTheAccumulator);
     RUN_TEST(testConv1dKernelBfpRawZeroBiasDoesNotSetTheAccumulator);
+    RUN_TEST(testConv1dGroupedGoldenHalfAway);
+    RUN_TEST(testConv1dGroupedGoldenSr);
     return UNITY_END();
 }

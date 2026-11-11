@@ -6,6 +6,7 @@
 #include "ConvTranspose1dKernel.h"
 #include "DeathTest.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "SlidingWindow1d.h"
 #include "StorageApi.h"
 #include "SymAccumGuard.h"
@@ -15,6 +16,14 @@
 #include "expected_bfp_convT1d.h"
 #include "expected_conv_transpose_1d_kernel.h"
 #include "unity.h"
+
+/* Golden comparisons: exact int32/int16 equality, bitwise float equality. */
+#define GOLD_I32(e, a, n) TEST_ASSERT_EQUAL_INT32_ARRAY((e), (a), (n))
+#define GOLD_I16(e, a, n) TEST_ASSERT_EQUAL_INT16_ARRAY((e), (a), (n))
+#define GOLD_F32(e, a, n) TEST_ASSERT_EQUAL_MEMORY((e), (a), (n) * sizeof(float))
+#define GOLD_F32_SCALAR(e, a) TEST_ASSERT_EQUAL_MEMORY(&(float){(e)}, &(float){(a)}, sizeof(float))
+#define GOLD_U32_SCALAR(e, a) TEST_ASSERT_EQUAL_UINT32((e), (a))
+#include "golden_convT1d_scatter.h"
 
 /* Grouped-weight ctx fixture: the stored dtype's code domain fixes the
  * weight's operand range (SymGroupedWeight.h); the guard runner below picks
@@ -1835,6 +1844,314 @@ void testConvTranspose1dKernelBfpScatterRejectsFloatOutput(void) {
                              ctScatterIntoFloatOutputBody());
 }
 
+/* ---- Goldens captured before the valid-tap-range refactor ----------------
+ * Outputs recorded from the scatter kernels as they were before the ConvT
+ * valid-tap range refactor, which must be bit-identical (SR stream included).
+ * K 5 on the EXPLICIT adjoint path, the only one that clips taps. Geometry A
+ * (stride 2, dilation 2, padLeft 3; Lin 5, Lout 12) clips low taps at inPos 0
+ * and high taps at inPos 4; B (same kernel, Lin 2, Lout 5) clips both ends at
+ * once (inPos 0 keeps k 2..3 only). With padLeft 3 and stride/dilation 2 the
+ * clip offset padLeft - inPos*stride is always odd, so C (stride 3, dilation
+ * 2, padLeft 4; Lin 4, Lout 11) adds offsets that divide by the dilation
+ * (inPos 0) and ones that do not (inPos 1), and a high clip at inPos 3.
+ * Operands are distinct, nonzero LCG codes; group scales are distinct with one
+ * maximum, so every rescale but one has a factor != 1 and an extra or missing
+ * rounding shows. */
+
+typedef struct ctGoldGeom {
+    size_t lin, lout, stride, dilation, padding;
+} ctGoldGeom_t;
+
+#define CT_GOLD_NUM_GEOMS 3
+static const ctGoldGeom_t kCtGoldGeoms[CT_GOLD_NUM_GEOMS] = {
+    {5, 12, 2, 2, 3}, {2, 5, 2, 2, 3}, {4, 11, 3, 2, 4}};
+
+/* Nonzero code in [-r, -1] u [1, r]. */
+static int32_t ctGoldCode(uint32_t *s, int32_t r) {
+    int32_t v = (int32_t)(ctLcg(s) % (uint32_t)(2 * r)) - r;
+    return v >= 0 ? v + 1 : v;
+}
+
+static void ctGoldKernel(kernel_t *kernel, const ctGoldGeom_t *geom) {
+    initKernelExplicit(kernel, 5, geom->padding, geom->dilation, geom->stride);
+}
+
+/* Distinct dyadic scales, unique maximum, non-monotonic in g. */
+static float ctGoldGroupScale(size_t g, size_t numGroups) {
+    return (float)(5 + 3 * ((g * 7) % numGroups)) / 64.0f;
+}
+
+/* Stack tensor (3-D or 1-D) over caller data; not copyable after init. */
+typedef struct ctGoldTensor {
+    tensor_t t;
+    shape_t s;
+    size_t dims[3];
+    size_t order[3];
+    symInt32QConfig_t qc;
+    quantization_t q;
+} ctGoldTensor_t;
+
+static void ctGoldShape(ctGoldTensor_t *g, size_t ndim, const size_t *dims) {
+    for (size_t i = 0; i < ndim; i++) {
+        g->dims[i] = dims[i];
+        g->order[i] = i;
+    }
+    setShape(&g->s, g->dims, ndim, g->order);
+}
+
+static void ctGoldFloat(ctGoldTensor_t *g, size_t ndim, const size_t *dims, float *data) {
+    ctGoldShape(g, ndim, dims);
+    initFloat32Quantization(&g->q);
+    setTensorValues(&g->t, (uint8_t *)data, &g->s, &g->q, NULL);
+}
+
+static void ctGoldSym(ctGoldTensor_t *g, size_t ndim, const size_t *dims, int32_t *data,
+                      float scale, uint8_t bits, roundingMode_t rm) {
+    ctGoldShape(g, ndim, dims);
+    initSymInt32QConfigWithQMaxBits(rm, &g->qc, bits);
+    g->qc.scale = scale;
+    initSymInt32Quantization(&g->qc, &g->q);
+    setTensorValues(&g->t, (uint8_t *)data, &g->s, &g->q, NULL);
+}
+
+/* batch 2, Cin 4, Cout 6, conv groups 2: weight [4, 3, 5] */
+#define CT_GOLD_B 2
+#define CT_GOLD_CIN 4
+#define CT_GOLD_COUT 6
+#define CT_GOLD_GROUPS 2
+#define CT_GOLD_MAX_OUT (CT_GOLD_B * CT_GOLD_COUT * 12)
+
+static void ctGoldRunFloat(const ctGoldGeom_t *geom, float *y) {
+    uint32_t s = 911u + (uint32_t)geom->lin;
+    float x[CT_GOLD_B * CT_GOLD_CIN * 5], w[CT_GOLD_CIN * 3 * 5], bias[CT_GOLD_COUT];
+    for (size_t i = 0; i < CT_GOLD_B * CT_GOLD_CIN * geom->lin; i++) {
+        x[i] = (float)ctGoldCode(&s, 4);
+    }
+    for (size_t i = 0; i < CT_GOLD_CIN * 3 * 5; i++) {
+        w[i] = (float)ctGoldCode(&s, 3);
+    }
+    for (size_t i = 0; i < CT_GOLD_COUT; i++) {
+        bias[i] = (float)ctGoldCode(&s, 5);
+    }
+    size_t xDims[] = {CT_GOLD_B, CT_GOLD_CIN, geom->lin}, wDims[] = {CT_GOLD_CIN, 3, 5};
+    size_t yDims[] = {CT_GOLD_B, CT_GOLD_COUT, geom->lout}, bDims[] = {CT_GOLD_COUT};
+    ctGoldTensor_t xT, wT, yT, bT;
+    ctGoldFloat(&xT, 3, xDims, x);
+    ctGoldFloat(&wT, 3, wDims, w);
+    ctGoldFloat(&yT, 3, yDims, y);
+    ctGoldFloat(&bT, 1, bDims, bias);
+    kernel_t kernel;
+    ctGoldKernel(&kernel, geom);
+    convTranspose1dKernelFloat32(&xT.t, &wT.t, &bT.t, &kernel, CT_GOLD_GROUPS, 0, &yT.t);
+}
+
+void testConvTScatterFloatGolden(void) {
+    const float *expected[CT_GOLD_NUM_GEOMS] = {kCtGoldFloatA, kCtGoldFloatB, kCtGoldFloatC};
+    for (size_t gi = 0; gi < CT_GOLD_NUM_GEOMS; gi++) {
+        float y[CT_GOLD_MAX_OUT];
+        ctGoldRunFloat(&kCtGoldGeoms[gi], y);
+        size_t n = CT_GOLD_B * CT_GOLD_COUT * kCtGoldGeoms[gi].lout;
+        GOLD_F32(expected[gi], y, n);
+    }
+}
+
+typedef struct ctGoldSymOut {
+    int32_t y[CT_GOLD_MAX_OUT];
+    float scale;
+    uint8_t bits;
+} ctGoldSymOut_t;
+
+static void ctGoldRunSym(const ctGoldGeom_t *geom, ctGoldSymOut_t *out) {
+    uint32_t s = 1213u + (uint32_t)geom->lin;
+    int32_t x[CT_GOLD_B * CT_GOLD_CIN * 5], w[CT_GOLD_CIN * 3 * 5], bias[CT_GOLD_COUT];
+    for (size_t i = 0; i < CT_GOLD_B * CT_GOLD_CIN * geom->lin; i++) {
+        x[i] = ctGoldCode(&s, 100);
+    }
+    for (size_t i = 0; i < CT_GOLD_CIN * 3 * 5; i++) {
+        w[i] = ctGoldCode(&s, 60);
+    }
+    for (size_t i = 0; i < CT_GOLD_COUT; i++) {
+        bias[i] = ctGoldCode(&s, 200);
+    }
+    size_t xDims[] = {CT_GOLD_B, CT_GOLD_CIN, geom->lin}, wDims[] = {CT_GOLD_CIN, 3, 5};
+    size_t yDims[] = {CT_GOLD_B, CT_GOLD_COUT, geom->lout}, bDims[] = {CT_GOLD_COUT};
+    ctGoldTensor_t xT, wT, yT, bT;
+    ctGoldSym(&xT, 3, xDims, x, 0.25f, 8, HALF_AWAY);
+    ctGoldSym(&wT, 3, wDims, w, 0.125f, 8, HALF_AWAY);
+    ctGoldSym(&yT, 3, yDims, out->y, 1.0f, UNSTAMPED_WIDTH, HALF_AWAY);
+    ctGoldSym(&bT, 1, bDims, bias, 0.3f, 12, HALF_AWAY);
+    kernel_t kernel;
+    ctGoldKernel(&kernel, geom);
+    convTranspose1dKernelSymInt32(&xT.t, &wT.t, &bT.t, &kernel, CT_GOLD_GROUPS, 0, &yT.t, NULL);
+    out->scale = yT.qc.scale;
+    out->bits = yT.qc.qMaxBits;
+}
+
+void testConvTScatterSymGolden(void) {
+    const int32_t *expected[CT_GOLD_NUM_GEOMS] = {kCtGoldSymA, kCtGoldSymB, kCtGoldSymC};
+    for (size_t gi = 0; gi < CT_GOLD_NUM_GEOMS; gi++) {
+        ctGoldSymOut_t out;
+        ctGoldRunSym(&kCtGoldGeoms[gi], &out);
+        size_t n = CT_GOLD_B * CT_GOLD_COUT * kCtGoldGeoms[gi].lout;
+        GOLD_I32(expected[gi], out.y, n);
+        GOLD_F32_SCALAR(kCtGoldSymScale, out.scale);
+        GOLD_U32_SCALAR(kCtGoldSymBits[gi], out.bits);
+    }
+}
+
+/* The BFP Conv1d-dx scatter walk (the forward conv's view: dx [2, 4, L] from
+ * gy [2, 6, Lgy] and w [6, 2, 5], conv groups 2) on geometries A and C.
+ * Grouped operands with a wide exponent spread, so products are both rounded
+ * and left-shifted; raw target groups straddle the conv groups, so some sums
+ * are re-gridded. */
+static void ctGoldRunBfp(const ctDxCase_t *c, uint32_t seed, ctDxResult_t *r) {
+    kernel_t kernel;
+    initKernelExplicit(&kernel, c->kernelSize, c->padding, c->dilation, c->stride);
+    size_t gyN = c->batch * c->cout * windowGeometry1dCalc(c->length, &kernel).outputLength;
+    size_t wN = c->cout * (c->cin / c->groups) * c->kernelSize;
+    int32_t gyCodes[60];
+    int32_t wCodes[60];
+    uint8_t gyExps[15];
+    uint8_t wExps[10];
+    TEST_ASSERT_TRUE(gyN <= 60 && wN <= 60);
+    TEST_ASSERT_TRUE(gyN / c->gyGroupSize <= 15 && wN / c->wGroupSize <= 10);
+    uint32_t s = seed;
+    for (size_t i = 0; i < gyN; i++) {
+        gyCodes[i] = ctGoldCode(&s, 127);
+    }
+    for (size_t i = 0; i < wN; i++) {
+        wCodes[i] = ctGoldCode(&s, 127);
+    }
+    for (size_t i = 0; i < gyN / c->gyGroupSize; i++) {
+        gyExps[i] = (uint8_t)(127 - 12 + (int)(ctLcg(&s) % 25u));
+    }
+    for (size_t i = 0; i < wN / c->wGroupSize; i++) {
+        wExps[i] = (uint8_t)(127 - 6 + (int)(ctLcg(&s) % 13u));
+    }
+    ctRunBfpScatterDx(c, gyCodes, gyExps, wCodes, wExps, r);
+    ctAssertDxMatchesReference(r);
+    TEST_ASSERT_TRUE(r->st.rounded > 0);
+    TEST_ASSERT_TRUE(r->st.leftShift > 0);
+    TEST_ASSERT_TRUE(r->st.realigned > 0);
+}
+
+void testConvTScatterBfpGolden(void) {
+    /* A: L 12 (Lgy 5), raw groups of 16 over conv groups of 24 dx elements */
+    ctDxCase_t a = {.batch = 2,
+                    .cin = 4,
+                    .length = 12,
+                    .cout = 6,
+                    .groups = 2,
+                    .kernelSize = 5,
+                    .stride = 2,
+                    .dilation = 2,
+                    .padding = 3,
+                    .m = 8,
+                    .gyGroupSize = 4,
+                    .wGroupSize = 6,
+                    .rawGroupSize = 16};
+    ctDxResult_t r;
+    ctGoldRunBfp(&a, 5150u, &r);
+    TEST_ASSERT_EQUAL_size_t(96, r.n);
+    TEST_ASSERT_EQUAL_size_t(6, r.numGroups);
+    GOLD_I32(kCtGoldBfpMantA, r.raw.mant, 96);
+    GOLD_I16(kCtGoldBfpExpA, r.raw.exps, 6);
+
+    /* C: L 11 (Lgy 4), raw groups of 8 over conv groups of 22 dx elements */
+    ctDxCase_t c = a;
+    c.length = 11;
+    c.stride = 3;
+    c.padding = 4;
+    c.rawGroupSize = 8;
+    ctGoldRunBfp(&c, 6160u, &r);
+    TEST_ASSERT_EQUAL_size_t(88, r.n);
+    TEST_ASSERT_EQUAL_size_t(11, r.numGroups);
+    GOLD_I32(kCtGoldBfpMantC, r.raw.mant, 88);
+    GOLD_I16(kCtGoldBfpExpC, r.raw.exps, 11);
+}
+
+/* Grouped scatter: batch 2, Cin 2, Cout 7, conv groups 1, weight [2, 7, 5] =
+ * 70 codes in 10 quantization groups of 7 (a group of 7 straddles the K = 5
+ * kernel rows). The SR case also pins the stream state after the call: the
+ * grouped scatter draws once per product and once per bias seed. */
+#define CT_GOLD_G_COUT 7
+#define CT_GOLD_G_NUM_GROUPS 10
+#define CT_GOLD_G_MAX_OUT (CT_GOLD_B * CT_GOLD_G_COUT * 12)
+
+typedef struct ctGoldGroupedOut {
+    int32_t y[CT_GOLD_G_MAX_OUT];
+    float scale;
+    uint8_t bits;
+} ctGoldGroupedOut_t;
+
+static void ctGoldRunGrouped(const ctGoldGeom_t *geom, roundingMode_t rm, rngStream_t *rs,
+                             ctGoldGroupedOut_t *out) {
+    uint32_t s = 7717u + (uint32_t)geom->lin;
+    int32_t x[CT_GOLD_B * 2 * 5], w[2 * CT_GOLD_G_COUT * 5], bias[CT_GOLD_G_COUT];
+    for (size_t i = 0; i < CT_GOLD_B * 2 * geom->lin; i++) {
+        x[i] = ctGoldCode(&s, 100);
+    }
+    for (size_t i = 0; i < 2 * CT_GOLD_G_COUT * 5; i++) {
+        w[i] = ctGoldCode(&s, 100);
+    }
+    for (size_t i = 0; i < CT_GOLD_G_COUT; i++) {
+        bias[i] = ctGoldCode(&s, 200);
+    }
+    float scales[CT_GOLD_G_NUM_GROUPS];
+    for (size_t g = 0; g < CT_GOLD_G_NUM_GROUPS; g++) {
+        scales[g] = ctGoldGroupScale(g, CT_GOLD_G_NUM_GROUPS);
+    }
+    symQConfig_t groups = {.scales = scales,
+                           .numGroups = CT_GOLD_G_NUM_GROUPS,
+                           .groupSize = 7,
+                           .qBits = 8,
+                           .roundingMode = rm};
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&groups);
+    size_t xDims[] = {CT_GOLD_B, 2, geom->lin}, wDims[] = {2, CT_GOLD_G_COUT, 5};
+    size_t yDims[] = {CT_GOLD_B, CT_GOLD_G_COUT, geom->lout}, bDims[] = {CT_GOLD_G_COUT};
+    ctGoldTensor_t xT, wT, yT, bT;
+    ctGoldSym(&xT, 3, xDims, x, 0.25f, 8, rm);
+    ctGoldSym(&wT, 3, wDims, w, 1.0f, 8, rm); /* grouped scratch: scale poisoned, mode = op's */
+    ctGoldSym(&yT, 3, yDims, out->y, 1.0f, UNSTAMPED_WIDTH, rm);
+    ctGoldSym(&bT, 1, bDims, bias, 0.3f, 12, rm);
+    kernel_t kernel;
+    ctGoldKernel(&kernel, geom);
+    convTranspose1dKernelSymInt32Grouped(&xT.t, &wT.t, &bT.t, &kernel, 1, 0, &yT.t, &groupedWeight,
+                                         rs);
+    out->scale = yT.qc.scale;
+    out->bits = yT.qc.qMaxBits;
+}
+
+void testConvTGroupedGoldenHalfAway(void) {
+    const int32_t *expected[CT_GOLD_NUM_GEOMS] = {kCtGoldGroupedHaA, kCtGoldGroupedHaB,
+                                                  kCtGoldGroupedHaC};
+    for (size_t gi = 0; gi < CT_GOLD_NUM_GEOMS; gi++) {
+        ctGoldGroupedOut_t out;
+        ctGoldRunGrouped(&kCtGoldGeoms[gi], HALF_AWAY, NULL, &out);
+        size_t n = CT_GOLD_B * CT_GOLD_G_COUT * kCtGoldGeoms[gi].lout;
+        GOLD_I32(expected[gi], out.y, n);
+        GOLD_F32_SCALAR(kCtGoldGroupedScale, out.scale);
+        GOLD_U32_SCALAR(kCtGoldGroupedBits, out.bits);
+    }
+}
+
+void testConvTGroupedGoldenSr(void) {
+    const int32_t *expected[CT_GOLD_NUM_GEOMS] = {kCtGoldGroupedSrA, kCtGoldGroupedSrB,
+                                                  kCtGoldGroupedSrC};
+    for (size_t gi = 0; gi < CT_GOLD_NUM_GEOMS; gi++) {
+        rngStream_t rs = rngOpen(rngKeyFromSeed(0xC0DE0000u + gi));
+        uint32_t before = rs.state;
+        ctGoldGroupedOut_t out;
+        ctGoldRunGrouped(&kCtGoldGeoms[gi], SR_HALF_AWAY, &rs, &out);
+        size_t n = CT_GOLD_B * CT_GOLD_G_COUT * kCtGoldGeoms[gi].lout;
+        TEST_ASSERT_NOT_EQUAL_UINT32(before, rs.state);
+        GOLD_I32(expected[gi], out.y, n);
+        GOLD_U32_SCALAR(kCtGoldGroupedSrState[gi], rs.state);
+        GOLD_F32_SCALAR(kCtGoldGroupedScale, out.scale);
+        GOLD_U32_SCALAR(kCtGoldGroupedBits, out.bits);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConvT1dKernelSymRejectsFloatInput);
@@ -1896,5 +2213,10 @@ int main(void) {
     RUN_TEST(testConvTranspose1dKernelBfpScatterRawGroupHugeGapFlushesTheLowRows);
     RUN_TEST(testConvTranspose1dKernelBfpScatterZeroGroupsDoNotSetTheAccumulator);
     RUN_TEST(testConvTranspose1dKernelBfpScatterRejectsFloatOutput);
+    RUN_TEST(testConvTScatterFloatGolden);
+    RUN_TEST(testConvTScatterSymGolden);
+    RUN_TEST(testConvTScatterBfpGolden);
+    RUN_TEST(testConvTGroupedGoldenHalfAway);
+    RUN_TEST(testConvTGroupedGoldenSr);
     return UNITY_END();
 }

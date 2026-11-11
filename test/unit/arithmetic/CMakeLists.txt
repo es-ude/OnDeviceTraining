@@ -286,6 +286,7 @@ add_elastic_ai_unit_test(
         Conv1dKernel
         MORE_LIBS
         SlidingWindow1d
+        RNG
         Kernel
         Matmul
         SymAccumGuard
@@ -320,6 +321,7 @@ add_elastic_ai_unit_test(
         ConvTranspose1dKernel
         MORE_LIBS
         Kernel
+        RNG
         SymAccumGuard
         SymGroupedWeight
         Tensor

@@ -21,6 +21,13 @@
 #include "expected_convT1d_grouped.h"
 #include "unity.h"
 
+/* Golden comparisons: exact int32 equality, bitwise float equality. */
+#define GOLD_I32(e, a, n) TEST_ASSERT_EQUAL_INT32_ARRAY((e), (a), (n))
+#define GOLD_F32(e, a, n) TEST_ASSERT_EQUAL_MEMORY((e), (a), (n) * sizeof(float))
+#define GOLD_F32_SCALAR(e, a) TEST_ASSERT_EQUAL_MEMORY(&(float){(e)}, &(float){(a)}, sizeof(float))
+#define GOLD_U32_SCALAR(e, a) TEST_ASSERT_EQUAL_UINT32((e), (a))
+#include "golden_conv1d_transposed_weight_grad.h"
+
 // Helper: build a Conv1dTransposed layer manually (no UserAPI in Phase 1)
 typedef struct convT1dRunResult {
     parameter_t *weights;
@@ -2829,8 +2836,83 @@ void testConv1dTransposedBiasGradSymSumWideWireExactThenAborts(void) {
                              (void)runConv1dTransposedSymBiasGradSum(3, 1, (1 << 30) - 1, 31));
 }
 
+/* ---- Weight-grad golden captured before the ConvT valid-tap-range refactor
+ * The float and SYM weight-grad scatters of the layer as they were before the
+ * refactor (which must be bit-identical). batch 2, Cin 4, Cout 6, conv groups
+ * 2, K 5, stride 2, dilation 2, outputPadding 1: Lin 5 -> Lout 18, the last
+ * output position is reached by no tap. Integer-valued float operands keep
+ * the float sums exact; the SYM operands are exact codes. */
+
+static uint32_t wgGoldLcg(uint32_t *s) {
+    *s = *s * 1664525u + 1013904223u;
+    return *s >> 8;
+}
+
+/* Nonzero code in [-r, -1] u [1, r]. */
+static int32_t wgGoldCode(uint32_t *s, int32_t r) {
+    int32_t v = (int32_t)(wgGoldLcg(s) % (uint32_t)(2 * r)) - r;
+    return v >= 0 ? v + 1 : v;
+}
+
+#define WG_GOLD_X_N (2 * 4 * 5)
+#define WG_GOLD_GY_N (2 * 6 * 18)
+#define WG_GOLD_W_N (4 * 3 * 5)
+
+void testConv1dTransposedLayerWeightGradGolden(void) {
+    size_t weightDims[] = {4, 3, 5};
+    size_t biasDims[] = {6};
+    size_t inputDims[] = {2, 4, 5};
+    size_t outputDims[] = {2, 6, 18};
+
+    /* FLOAT32: through the layer backward (the float weight-grad calc is static) */
+    uint32_t s = 3301u;
+    float xF[WG_GOLD_X_N], gyF[WG_GOLD_GY_N], wF[WG_GOLD_W_N], bF[6];
+    for (size_t i = 0; i < WG_GOLD_X_N; i++) {
+        xF[i] = (float)wgGoldCode(&s, 4);
+    }
+    for (size_t i = 0; i < WG_GOLD_GY_N; i++) {
+        gyF[i] = (float)wgGoldCode(&s, 5);
+    }
+    for (size_t i = 0; i < WG_GOLD_W_N; i++) {
+        wF[i] = (float)wgGoldCode(&s, 3);
+    }
+    for (size_t i = 0; i < 6; i++) {
+        bF[i] = (float)wgGoldCode(&s, 3);
+    }
+    convT1dRunResult_t r;
+    convT1dBuild(&r, wF, weightDims, bF, biasDims, 1, xF, inputDims, 5, 2, 2, 2, 1, NULL,
+                 outputDims);
+    tensor_t *lossGradF = makeFloatTensor(outputDims, 3, gyF);
+    conv1dTransposedBackward(&r.layer, r.input, lossGradF, NULL, NULL);
+    GOLD_F32(kWgGoldFloat, (float *)r.weights->grad->data, WG_GOLD_W_N);
+
+    /* SYM_INT32: the weight-grad op alone, on exact codes */
+    int32_t xS[WG_GOLD_X_N], gyS[WG_GOLD_GY_N];
+    for (size_t i = 0; i < WG_GOLD_X_N; i++) {
+        xS[i] = wgGoldCode(&s, 100);
+    }
+    for (size_t i = 0; i < WG_GOLD_GY_N; i++) {
+        gyS[i] = wgGoldCode(&s, 100);
+    }
+    parameter_t *weights = buildSymParam(3, weightDims, NULL);
+    tensor_t *input = buildSymInt32TensorExact(3, inputDims, xS, 0.25f);
+    tensor_t *lossGrad = buildSymInt32TensorExact(3, outputDims, gyS, 0.125f);
+    kernel_t kernel;
+    initKernel(&kernel, 5, VALID, 2, 2);
+    conv1dTransposedConfig_t cfg;
+    quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
+    initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 2, 1, sq, sq, sq,
+                                                 sq);
+    conv1dTransposedCalcWeightGradsSymInt32(&cfg, input, lossGrad, NULL);
+    symInt32QConfig_t *gQC = (symInt32QConfig_t *)weights->grad->quantization->qConfig;
+    GOLD_I32(kWgGoldSym, (int32_t *)weights->grad->data, WG_GOLD_W_N);
+    GOLD_F32_SCALAR(kWgGoldSymScale, gQC->scale);
+    GOLD_U32_SCALAR(kWgGoldSymBits, gQC->qMaxBits);
+}
+
 int main() {
     UNITY_BEGIN();
+    RUN_TEST(testConv1dTransposedLayerWeightGradGolden);
     RUN_TEST(testConv1dTransposedWgGuardProvenSafeN511RunsExact);
     RUN_TEST(testConv1dTransposedWgGuardDiesAtFirstWrappingNFullScaleCodes);
     RUN_TEST(testConv1dTransposedWgGuardDiesOnNegativeOverflow);

@@ -344,6 +344,15 @@ def run_pair(
             "diverged": diverged, "returncode": 0, "stderr": ""}
 
 
+def resumed_row(config: str, seed: int, log_path: Path) -> dict:
+    """The result row of a pair --resume skipped as complete, read from its log
+    (`final.test_acc`, `final.diverged`), so the summary covers every selected
+    (config, seed), not only the pairs run in this invocation."""
+    final = json.loads(log_path.read_text())["final"]
+    return {"config": config, "seed": seed, "test_acc": final.get("test_acc"), "wall": None,
+            "diverged": int(bool(final.get("diverged"))), "returncode": 0, "stderr": ""}
+
+
 def format_summary(rows: list[dict]) -> str:
     """Per-config table (one line per seed, crashed seeds included with
     diverged=1 and no accuracy) plus the total diverged count."""
@@ -399,16 +408,17 @@ def main() -> None:
     build_dir = ROOT / "build" / args.build_subdir / "examples" / "har_classifier"
 
     pairs = [(config, seed) for seed in args.seeds for config in args.configs]
+    rows: list[dict] = []
     if args.resume:
-        before = len(pairs)
-        pairs = [
-            (c, s)
-            for c, s in pairs
-            if not is_complete(logs_dir / f"{c}_seed{s}.json", args.epochs, s)
+        complete = [
+            (c, s) for c, s in pairs
+            if is_complete(logs_dir / f"{c}_seed{s}.json", args.epochs, s)
         ]
-        skipped = before - len(pairs)
-        if skipped:
-            print(f"resume: skipping {skipped} already-complete run(s)", flush=True)
+        rows = [resumed_row(c, s, logs_dir / f"{c}_seed{s}.json") for c, s in complete]
+        done_pairs = set(complete)
+        pairs = [pair for pair in pairs if pair not in done_pairs]
+        if complete:
+            print(f"resume: skipping {len(complete)} already-complete run(s)", flush=True)
     total = len(pairs)
 
     # Preflight every selected binary BEFORE submitting jobs: a missing binary
@@ -440,7 +450,6 @@ def main() -> None:
 
     done = 0
     failures = 0
-    rows: list[dict] = []
     t_start = time.monotonic()
     with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
         futures = {

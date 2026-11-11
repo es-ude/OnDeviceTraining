@@ -154,3 +154,39 @@ def test_bfp_data_writer_does_not_inherit_parent_shell_knobs(tmp_path, monkeypat
     assert env["BFP_HEAD"] == "bfp"
     for key in (*LEAKY_PARENT_KNOBS, "SYM_BITS"):
         assert key not in env, key
+
+
+def test_resume_summary_covers_already_complete_pairs(tmp_path, monkeypatch, capsys):
+    """With --resume, pairs skipped as complete still belong in the summary and the
+    diverged count: their rows come from their existing logs."""
+    import json
+
+    build_dir = tmp_path / "build" / "examples" / "examples" / "har_classifier"
+    build_dir.mkdir(parents=True)
+    (build_dir / "train_c_har_classifier_sym").write_text("")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    for seed, acc, diverged in ((1, 0.875, 0), (2, None, 1)):
+        (logs / f"sym8_seed{seed}.json").write_text(json.dumps(
+            {"config": {"epochs": 2, "seed": seed},
+             "final": {"test_acc": acc, "diverged": diverged}}))
+    ran = []
+
+    def fake_run_pair(config, seed, epochs, logs_dir, build_dir):
+        ran.append((config, seed))
+        return {"config": config, "seed": seed, "test_acc": 0.5, "wall": 1.0,
+                "diverged": 0, "returncode": 0, "stderr": ""}
+
+    monkeypatch.setattr(run_matrix, "ROOT", tmp_path)
+    monkeypatch.setattr(run_matrix, "run_pair", fake_run_pair)
+    monkeypatch.setattr(sys, "argv", [
+        "run_matrix.py", "--configs", "sym8", "--seeds", "1", "2", "3", "--epochs", "2",
+        "--logs", str(logs), "--build-subdir", "examples", "--resume"])
+    run_matrix.main()
+    out = capsys.readouterr().out
+    assert ran == [("sym8", 3)]
+    assert "sym8: 3 seeds, 1 diverged" in out
+    assert "seed1   test_acc=0.8750 diverged=0" in out
+    assert "seed2   test_acc=N/A diverged=1" in out
+    assert "seed3   test_acc=0.5000 diverged=0" in out
+    assert "diverged: 1/3 runs" in out

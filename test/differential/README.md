@@ -105,10 +105,19 @@ a run, never widened after one (`run_cells.py::scale_tol`): kernel tier
 2^-22 (one product, two units), layer tier `(1+u)^4 - 1` (restore chain),
 staged layer tier `(1+u)^5 - 1` (the staging scale multiplies in), encode
 `(1+u)^1 - 1`, dynamic requant `(1+u)^3 - 1`, fixed requant 0 (preset).
+Since every stored scale is canonical (arithmetic-sym 'Stored scales are
+canonical dyadic values') Leg A computes each of these scales exactly -- the
+stored product `NEAREST15(s_a * s_b)`, the fitted grid `CEIL15(absMax / qMax)`
+or, for the requant diagonal, `CEIL15(s_in * max|code| / qMax)` -- with the one
+Python copy of the 15-bit rule (`test/unit/goldgen/dyadic_scale.py`); the
+tolerances above are kept as stated. The cell fixtures draw canonical
+operand scales (`random_scale`, `canonical_scale_pair`); a grid-exact 13-bit
+scale is canonical already.
 
 ## Bias-seed policy (an interpretation, recorded as a doc finding)
 
-The forward bias seed `round(b_q * s_b / (s_in * s_w))` is large (an
+The forward bias seed `round(b_q * s_b / s_acc)`, `s_acc` the stored product
+scale `NEAREST15(s_in * s_w)`, is large (an
 int12*int12 product scale) and rounded once per output channel in C; its
 real-valued pre-rounding value is where the documented rule meets float32.
 Per channel (`ref/census.py::seed_policy`):
@@ -121,7 +130,7 @@ Per channel (`ref/census.py::seed_policy`):
 - it does not discriminate (|seed| >= 2^20 at k = 4: one ulp32 is >= 0.125,
   so the window covers the whole unit interval and says nothing): the
   documented expression evaluated left-to-right in float32 -- `q * s_b`,
-  `s_in * s_w` as one float32 product, then the quotient, rounded half away
+  then the quotient by the stored `s_acc`, rounded half away
   -- is the gate (`f32`). This is an INTERPRETATION the doc does not make
   (it states the rule in reals; `DOC_GAPS[2]` in `ref/sym_ref.py`); a C seed
   that differs from this reading on such a channel is a `MISMATCH` and an
@@ -396,8 +405,8 @@ reported alongside (`ratio_rigorous`) and never needed.
 `ref/exact_ref.py`, in value units:
 
 - GEMM raw wire (Conv1d forward, Linear forward, Linear dx;
-  `bound_gemm_raw`): `y_absmax * 2^-23` (`s_raw = s_a * s_b` is a float32
-  product in C); with a bias `s_raw * (0.5 + g)` (the seed rounding plus
+  `bound_gemm_raw`): `y_absmax * 2^-15` (`s_raw = NEAREST15(s_a * s_b)` is
+  the stored canonical product in C, within 2^-15 of the exact product); with a bias `s_raw * (0.5 + g)` (the seed rounding plus
   `g`, the deviation the seed policy grants on the widest channel); layer
   tier `s_out * (0.5 + max(k * ulp32(qMax), ((1+u)^4 - 1) * qMax))` (the
   restore rounding plus the larger of the census-legal tie width and the
@@ -409,24 +418,27 @@ reported alongside (`ratio_rigorous`) and never needed.
   the other operand). The term is **zero for a grid-exact FLOAT32 input**
   (`Operand.stages_exactly`: values are `code * scale` exactly -- verified when
   the fixture is built -- on the int12 staging grid with some code at
-  +-qMax, so the per-tensor `absMax / qMax` IS the fixture's scale and the
+  +-qMax, so the per-tensor `CEIL15(absMax / qMax)` IS the fixture's scale (a
+  13-bit grid-exact scale is already canonical) and the
   staged codes are the fixture's codes; Leg A's code and scale comparison
   would show any deviation from that premise). Every Linear cell is
   grid-exact, so on the staged layer rows (S1 forward, S3 weightGrad) the
   bound is the restore / float32 rounding terms alone (S1 ratios reach
   ~1.00: the observed error is the restore's own 0.5 LSB); the term stays in
   the code for a FLOAT32 input that is not grid-exact.
-- FLOAT32 grad (`bound_float32_grad`): `g_absmax * ((1+u)^n - 1)` with n =
+- FLOAT32 grad (`bound_float32_grad`): `g_absmax * ((1+u)^(n-1) * (1 +
+  2^-15) - 1)` for a weight grad (the product rounding is the stored canonical
+  product, 2^-15) and `g_absmax * ((1+u)^n - 1)` for a bias grad, with n =
   the float32 roundings the production takes: a weight grad is the int->float
   cast, the `s_loss * s_in` product and the multiply -- 3, but the cast is
   exact when every |raw| < 2^24 (a float32 holds 24 significant bits), so n =
   2 there (`weight_grad_roundings`; both legs use it); a bias grad is 2.
   Plus the staging term (zero for a grid-exact input) with `max_o sum_b
   |L[b,o]|` for the weight grad. A F9 raw (>= 2^31) always keeps 3. The
-  kernel-tier grads are raw int32 at `s_raw`: only the float32 product scale
-  applies (`y_absmax * 2^-23`; the bias-grad scale is copied verbatim).
+  kernel-tier grads are raw int32 at `s_raw`: only the stored product scale
+  applies (`y_absmax * 2^-15`; the bias-grad scale is copied verbatim).
 - Encode / requant round trip (`bound_requant_roundtrip`):
-  `s_out * (0.5 + slack + qMax * u)`; elements the fixed requant clamps are
+  `s_out * (0.5 + slack + qMax * 2^-15)`; elements the fixed requant clamps are
   outside any round-trip bound by construction and are excluded (reported
   as `n_clamped_excluded` with their own max error).
 - BFP GEMM family (`bound_bfp_fold`, elementwise): the walk-order-free `N * 2^-24 * (sum_i |a_i b_i| + |bias|)` with `S = sum|.|`

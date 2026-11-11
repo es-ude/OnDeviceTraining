@@ -16,7 +16,13 @@ import torch
 import torch.nn.functional as F
 
 F32_U = 2.0**-24  # float32 unit roundoff
-F32_REL = 2.0**-23  # two units: covers the float32 scale product s_in * s_w
+# A stored scale is its exact value rounded ONCE to a 15-bit dyadic mantissa
+# (arithmetic-sym 'Stored scales are canonical dyadic values'): at most half a
+# 15-bit unit, 2^-15 relative (reached at m = 16384). This is the scale term
+# of every bound below; it was 2^-23 (two float32 units) while scales were
+# plain float32 products.
+SCALE_U = 2.0**-15
+F32_REL = SCALE_U  # the stored product scale NEAREST15(s_in * s_w)
 
 
 def dequant(codes: np.ndarray, scale: float) -> np.ndarray:
@@ -96,8 +102,9 @@ def bound_conv1d_forward(
     """Analytic bound on |dequant(C output) - exact| for the Conv1d forward.
 
     Terms (all in value units):
-      y_absmax * F32_REL          s_raw is a float32 product in C (<= u
-                                  relative on raw * s_raw; two units kept)
+      y_absmax * F32_REL          s_raw is the stored product scale
+                                  NEAREST15(s_in * s_w) (<= 2^-15 relative
+                                  on raw * s_raw)
       s_raw * (0.5 + g)           bias present: the seed rounding (0.5 raw
                                   LSB) plus g = the deviation the seed policy
                                   grants on the widest channel
@@ -180,27 +187,35 @@ def bound_gemm_raw(
     return bound_conv1d_forward(tier, s_out, s_raw, seed_granted_lsb, y_absmax, q_max, k) + staging
 
 
-def bound_float32_grad(g_absmax: float, n_roundings: int, staging: float = 0.0) -> float:
+def bound_float32_grad(g_absmax: float, n_roundings: int, staging: float = 0.0, product_scale: bool = True) -> float:
     """Bound for a FLOAT32-stored grad produced from a SYM_INT32 raw increment:
     the first store into a zeroed grad is the increment's float32 value,
     at most ``n_roundings`` float32 roundings away from raw * s_raw (the
     int->float cast, the s_loss * s_in product, the multiply -- three; see
     sym_ref.DOC_GAPS[3]) -- ((1+u)^n - 1) relative -- plus the staging term
     of a FLOAT32 forward input. The kernel tier has no float at all: its raw
-    int32 is exact and only the float32 product scale (F32_REL) applies.
+    int32 is exact and only the stored product scale (F32_REL) applies.
+    With ``product_scale`` one of the ``n_roundings`` is the s_loss * s_in
+    product, which is now the stored canonical product: its term is SCALE_U
+    instead of F32_U. Without it (biasGrad: sum * s_loss, no product) every
+    rounding is a float32 one.
     """
-    return g_absmax * ((1.0 + F32_U) ** n_roundings - 1.0) + staging
+    if not product_scale:
+        return g_absmax * ((1.0 + F32_U) ** n_roundings - 1.0) + staging
+    n_f32 = max(int(n_roundings) - 1, 0)
+    return g_absmax * ((1.0 + F32_U) ** n_f32 * (1.0 + SCALE_U) - 1.0) + staging
 
 
 def bound_requant_roundtrip(s_out: float, q_max: int, k: int) -> float:
     """|value - code * s_out| for an encode / requant onto a fresh or preset
     grid: the rounding (0.5 LSB), the census-legal tie flip (slack), and the
-    float32 representation of the scale the codes are read back with
-    (|code| <= qMax, scale within u relative): s_out * (0.5 + slack + qMax*u).
+    representation of the scale the codes are read back with (|code| <=
+    qMax, a stored scale within SCALE_U relative of its exact value):
+    s_out * (0.5 + slack + qMax * SCALE_U).
     Clamped elements are outside this bound by construction and are
     reported separately.
     """
-    return float(s_out) * (0.5 + restore_slack_codes(q_max, k) + q_max * F32_U)
+    return float(s_out) * (0.5 + restore_slack_codes(q_max, k) + q_max * SCALE_U)
 
 
 # --------------------------------------------------------------------------- #

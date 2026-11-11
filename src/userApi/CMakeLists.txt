@@ -44,6 +44,7 @@ target_link_libraries(InferenceApi PRIVATE
         RematScheduler
         RematCheck
         OpTable
+        DyadicScale
 )
 
 add_library(ModelGraphApi ModelGraphApi.c)

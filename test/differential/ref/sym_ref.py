@@ -10,13 +10,34 @@ docstring and listed in ``DOC_GAPS`` so the report can surface it.
 All arithmetic is exact (int64 MACs) or float64. The float32 expression order
 of the C requant is NOT part of the documented scheme, so this leg cannot be
 bit-exact at float32 rounding ties; ``census.py`` classifies those.
+
+Stored scales follow arithmetic-sym 'Stored scales are canonical dyadic
+values': every stored scale is m * 2^e with 16384 <= m <= 32767, rounded ONCE
+from its exact value (fitted grids CEIL, products / ratios / coefficients /
+user-given scales NEAREST). The 15-bit rounding itself is the one Python copy
+of that rule, ``test/unit/goldgen/dyadic_scale.py`` (cross-checked bit for bit
+against the C helpers); this leg imports it rather than restating it a second
+time, and only decides from the doc WHICH rule a site uses.
 """
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "unit" / "goldgen"))
+from dyadic_scale import (  # noqa: E402,F401  (re-exported for run_cells)
+    NEAREST,
+    canon,
+    decompose,
+    fit_scale,
+    fit_scale_from_codes,
+    is_canonical,
+    product_scale,
+)
 
 # What the fixed docs now state, with the section that states it. Leg A cites
 # these instead of assuming them; they are not gaps. ``docs/conventions/``
@@ -28,6 +49,11 @@ DOC_COVERED: dict[str, str] = {
     "for x >= -qMax), barring a float32-ulp overshoot of x / scale.",
     "zero_absmax": "same section, dynamic absmax encode: an all-zero tensor gets scale = 1.0 and "
     "all-zero codes.",
+    "canonical_scales": "arithmetic-sym 'Stored scales are canonical dyadic values': a fitted grid is "
+    "CEIL15(absMax / qMax) (float32 quotient first), or CEIL15(inScale * max|code| / qMax) exactly "
+    "when the absmax is an integer code times a stored scale (the requant diagonal); a stored "
+    "product s_a * s_b is NEAREST15 of the exact product; a user-given / fixed target scale is "
+    "NEAREST15. Under HALF_AWAY the absmax element lands on qMax; under SR it may land on qMax - 1.",
     "half_away": "same section, Rounding modes: HALF_AWAY = C round() (an exact .5 goes away from "
     "zero), result converted to int32.",
     "staging": "same document, 'Staging a FLOAT32 operand under ARITH_SYM_INT32': the dynamic absmax "
@@ -124,17 +150,17 @@ def encode_sym(x: np.ndarray, q_max_bits: int) -> Encoded:
     """Dynamic absmax encode of real values onto a symmetric b-bit grid.
 
     arithmetic-sym, decision register '#192 D1': 'a dynamic one (dequant ->
-    absmax -> fresh scale ...)' and 'D3': 'forward requant maps absmax exactly
-    onto qMax, so it never saturates'; arithmetic-sym 'Rounding modes, the
-    SYM_INT32 grid, encode and requant' gives scale = absmax / qMax and
-    code = clampInt32(roundByMode(x / scale), qMin, qMax). The clamp is a
-    no-op under HALF_AWAY and, for x / scale within [-qMax, qMax], under SR_HALF_AWAY
-    at either end of the grid (exact SR never moves an exactly representable qMax/qMin).
-    absmax == 0 -> scale 1.0 and all-zero codes (same section).
+    absmax -> fresh scale ...)' and 'D3': the absmax maps to at most qMax;
+    arithmetic-sym 'Stored scales are canonical dyadic values' gives the
+    float-data fit scale = CEIL15(absmax / qMax) (the float32 quotient, then its
+    bits rounded up to 15) and 'Rounding modes, the SYM_INT32 grid, encode and
+    requant' code = clampInt32(roundByMode(x / scale), qMin, qMax). The clamp is
+    a no-op under HALF_AWAY. absmax == 0 -> scale 1.0 and all-zero codes (same
+    section).
     """
     x = np.asarray(x, dtype=np.float64)
     absmax = float(np.max(np.abs(x))) if x.size else 0.0
-    scale = 1.0 if absmax == 0.0 else absmax / qmax(q_max_bits)
+    scale = fit_scale(absmax, float(qmax(q_max_bits)))
     pre = x / scale
     codes = np.clip(round_half_away(pre), qmin(q_max_bits), qmax(q_max_bits))
     return Encoded(codes=codes, scale=scale, pre=pre)
@@ -271,9 +297,9 @@ def bias_seed_f32_literal(
     """The documented seed expression read left-to-right in float32.
 
     'seed = round(param_q * param_scale / accumulator_scale)' (arithmetic-sym,
-    'SYM_INT32 seed-rescale') with accumulator_scale = s_in * s_w ('Conv1d /
-    Conv1dTransposed SYM_INT32'): q * s_b first, s_in * s_w as one float32
-    product, then the quotient, rounded half away. The doc states the rule
+    'SYM_INT32 seed-rescale') with accumulator_scale the STORED product scale
+    NEAREST15(s_in * s_w) ('Stored scales are canonical dyadic values'): q * s_b
+    first, then the quotient by that stored value, rounded half away. The doc states the rule
     in reals (DOC_GAPS[0]); this reading is the harness's INTERPRETATION
     (DOC_GAPS[2]) and gates a channel only where the real-valued tie window
     cannot discriminate (k * ulp32(|seed|) >= 0.5, i.e. |seed| >= 2^20 at
@@ -281,8 +307,9 @@ def bias_seed_f32_literal(
     the float32 evaluation is not finite (the reading is then undefined).
     """
     f = np.float32
+    s_acc = f(stored_product(s_x, s_w))  # the stored canonical accumulator scale
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        pre32 = (np.asarray(b_codes).astype(f) * f(s_b)) / (f(s_x) * f(s_w))
+        pre32 = (np.asarray(b_codes).astype(f) * f(s_b)) / s_acc
     pre64 = pre32.astype(np.float64)
     finite = np.isfinite(pre64)
     out = np.full(pre64.shape, np.nan, dtype=np.float64)
@@ -290,11 +317,18 @@ def bias_seed_f32_literal(
     return out
 
 
+def stored_product(s_a: float, s_b: float) -> float:
+    """The stored scale of a raw product wire: NEAREST15 of the exact product
+    s_a * s_b of the two (canonical) operand scales, rounded once
+    (arithmetic-sym 'Stored scales are canonical dyadic values')."""
+    return product_scale(float(s_a), float(s_b), NEAREST)
+
+
 @dataclass
 class RawForward:
     mac: np.ndarray  # int64 [B, Cout, Lout], the pure integer MAC (no seed)
     raw: np.ndarray  # int64, mac + seed[oc]
-    s_raw: float  # float64 s_in * s_w
+    s_raw: float  # the stored product scale NEAREST15(s_in * s_w)
     seed: BiasSeed | None
 
 
@@ -311,11 +345,12 @@ def conv1d_sym_forward_raw(
 
     arithmetic-sym, 'Conv1d / Conv1dTransposed SYM_INT32 (#45)': 'Both emit raw
     accumulator-range int32 mantissas at output scale s_in*s_w (NOT
-    range-restored) -- that's the kernel's contract'; the bias enters as the
-    refolded per-output-channel seed (``bias_seed``).
+    range-restored) -- that's the kernel's contract', the stored scale being
+    NEAREST15(s_in * s_w) (``stored_product``); the bias enters as the
+    refolded per-output-channel seed (``bias_seed``) on that stored scale.
     """
     mac = conv1d_int_mac(x_codes, w_codes, geom)
-    s_raw = float(s_x) * float(s_w)
+    s_raw = stored_product(s_x, s_w)
     seed = None
     raw = mac
     if b_codes is not None:
@@ -327,7 +362,7 @@ def conv1d_sym_forward_raw(
 @dataclass
 class Restored:
     codes: np.ndarray  # int64, width-restored codes
-    scale: float  # float64 fresh scale absmax / qMax
+    scale: float  # the stored canonical scale (fresh fit, or the snapped target)
     pre: np.ndarray  # float64 pre-rounding values raw * s_raw / scale
 
 
@@ -338,17 +373,19 @@ def restore_sym(raw: np.ndarray, s_raw: float, q_max_bits: int) -> Restored:
     epilogue restores operand width at the producer ... OUT_WRITE routes
     SYM->SYM through the conversionMatrix diagonal', and the decision register
     '#192 D1' defines that diagonal as the dynamic requant 'dequant -> absmax
-    -> fresh scale'; 'D3': absmax maps exactly onto qMax (no saturation). So
-    scale = max|raw * s_raw| / qMax, codes = round_half_away(raw * s_raw / scale).
-    absmax == 0 -> scale 1.0 (arithmetic-sym, same section as the encode). The width (q_max_bits) is the
+    -> fresh scale'; 'Stored scales are canonical dyadic values': the absmax is
+    an integer code times a stored scale, so the grid is fitted from the codes,
+    scale = CEIL15(s_raw * max|raw| / qMax) exactly, and codes =
+    round_half_away(raw * s_raw / scale) (at most qMax). absmax == 0 -> scale 1.0 (arithmetic-sym, same section as the encode). The width (q_max_bits) is the
     produced wire's storage config; the rounding mode is the OP's
     ('OUT_WRITE epilogue rounding is operation-owned (#282)': the op's
     arithmetic.roundingMode, for which the storage config is only the
     default) -- HALF_AWAY in every deterministic cell.
     """
-    values = np.asarray(raw, dtype=np.float64) * float(s_raw)
-    absmax = float(np.max(np.abs(values))) if values.size else 0.0
-    scale = 1.0 if absmax == 0.0 else absmax / qmax(q_max_bits)
+    raw = np.asarray(raw, dtype=np.int64)
+    values = raw.astype(np.float64) * float(s_raw)
+    max_code = int(np.max(np.abs(raw))) if raw.size else 0
+    scale = fit_scale_from_codes(float(s_raw), max_code, qmax(q_max_bits))
     pre = values / scale
     codes = np.clip(round_half_away(pre), qmin(q_max_bits), qmax(q_max_bits))
     return Restored(codes=codes, scale=scale, pre=pre)
@@ -393,7 +430,7 @@ def linear_sym_forward_raw(
     Conv1d apply unchanged (channel axis 1).
     """
     mac = linear_int_mac(x_codes, w_codes)[:, :, None]
-    s_raw = float(s_x) * float(s_w)
+    s_raw = stored_product(s_x, s_w)
     seed = None
     raw = mac
     if b_codes is not None:
@@ -417,7 +454,7 @@ def linear_sym_dx_raw(l_codes: np.ndarray, s_l: float, w_codes: np.ndarray, s_w:
     if l.ndim != 2 or w.ndim != 2 or l.shape[1] != w.shape[0]:
         raise ValueError("L must be [B, outF] and W [outF, inF]")
     mac = (l @ w)[:, :, None]
-    return RawForward(mac=mac, raw=mac, s_raw=float(s_l) * float(s_w), seed=None)
+    return RawForward(mac=mac, raw=mac, s_raw=stored_product(s_l, s_w), seed=None)
 
 
 def linear_sym_weight_grad_raw(
@@ -437,7 +474,7 @@ def linear_sym_weight_grad_raw(
     if l.ndim != 2 or x.ndim != 2 or l.shape[0] != x.shape[0]:
         raise ValueError("L must be [B, outF] and x [B, inF]")
     mac = (l.T @ x)[None, :, :]
-    return RawForward(mac=mac, raw=mac, s_raw=float(s_l) * float(s_x), seed=None)
+    return RawForward(mac=mac, raw=mac, s_raw=stored_product(s_l, s_x), seed=None)
 
 
 def linear_sym_bias_grad_raw(l_codes: np.ndarray) -> np.ndarray:
@@ -558,9 +595,13 @@ def requant_fixed(codes: np.ndarray, s_in: float, s_target: float, q_max_bits: i
     inScale / targetScale, qMin, qMax)) followed by an integer clamp to
     [qMin, qMax] (#511). Under HALF_AWAY (every cell here) the float clamp
     bounds are integers, so the integer clamp is a no-op and is not modelled;
-    an SR cell would need it. The scale is the given target, unchanged.
+    an SR cell would need it. The target is a user-given scale, stored
+    NEAREST15 ('Stored scales are canonical dyadic values'; a canonical target
+    is unchanged), and the input scale is read the same way.
     """
-    values = np.asarray(codes, dtype=np.float64) * float(s_in)
-    pre = values / float(s_target)
+    s_in = canon(float(s_in), NEAREST)
+    s_t = canon(float(s_target), NEAREST)
+    values = np.asarray(codes, dtype=np.float64) * s_in
+    pre = values / s_t
     out = round_half_away(np.clip(pre, qmin(q_max_bits), qmax(q_max_bits)))
-    return Restored(codes=out, scale=float(s_target), pre=pre)
+    return Restored(codes=out, scale=s_t, pre=pre)

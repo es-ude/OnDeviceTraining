@@ -15,6 +15,7 @@ validCount < kernel_size — same convention as the C impl.
 Run via `uv run` (CMake wires this automatically).
 """
 import argparse
+import zlib
 import sys
 from fractions import Fraction
 from pathlib import Path
@@ -111,7 +112,7 @@ def _run_avg_fixture(name, x, *, kernel_size, stride, padding, dilation,
     if loss_grad_kind == "ones":
         gy = torch.ones_like(y)
     elif loss_grad_kind == "randn":
-        torch.manual_seed(hash(name) & 0xFFFF)
+        torch.manual_seed(zlib.crc32(name.encode()) & 0xFFFF)  # not hash(): salted per process
         gy = torch.randn_like(y)
     else:
         raise ValueError(loss_grad_kind)
@@ -261,7 +262,7 @@ def _run_avg_sym_fixture(name, x, *, kernel_size, stride, dilation, padding_type
     if loss_grad_kind == "ones":
         gy = torch.ones((batch, channels, out_len), dtype=torch.float64)
     elif loss_grad_kind == "randn":
-        torch.manual_seed(hash(name) & 0xFFFF)
+        torch.manual_seed(zlib.crc32(name.encode()) & 0xFFFF)  # not hash(): salted per process
         gy = torch.randn(batch, channels, out_len, dtype=torch.float64)
     else:
         raise ValueError(loss_grad_kind)

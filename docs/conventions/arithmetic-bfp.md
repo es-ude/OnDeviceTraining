@@ -1051,10 +1051,12 @@ epic's bit-identity proof rung (a BFP config expressible as grouped
 SYM with `2^E` scales runs bit-identical to the grouped-SYM path) exists
 for the GEMM family and CANNOT exist for the norms: the SYM norm kernels
 derive DYNAMIC, data-dependent output scales (forward
-`s_norm = absmax/qMax` via the global-stretch scheme; backward dx's scale
-likewise, refreshed every call), so even a power-of-two-input config
-diverges structurally — the SYM path's produced grid is an arbitrary float
-scale, the BFP path's is a power of two, and the two paths are not the same
+`s_norm = CEIL15(absmax/qMax)`, the canonical 15-bit grid of
+arithmetic-sym "Stored scales are canonical dyadic values", via the
+global-stretch scheme; backward dx's scale likewise, refreshed every call),
+so even a power-of-two-input config diverges structurally — the SYM path's
+produced grid is a data-dependent 15-bit dyadic scale, the BFP path's is a
+power of two, and the two paths are not the same
 sum in a different order but different QUANTIZERS. What replaces the rung:
 
 - **config-pin forward twins on grid-exact fixtures**

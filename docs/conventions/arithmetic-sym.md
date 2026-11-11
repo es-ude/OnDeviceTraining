@@ -58,20 +58,27 @@ grid (`clampInt32(..., qMin, qMax)`).
 
 - *Dynamic absmax encode* (`convertFloatTensorToSymInt32Tensor`, and the
   dynamic requant `requantSymInt32Tensor` behind
-  `conversionMatrix[SYM_INT32][SYM_INT32]`): `scale = absMax / qMax` (float32),
-  `code = clampInt32(roundByMode(x / scale), qMin, qMax)`; requant evaluates
-  `(float)code · (inScale / scale)` instead of `x / scale`. An all-zero tensor
-  (`absMax == 0`) gets `scale = 1.0`; under `HALF_AWAY` its codes are all zero.
-  Under `SR_HALF_AWAY` it is zero too (`f == 0` never lifts). Because
-  `|x / scale|` is at most `qMax` (up to a float32 ulp), `HALF_AWAY` never
-  produces `qMin`; under `SR_HALF_AWAY` the result is `floor(x)` or `ceil(x)`, so `qMin`
+  `conversionMatrix[SYM_INT32][SYM_INT32]`): `scale = CEIL15(absMax / qMax)`
+  (the canonical fit, see "Stored scales are canonical dyadic values" below;
+  the requant fits it from the integer codes, `CEIL15(inScale · max|code| /
+  qMax)`), `code = clampInt32(roundByMode(x / scale), qMin, qMax)`; requant
+  evaluates `(float)code · (inScale / scale)` instead of `x / scale`. An
+  all-zero tensor (`absMax == 0`) gets `scale = 1.0`; under `HALF_AWAY` its
+  codes are all zero. Under `SR_HALF_AWAY` it is zero too (`f == 0` never
+  lifts). Because the CEIL scale is at least `absMax / qMax`, `|x / scale|` is
+  at most `qMax` (up to a float32 ulp): under `HALF_AWAY` the absmax element
+  lands on `qMax` (the CEIL moves it by at most `qMax · 2^-14 < 0.5` codes);
+  under `SR_HALF_AWAY` it lands on `qMax` only with probability
+  `frac(absMax / scale)` (< 1; e.g. about 0.88 for `1/2047`), else on `qMax - 1`
+  -- still unbiased. `HALF_AWAY` never produces `qMin`; under `SR_HALF_AWAY` the result is `floor(x)` or `ceil(x)`, so `qMin`
   appears only if `x / scale` overshoots `-qMax` by that float32 ulp and
   `u` is smaller than the overshoot. Likewise an `x / scale` that overshoots
   `qMax` by an ulp can round up to `qMax + 1`; that real overshoot (not an
   artifact of the add) is what the integer clamp covers on the top side.
 - *Fixed-scale requant* (`requantSymInt32TensorToScale`, #192 D1 "requant into
   a preset target scale"): the output scale must already be set and `> 0`
-  (else `exit(1)`); each element is `clampInt32(roundByMode(clamp((float)code ·
+  (else `exit(1)`) and is stored as `NEAREST15(targetScale)` (a user-given
+  scale; a canonical target is unchanged); each element is `clampInt32(roundByMode(clamp((float)code ·
   inScale / targetScale, qMin, qMax)), qMin, qMax)`, so out-of-grid values
   **saturate** to the two's-complement grid, and this is how `qMin` becomes
   reachable under `HALF_AWAY`. The float-domain clamp bounds the value fed to
@@ -86,6 +93,30 @@ grid (`clampInt32(..., qMin, qMax)`).
 - The `OUT_ACC_FIXED_SCALE` epilogue (`rescaleIntoAccumulatorScale`) does not
   clamp at all (see "Quantized gradient accumulation").
 
+**Stored scales are canonical dyadic values** (LINQ S2). Every stored SYM,
+SYM_INT32 and ASYM scale is an exact 15-bit dyadic value `m · 2^e`,
+`16384 <= m <= 32767` (`DyadicScale.h`), held in a float until the storage
+type changes. Each site rounds ONCE from the exact value it derives, and the
+codes are computed on the same value that is stored (`ScaleCanon.h`):
+
+| Site class | Stored scale |
+|---|---|
+| grid fitted to float data (absmax encode, ASYM range `(max - min) / qMax`, norm `sNorm` / `dxScale`, rsqrt) | `CEIL15(absMax / qMax)`: the float32 quotient first, then its bits rounded up to 15 |
+| grid fitted to integer codes (requant diagonal, ASYM→SYM, SYM_INT32→SYM) | `CEIL15(inScale · max|code| / qMax)`, exact rational |
+| product of two stored scales (GEMM / conv raw wire, Mul, weight-grad raw, norm `sNorm · gamma`) | `NEAREST15(s_a · s_b)` of the exact mantissa product (never the float product rounded again); the bias seed is refolded onto this stored value |
+| grouped rescaled accumulator `sAcc` | `CEIL15(aScale · maxScale)`, so every group factor stays `<= 1` (the guard's proof) |
+| stored scale over an integer (optimizer mean `1/B`, avg-pool `1/K`) | `NEAREST15(s · 1 / n)`, exact ratio |
+| stored scale times a coefficient (Dropout `1/(1-p)`, optimizer factor) | `NEAREST15(s · NEAREST15(c))`; `p = 0` gives exactly `s` |
+| quotient of two stored scales (Div) | `NEAREST15(s_a / s_b)`, exact |
+| raw-int tensor | exactly `1.0` |
+| user-given, fixed-target or deserialized scale | `NEAREST15(x)` (identity on a canonical value) |
+| copy | unchanged |
+
+`CEIL15` / `NEAREST15` round a positive rational to 15 significant bits
+(NEAREST: half up). A stored scale is therefore within `2^-15` relative of
+the exact value it rounds. `ODT_SCALE_STRICT` (preset `unit_test_scale_strict`)
+asserts canonicality at every store.
+
 **Staging a FLOAT32 operand under `ARITH_SYM_INT32`** (`executeOp` prologue,
 `src/arithmetic/ExecuteOp.c`). Each storage type has its own route into stack
 scratch, and every route declares the width of the codes it actually writes
@@ -94,7 +125,7 @@ from):
 
 | Stored as | Route | Scratch scale | Declared `qMaxBits` |
 |---|---|---|---|
-| FLOAT32 | dynamic absmax encode above, **per tensor** (one scale for the whole operand, not per sample or row), rounded by the op's `arithmetic.roundingMode` | `absMax / qMax` | `ODT_SYM_OPERAND_QMAXBITS` (the `initSymInt32QConfig` default, 12) |
+| FLOAT32 | dynamic absmax encode above, **per tensor** (one scale for the whole operand, not per sample or row), rounded by the op's `arithmetic.roundingMode` | `CEIL15(absMax / qMax)` | `ODT_SYM_OPERAND_QMAXBITS` (the `initSymInt32QConfig` default, 12) |
 | SYM, per-tensor | sign-extend the packed codes (`convertSymTensorToSymInt32Tensor`) | copied | `qBits` |
 | ASYM, per-tensor | `code − zp` (`convertAsymTensorToSymInt32Tensor`) | copied | `qBits + 1` (the difference spans `±(2^qBits − 1)`) |
 | INT32 | raw copy, unclamped (the funnel's file-static `stageInt32Raw`, not the public cell) | 1 | 32 (full two's-complement range) — the same declaration a raw SYM kernel output carries when its static bound exceeds int32 (next paragraph); 32 is an operand / requant-source width, never a target's. The public cell `convertInt32TensorToSymInt32Tensor` instead keeps the destination's declared width (validated in [1, 31]) and aborts on any code outside `[-2^(q-1), 2^(q-1)-1]`, so a user tensor never understates its codes |
@@ -645,7 +676,7 @@ published; every cited ID is stated here. (Group-quant IDs: see
 | ID | Decision | Applied in |
 |---|---|---|
 | D1 | Requant primitives in `TensorConversion.c`: a dynamic one (dequant → absmax → fresh scale, wired as `conversionMatrix[SYM_INT32][SYM_INT32]`) and a fixed-scale one (requant into a preset target scale). `convertTensor`'s same-type copy semantics stay untouched. | `TensorConversion.c`, `UnitTestTensorConversion.c` |
-| D3 | The Quantization layer is a generic conversion node over the conversion matrix. Dynamic targets only: forward requant maps absmax exactly onto qMax, so it never saturates and backward is a value-identical pass-through (no STE clipping mask). | `QuantizationLayer.c` |
+| D3 | The Quantization layer is a generic conversion node over the conversion matrix. Dynamic targets only: forward requant maps absmax to at most qMax (exactly onto qMax under HALF_AWAY; the canonical CEIL grid, "Stored scales are canonical dyadic values"), so it never saturates and backward is a value-identical pass-through (no STE clipping mask). | `QuantizationLayer.c` |
 | D7 | Test/gold strategy: shared Python gold helpers in `test/unit/goldgen/` (`sym_gold.py`) plus a C test-helper library. | `test/unit/goldgen/` |
 
 **Arithmetic-type split (2026-07-02), cited as `arithmetic-type-split D<n>`.**

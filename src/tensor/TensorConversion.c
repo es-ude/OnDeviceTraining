@@ -565,6 +565,7 @@ void requantSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStr
     symInt32QConfig_t *outputSymInt32QC = outputTensor->quantization->qConfig;
     /* latch BEFORE writing outputSymInt32QC->scale: when called in-place
      * (inputTensor == outputTensor) both pointers alias the same config */
+    odtScaleAssertCanonical(inputSymInt32QC->scale); /* stored input: strict checks it */
     const float inScale = canonFixedScale(inputSymInt32QC->scale);
 
     int32_t *inputInt32 = (int32_t *)inputTensor->data;
@@ -940,6 +941,7 @@ void convertAsymTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor,
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     asymQConfig_t *inQC = inputTensor->quantization->qConfig;
     requirePerTensorAsym(inQC, "convertAsymTensorToSymTensor");
+    odtScaleAssertCanonical(inQC->scales[0]); /* a stored input scale: strict checks it */
     const float inScale = canonFixedScale(inQC->scales[0]);
     const int32_t inZp = (int32_t)inQC->zeroPoints[0];
     size_t inBits = calcBitsPerElement(inputTensor->quantization);
@@ -1846,6 +1848,7 @@ void convertSymInt32TensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTen
                     outQC->numGroups);
         exit(1);
     }
+    odtScaleAssertCanonical(inQC->scale); /* a stored input scale: strict checks it */
     const float inScale = canonFixedScale(inQC->scale);
     const int32_t *in = (const int32_t *)inputTensor->data;
     /* pass 1: the largest code magnitude (requantSymInt32Tensor precedent: the

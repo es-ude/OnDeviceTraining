@@ -12,6 +12,7 @@ on the stride/dilation backward path are non-vacuous
 Run via `uv run` (CMake wires this automatically).
 """
 import argparse
+import zlib
 import sys
 from pathlib import Path
 
@@ -121,7 +122,7 @@ def _run_max_fixture(name, x, *, kernel_size, stride, padding, dilation,
     if loss_grad_kind == "ones":
         gy = torch.ones_like(y)
     elif loss_grad_kind == "randn":
-        torch.manual_seed(hash(name) & 0xFFFF)
+        torch.manual_seed(zlib.crc32(name.encode()) & 0xFFFF)  # not hash(): salted per process
         gy = torch.randn_like(y)
     else:
         raise ValueError(loss_grad_kind)
@@ -262,7 +263,7 @@ def _run_max_sym_fixture(name, x, *, kernel_size, stride, dilation, padding_type
     if loss_grad_kind == "ones":
         gy = torch.ones((x.shape[0], x.shape[1], geom["out_len"]), dtype=torch.float64)
     elif loss_grad_kind == "randn":
-        torch.manual_seed(hash(name) & 0xFFFF)
+        torch.manual_seed(zlib.crc32(name.encode()) & 0xFFFF)  # not hash(): salted per process
         gy = torch.randn(x.shape[0], x.shape[1], geom["out_len"], dtype=torch.float64)
     else:
         raise ValueError(loss_grad_kind)

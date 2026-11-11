@@ -2626,7 +2626,7 @@ void testAccumulateSymRescaleMatchesReferenceAtChunkBoundary(void) {
                        .groupSize = 0,
                        .roundingMode = HALF_AWAY,
                        .qBits = qBits};
-    qc.scales[0] = 0.01f;
+    qc.scales[0] = 0.009765625f; /* 5 * 2^-9, a canonical stored scale */
     quantization_t q;
     initSymQuantization(&qc, &q);
     uint8_t *data = (uint8_t *)reserveMemory(calcNumberOfBytesForData(&q, n));
@@ -2646,7 +2646,7 @@ void testAccumulateSymRescaleMatchesReferenceAtChunkBoundary(void) {
 
     float *reference = (float *)reserveMemory(n * sizeof(float));
     for (size_t i = 0; i < n; i++) {
-        reference[i] = (float)seedMant[i] * 0.01f + inc[i];
+        reference[i] = (float)seedMant[i] * 0.009765625f + inc[i];
     }
 
     accumulateFloatIntoSymTensorRescale(&target, inc, n, NULL);
@@ -2710,14 +2710,14 @@ void testAccumulateTensorIntoSymRescaleStreamsIncrementAcrossChunks(void) {
 
     symInt32QConfig_t incQC;
     initSymInt32QConfigWithQMaxBits(HALF_AWAY, &incQC, 16);
-    incQC.scale = 0.001f;
+    incQC.scale = 0.0009765625f; /* 2^-10, a canonical stored scale */
     quantization_t incQ;
     initSymInt32Quantization(&incQC, &incQ);
     int32_t *incData = (int32_t *)reserveMemory(n * sizeof(int32_t));
     for (size_t i = 0; i < n; i++) {
-        incData[i] = 50; /* 50 * 0.001 = 0.05 */
+        incData[i] = 50; /* 50 * 2^-10 ~ 0.049 */
     }
-    incData[400] = 100000; /* 100000 * 0.001 = 100.0 -- dominant; SECOND chunk */
+    incData[400] = 102400; /* 102400 * 2^-10 = 100.0 -- dominant; SECOND chunk */
     tensor_t incTensor;
     setTensorValues(&incTensor, (uint8_t *)incData, &shape, &incQ, NULL);
 
@@ -2823,7 +2823,7 @@ void testChunkedSymInt32ToSymRoundTripsAtChunkBoundary(void) {
 
     symInt32QConfig_t inQC;
     initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQC, 16);
-    inQC.scale = 0.05f;
+    inQC.scale = 0.046875f; /* 3 * 2^-6, a canonical stored scale */
     quantization_t inQ;
     initSymInt32Quantization(&inQC, &inQ);
     int32_t *inData = (int32_t *)reserveMemory(n * sizeof(int32_t));
@@ -2958,7 +2958,7 @@ void testChunkedSymToAsymRoundTripsAtChunkBoundary(void) {
                          .groupSize = 0,
                          .roundingMode = HALF_AWAY,
                          .qBits = qBits};
-    inQC.scales[0] = 0.2f;
+    inQC.scales[0] = 0.1875f; /* 3 * 2^-4, a canonical stored scale */
     quantization_t inQ;
     initSymQuantization(&inQC, &inQ);
     int32_t *mant = (int32_t *)reserveMemory(n * sizeof(int32_t));
@@ -3020,7 +3020,7 @@ void testChunkedSymInt32ToAsymRoundTripsAtChunkBoundary(void) {
 
     symInt32QConfig_t inQC;
     initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQC, 16);
-    inQC.scale = 0.2f;
+    inQC.scale = 0.1875f; /* 3 * 2^-4, a canonical stored scale */
     quantization_t inQ;
     initSymInt32Quantization(&inQC, &inQ);
     int32_t *inData = (int32_t *)reserveMemory(n * sizeof(int32_t));

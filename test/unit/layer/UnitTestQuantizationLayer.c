@@ -76,7 +76,8 @@ void testQuantizationForwardSymToSymMatchesDirectRequant(void) {
     const int32_t mantissas[6] = {1500000, -730000, 42, 0, 999999, -1500000};
     tensor_t *input = buildSym2D(2, 3);
     memcpy(input->data, mantissas, sizeof(mantissas));
-    ((symInt32QConfig_t *)input->quantization->qConfig)->scale = 1e-4f;
+    ((symInt32QConfig_t *)input->quantization->qConfig)->scale =
+        0.0001220703125f; /* 2^-13, a canonical stored scale */
 
     tensor_t *expected = buildSym2D(2, 3);
     requantSymInt32Tensor(input, expected, NULL);
@@ -84,7 +85,8 @@ void testQuantizationForwardSymToSymMatchesDirectRequant(void) {
     /* Fixture sanity: the requant must actually change mantissas + scale,
      * otherwise the differential assert below is vacuous (scale-freeze class). */
     TEST_ASSERT_TRUE(((int32_t *)expected->data)[0] != 1500000);
-    TEST_ASSERT_TRUE(((symInt32QConfig_t *)expected->quantization->qConfig)->scale != 1e-4f);
+    TEST_ASSERT_TRUE(((symInt32QConfig_t *)expected->quantization->qConfig)->scale !=
+                     0.0001220703125f);
 
     tensor_t *actual = buildSym2D(2, 3);
     layer_t qLayer = {.type = QUANTIZATION, .config = NULL}; /* kernel reads only tensors */
@@ -202,7 +204,8 @@ void testQuantizationBackwardRequantsDyMantissasLikeDirectRequant(void) {
     const int32_t dyMantissas[6] = {800000, -123456, 7, -800000, 65536, 0};
     tensor_t *loss = buildSym2D(2, 3);
     memcpy(loss->data, dyMantissas, sizeof(dyMantissas));
-    ((symInt32QConfig_t *)loss->quantization->qConfig)->scale = 2e-5f;
+    ((symInt32QConfig_t *)loss->quantization->qConfig)->scale =
+        1.52587890625e-05f; /* 2^-16, a canonical stored scale */
 
     tensor_t *expected = buildSym2D(2, 3);
     requantSymInt32Tensor(loss, expected, NULL);

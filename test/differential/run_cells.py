@@ -152,11 +152,31 @@ DEFAULT_SCALE_RANGES = {  # value absmax ranges, divided by qMax below
 
 
 def random_scale(rng: np.random.Generator, lo: float, hi: float, qmax: int) -> float:
+    """A canonical stored scale (arithmetic-sym 'Stored scales are canonical
+    dyadic values': m * 2^e, 16384 <= m <= 32767) near absmax / qMax, never a
+    power of two. A cell operand IS a stored tensor, so its scale must be one
+    the C could have stored; the driver's NEAREST read is then the identity."""
     absmax = float(np.exp(rng.uniform(np.log(lo), np.log(hi))))
-    scale = f32(absmax / qmax)
-    if is_power_of_two(scale):
-        scale = f32(scale * 1.0000001)
-    return scale
+    m, e = sym_ref.decompose(sym_ref.canon(f32(absmax / qmax)))
+    if m == 16384:
+        m += 1
+    return f32(m * 2.0**e)
+
+
+def canonical_scale_pair(rng: np.random.Generator, lo: float, hi: float, qmax: int, num: int, den: int) -> tuple[float, float]:
+    """(s_t, s_in) with s_in / s_t == num / den EXACTLY and both canonical:
+    the target mantissa is moved to the nearest multiple of 2 * den, so
+    m * num / den is an integer that a 15-bit mantissa still holds."""
+    s_t = random_scale(rng, lo, hi, qmax)
+    m, e = sym_ref.decompose(s_t)
+    step = 2 * den
+    m = max(16384 + step - 16384 % step, (m // step) * step)
+    while True:
+        s_t = f32(m * 2.0**e)
+        s_in = f32(s_t * num / den)
+        if s_in * den == s_t * num and sym_ref.is_canonical(s_in) and not is_power_of_two(s_t):
+            return s_t, s_in
+        m += step
 
 
 def grid_exact_scale(rng: np.random.Generator, lo: float, hi: float, qmax: int) -> float:
@@ -347,8 +367,7 @@ def build_convert_fixture(cell: dict, k: int) -> Fixture:
         fx.notes.append(f"absmax code {m_max}, {len(ties)} tie codes, worst |frac-.5| = {worst:.2e}")
     elif direction == "requant_fixed":
         ratio_num, ratio_den = fx_spec.get("ratio", [3, 4])  # s_in / s_target as a rational
-        s_t = random_scale(rng, 0.5, 4.0, q_out)
-        s_in = f32(s_t * ratio_num / ratio_den)
+        s_t, s_in = canonical_scale_pair(rng, 0.5, 4.0, q_out, ratio_num, ratio_den)
         r = s_in / s_t  # float64 ratio of the two float32 scales
         codes = rng.integers(-q_in, q_in + 1, size=n, dtype=np.int64)
         # interior ties: m * r = integer + 0.5 when m*ratio_num is an odd multiple of ratio_den/2
@@ -625,7 +644,7 @@ def resolve_leg_a_layer(
     c_codes: np.ndarray, c_scale: float, inp: LegAInputs, out_bits: int, k: int, scale_rel_tol: float
 ) -> dict:
     """Layer tier: the restore couples the channels only through the fresh
-    scale absmax(raw * s_raw) / qMax. Every assignment of allowed seeds has
+    scale CEIL15(s_raw * max|raw| / qMax). Every assignment of allowed seeds has
     an absmax that is some channel's maximum under one of its allowed seeds,
     so the realizable absmax values are enumerated (at most 2 * Cout), the
     observed C scale selects those within the derived scale tolerance (none:
@@ -648,7 +667,8 @@ def resolve_leg_a_layer(
     cands = sorted({v for row in chmax for v in row if v >= lower}) or [0]
 
     def scale_of(v: int) -> float:
-        return 1.0 if v == 0 else v * s_raw / q_max
+        # the requant diagonal's canonical fit from the integer absmax code
+        return sym_ref.fit_scale_from_codes(s_raw, v, q_max)
 
     rels = {v: abs(c_scale - scale_of(v)) / scale_of(v) for v in cands}
     matching = [v for v in cands if rels[v] <= scale_rel_tol]
@@ -843,12 +863,12 @@ def scale_tol(n_roundings: int) -> float:
     return (1.0 + F32_U) ** n_roundings - 1.0
 
 
-# kernel tier: s_raw = s_a * s_b, one float32 product (two units kept, as in
-# cell 0: the scale check is rel 2^-22 there)
+# kernel tier: s_raw = NEAREST15(s_a * s_b), the stored canonical product; Leg A
+# computes the same value exactly, so the 2^-22 tolerance is not exercised
 SCALE_TOL_KERNEL = census.SCALE_REL_TOL
-# layer tier, SYM_INT32 operands: restore scale = absmax((float)raw * s_raw)
-# / qMax -- (float)raw (1, only above 2^24), s_raw product (1), multiply (1),
-# divide (1): 4 roundings
+# layer tier, SYM_INT32 operands: restore scale = CEIL15(s_raw * max|raw| /
+# qMax), exact in Leg A too; the 4-rounding tolerance of the former float
+# expression is kept as stated before the run
 SCALE_TOL_LAYER = max(census.SCALE_REL_TOL, scale_tol(4))
 # layer tier with a staged FLOAT32 input: the staging scale absmax / qMax (1,
 # exact for grid-exact fixtures but counted) multiplies into s_raw: 5
@@ -1144,7 +1164,7 @@ def linear_bias_grad_row(fx: Fixture, tier: str, drv: DriverResult) -> dict:
         ref = sym_ref.dequant(ref_sum, fx.scale("loss"))
         a = resolve_leg_a_float(o["values"], ref, 2)
         err = float(np.max(np.abs(o["values"].astype(np.float64) - exact))) if exact.size else 0.0
-        b = census.leg_b_check(err, exact_ref.bound_float32_grad(g_absmax, 2))
+        b = census.leg_b_check(err, exact_ref.bound_float32_grad(g_absmax, 2, product_scale=False))
     return {"output": "biasGrad", "legA": a, "legB": b, "n_elements": int(exact.size)}
 
 

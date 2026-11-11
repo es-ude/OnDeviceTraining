@@ -26,6 +26,7 @@
 #include "Relu.h"
 #include "RematCheck.h"
 #include "RematScheduler.h"
+#include "ScaleCanon.h"
 #include "Softmax.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -137,7 +138,7 @@ static void initBufferInput(tensor_t *input, tensor_t *buffer) {
         symInt32QConfig_t *currentQC = currentQ->qConfig;
         symInt32QConfig_t *symInt32QC = reserveMemory(sizeof(symInt32QConfig_t));
         symInt32QC->roundingMode = currentQC->roundingMode;
-        symInt32QC->scale = currentQC->scale;
+        storeCanonScale(&symInt32QC->scale, currentQC->scale);
         symInt32QC->qMaxBits = currentQC->qMaxBits;
         q->qConfig = symInt32QC;
         break;

@@ -1876,6 +1876,105 @@ void testConv1dGroupedGoldenSr(void) {
     }
 }
 
+/* Conv groups 2 (the cases above all run conv groups 1): batch 2, Cin 4,
+ * conv groups 2 (inChPerGroup 2), outC 4 (outChPerGroup 2), L 8, K 5, stride
+ * 2, dilation 2, EXPLICIT 3, so outLen 3 and left padding enters every row
+ * mid-row. A weight row (one oc) is 10 codes; group sizes 4 and 8 straddle
+ * both the ic rows (5 codes) and the oc rows. Captured, like the cases above,
+ * from the kernel before the range-cursor refactor. */
+#define CG2_GOLD_NUM_CASES 2
+#define CG2_GOLD_B 2
+#define CG2_GOLD_CIN 4
+#define CG2_GOLD_OUTC 4
+#define CG2_GOLD_L 8
+#define CG2_GOLD_OUTLEN 3
+#define CG2_GOLD_W (CG2_GOLD_OUTC * 2 * 5)
+#define CG2_GOLD_Y (CG2_GOLD_B * CG2_GOLD_OUTC * CG2_GOLD_OUTLEN)
+
+static const size_t kCg2GoldGroupSize[CG2_GOLD_NUM_CASES] = {4, 8};
+static const int32_t *const kCg2GoldHa[CG2_GOLD_NUM_CASES] = {kCg2GoldHa0, kCg2GoldHa1};
+static const int32_t *const kCg2GoldSr[CG2_GOLD_NUM_CASES] = {kCg2GoldSr0, kCg2GoldSr1};
+
+typedef struct cg2GoldOut {
+    int32_t y[CG2_GOLD_Y];
+    float scale;
+    uint8_t bits;
+} cg2GoldOut_t;
+
+static void cg2GoldRun(size_t groupSize, roundingMode_t rm, rngStream_t *rs, cg2GoldOut_t *out) {
+    uint32_t s = 7121u + (uint32_t)groupSize;
+    size_t numGroups = CG2_GOLD_W / groupSize;
+    int32_t x[CG2_GOLD_B * CG2_GOLD_CIN * CG2_GOLD_L], w[CG2_GOLD_W], bias[CG2_GOLD_OUTC];
+    for (size_t i = 0; i < CG2_GOLD_B * CG2_GOLD_CIN * CG2_GOLD_L; i++) {
+        x[i] = cgGoldCode(&s, 100);
+    }
+    for (size_t i = 0; i < CG2_GOLD_W; i++) {
+        w[i] = cgGoldCode(&s, 100);
+    }
+    for (size_t i = 0; i < CG2_GOLD_OUTC; i++) {
+        bias[i] = cgGoldCode(&s, 200);
+    }
+    float scales[10];
+    for (size_t g = 0; g < numGroups; g++) {
+        scales[g] = cgGoldGroupScale(g, numGroups);
+    }
+    symQConfig_t groups = {.scales = scales,
+                           .numGroups = numGroups,
+                           .groupSize = groupSize,
+                           .qBits = 8,
+                           .roundingMode = rm};
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&groups);
+
+    size_t xDims[] = {CG2_GOLD_B, CG2_GOLD_CIN, CG2_GOLD_L}, wDims[] = {CG2_GOLD_OUTC, 2, 5};
+    size_t yDims[] = {CG2_GOLD_B, CG2_GOLD_OUTC, CG2_GOLD_OUTLEN}, bDims[] = {CG2_GOLD_OUTC};
+    size_t order[] = {0, 1, 2};
+    shape_t xS, wS, yS, bS;
+    setShape(&xS, xDims, 3, order);
+    setShape(&wS, wDims, 3, order);
+    setShape(&yS, yDims, 3, order);
+    setShape(&bS, bDims, 1, order);
+    symInt32QConfig_t xQC, wQC, yQC, bQC;
+    initSymInt32QConfigWithQMaxBits(rm, &xQC, 8);
+    initSymInt32QConfigWithQMaxBits(rm, &wQC, 8);
+    initSymInt32QConfigWithQMaxBits(rm, &yQC, UNSTAMPED_WIDTH);
+    initSymInt32QConfigWithQMaxBits(rm, &bQC, 12);
+    xQC.scale = 0.25f;
+    bQC.scale = 0.3f;
+    quantization_t xQ, wQ, yQ, bQ;
+    initSymInt32Quantization(&xQC, &xQ);
+    initSymInt32Quantization(&wQC, &wQ);
+    initSymInt32Quantization(&yQC, &yQ);
+    initSymInt32Quantization(&bQC, &bQ);
+    tensor_t xT, wT, yT, bT;
+    setTensorValues(&xT, (uint8_t *)x, &xS, &xQ, NULL);
+    setTensorValues(&wT, (uint8_t *)w, &wS, &wQ, NULL);
+    setTensorValues(&yT, (uint8_t *)out->y, &yS, &yQ, NULL);
+    setTensorValues(&bT, (uint8_t *)bias, &bS, &bQ, NULL);
+    kernel_t kernel;
+    initKernelExplicit(&kernel, 5, 3, 2, 2);
+    conv1dKernelSymInt32Grouped(&xT, &wT, &bT, &kernel, 2, &yT, &groupedWeight, rs);
+    out->scale = yQC.scale;
+    out->bits = yQC.qMaxBits;
+}
+
+void testConv1dGroupedGoldenConvGroups2(void) {
+    for (size_t ci = 0; ci < CG2_GOLD_NUM_CASES; ci++) {
+        cg2GoldOut_t ha, sr;
+        cg2GoldRun(kCg2GoldGroupSize[ci], HALF_AWAY, NULL, &ha);
+        rngStream_t rs = rngOpen(rngKeyFromSeed(0xC2D00000u + ci));
+        uint32_t before = rs.state;
+        cg2GoldRun(kCg2GoldGroupSize[ci], SR_HALF_AWAY, &rs, &sr);
+        TEST_ASSERT_NOT_EQUAL_UINT32(before, rs.state);
+        GOLD_I32(kCg2GoldHa[ci], ha.y, CG2_GOLD_Y);
+        GOLD_I32(kCg2GoldSr[ci], sr.y, CG2_GOLD_Y);
+        GOLD_U32_SCALAR(kCg2GoldSrState[ci], rs.state);
+        GOLD_F32_SCALAR(kCg2GoldScale[ci], ha.scale);
+        GOLD_F32_SCALAR(kCg2GoldScale[ci], sr.scale);
+        GOLD_U32_SCALAR(kCg2GoldBits[ci], ha.bits);
+        GOLD_U32_SCALAR(kCg2GoldBits[ci], sr.bits);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConv1dKernelSymRejectsFloatInput);
@@ -1946,5 +2045,6 @@ int main(void) {
     RUN_TEST(testConv1dKernelBfpRawZeroBiasDoesNotSetTheAccumulator);
     RUN_TEST(testConv1dGroupedGoldenHalfAway);
     RUN_TEST(testConv1dGroupedGoldenSr);
+    RUN_TEST(testConv1dGroupedGoldenConvGroups2);
     return UNITY_END();
 }

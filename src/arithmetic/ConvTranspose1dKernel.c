@@ -10,6 +10,7 @@
 #include "Rounding.h"
 #include "SlidingWindow1d.h"
 #include "SymAccumGuard.h"
+#include "SymGroupCursor.h"
 #include "SymGroupedWeight.h"
 
 /* Shared VALID / adjoint-SAME(/EXPLICIT) geometry resolution for every ConvT
@@ -374,6 +375,12 @@ SYM_ACCUM_ALWAYS_INLINE void convTSymGroupedScatter(const convTSymView_t *v,
     CONVT_SYM_VIEW_LOCALS(v);
 
     size_t dilation = kernel->dilation;
+    const size_t groupSize = weightGroups->groupSize;
+    symGroupCursor_t cursor = {0};
+    /* inScale * scales[cursor.group], refreshed only when the cursor moves:
+     * the same float the per-product expression would give, without a
+     * (soft-float on M0+) multiply per product. */
+    float factor = 0.0f;
 
     for (size_t b = 0; b < batch; b++) {
         for (size_t g = 0; g < groups; g++) {
@@ -391,30 +398,34 @@ SYM_ACCUM_ALWAYS_INLINE void convTSymGroupedScatter(const convTSymView_t *v,
 
                     for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
                         size_t oc = outLo + ocOffset;
-                        size_t outIdx = outFirst;
-                        for (size_t k = kLo; k < kHi; k++, outIdx += dilation) {
-                            size_t wStorageIdx = (ic * outChPerGroup + ocOffset) * kernelSize + k;
-                            /* Per-PRODUCT rescale into sAcc -- NOT the gather
-                             * cores' running group-partial: consecutive
-                             * products here land in DIFFERENT output elements
-                             * (outIdx moves with k), so there is no
-                             * per-(target, group) run across which a raw int32
-                             * partial could be carried without a second
-                             * accumulator buffer. Cost: one rounding per
-                             * product, |err| <= 0.5*C*sAcc per output element
-                             * (C = contributing products). Per-element group
-                             * division (gap-robust): padding clips k taps, so
-                             * visited wStorageIdx values can have gaps -- a
-                             * precomputed run length would overshoot. */
-                            size_t elemGroup = wStorageIdx / weightGroups->groupSize;
-                            int32_t product = symProduct(xv, wArr[wStorageIdx], checked, site);
-                            size_t yIdx = (b * outChannels + oc) * outputLength + outIdx;
-                            yArr[yIdx] =
-                                symAdd(yArr[yIdx],
-                                       rescalePartialIntoAccumulatorScale(
-                                           product, inScale * weightGroups->scales[elemGroup], sAcc,
-                                           roundingMode, rs),
-                                       checked, site);
+                        size_t yIdx = (b * outChannels + oc) * outputLength + outFirst;
+                        size_t wIdx = (ic * outChPerGroup + ocOffset) * kernelSize + kLo;
+                        size_t wEnd = wIdx + (kHi - kLo);
+                        /* Per-PRODUCT rescale into sAcc -- NOT the gather
+                         * cores' running group-partial: consecutive products
+                         * here land in DIFFERENT output elements (the output
+                         * index moves with k), so there is no per-(target,
+                         * group) run across which a raw int32 partial could be
+                         * carried without a second accumulator buffer. Cost:
+                         * one rounding per product, |err| <= 0.5*C*sAcc per
+                         * output element (C = contributing products). The taps
+                         * [kLo, kHi) are contiguous in the weight, so the run is
+                         * split where the cursor's group ends; between runs the
+                         * index jumps (next oc row, next inPos), so the group is
+                         * re-derived from the actual index. */
+                        while (wIdx < wEnd) {
+                            if (!symGroupCursorHolds(&cursor, wIdx)) {
+                                symGroupCursorSeek(&cursor, wIdx, groupSize);
+                                factor = inScale * weightGroups->scales[cursor.group];
+                            }
+                            size_t runEnd = cursor.end < wEnd ? cursor.end : wEnd;
+                            for (; wIdx < runEnd; wIdx++, yIdx += dilation) {
+                                int32_t product = symProduct(xv, wArr[wIdx], checked, site);
+                                yArr[yIdx] = symAdd(yArr[yIdx],
+                                                    rescalePartialIntoAccumulatorScale(
+                                                        product, factor, sAcc, roundingMode, rs),
+                                                    checked, site);
+                            }
                         }
                     }
                 }

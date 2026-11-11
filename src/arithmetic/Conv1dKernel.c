@@ -10,6 +10,7 @@
 #include "Rounding.h"
 #include "SlidingWindow1d.h"
 #include "SymAccumGuard.h"
+#include "SymGroupCursor.h"
 #include "SymGroupedWeight.h"
 
 void conv1dKernelFloat32(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
@@ -285,6 +286,11 @@ conv1dSymGroupedLoops(const convSymView_t *v, const symQConfig_t *weightGroups, 
     const windowGeometry1d_t geom = *v->geom;
     const int32_t *xArr = v->xArr, *wArr = v->wArr, *seed = v->seed;
     int32_t *yArr = v->yArr;
+    const size_t groupSize = weightGroups->groupSize;
+    const size_t dilation = geom.dilation;
+    /* Kept across windows: the next window usually starts in the group the
+     * last one visited, so it needs no division to resume. */
+    symGroupCursor_t cursor = {0};
 
     for (size_t b = 0; b < batch; b++) {
         for (size_t g = 0; g < groups; g++) {
@@ -299,42 +305,46 @@ conv1dSymGroupedLoops(const convSymView_t *v, const symQConfig_t *weightGroups, 
                     windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
                     int32_t acc = seed[oc];
                     int32_t partial = 0;
-                    size_t currentGroup = SIZE_MAX;
+                    /* Whether `partial` belongs to cursor.group yet: a window
+                     * with no valid tap (validCount 0) never sets it, so it
+                     * neither combines nor draws from the SR stream. */
+                    bool visited = false;
 
                     for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
                         size_t ic = inLo + icOffset;
-                        for (size_t i = 0; i < slice.validCount; i++) {
-                            size_t inputIdx = slice.firstValidInputIdx + i * geom.dilation;
-                            size_t kernelIdx = slice.firstValidKernelOffset + i;
-                            size_t wStorageIdx = wBase + icOffset * kernelSize + kernelIdx;
-                            /* Per-element division, unlike Matmul's grouped kernel (which
-                             * precomputes a run length to the next group boundary): padding
-                             * (VALID/SAME/EXPLICIT) makes slice.validCount skip invalid kernel
-                             * positions, so consecutive wStorageIdx values here can have gaps --
-                             * a precomputed run length would overshoot past a skipped index.
-                             * Dividing the actual visited index is gap-robust. */
-                            size_t elemGroup = wStorageIdx / weightGroups->groupSize;
-
-                            if (elemGroup != currentGroup) {
-                                if (currentGroup != SIZE_MAX) {
+                        size_t xIdx =
+                            (b * inChannels + ic) * inputLength + slice.firstValidInputIdx;
+                        size_t wIdx = wBase + icOffset * kernelSize + slice.firstValidKernelOffset;
+                        size_t wRowEnd = wIdx + slice.validCount;
+                        /* One row's valid taps are contiguous in the weight,
+                         * but padding leaves gaps between rows, so the run is
+                         * split where the cursor's group ends and the group is
+                         * re-derived from the actual next index. */
+                        while (wIdx < wRowEnd) {
+                            if (!symGroupCursorHolds(&cursor, wIdx)) {
+                                if (visited) {
                                     /* Group-boundary combine: fold the FINISHED
                                      * group's raw int32 partial into the running
                                      * accumulator scale (one rounding here,
-                                     * honoring the op's rounding mode). */
+                                     * honoring the op's rounding mode). A group
+                                     * that goes on into the next ic row does not
+                                     * combine at the row end. */
                                     acc = symAdd(acc,
                                                  rescalePartialIntoAccumulatorScale(
                                                      partial,
-                                                     inScale * weightGroups->scales[currentGroup],
+                                                     inScale * weightGroups->scales[cursor.group],
                                                      sAcc, roundingMode, rs),
                                                  checked, accSite);
                                     partial = 0;
                                 }
-                                currentGroup = elemGroup;
+                                symGroupCursorSeek(&cursor, wIdx, groupSize);
                             }
-
-                            int32_t xv = xArr[(b * inChannels + ic) * inputLength + inputIdx];
-                            int32_t wv = wArr[wStorageIdx];
-                            partial = symMac(partial, xv, wv, checked, partialSite);
+                            visited = true;
+                            size_t runEnd = cursor.end < wRowEnd ? cursor.end : wRowEnd;
+                            for (; wIdx < runEnd; wIdx++, xIdx += dilation) {
+                                partial =
+                                    symMac(partial, xArr[xIdx], wArr[wIdx], checked, partialSite);
+                            }
                         }
                     }
                     /* Tail combine: the LAST group visited never crosses a
@@ -343,10 +353,10 @@ conv1dSymGroupedLoops(const convSymView_t *v, const symQConfig_t *weightGroups, 
                      * inChPerGroup*kernelSize reduction) never hit the
                      * mid-loop branch at all -- this is their ONLY weight
                      * combine. */
-                    if (currentGroup != SIZE_MAX) {
+                    if (visited) {
                         acc = symAdd(acc,
                                      rescalePartialIntoAccumulatorScale(
-                                         partial, inScale * weightGroups->scales[currentGroup],
+                                         partial, inScale * weightGroups->scales[cursor.group],
                                          sAcc, roundingMode, rs),
                                      checked, accSite);
                     }

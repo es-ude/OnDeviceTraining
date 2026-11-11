@@ -1,5 +1,6 @@
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "SlidingWindow1d.h"
 #include "unity.h"
@@ -461,6 +462,186 @@ void testTapOutputRangeEmptyWhenStrideSkipsTheInput() {
     TEST_ASSERT_EQUAL_size_t(1, hi);
 }
 
+/* ---- B6: differential tests against the pre-B6 (int64-divide) geometry ----
+ * refWindowSlice1dAt / refWindowTapOutputRange1d are verbatim copies of the
+ * long-long implementations that the divide-free rewrite replaced; the
+ * exhaustive sweeps below pin the rewrite as bit-identical on every field. */
+
+static windowSlice1d_t refWindowSlice1dAt(windowGeometry1d_t const *geometry, size_t outputPos) {
+    windowSlice1d_t s = {0};
+    // signed math because input start can go negative when padLeft > 0
+    long long inputStart = (long long)(outputPos * geometry->stride) - (long long)geometry->padLeft;
+    long long dilation = (long long)geometry->dilation;
+    long long inputLen = (long long)geometry->inputLength;
+
+    // Right-side OOB: window starts past the end of input. C's integer division
+    // truncates toward zero (not floor), so without this guard a small-magnitude
+    // negative numerator below would round up to 0 and miss the empty-window
+    // sentinel. Catch it explicitly.
+    if (inputStart >= inputLen) {
+        s.firstValidInputIdx = 0;
+        s.firstValidKernelOffset = geometry->kernelSize;
+        s.validCount = 0;
+        return s;
+    }
+
+    // first kernel offset k where (inputStart + k*dilation) >= 0
+    long long firstK = 0;
+    if (inputStart < 0) {
+        // ceil((-inputStart) / dilation)
+        firstK = (-inputStart + dilation - 1) / dilation;
+    }
+
+    // last kernel offset k where (inputStart + k*dilation) < inputLen
+    long long lastK = (long long)geometry->kernelSize - 1;
+    long long maxKByInputLen = (inputLen - 1 - inputStart) / dilation; // floor
+    if (maxKByInputLen < lastK) {
+        lastK = maxKByInputLen;
+    }
+
+    if (firstK > lastK) {
+        // empty window — sentinel firstValidKernelOffset == kernelSize lets caller skip
+        s.firstValidInputIdx = 0;
+        s.firstValidKernelOffset = geometry->kernelSize;
+        s.validCount = 0;
+        return s;
+    }
+
+    s.firstValidKernelOffset = (size_t)firstK;
+    s.firstValidInputIdx = (size_t)(inputStart + firstK * dilation);
+    s.validCount = (size_t)(lastK - firstK + 1);
+    return s;
+}
+
+static void refWindowTapOutputRange1d(windowGeometry1d_t const *geometry, size_t k, size_t *outLo,
+                                      size_t *outHi) {
+    // signed: the tap offset relative to the window start is negative when
+    // padLeft exceeds k*dilation
+    long long tapOffset = (long long)(k * geometry->dilation) - (long long)geometry->padLeft;
+    long long stride = (long long)geometry->stride;
+    long long inputLen = (long long)geometry->inputLength;
+
+    // first outPos with outPos*stride + tapOffset >= 0
+    long long lo = 0;
+    if (tapOffset < 0) {
+        lo = (-tapOffset + stride - 1) / stride;
+    }
+
+    // first outPos with outPos*stride + tapOffset >= inputLen
+    long long hi = 0;
+    if (inputLen - tapOffset > 0) {
+        hi = (inputLen - tapOffset + stride - 1) / stride;
+    }
+    if (hi > (long long)geometry->outputLength) {
+        hi = (long long)geometry->outputLength;
+    }
+    if (lo > hi) {
+        lo = hi;
+    }
+
+    *outLo = (size_t)lo;
+    *outHi = (size_t)hi;
+}
+
+typedef void (*geometryCheck_t)(windowGeometry1d_t const *g, char const *label, size_t *checks);
+
+/* inputLength 0..40 x kernelSize 1..9 x stride 1..4 x dilation 1..4 x
+ * {VALID, SAME, EXPLICIT padding 0..5}. */
+static size_t sweepGeometries(geometryCheck_t check, size_t *skipped) {
+    size_t checks = 0;
+    for (size_t inputLength = 0; inputLength <= 40; inputLength++) {
+        for (size_t kernelSize = 1; kernelSize <= 9; kernelSize++) {
+            for (size_t stride = 1; stride <= 4; stride++) {
+                for (size_t dilation = 1; dilation <= 4; dilation++) {
+                    for (int mode = -2; mode <= 5; mode++) {
+                        kernel_t kernel;
+                        char label[160];
+                        if (mode == -2) {
+                            initKernel(&kernel, kernelSize, VALID, dilation, stride);
+                        } else if (mode == -1) {
+                            initKernel(&kernel, kernelSize, SAME, dilation, stride);
+                        } else {
+                            initKernelExplicit(&kernel, kernelSize, (size_t)mode, dilation, stride);
+                        }
+                        snprintf(label, sizeof(label),
+                                 "L=%zu K=%zu stride=%zu dil=%zu mode=%s pad=%d", inputLength,
+                                 kernelSize, stride, dilation,
+                                 mode == -2 ? "VALID" : (mode == -1 ? "SAME" : "EXPLICIT"),
+                                 mode < 0 ? 0 : mode);
+                        windowGeometry1d_t g = windowGeometry1dCalc(inputLength, &kernel);
+                        if (g.padLeft > (size_t)INT32_MAX) {
+                            // windowGeometry1dCalc(0, SAME) with stride > effective kernel
+                            // wraps (outputLength - 1) * stride, giving padLeft ~ SIZE_MAX/2
+                            // and outputLength 0; the reference then overflows long long
+                            // (UB), so there is no defined result to compare against.
+                            TEST_ASSERT_TRUE_MESSAGE(inputLength == 0 && mode == -1, label);
+                            (*skipped)++;
+                            continue;
+                        }
+                        check(&g, label, &checks);
+                    }
+                }
+            }
+        }
+    }
+    return checks;
+}
+
+static void checkSliceAgainstReference(windowGeometry1d_t const *g, char const *label,
+                                       size_t *checks) {
+    for (size_t outPos = 0; outPos <= g->outputLength + 2; outPos++) {
+        windowSlice1d_t expected = refWindowSlice1dAt(g, outPos);
+        windowSlice1d_t actual = windowSlice1dAt(g, outPos);
+        (*checks)++;
+        if (expected.firstValidInputIdx != actual.firstValidInputIdx ||
+            expected.firstValidKernelOffset != actual.firstValidKernelOffset ||
+            expected.validCount != actual.validCount) {
+            char msg[320];
+            snprintf(msg, sizeof(msg),
+                     "%s outPos=%zu: ref {idx=%zu, k=%zu, n=%zu} != new {idx=%zu, k=%zu, n=%zu}",
+                     label, outPos, expected.firstValidInputIdx, expected.firstValidKernelOffset,
+                     expected.validCount, actual.firstValidInputIdx, actual.firstValidKernelOffset,
+                     actual.validCount);
+            TEST_FAIL_MESSAGE(msg);
+        }
+    }
+}
+
+static void checkTapRangeAgainstReference(windowGeometry1d_t const *g, char const *label,
+                                          size_t *checks) {
+    for (size_t k = 0; k < g->kernelSize; k++) {
+        size_t expectedLo = SIZE_MAX, expectedHi = SIZE_MAX;
+        size_t actualLo = SIZE_MAX - 1, actualHi = SIZE_MAX - 1;
+        refWindowTapOutputRange1d(g, k, &expectedLo, &expectedHi);
+        windowTapOutputRange1d(g, k, &actualLo, &actualHi);
+        (*checks)++;
+        if (expectedLo != actualLo || expectedHi != actualHi) {
+            char msg[320];
+            snprintf(msg, sizeof(msg), "%s k=%zu: ref [%zu, %zu) != new [%zu, %zu)", label, k,
+                     expectedLo, expectedHi, actualLo, actualHi);
+            TEST_FAIL_MESSAGE(msg);
+        }
+    }
+}
+
+void testWindowSlice1dAtMatchesReferenceExhaustive() {
+    size_t skipped = 0;
+    size_t checks = sweepGeometries(checkSliceAgainstReference, &skipped);
+    printf("windowSlice1dAt: %zu (geometry, outPos) cases matched the reference; %zu wrapped L=0 "
+           "SAME geometries skipped\n",
+           checks, skipped);
+    TEST_ASSERT_TRUE(checks > 0);
+}
+
+void testWindowTapOutputRange1dMatchesReferenceExhaustive() {
+    size_t skipped = 0;
+    size_t checks = sweepGeometries(checkTapRangeAgainstReference, &skipped);
+    printf("windowTapOutputRange1d: %zu (geometry, k) cases matched the reference; %zu wrapped L=0 "
+           "SAME geometries skipped\n",
+           checks, skipped);
+    TEST_ASSERT_TRUE(checks > 0);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -495,5 +676,7 @@ int main(void) {
     RUN_TEST(testTransposeTapsMatchScatterEnumeration);
     RUN_TEST(testTapOutputRangeMatchesSliceBruteForce);
     RUN_TEST(testTapOutputRangeEmptyWhenStrideSkipsTheInput);
+    RUN_TEST(testWindowSlice1dAtMatchesReferenceExhaustive);
+    RUN_TEST(testWindowTapOutputRange1dMatchesReferenceExhaustive);
     return UNITY_END();
 }

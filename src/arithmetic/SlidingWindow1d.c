@@ -47,80 +47,85 @@ windowGeometry1d_t windowGeometry1dCalc(size_t inputLength, kernel_t const *kern
     return g;
 }
 
+/* Unsigned, divide-free geometry (B6). These run once per output position or
+ * tap in every conv/pool kernel, so they avoid 64-bit math (a libgcc call on
+ * Cortex-M) and skip the divide entirely for the common stride/dilation 1. */
+static inline size_t ceilDivSize(size_t numerator, size_t denominator) {
+    return (denominator == 1) ? numerator : (numerator + denominator - 1) / denominator;
+}
+
+static inline size_t floorDivSize(size_t numerator, size_t denominator) {
+    return (denominator == 1) ? numerator : numerator / denominator;
+}
+
+static windowSlice1d_t emptyWindowSlice(size_t kernelSize) {
+    // sentinel firstValidKernelOffset == kernelSize lets the caller skip
+    windowSlice1d_t s = {
+        .firstValidInputIdx = 0, .firstValidKernelOffset = kernelSize, .validCount = 0};
+    return s;
+}
+
 windowSlice1d_t windowSlice1dAt(windowGeometry1d_t const *geometry, size_t outputPos) {
-    windowSlice1d_t s = {0};
-    // signed math because input start can go negative when padLeft > 0
-    long long inputStart = (long long)(outputPos * geometry->stride) - (long long)geometry->padLeft;
-    long long dilation = (long long)geometry->dilation;
-    long long inputLen = (long long)geometry->inputLength;
+    size_t const kernelSize = geometry->kernelSize;
+    size_t const dilation = geometry->dilation;
+    size_t const inputLength = geometry->inputLength;
+    size_t const windowPos = outputPos * geometry->stride;
 
-    // Right-side OOB: window starts past the end of input. C's integer division
-    // truncates toward zero (not floor), so without this guard a small-magnitude
-    // negative numerator below would round up to 0 and miss the empty-window
-    // sentinel. Catch it explicitly.
-    if (inputStart >= inputLen) {
-        s.firstValidInputIdx = 0;
-        s.firstValidKernelOffset = geometry->kernelSize;
-        s.validCount = 0;
-        return s;
+    // The window starts at windowPos - padLeft. firstK is the first kernel
+    // offset whose input index is >= 0; firstIdx is that input index.
+    size_t firstK = 0;
+    size_t firstIdx;
+    if (windowPos < geometry->padLeft) {
+        size_t const neg = geometry->padLeft - windowPos;
+        firstK = ceilDivSize(neg, dilation);
+        if (firstK >= kernelSize) {
+            return emptyWindowSlice(kernelSize);
+        }
+        firstIdx = firstK * dilation - neg;
+    } else {
+        firstIdx = windowPos - geometry->padLeft;
+    }
+    if (firstIdx >= inputLength) {
+        return emptyWindowSlice(kernelSize);
     }
 
-    // first kernel offset k where (inputStart + k*dilation) >= 0
-    long long firstK = 0;
-    if (inputStart < 0) {
-        // ceil((-inputStart) / dilation)
-        firstK = (-inputStart + dilation - 1) / dilation;
-    }
-
-    // last kernel offset k where (inputStart + k*dilation) < inputLen
-    long long lastK = (long long)geometry->kernelSize - 1;
-    long long maxKByInputLen = (inputLen - 1 - inputStart) / dilation; // floor
-    if (maxKByInputLen < lastK) {
-        lastK = maxKByInputLen;
-    }
-
-    if (firstK > lastK) {
-        // empty window — sentinel firstValidKernelOffset == kernelSize lets caller skip
-        s.firstValidInputIdx = 0;
-        s.firstValidKernelOffset = geometry->kernelSize;
-        s.validCount = 0;
-        return s;
-    }
-
-    s.firstValidKernelOffset = (size_t)firstK;
-    s.firstValidInputIdx = (size_t)(inputStart + firstK * dilation);
-    s.validCount = (size_t)(lastK - firstK + 1);
+    // taps firstK .. firstK + validCount - 1 stay below inputLength
+    size_t const reachable = floorDivSize(inputLength - 1 - firstIdx, dilation) + 1;
+    size_t const remainingTaps = kernelSize - firstK;
+    windowSlice1d_t s = {.firstValidInputIdx = firstIdx,
+                         .firstValidKernelOffset = firstK,
+                         .validCount = (reachable < remainingTaps) ? reachable : remainingTaps};
     return s;
 }
 
 void windowTapOutputRange1d(windowGeometry1d_t const *geometry, size_t k, size_t *outLo,
                             size_t *outHi) {
-    // signed: the tap offset relative to the window start is negative when
-    // padLeft exceeds k*dilation
-    long long tapOffset = (long long)(k * geometry->dilation) - (long long)geometry->padLeft;
-    long long stride = (long long)geometry->stride;
-    long long inputLen = (long long)geometry->inputLength;
+    size_t const stride = geometry->stride;
+    size_t const inputLength = geometry->inputLength;
+    size_t const tapPos = k * geometry->dilation;
 
-    // first outPos with outPos*stride + tapOffset >= 0
-    long long lo = 0;
-    if (tapOffset < 0) {
-        lo = (-tapOffset + stride - 1) / stride;
+    // Tap k of output outPos reads input outPos*stride + tapPos - padLeft.
+    // lo: first outPos with that index >= 0; hi: first outPos with it >= inputLength.
+    size_t lo = 0;
+    size_t span; // inputLength - (tapPos - padLeft), clamped at 0
+    if (tapPos < geometry->padLeft) {
+        size_t const neg = geometry->padLeft - tapPos;
+        lo = ceilDivSize(neg, stride);
+        span = inputLength + neg;
+    } else {
+        size_t const offset = tapPos - geometry->padLeft;
+        span = (offset < inputLength) ? inputLength - offset : 0;
     }
-
-    // first outPos with outPos*stride + tapOffset >= inputLen
-    long long hi = 0;
-    if (inputLen - tapOffset > 0) {
-        hi = (inputLen - tapOffset + stride - 1) / stride;
-    }
-    if (hi > (long long)geometry->outputLength) {
-        hi = (long long)geometry->outputLength;
+    size_t hi = ceilDivSize(span, stride);
+    if (hi > geometry->outputLength) {
+        hi = geometry->outputLength;
     }
     if (lo > hi) {
         lo = hi;
     }
 
-    *outLo = (size_t)lo;
-    *outHi = (size_t)hi;
+    *outLo = lo;
+    *outHi = hi;
 }
 
 size_t convTranspose1dTapsAt(size_t outPos, size_t inputLength, size_t kernelSize, size_t stride,

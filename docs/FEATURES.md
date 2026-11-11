@@ -696,7 +696,7 @@ checkpointing, limitations, literature).
   combines each group run with an int32 fixed-point multiply-shift, Linear keeps a
   float rescale -- scatter core via a per-group integer fold of each input code, pure
   int32 MACs (both integer paths: legacy float rescale for inputs wider than 16
-  bits); per-channel = the special case `groupSize ==
+  bits, no provable F >= 1, or A outside the canonical exponent range); per-channel = the special case `groupSize ==
   elemsPerOutChannel`) plus **optimizer updates** on grouped params (SGD/AdamW,
   per-group dynamic absmax requant each write-back). Rounding-error bounds for the
   backward/update paths: `docs/conventions/arithmetic-sym.md` §"Grouped backward".

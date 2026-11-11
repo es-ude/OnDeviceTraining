@@ -82,7 +82,8 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
  *  the reduction. Output scale = A, qMaxBits = the width of the site with x
  *  widened to [xMin * 2^F - 1, xMax * 2^F + 1] plus the bias seeds.
  *
- *  Legacy float path (inputs wider than 16 bits, or no provable F >= 1):
+ *  Legacy float path (inputs wider than 16 bits, no provable F >= 1, or A outside the
+ *  canonical exponent range):
  *  each partial folds into sAcc = s_in * max_g(scales[g]) (never scales[0])
  *  via rescaleIntoAccumulatorScale (GGUF rescale-combine pattern, #189); bias
  *  refolded into sAcc; output scale = sAcc.

@@ -84,7 +84,8 @@ void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight
  *  fold site's width (x widened to [xMin * 2^F - 1, xMax * 2^F + 1]) with the
  *  bias seeds.
  *
- *  Legacy float path (inputs wider than 16 bits, or no provable F >= 1):
+ *  Legacy float path (inputs wider than 16 bits, no provable F >= 1, or A outside the
+ *  canonical exponent range):
  *  each product is rescaled into sAcc = s_in * max_g(scales[g]) individually
  *  (rescaleIntoAccumulatorScale, op rounding), |err| <= 0.5*C*sAcc for C
  *  contributing products; bias refolded into sAcc; output scale = sAcc.

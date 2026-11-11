@@ -1,5 +1,6 @@
 #include <math.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "ArithmeticType.h"
@@ -4819,6 +4820,139 @@ void testLinearBackwardBfpDxIntoBfpWireSrFollowsTheOpModeAndTheOutStream(void) {
                               "SR and HALF_AWAY agree: the SR test is vacuous");
 }
 
+/* E0 characterization (SYM_BWD=1 HAR arm): integer dW/db/dx behind FLOAT32
+ * wires. Twin layers from the same FLOAT32 values: (a) all-FLOAT32 reference;
+ * (b) params requantized to packed SYM@8 per-tensor, all four math slots
+ * {ARITH_SYM_INT32, HALF_AWAY}, outputQ = propLossQ = FLOAT32, FLOAT32 grad
+ * storage (the NULL grad-storage knob default) and DYNAMIC_RESCALE acc modes
+ * -- exactly what train_c_sym.c builds under SYM_BWD=1 SYM_WIRES=0. Bounds per
+ * tensor, relative to max|a|: dx 2^-5 (8-bit weights); dW/db 2^-9 (FLOAT32
+ * operands staged as 12-bit SYM_INT32, ODT_SYM_OPERAND_QMAXBITS). */
+#define CHAR_LIN_IN 32
+#define CHAR_LIN_OUT 6
+
+static void charLinFill(float *buf, size_t n, uint32_t seed, float amp) {
+    uint32_t s = seed;
+    for (size_t i = 0; i < n; i++) {
+        s = s * 1664525u + 1013904223u;
+        buf[i] = amp * ((float)(s >> 8) / 8388608.0f - 1.0f); /* [-amp, amp), off-grid */
+    }
+}
+
+typedef struct charLinErr {
+    float maxErr;
+    float maxRef;
+    bool anyDiff;
+} charLinErr_t;
+
+static charLinErr_t charLinCompare(const float *ref, const float *got, size_t n) {
+    charLinErr_t e = {0.0f, 0.0f, false};
+    for (size_t i = 0; i < n; i++) {
+        e.maxErr = fmaxf(e.maxErr, fabsf(got[i] - ref[i]));
+        e.maxRef = fmaxf(e.maxRef, fabsf(ref[i]));
+        e.anyDiff = e.anyDiff || (got[i] != ref[i]);
+    }
+    return e;
+}
+
+static void charLinAssert(const char *name, charLinErr_t e, float relTol) {
+    char msg[160];
+    snprintf(msg, sizeof msg, "%s: maxErr=%.6g maxRef=%.6g rel=%.6g (tol %.6g)", name,
+             (double)e.maxErr, (double)e.maxRef, (double)(e.maxErr / e.maxRef), (double)relTol);
+    TEST_MESSAGE(msg);
+    TEST_ASSERT_TRUE_MESSAGE(e.maxRef > 0.0f, msg);
+    TEST_ASSERT_TRUE_MESSAGE(e.maxErr <= relTol * e.maxRef, msg);
+    TEST_ASSERT_TRUE_MESSAGE(e.anyDiff, "(b) is bit-identical to (a): the comparison is vacuous");
+}
+
+typedef struct charLinTwin {
+    layer_t *layer;
+    parameter_t *weights;
+    parameter_t *bias;
+    tensor_t *propLoss;
+} charLinTwin_t;
+
+static charLinTwin_t charLinBuild(const float *w, const float *b, quantization_t *floatQ,
+                                  bool symBwd) {
+    charLinTwin_t t;
+    size_t wDims[] = {CHAR_LIN_OUT, CHAR_LIN_IN};
+    size_t bDims[] = {CHAR_LIN_OUT};
+    tensor_t *wParam = makeFloatTensor(wDims, 2, w);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    tensor_t *bParam = makeFloatTensor(bDims, 1, b);
+    tensor_t *bGrad = gradInitFloat(bParam, NULL);
+    if (symBwd) {
+        quantization_t *sym8 = quantizationInitSym(8, HALF_AWAY);
+        requantizeTensorInPlace(wParam, sym8);
+        requantizeTensorInPlace(bParam, sym8);
+        freeQuantization(sym8);
+    }
+    t.weights = parameterInit(wParam, wGrad);
+    t.bias = parameterInit(bParam, bGrad);
+    t.layer = buildBorrowedLinearLayer(t.weights, t.bias, floatQ);
+    if (symBwd) {
+        linearConfig_t *cfg = t.layer->config->linear;
+        const arithmetic_t sym = {ARITH_SYM_INT32, HALF_AWAY};
+        cfg->forwardMath = sym;
+        cfg->weightGradMath = sym;
+        cfg->biasGradMath = sym;
+        cfg->propLossMath = sym;
+        cfg->weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
+        cfg->biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
+    }
+    size_t xDims[] = {1, CHAR_LIN_IN};
+    t.propLoss = makeFloatTensor(xDims, 2, NULL);
+    return t;
+}
+
+void testLinearBackwardSymInt32GradMathFloatWiresMatchesFloat(void) {
+    float w[CHAR_LIN_OUT * CHAR_LIN_IN];
+    float b[CHAR_LIN_OUT];
+    float x[CHAR_LIN_IN];
+    float g[CHAR_LIN_OUT];
+    charLinFill(w, CHAR_LIN_OUT * CHAR_LIN_IN, 11u, 0.3f);
+    charLinFill(b, CHAR_LIN_OUT, 12u, 0.1f);
+    charLinFill(x, CHAR_LIN_IN, 13u, 1.7f);
+    charLinFill(g, CHAR_LIN_OUT, 14u, 0.05f);
+
+    quantization_t *floatQ = quantizationInitFloat();
+    charLinTwin_t a = charLinBuild(w, b, floatQ, false);
+    charLinTwin_t s = charLinBuild(w, b, floatQ, true);
+
+    size_t xDims[] = {1, CHAR_LIN_IN};
+    size_t gDims[] = {1, CHAR_LIN_OUT};
+    tensor_t *input = makeFloatTensor(xDims, 2, x);
+    tensor_t *lossGrad = makeFloatTensor(gDims, 2, g);
+
+    linearBackward(a.layer, input, lossGrad, a.propLoss, NULL);
+    linearBackward(s.layer, input, lossGrad, s.propLoss, NULL);
+
+    TEST_ASSERT_EQUAL_INT(SYM, s.weights->param->quantization->type);
+    TEST_ASSERT_EQUAL_INT(FLOAT32, s.weights->grad->quantization->type);
+    TEST_ASSERT_EQUAL_INT(FLOAT32, s.bias->grad->quantization->type);
+    TEST_ASSERT_EQUAL_INT(FLOAT32, s.propLoss->quantization->type);
+
+    charLinErr_t dx = charLinCompare((const float *)a.propLoss->data,
+                                     (const float *)s.propLoss->data, CHAR_LIN_IN);
+    charLinErr_t dW =
+        charLinCompare((const float *)a.weights->grad->data, (const float *)s.weights->grad->data,
+                       CHAR_LIN_OUT * CHAR_LIN_IN);
+    charLinErr_t db = charLinCompare((const float *)a.bias->grad->data,
+                                     (const float *)s.bias->grad->data, CHAR_LIN_OUT);
+
+    freeLinearLayer(a.layer);
+    freeLinearLayer(s.layer);
+    freeTensor(a.propLoss);
+    freeTensor(s.propLoss);
+    freeTensor(input);
+    freeTensor(lossGrad);
+    freeQuantization(floatQ);
+
+    charLinAssert("linear dx", dx, 1.0f / 32.0f);
+    charLinAssert("linear dW", dW, 1.0f / 512.0f);
+    charLinAssert("linear db", db, 1.0f / 512.0f);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConvertInt32ToSymInt32UserTensorStaysCloneable);
@@ -4932,5 +5066,6 @@ int main(void) {
     RUN_TEST(testLinearBackwardBfpDxIntoBfpWireMatchesIntegerReference);
     RUN_TEST(testLinearBackwardBfpDxWorstCaseM16IntoBfpWireIsExact);
     RUN_TEST(testLinearBackwardBfpDxIntoBfpWireSrFollowsTheOpModeAndTheOutStream);
+    RUN_TEST(testLinearBackwardSymInt32GradMathFloatWiresMatchesFloat);
     return UNITY_END();
 }

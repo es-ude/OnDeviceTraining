@@ -16,10 +16,12 @@
  *     (convertSymTensorToSymInt32Tensor); for the FLOAT32 activation wire it is
  *     convertFloatTensorToSymInt32Tensor. Restored to FLOAT32 at the producer
  *     (outputQ) by the OUT_WRITE epilogue.
- *   - ALL backward compute FLOAT32 (weightGradMath/biasGradMath/propLossMath)
- *     and grad storage FLOAT32 (weightGradStorage/biasGradStorage left NULL =
- *     per-layer FLOAT32 default). No sub-byte packing on the grad side here.
- *   - all activation + dx wires FLOAT32.
+ *   - backward compute (weightGradMath/biasGradMath/propLossMath) FLOAT32 by
+ *     default; SYM_BWD=1 switches all three to ARITH_SYM_INT32 (integer
+ *     dW/db/dx), independent of SYM_WIRES. Grad storage stays FLOAT32 either
+ *     way (weightGradStorage/biasGradStorage left NULL = per-layer FLOAT32
+ *     default). No sub-byte packing on the grad side here.
+ *   - all activation + dx wires FLOAT32 (SYM_WIRES=1: SYM_INT32).
  *   - optimizer: SGD-M, routed through executeOp like every other op (#284) --
  *     per-target dtype dispatch is a funnel property, not an optimizer-level
  *     switch: the prologue converts operands to the update arithmetic and the
@@ -32,7 +34,8 @@
  *     Param storage qConfigs stay HALF_AWAY (deterministic init encode +
  *     serialization truth).
  *
- * SYM_BITS / SEED / LR / MOMENTUM / EPOCHS / LOG_PATH are env-overridable. */
+ * SYM_BITS / SYM_WIRES / SYM_BWD / SEED / LR / MOMENTUM / EPOCHS / LOG_PATH
+ * are env-overridable. */
 
 #include <errno.h>
 #include <math.h>
@@ -113,6 +116,7 @@ static int g_epochs = 50;
 static unsigned g_seed = 1;
 static int g_symBits = 12;
 static int g_symWires = 0;          /* SYM_WIRES=1 -> full-SYM wires (#206 acceptance) */
+static int g_symBwd = 0;            /* SYM_BWD=1 -> SYM_INT32 dW/db/dx math, any wires */
 static int g_useCosine = 0;         /* LR_SCHEDULE=cosine */
 static float g_lrMin = 0.0f;        /* LR_MIN (cosine floor) */
 static optimizer_t *g_optim = NULL; /* for per-epoch LR logging in epochCallback */
@@ -224,22 +228,24 @@ typedef struct symQuant {
 } symQuant_t;
 
 /* SYM layerQuant for conv/linear: SYM_INT32 forward compute, FLOAT32 grad
- * math, FLOAT32 grad storage (weightGradStorage/biasGradStorage NULL =>
- * per-layer FLOAT32 default). Wires are FLOAT32 by default; SYM_WIRES=1
- * (#206 acceptance) switches the activation + dx wires to SYM_INT32 and the
- * dx COMPUTE to the native SYM arms — param grads stay FLOAT32 either way
+ * storage (weightGradStorage/biasGradStorage NULL => per-layer FLOAT32
+ * default). Wires are FLOAT32 by default; SYM_WIRES=1 (#206 acceptance)
+ * switches the activation + dx wires to SYM_INT32 and the dx COMPUTE to the
+ * native SYM arms. SYM_BWD=1 switches the dW/db/dx COMPUTE to SYM_INT32 under
+ * either wire setting (FLOAT32 wire operands are staged to SYM_INT32 by the
+ * executeOp prologue). Param grads are STORED FLOAT32 in every combination
  * (#261). weightStorage/biasStorage are FLOAT32 during construction (factory
  * only inits FLOAT32-native param storage, #270); main() requantizes them to
  * packed SYM@SYM_BITS post-build. */
 static layerQuant_t symLayerQuant(symQuant_t *sq) {
+    const arithmetic_t symMath = {ARITH_SYM_INT32, HALF_AWAY};
+    const arithmetic_t floatMath = {ARITH_FLOAT32, HALF_AWAY};
     quantization_t *wireQ = g_symWires ? sq->symWireQ : sq->floatQ;
-    arithmetic_t dxMath = g_symWires ? (arithmetic_t){ARITH_SYM_INT32, HALF_AWAY}
-                                     : (arithmetic_t){ARITH_FLOAT32, HALF_AWAY};
     return (layerQuant_t){
-        .forwardMath = (arithmetic_t){ARITH_SYM_INT32, HALF_AWAY},
-        .weightGradMath = (arithmetic_t){ARITH_FLOAT32, HALF_AWAY},
-        .biasGradMath = (arithmetic_t){ARITH_FLOAT32, HALF_AWAY},
-        .propLossMath = dxMath,
+        .forwardMath = symMath,
+        .weightGradMath = g_symBwd ? symMath : floatMath,
+        .biasGradMath = g_symBwd ? symMath : floatMath,
+        .propLossMath = (g_symWires || g_symBwd) ? symMath : floatMath,
         .outputQ = wireQ,
         .propLossQ = wireQ,
         .weightStorage = sq->floatQ, /* temp; requantized to SYM@SYM_BITS post-build */
@@ -663,6 +669,11 @@ static void runOdtsRoundtrip(layer_t **model, dataLoader_t *testLoader, epochSta
 int main(void) {
     g_symBits = envInt("SYM_BITS", g_symBits);
     g_symWires = envInt("SYM_WIRES", g_symWires);
+    g_symBwd = envInt("SYM_BWD", g_symBwd);
+    if (g_symBwd != 0 && g_symBwd != 1) {
+        fprintf(stderr, "SYM_BWD must be 0 or 1 (got %d)\n", g_symBwd);
+        return 2;
+    }
     g_lr = envFloat("LR", g_lr);
     g_momentum = envFloat("MOMENTUM", g_momentum);
     g_epochs = envInt("EPOCHS", g_epochs);
@@ -744,10 +755,10 @@ int main(void) {
     int groupSizeForLog = (g_groupMode == GROUP_MODE_SIZE) ? g_groupSize : 0;
 
     fprintf(stdout,
-            "CONFIG sym_bits=%d lr=%.5f momentum=%.3f epochs=%d seed=%u "
+            "CONFIG sym_bits=%d sym_wires=%d sym_bwd=%d lr=%.5f momentum=%.3f epochs=%d seed=%u "
             "group_mode=%s group_size=%d weight_dtype=%s\n",
-            g_symBits, (double)g_lr, (double)g_momentum, g_epochs, g_seed, groupModeStr,
-            groupSizeForLog, weightDtypeStr);
+            g_symBits, g_symWires, g_symBwd, (double)g_lr, (double)g_momentum, g_epochs, g_seed,
+            groupModeStr, groupSizeForLog, weightDtypeStr);
 
 #ifdef ODT_MEM_PROFILE
     /* Reset the heap counter to 0 BEFORE the first allocation so dataset_b is
@@ -893,19 +904,21 @@ int main(void) {
         if (g_log_file != NULL) {
             fprintf(g_log_file,
                     "{\n  \"impl\": \"c-sym-weights\", \"example\": \"har_classifier\",\n"
-                    "  \"config\": {\"sym_bits\": %d, \"epochs\": %d, \"batch\": %d, \"lr\": %.6f, "
+                    "  \"config\": {\"sym_bits\": %d, \"sym_wires\": %d, \"sym_bwd\": %d, "
+                    "\"epochs\": %d, \"batch\": %d, \"lr\": %.6f, "
                     "\"momentum\": %.6f, \"seed\": %u, "
                     "\"lr_schedule\": \"%s\", \"lr_min\": %.6f, "
                     "\"weight_dtype\": \"%s\", \"group_mode\": \"%s\", \"group_size\": %d, "
                     "\"groups_resolved\": {\"conv1\": [%zu, %zu], \"conv2\": [%zu, %zu], "
                     "\"conv3\": [%zu, %zu], \"linear\": [%zu, %zu]}, "
                     "\"group_overhead_b\": %zu%s},\n  \"epochs\": [\n",
-                    g_symBits, g_epochs, BATCH, (double)g_lr, (double)g_momentum, g_seed,
-                    g_useCosine ? "cosine" : "none", (double)g_lrMin, weightDtypeStr, groupModeStr,
-                    groupSizeForLog, groupInfo.conv1.numGroups, groupInfo.conv1.groupSize,
-                    groupInfo.conv2.numGroups, groupInfo.conv2.groupSize, groupInfo.conv3.numGroups,
-                    groupInfo.conv3.groupSize, groupInfo.linear.numGroups,
-                    groupInfo.linear.groupSize, groupInfo.overheadBytes, odtsRoundtripFrag);
+                    g_symBits, g_symWires, g_symBwd, g_epochs, BATCH, (double)g_lr,
+                    (double)g_momentum, g_seed, g_useCosine ? "cosine" : "none", (double)g_lrMin,
+                    weightDtypeStr, groupModeStr, groupSizeForLog, groupInfo.conv1.numGroups,
+                    groupInfo.conv1.groupSize, groupInfo.conv2.numGroups, groupInfo.conv2.groupSize,
+                    groupInfo.conv3.numGroups, groupInfo.conv3.groupSize,
+                    groupInfo.linear.numGroups, groupInfo.linear.groupSize, groupInfo.overheadBytes,
+                    odtsRoundtripFrag);
         }
     }
 

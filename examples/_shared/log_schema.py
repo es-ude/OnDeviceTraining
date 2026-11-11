@@ -26,6 +26,8 @@ class TrainConfig(TypedDict):
     optimizer: NotRequired[str]  # "sgd" | "adamw" (#328); absent = sgd
     weight_decay: NotRequired[float]
     weight_dtype: NotRequired[str]  # "sym" | "asym" | "bfp"
+    sym_wires: NotRequired[int]  # c-sym-weights: 0/1 SYM_INT32 activation + dx wires (SYM_WIRES); absent = 0
+    sym_bwd: NotRequired[int]  # c-sym-weights: 0/1 SYM_INT32 dW/db/dx math (SYM_BWD); absent = 0
     group_mode: NotRequired[str]  # "tensor" | "channel" | "size" (#300); absent = tensor
     group_size: NotRequired[int]  # GROUP_SIZE when group_mode == "size"; 0 otherwise
     groups_resolved: NotRequired[dict[str, list[int]]]  # per-layer [numGroups, groupSize] (#300)

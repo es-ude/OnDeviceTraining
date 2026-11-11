@@ -815,7 +815,7 @@ runs all five); `train_c_continual` links the instrumentation library but record
 memory block. All five are env-configured: `SEED`, `LR`, `MOMENTUM`, `LOG_PATH`, `EPOCHS`
 (`STAGE1_EPOCHS`/`STAGE2_EPOCHS` for the finetune binary)
 (+ the float binary's `BATCH_SIZE`/`LR_SCHEDULE`/`BS_SCHEDULE`/`BS_LR_COMPENSATION`/`GAMMA`/
-`STEP_SIZE`/`MAX_BATCH_SIZE`/`RESHUFFLE`, see above; + `SYM_BITS`, `SYM_ROUNDING`, `SYM_WIRES`, `LR_SCHEDULE`, `LR_MIN`, `GROUP_MODE`,
+`STEP_SIZE`/`MAX_BATCH_SIZE`/`RESHUFFLE`, see above; + `SYM_BITS`, `SYM_ROUNDING`, `SYM_WIRES`, `SYM_BWD`, `LR_SCHEDULE`, `LR_MIN`, `GROUP_MODE`,
 `GROUP_SIZE`, `WEIGHT_DTYPE`, `ODTS_ROUNDTRIP` for the SYM binary; the `BFP_*` knobs
 for the BFP binary, see above; the AdamW binary ignores `MOMENTUM`). Each writes an extended RunLog JSON whose `memory` block
 carries per-category analytic bytes, instrumented heap/stack/RSS peaks, and the **reconciliation

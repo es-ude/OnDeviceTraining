@@ -122,6 +122,15 @@ CONFIGS: dict[str, tuple[str, dict[str, str]]] = {
     # Full-SYM wires (#206 acceptance): SYM_INT32 activation + dx wires, SYM
     # dx compute, SYM softmax output -> fake-quant CE + SYM metrics argmax.
     "sym8w": ("train_c_har_classifier_sym", {"SYM_BITS": "8", "SYM_WIRES": "1"}),
+    # E0 linear-quant baseline (host twins of the board firmware arms): SYM_BWD=1
+    # = integer dW/db/dx (SYM_INT32 grad math, FLOAT32 grad storage) under
+    # FLOAT32 wires (sym8b), + SYM_INT32 wires (sym8bw), + per-output-channel
+    # weight groups (sym8bwg). asym8 = ASYM@8 weights, FLOAT32 backward.
+    "sym8b": ("train_c_har_classifier_sym", {"SYM_BITS": "8", "SYM_BWD": "1"}),
+    "sym8bw": ("train_c_har_classifier_sym", {"SYM_BITS": "8", "SYM_BWD": "1", "SYM_WIRES": "1"}),
+    "sym8bwg": ("train_c_har_classifier_sym",
+                {"SYM_BITS": "8", "SYM_BWD": "1", "SYM_WIRES": "1", "GROUP_MODE": "channel"}),
+    "asym8": ("train_c_har_classifier_sym", {"SYM_BITS": "8", "WEIGHT_DTYPE": "asym"}),
     "sym6": ("train_c_har_classifier_sym", {"SYM_BITS": "6"}),
     "sym4": ("train_c_har_classifier_sym", {"SYM_BITS": "4"}),
     "sym8cos": ("train_c_har_classifier_sym", {"SYM_BITS": "8", "LR_SCHEDULE": "cosine"}),

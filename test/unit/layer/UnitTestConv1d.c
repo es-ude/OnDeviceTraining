@@ -1,4 +1,6 @@
+#include <math.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -4234,6 +4236,145 @@ void testConv1dBfpWeightGradFixedScaleKeepsTheFloatBridge(void) {
     freeQuantization(floatQ);
 }
 
+/* E0 characterization (SYM_BWD=1 HAR arm): integer dW/db/dx behind FLOAT32
+ * wires. Twin layers from the same FLOAT32 values: (a) all-FLOAT32 reference;
+ * (b) params requantized to packed SYM@8 per-tensor, all four math slots
+ * {ARITH_SYM_INT32, HALF_AWAY}, outputQ = propLossQ = FLOAT32, FLOAT32 grad
+ * storage (the NULL grad-storage knob default) and DYNAMIC_RESCALE acc modes
+ * -- exactly what train_c_sym.c builds under SYM_BWD=1 SYM_WIRES=0. SAME
+ * padding as the HAR convs. Bounds per tensor, relative to max|a|: dx 2^-5
+ * (8-bit weights); dW/db 2^-9 (FLOAT32 operands staged as 12-bit SYM_INT32,
+ * ODT_SYM_OPERAND_QMAXBITS). */
+#define CHAR_CONV_CIN 8
+#define CHAR_CONV_COUT 6
+#define CHAR_CONV_K 5
+#define CHAR_CONV_L 20
+
+static void charConvFill(float *buf, size_t n, uint32_t seed, float amp) {
+    uint32_t s = seed;
+    for (size_t i = 0; i < n; i++) {
+        s = s * 1664525u + 1013904223u;
+        buf[i] = amp * ((float)(s >> 8) / 8388608.0f - 1.0f); /* [-amp, amp), off-grid */
+    }
+}
+
+typedef struct charConvErr {
+    float maxErr;
+    float maxRef;
+    bool anyDiff;
+} charConvErr_t;
+
+static charConvErr_t charConvCompare(const float *ref, const float *got, size_t n) {
+    charConvErr_t e = {0.0f, 0.0f, false};
+    for (size_t i = 0; i < n; i++) {
+        e.maxErr = fmaxf(e.maxErr, fabsf(got[i] - ref[i]));
+        e.maxRef = fmaxf(e.maxRef, fabsf(ref[i]));
+        e.anyDiff = e.anyDiff || (got[i] != ref[i]);
+    }
+    return e;
+}
+
+static void charConvAssert(const char *name, charConvErr_t e, float relTol) {
+    char msg[160];
+    snprintf(msg, sizeof msg, "%s: maxErr=%.6g maxRef=%.6g rel=%.6g (tol %.6g)", name,
+             (double)e.maxErr, (double)e.maxRef, (double)(e.maxErr / e.maxRef), (double)relTol);
+    TEST_MESSAGE(msg);
+    TEST_ASSERT_TRUE_MESSAGE(e.maxRef > 0.0f, msg);
+    TEST_ASSERT_TRUE_MESSAGE(e.maxErr <= relTol * e.maxRef, msg);
+    TEST_ASSERT_TRUE_MESSAGE(e.anyDiff, "(b) is bit-identical to (a): the comparison is vacuous");
+}
+
+typedef struct charConvTwin {
+    layer_t *layer;
+    parameter_t *weights;
+    parameter_t *bias;
+    tensor_t *propLoss;
+} charConvTwin_t;
+
+static charConvTwin_t charConvBuild(const float *w, const float *b, quantization_t *floatQ,
+                                    bool symBwd) {
+    charConvTwin_t t;
+    size_t wDims[] = {CHAR_CONV_COUT, CHAR_CONV_CIN, CHAR_CONV_K};
+    size_t bDims[] = {CHAR_CONV_COUT};
+    tensor_t *wParam = makeFloatTensor(wDims, 3, w);
+    tensor_t *wGrad = gradInitFloat(wParam, NULL);
+    tensor_t *bParam = makeFloatTensor(bDims, 1, b);
+    tensor_t *bGrad = gradInitFloat(bParam, NULL);
+    if (symBwd) {
+        quantization_t *sym8 = quantizationInitSym(8, HALF_AWAY);
+        requantizeTensorInPlace(wParam, sym8);
+        requantizeTensorInPlace(bParam, sym8);
+        freeQuantization(sym8);
+    }
+    t.weights = parameterInit(wParam, wGrad);
+    t.bias = parameterInit(bParam, bGrad);
+    kernel_t *kernel = reserveMemory(sizeof(kernel_t)); /* freed by freeConv1dLayer */
+    initKernel(kernel, CHAR_CONV_K, SAME, 1, 1);
+    t.layer = buildBorrowedConv1dLayer(t.weights, t.bias, kernel, floatQ);
+    if (symBwd) {
+        conv1dConfig_t *cfg = t.layer->config->conv1d;
+        const arithmetic_t sym = {ARITH_SYM_INT32, HALF_AWAY};
+        cfg->forwardMath = sym;
+        cfg->weightGradMath = sym;
+        cfg->biasGradMath = sym;
+        cfg->propLossMath = sym;
+        cfg->weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
+        cfg->biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
+    }
+    size_t xDims[] = {1, CHAR_CONV_CIN, CHAR_CONV_L};
+    t.propLoss = makeFloatTensor(xDims, 3, NULL);
+    return t;
+}
+
+void testConv1dBackwardSymInt32GradMathFloatWiresMatchesFloat(void) {
+    float w[CHAR_CONV_COUT * CHAR_CONV_CIN * CHAR_CONV_K];
+    float b[CHAR_CONV_COUT];
+    float x[CHAR_CONV_CIN * CHAR_CONV_L];
+    float g[CHAR_CONV_COUT * CHAR_CONV_L];
+    const size_t nW = CHAR_CONV_COUT * CHAR_CONV_CIN * CHAR_CONV_K;
+    charConvFill(w, nW, 21u, 0.3f);
+    charConvFill(b, CHAR_CONV_COUT, 22u, 0.1f);
+    charConvFill(x, CHAR_CONV_CIN * CHAR_CONV_L, 23u, 1.7f);
+    charConvFill(g, CHAR_CONV_COUT * CHAR_CONV_L, 24u, 0.05f);
+
+    quantization_t *floatQ = quantizationInitFloat();
+    charConvTwin_t a = charConvBuild(w, b, floatQ, false);
+    charConvTwin_t s = charConvBuild(w, b, floatQ, true);
+
+    size_t xDims[] = {1, CHAR_CONV_CIN, CHAR_CONV_L};
+    size_t gDims[] = {1, CHAR_CONV_COUT, CHAR_CONV_L};
+    tensor_t *input = makeFloatTensor(xDims, 3, x);
+    tensor_t *lossGrad = makeFloatTensor(gDims, 3, g);
+
+    conv1dBackward(a.layer, input, lossGrad, a.propLoss, NULL);
+    conv1dBackward(s.layer, input, lossGrad, s.propLoss, NULL);
+
+    TEST_ASSERT_EQUAL_INT(SYM, s.weights->param->quantization->type);
+    TEST_ASSERT_EQUAL_INT(FLOAT32, s.weights->grad->quantization->type);
+    TEST_ASSERT_EQUAL_INT(FLOAT32, s.bias->grad->quantization->type);
+    TEST_ASSERT_EQUAL_INT(FLOAT32, s.propLoss->quantization->type);
+
+    charConvErr_t dx =
+        charConvCompare((const float *)a.propLoss->data, (const float *)s.propLoss->data,
+                        CHAR_CONV_CIN * CHAR_CONV_L);
+    charConvErr_t dW = charConvCompare((const float *)a.weights->grad->data,
+                                       (const float *)s.weights->grad->data, nW);
+    charConvErr_t db = charConvCompare((const float *)a.bias->grad->data,
+                                       (const float *)s.bias->grad->data, CHAR_CONV_COUT);
+
+    freeConv1dLayer(a.layer);
+    freeConv1dLayer(s.layer);
+    freeTensor(a.propLoss);
+    freeTensor(s.propLoss);
+    freeTensor(input);
+    freeTensor(lossGrad);
+    freeQuantization(floatQ);
+
+    charConvAssert("conv1d dx", dx, 1.0f / 32.0f);
+    charConvAssert("conv1d dW", dW, 1.0f / 512.0f);
+    charConvAssert("conv1d db", db, 1.0f / 512.0f);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testConv1dWgGuardProvenSafeN511RunsExact);
@@ -4331,5 +4472,6 @@ int main() {
     RUN_TEST(testConv1dBackwardFloatRejectsWrongLossShape);
     RUN_TEST(testConv1dBiasGradSymSumProofBoundary16Bit);
     RUN_TEST(testConv1dBiasGradSymSumWideWireExactThenAborts);
+    RUN_TEST(testConv1dBackwardSymInt32GradMathFloatWiresMatchesFloat);
     return UNITY_END();
 }

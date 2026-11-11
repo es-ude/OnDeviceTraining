@@ -1454,6 +1454,87 @@ static int32_t cgRunAsymImage(size_t inCh, size_t len, size_t k, uint8_t xBits, 
     return y;
 }
 
+/* Channel-aligned twin of cgRun's grouped branch: outC output channels, each
+ * row (inCh * K codes, a copy of gCgW's first inCh * K) its own group of scale
+ * 1, so groupSize == the row length and the kernel takes its cursor-free
+ * aligned loop. One output element per channel, written to gCgY[oc]; every
+ * channel gets the same bias code when biasCode != NULL. */
+#define CG_ALIGNED_MAX_OUTC 2
+static int32_t gCgWAligned[CG_ALIGNED_MAX_OUTC * CG_MAXN];
+
+static void cgRunAligned(size_t outC, size_t inCh, size_t k, uint8_t bits,
+                         const int32_t *biasCode) {
+    TEST_ASSERT_TRUE(outC >= 2 && outC <= CG_ALIGNED_MAX_OUTC);
+    size_t row = inCh * k;
+    for (size_t oc = 0; oc < outC; oc++) {
+        for (size_t i = 0; i < row; i++) {
+            gCgWAligned[oc * row + i] = gCgW[i];
+        }
+    }
+    size_t xDims[] = {1, inCh, k}, wDims[] = {outC, inCh, k}, yDims[] = {1, outC, 1};
+    size_t order[] = {0, 1, 2}, biasDims[] = {outC};
+    shape_t xS, wS, yS, biasS;
+    setShape(&xS, xDims, 3, order);
+    setShape(&wS, wDims, 3, order);
+    setShape(&yS, yDims, 3, order);
+    setShape(&biasS, biasDims, 1, order);
+    symInt32QConfig_t xQC, wQC, biasQC;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &xQC, bits);
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &wQC, bits);
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &gCgYQC, UNSTAMPED_WIDTH);
+    initSymInt32QConfig(HALF_AWAY, &biasQC);
+    quantization_t xQ, wQ, biasQ;
+    initSymInt32Quantization(&xQC, &xQ);
+    initSymInt32Quantization(&wQC, &wQ);
+    initSymInt32Quantization(&gCgYQC, &gCgYQ);
+    initSymInt32Quantization(&biasQC, &biasQ);
+    int32_t biasData[CG_ALIGNED_MAX_OUTC];
+    for (size_t oc = 0; oc < outC; oc++) {
+        biasData[oc] = biasCode ? *biasCode : 0;
+    }
+    tensor_t x, w, yT, bias;
+    setTensorValues(&x, (uint8_t *)gCgX, &xS, &xQ, NULL);
+    setTensorValues(&w, (uint8_t *)gCgWAligned, &wS, &wQ, NULL);
+    setTensorValues(&yT, (uint8_t *)gCgY, &yS, &gCgYQ, NULL);
+    setTensorValues(&bias, (uint8_t *)biasData, &biasS, &biasQ, NULL);
+    kernel_t kernel;
+    initKernel(&kernel, k, VALID, 1, 1);
+    odtScale_t scales[CG_ALIGNED_MAX_OUTC] = {odtTestScale(1), odtTestScale(1)};
+    symQConfig_t groups = {.scales = scales,
+                           .numGroups = outC,
+                           .groupSize = row,
+                           .qBits = bits,
+                           .roundingMode = HALF_AWAY};
+    symGroupedWeight_t groupedWeight = {.groups = &groups, .domain = SYM_CODES_TWOS_COMPLEMENT};
+    conv1dKernelSymInt32Grouped(&x, &w, biasCode ? &bias : NULL, &kernel, 1, &yT, &groupedWeight,
+                                NULL);
+}
+
+/* 600 terms of +-2047^2 per channel: unprovable, so the checked aligned loop
+ * runs, and both channels come out exact. */
+void testConv1dKernelSymGroupedAlignedGuardCheckedPathStaysExactWhenValuesFit(void) {
+    cgFill(600, 2047, 2047, true);
+    cgRunAligned(2, 600, 1, 12, NULL);
+    TEST_ASSERT_EQUAL_INT32(cgExpected(600), gCgY[0]);
+    TEST_ASSERT_EQUAL_INT32(cgExpected(600), gCgY[1]);
+}
+
+/* 512 terms of 2^22 per channel: the raw row partial reaches 2^31. */
+void testConv1dKernelSymGroupedAlignedGuardDiesOnRawGroupPartialOverflow(void) {
+    cgFill(512, -2048, -2048, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "conv1dKernelSymInt32Grouped (raw group partial)",
+                             cgRunAligned(2, 512, 1, 12, NULL));
+}
+
+/* 511 terms of 2^22 fit the partial; the 2^22 bias seed tips the rescaled
+ * accumulator to 2^31. */
+void testConv1dKernelSymGroupedAlignedGuardDiesOnRescaledAccumulatorOverflow(void) {
+    int32_t seed = 4194304;
+    cgFill(511, -2048, -2048, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "conv1dKernelSymInt32Grouped (rescaled accumulator)",
+                             cgRunAligned(2, 511, 1, 12, &seed));
+}
+
 void testConv1dKernelSymGuardProvenSafeN511RunsExact(void) {
     cgFill(511, -2048, -2048, false);
     TEST_ASSERT_EQUAL_INT32(511 * 4194304, cgRun(511, 1, 1, 12, 12, NULL, 0));
@@ -2039,6 +2120,9 @@ int main(void) {
     RUN_TEST(testConv1dKernelSymGroupedGuardWidthsFollowTheInputWidth);
     RUN_TEST(testConv1dKernelSymGroupedGuardWideInputProductOverflowAborts);
     RUN_TEST(testConv1dKernelSymGroupedGuardCountsKernelTapsInN);
+    RUN_TEST(testConv1dKernelSymGroupedAlignedGuardCheckedPathStaysExactWhenValuesFit);
+    RUN_TEST(testConv1dKernelSymGroupedAlignedGuardDiesOnRawGroupPartialOverflow);
+    RUN_TEST(testConv1dKernelSymGroupedAlignedGuardDiesOnRescaledAccumulatorOverflow);
     RUN_TEST(testConv1dKernelSingleChannelSingleBatch);
     RUN_TEST(testConv1dKernelMultiChannelWithBias);
     RUN_TEST(testConv1dKernelMultiBatch);

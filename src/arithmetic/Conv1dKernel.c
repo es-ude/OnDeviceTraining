@@ -277,6 +277,67 @@ static void conv1dValidateWeightGroups(const symGroupedWeight_t *groupedWeight,
     validateSymQConfigShape(weightGroups, weightElemCount);
 }
 
+/* Channel-aligned case of conv1dSymGroupedLoops (groupSize a multiple of the
+ * inChPerGroup*kernelSize reduction row): every row lies in one group, so
+ * the group, and its float factor, is fixed per output channel and the loop
+ * takes conv1dSymLoops' shape with no cursor. Bit-identical to the cursor
+ * loop: the same MAC order into one raw partial, then one combine per output
+ * element, skipped (no SR draw) when the window has no valid tap. */
+SYM_ACCUM_ALWAYS_INLINE void
+conv1dSymGroupedAlignedLoops(const convSymView_t *v, const symQConfig_t *weightGroups,
+                             float inScale, float sAcc, roundingMode_t roundingMode,
+                             rngStream_t *rs, const bool checked, const symAccumSite_t *partialSite,
+                             const symAccumSite_t *accSite) {
+    const size_t batch = v->batch, groups = v->groups, inChPerGroup = v->inChPerGroup;
+    const size_t outChPerGroup = v->outChPerGroup, outChannels = v->outChannels;
+    const size_t outputLength = v->outputLength, inChannels = v->inChannels;
+    const size_t inputLength = v->inputLength, kernelSize = v->kernelSize;
+    const windowGeometry1d_t geom = *v->geom;
+    const int32_t *xArr = v->xArr, *wArr = v->wArr, *seed = v->seed;
+    int32_t *yArr = v->yArr;
+    const size_t rowLength = inChPerGroup * kernelSize;
+    const size_t groupSize = weightGroups->groupSize;
+    const size_t dilation = geom.dilation;
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+
+            for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                size_t oc = outLo + ocOffset;
+                size_t wBase = oc * rowLength;
+                const float factor =
+                    inScale * loadCanonScale(&weightGroups->scales[wBase / groupSize]);
+
+                for (size_t outPos = 0; outPos < outputLength; outPos++) {
+                    windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
+                    int32_t acc = seed[oc];
+                    int32_t partial = 0;
+
+                    for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                        size_t ic = inLo + icOffset;
+                        size_t xIdx =
+                            (b * inChannels + ic) * inputLength + slice.firstValidInputIdx;
+                        size_t wIdx = wBase + icOffset * kernelSize + slice.firstValidKernelOffset;
+                        for (size_t i = 0; i < slice.validCount; i++, wIdx++, xIdx += dilation) {
+                            partial = symMac(partial, xArr[xIdx], wArr[wIdx], checked, partialSite);
+                        }
+                    }
+                    if (slice.validCount > 0) {
+                        acc = symAdd(acc,
+                                     rescalePartialIntoAccumulatorScale(partial, factor, sAcc,
+                                                                        roundingMode, rs),
+                                     checked, accSite);
+                    }
+
+                    yArr[(b * outChannels + oc) * outputLength + outPos] = acc;
+                }
+            }
+        }
+    }
+}
+
 /* Grouped twin of conv1dSymLoops: two int32 accumulators (the raw group
  * partial and the running acc of rescaled partials), each with its own site. */
 SYM_ACCUM_ALWAYS_INLINE void
@@ -292,6 +353,12 @@ conv1dSymGroupedLoops(const convSymView_t *v, const symQConfig_t *weightGroups, 
     int32_t *yArr = v->yArr;
     const size_t groupSize = weightGroups->groupSize;
     const size_t dilation = geom.dilation;
+    const size_t rowLength = inChPerGroup * kernelSize;
+    if (rowLength != 0 && groupSize % rowLength == 0) {
+        conv1dSymGroupedAlignedLoops(v, weightGroups, inScale, sAcc, roundingMode, rs, checked,
+                                     partialSite, accSite);
+        return;
+    }
     /* Kept across windows: the next window usually starts in the group the
      * last one visited, so it needs no division to resume. */
     symGroupCursor_t cursor = {0};

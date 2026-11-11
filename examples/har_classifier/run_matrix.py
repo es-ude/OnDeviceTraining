@@ -194,6 +194,25 @@ CONFIGS: dict[str, tuple[str, dict[str, str]]] = {
 }
 
 
+# Every variable an arm can set (union over CONFIGS) plus the per-run knobs this
+# script sets itself. ODTS_ROUNDTRIP is the standalone round-trip demo, never a
+# sweep dimension: inherited into parallel runs it races the fixed
+# outputs/har_sym_group.odts path (spurious MISMATCH exits).
+ARM_KNOBS: frozenset[str] = frozenset(
+    {key for _, env in CONFIGS.values() for key in env}
+    | {"SEED", "EPOCHS", "LOG_PATH", "ODTS_ROUNDTRIP"}
+)
+
+
+def child_env(config_env: dict[str, str], **run_knobs: str) -> dict[str, str]:
+    """The trainer environment for one arm: the parent environment without any
+    arm knob, then exactly this arm's config and per-run knobs. Without the
+    strip, a knob exported in the parent shell (e.g. SYM_BWD=1) would leak into
+    every arm that does not set it and mislabel those runs."""
+    inherited = {k: v for k, v in os.environ.items() if k not in ARM_KNOBS}
+    return {**inherited, **config_env, **run_knobs}
+
+
 def is_complete(log_path: Path, epochs: int, seed: int) -> bool:
     """A run is complete if its JSON log exists, carries a `final` block, and its
     persisted config matches the requested run identity. Lets --resume skip
@@ -260,7 +279,7 @@ def write_bfp_data(configs, build_dir: Path) -> None:
             continue
         done.add(bfp_data_key(env))
         subprocess.run([str(build_dir / binary_name), "--write-bfp-data"], cwd=ROOT,
-                       env={**os.environ, **env}, capture_output=True, text=True, check=True)
+                       env=child_env(env), capture_output=True, text=True, check=True)
         print(f"pre-converted BFP data written for {config}", flush=True)
 
 
@@ -285,17 +304,7 @@ def run_one(
             "(and pass the matching --build-subdir; default is examples_memprofile)"
         )
     log_path = logs_dir / f"{config}_seed{seed}.json"
-    env = {
-        **os.environ,
-        **extra_env,
-        "SEED": str(seed),
-        "EPOCHS": str(epochs),
-        "LOG_PATH": str(log_path),
-    }
-    # A shell-exported ODTS_ROUNDTRIP=1 would leak into every parallel run and
-    # race the fixed outputs/har_sym_group.odts path (spurious MISMATCH exits).
-    # The round-trip demo is a standalone check, never a sweep dimension.
-    env.pop("ODTS_ROUNDTRIP", None)
+    env = child_env(extra_env, SEED=str(seed), EPOCHS=str(epochs), LOG_PATH=str(log_path))
     t0 = time.monotonic()
     result = subprocess.run(
         [str(binary)], cwd=ROOT, env=env, capture_output=True, text=True, check=True

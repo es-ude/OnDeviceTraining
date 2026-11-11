@@ -104,3 +104,53 @@ def test_clean_run_reads_diverged_from_its_log(tmp_path, monkeypatch):
     (tmp_path / "float_seed1.json").write_text('{"final": {"diverged": 1}}')
     assert run_matrix.run_pair("float", 1, 2, tmp_path, tmp_path)["diverged"] == 1
     assert run_matrix.run_pair("float", 2, 2, tmp_path, tmp_path)["diverged"] == 0
+
+
+LEAKY_PARENT_KNOBS = {"SYM_BWD": "1", "SYM_WIRES": "1", "GROUP_MODE": "channel"}
+
+
+def _capture_child_envs(tmp_path, monkeypatch):
+    """Fake trainer binaries + a subprocess.run spy recording each child env."""
+    import subprocess
+
+    for binary in {b for b, _ in run_matrix.CONFIGS.values()}:
+        (tmp_path / binary).write_text("")
+    envs = []
+
+    def spy(cmd, **kwargs):
+        envs.append(kwargs["env"])
+        return subprocess.CompletedProcess(cmd, 0, stdout="FINAL test_acc=0.5\n", stderr="")
+
+    monkeypatch.setattr(run_matrix.subprocess, "run", spy)
+    for key, value in LEAKY_PARENT_KNOBS.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("PATH_SENTINEL_FOR_TEST", "kept")
+    return envs
+
+
+def test_parent_shell_knobs_do_not_leak_into_arms_that_do_not_set_them(tmp_path, monkeypatch):
+    """An exported SYM_BWD=1 must not turn the `sym8` arm into an integer-backward
+    run under the sym8 label: each arm gets exactly its own config knobs."""
+    envs = _capture_child_envs(tmp_path, monkeypatch)
+    run_matrix.run_one("sym8", 1, 2, tmp_path, tmp_path)
+    sym8 = envs[-1]
+    for key in LEAKY_PARENT_KNOBS:
+        assert key not in sym8, key
+    assert sym8["SYM_BITS"] == "8"
+    assert sym8["PATH_SENTINEL_FOR_TEST"] == "kept"
+
+    run_matrix.run_one("sym8bw", 1, 2, tmp_path, tmp_path)
+    sym8bw = envs[-1]
+    assert sym8bw["SYM_BWD"] == "1" and sym8bw["SYM_WIRES"] == "1"
+    assert "GROUP_MODE" not in sym8bw
+
+
+def test_bfp_data_writer_does_not_inherit_parent_shell_knobs(tmp_path, monkeypatch):
+    envs = _capture_child_envs(tmp_path, monkeypatch)
+    monkeypatch.setenv("BFP_HEAD", "float")
+    monkeypatch.setenv("SYM_BITS", "4")
+    run_matrix.write_bfp_data(["bfp8full_hbfp"], tmp_path)
+    env = envs[-1]
+    assert env["BFP_HEAD"] == "bfp"
+    for key in (*LEAKY_PARENT_KNOBS, "SYM_BITS"):
+        assert key not in env, key

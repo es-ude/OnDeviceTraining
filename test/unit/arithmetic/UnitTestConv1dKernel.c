@@ -1822,7 +1822,7 @@ static void cgGoldRun(const cgGoldCase_t *c, roundingMode_t rm, rngStream_t *rs,
     initSymInt32QConfigWithQMaxBits(rm, &yQC, UNSTAMPED_WIDTH);
     initSymInt32QConfigWithQMaxBits(rm, &bQC, 12);
     xQC.scale = odtTestScale(0.25f);
-    bQC.scale = odtScaleFromFloat(0.3f, ODT_SCALE_NEAREST);
+    bQC.scale = odtScaleFromFloat(0.3f, ODT_SCALE_NEAREST); /* NEAREST15(0.3), canonical */
     quantization_t xQ, wQ, yQ, bQ;
     initSymInt32Quantization(&xQC, &xQ);
     initSymInt32Quantization(&wQC, &wQ);
@@ -1944,7 +1944,7 @@ static void cg2GoldRun(size_t groupSize, roundingMode_t rm, rngStream_t *rs, cg2
     initSymInt32QConfigWithQMaxBits(rm, &yQC, UNSTAMPED_WIDTH);
     initSymInt32QConfigWithQMaxBits(rm, &bQC, 12);
     xQC.scale = odtTestScale(0.25f);
-    bQC.scale = odtScaleFromFloat(0.3f, ODT_SCALE_NEAREST);
+    bQC.scale = odtScaleFromFloat(0.3f, ODT_SCALE_NEAREST); /* NEAREST15(0.3), canonical */
     quantization_t xQ, wQ, yQ, bQ;
     initSymInt32Quantization(&xQC, &xQ);
     initSymInt32Quantization(&wQC, &wQ);

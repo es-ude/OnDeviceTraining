@@ -1,7 +1,10 @@
 /* Goldens for UnitTestConv1dKernel.c's testConv1dGroupedGolden* tests,
  * recorded from conv1dKernelSymInt32Grouped at linq/b6 (6a1dff5a) before the
  * grouped-kernel range-cursor refactor; that refactor must reproduce them bit
- * for bit. Regenerate only for an intended numeric change. Index i is
+ * for bit. Regenerate only for an intended numeric change. linq S3: the bias
+ * scale input became NEAREST15(0.3) (an odtScale_t cannot hold 0.3f); only
+ * kCgGoldHa11 moved (output channel 0's bias seed, one LSB), re-recorded from
+ * the same kernel. Index i is
  * kCgGoldCases[i]; arrays are [batch][outChannel][position] flat. */
 #ifndef GOLDEN_CONV1D_GROUPED_H
 #define GOLDEN_CONV1D_GROUPED_H
@@ -57,9 +60,9 @@ static const int32_t kCgGoldHa10[126] = {
     -5306, 154,   2909,  -3932, 2254,  -2624, 988,   -9328, 501,   -1864, 187,   2840, -4115, -3976,
     -8700, -9864, 706,   1378,  1291,  -218,  -1585, 680,   -2656, 12694, 238,   -429, -2049, 2015};
 static const int32_t kCgGoldHa11[54] = {
-    -963,  612,   -977, -8083, 7165,  -10783, -1899,  722,  -1379, 1201, -3887, 664,  -418,  554,
-    2128,  -258,  3772, 2594,  -175,  7900,   -11597, 2160, -7135, 1443, -4825, 4570, 383,   -963,
-    -3117, -2685, 2379, -1548, 1623,  2832,   -5065,  -771, 1201,  3589, 5400,  3248, -1917, -8963,
+    -964,  611,   -978, -8084, 7164,  -10784, -1900,  721,  -1380, 1201, -3887, 664,  -418,  554,
+    2128,  -258,  3772, 2594,  -175,  7900,   -11597, 2160, -7135, 1443, -4825, 4570, 383,   -964,
+    -3118, -2686, 2378, -1549, 1622,  2831,   -5066,  -772, 1201,  3589, 5400,  3248, -1917, -8963,
     1119,  6894,  463,  -175,  -6235, -12207, 9369,   -932, -2497, 7057, -2589, -559};
 static const int32_t kCgGoldSr0[24] = {4879,  9530,  5857,  4549,  -8610, 2746,  3335,  10848,
                                        -4451, 4336,  -2362, -843,  -5526, 389,   -5624, -7164,

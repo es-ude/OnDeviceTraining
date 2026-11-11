@@ -106,6 +106,10 @@ from sym_gold import (bfp_dequant_f32, dequant_asym_grouped, dequant_sym_grouped
                       emit_float_array, emit_float_scalar, emit_int32_array, emit_int32_scalar,
                       quantize_asym_grouped, requant_absmax_grouped_f32, sgd_bfp_step_ref,
                       sgd_grouped_step_ref)
+from dyadic_scale import canon
+
+# The C fixture stores each input scale as an odtScale_t, so every input scale
+# is a canonical 15-bit dyadic value: canon(x) is the one nearest x.
 
 Q_BITS = 8
 GROUP_SIZE = 3
@@ -152,7 +156,7 @@ def check_no_collapse(name, new_mantissas, new_scales, new_param_float, q_bits, 
 
 def fixture_step0():
     param_mantissas = [40, -90, 100, -30, 70, -10]
-    param_scales = [0.05, 0.02]
+    param_scales = [canon(0.05), canon(0.02)]
     grad = [0.3, -0.15, 0.05, 0.2, -0.25, 0.1]
     lr = 0.1
     weight_decay = 0.01
@@ -176,7 +180,7 @@ def fixture_step0():
 
 def fixture_momentum():
     param_mantissas = [60, -20, 110, -50, 30, -80]
-    param_scales = [0.03, 0.04]
+    param_scales = [canon(0.03), canon(0.04)]
     grad = [0.2, 0.1, -0.3, 0.15, -0.05, 0.25]
     state_prev = [0.5, -0.3, 0.2, -0.4, 0.1, -0.6]
     momentum = 0.9
@@ -212,7 +216,7 @@ def fixture_asym_step0():
     quantize_asym_grouped out) around the SAME float32 kernel arithmetic as
     sgd_grouped_step_ref."""
     param_codes = [40, 190, 100, 30, 210, 120]
-    param_scales = [0.05, 0.02]
+    param_scales = [canon(0.05), canon(0.02)]
     param_zps = [90, 150]
     grad = [0.3, -0.15, 0.05, 0.2, -0.25, 0.1]
     lr = 0.1

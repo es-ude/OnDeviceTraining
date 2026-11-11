@@ -1231,9 +1231,11 @@ void testCtxReachesKernel(void) {
     TEST_ASSERT_EQUAL_FLOAT(8.0f, got1);  /* -2.0 + 10 */
 }
 
+#define AUX_SENTINEL_SCALE 0.77734375f /* 199 * 2^-8, canonical */
+
 /* Adapter writing distinct values into rawOut and auxOut, plus a sentinel SYM
  * scale on auxOut that no funnel machinery would ever produce on its own
- * (0.777f). auxOut is a DIFFERENT dtype (SYM_INT32) from the FLOAT32
+ * (AUX_SENTINEL_SCALE). auxOut is a DIFFERENT dtype (SYM_INT32) from the FLOAT32
  * arithmetic/target here specifically so that, if a future edit accidentally
  * routed auxOut through writeOut/accumulateOut (funnel-converting it), the
  * requant would recompute its scale from the data's absmax and destroy the
@@ -1250,8 +1252,7 @@ static void kernelWritesAuxVerbatim(tensor_t **ops, size_t nOps, tensor_t *rawOu
         dst[i] = src[i];
         aux[i] = (int32_t)(i + 7); /* sentinel indices, unrelated to op values */
     }
-    ((symInt32QConfig_t *)auxOut->quantization->qConfig)->scale =
-        odtScaleFromFloat(0.777f, ODT_SCALE_NEAREST);
+    ((symInt32QConfig_t *)auxOut->quantization->qConfig)->scale = odtTestScale(AUX_SENTINEL_SCALE);
 }
 
 void testAuxOutIsKernelWrittenVerbatimAndNeverFunnelConverted(void) {
@@ -1284,7 +1285,7 @@ void testAuxOutIsKernelWrittenVerbatimAndNeverFunnelConverted(void) {
     TEST_ASSERT_EQUAL_FLOAT(-4.0f, outGot1);
     TEST_ASSERT_EQUAL_INT32(7, auxGot0); /* auxOut: kernel's verbatim write survives */
     TEST_ASSERT_EQUAL_INT32(8, auxGot1);
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.777f, auxScale); /* sentinel scale untouched */
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, AUX_SENTINEL_SCALE, auxScale); /* sentinel scale untouched */
 }
 
 /* OUT_ACC_FIXED_SCALE must consult the TARGET's roundingMode (PR1b.2 D4) via

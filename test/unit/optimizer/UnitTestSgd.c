@@ -760,8 +760,7 @@ void testSgdStepSymInt32DoesNotRoundTripGrad(void) {
     ((int32_t *)g->data)[0] = 10;
     ((int32_t *)g->data)[1] = -20;
     ((int32_t *)g->data)[2] = 30;
-    ((symInt32QConfig_t *)g->quantization->qConfig)->scale =
-        odtScaleFromFloat(0.05f, ODT_SCALE_NEAREST);
+    ((symInt32QConfig_t *)g->quantization->qConfig)->scale = odtTestScale(0.046875f); /* 3 * 2^-6 */
 
     /* Minimal stack optimizer around one parameter; hand-assembled momentum==0
      * optimizer; SYM_INT32 param. sgdStepM's unified momentum==0 fast path reads only
@@ -793,7 +792,7 @@ void testSgdStepSymInt32DoesNotRoundTripGrad(void) {
     TEST_ASSERT_EQUAL_INT(10, m0);
     TEST_ASSERT_EQUAL_INT(-20, m1);
     TEST_ASSERT_EQUAL_INT(30, m2);
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.05f, gScale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.046875f, gScale);
 }
 
 void testSgdStepMMomentumZeroIgnoresStatesAndUpdatesParam(void) {
@@ -2206,7 +2205,7 @@ static tensor_t *buildGroupedSymParam1D(const int32_t *mantissas, const float *s
     byteConversion((uint8_t *)mantissas, 32, t->data, qBits, n);
     symQConfig_t *qc = t->quantization->qConfig;
     for (size_t g = 0; g < numGroups; g++) {
-        qc->scales[g] = odtScaleFromFloat(scales[g], ODT_SCALE_NEAREST);
+        qc->scales[g] = odtTestScale(scales[g]);
     }
     return t;
 }
@@ -2428,7 +2427,7 @@ static tensor_t *buildGroupedAsymParam1D(const int32_t *codes, const float *scal
     byteConversion((uint8_t *)codes, 32, t->data, qBits, n);
     asymQConfig_t *qc = t->quantization->qConfig;
     for (size_t g = 0; g < numGroups; g++) {
-        qc->scales[g] = odtScaleFromFloat(scales[g], ODT_SCALE_NEAREST);
+        qc->scales[g] = odtTestScale(scales[g]);
         qc->zeroPoints[g] = (uint16_t)zps[g];
     }
     return t;

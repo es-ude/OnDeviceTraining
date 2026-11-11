@@ -1275,7 +1275,7 @@ void testDropoutBackwardFloatAliasedMatchesDisjoint(void) {
  * run's, the propLoss scale is bit-equal to it, and the loss header's scale is
  * unchanged. */
 void testDropoutBackwardSymInt32AliasedMatchesDisjoint(void) {
-    const float lossScale = 0.2f;
+    const float lossScale = 0.25f;
     size_t dims[] = {4};
     size_t order[] = {0};
     shape_t lossShape = {.numberOfDimensions = 1, .dimensions = dims, .orderOfDimensions = order};
@@ -1287,8 +1287,8 @@ void testDropoutBackwardSymInt32AliasedMatchesDisjoint(void) {
         qc[i].scale = odtTestScale(1.f);
         initSymInt32Quantization(&qc[i], &q[i]);
     }
-    qc[0].scale = odtScaleFromFloat(lossScale, ODT_SCALE_NEAREST);
-    qc[2].scale = odtScaleFromFloat(lossScale, ODT_SCALE_NEAREST);
+    qc[0].scale = odtTestScale(lossScale);
+    qc[2].scale = odtTestScale(lossScale);
     tensor_t *mask = buildBoolMask(4);
     fillMaskKeepEven(mask);
     quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);

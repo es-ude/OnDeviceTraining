@@ -66,11 +66,21 @@ grid (`clampInt32(..., qMin, qMax)`).
   all-zero tensor (`absMax == 0`) gets `scale = 1.0`; under `HALF_AWAY` its
   codes are all zero. Under `SR_HALF_AWAY` it is zero too (`f == 0` never
   lifts). Because the CEIL scale is at least `absMax / qMax`, `|x / scale|` is
-  at most `qMax` (up to a float32 ulp): under `HALF_AWAY` the absmax element
-  lands on `qMax` (the CEIL moves it by at most `qMax · 2^-14 < 0.5` codes);
-  under `SR_HALF_AWAY` it lands on `qMax` only with probability
-  `frac(absMax / scale)` (< 1; e.g. about 0.88 for `1/2047`), else on `qMax - 1`
-  -- still unbiased. `HALF_AWAY` never produces `qMin`; under `SR_HALF_AWAY` the result is `floor(x)` or `ceil(x)`, so `qMin`
+  at most `qMax` (up to a float32 ulp). The CEIL raises the scale by less than
+  `2^-14` relative (the 15-bit mantissa is `>= 2^14`), so `absMax / scale` sits
+  less than `qMax · 2^-14` codes below `qMax`, i.e. less than `2^(b-15)` for
+  `b = qMaxBits`. Under `HALF_AWAY` the absmax element therefore lands
+  exactly on `qMax` only for `qMaxBits <= 14` (shortfall `< 0.5` code). From 15
+  bits on it lands in `[qMax - 2^(b-15), qMax]`: up to 1 code short at 15 bits,
+  2 at 16 (`qMaxBits = 16`, `x = 1.0` gives `32766`), 32 at 20. The relative
+  error of the absmax stays below `2^-14` at every width, and every overflow
+  argument needs only `<= qMax`. Under `SR_HALF_AWAY` the absmax lands on
+  `floor` or `ceil` of `absMax / scale`, unbiased: for `qMaxBits <= 14` that is
+  `qMax` with probability `frac(absMax / scale)` (< 1; e.g. about 0.88 for
+  `1/2047`), else `qMax - 1`; wider grids reach down to `qMax - 2^(b-15)`.
+  Pinned by `testConversionFloatSymInt32AbsMaxHitsQMaxUpTo14Bits` and
+  `testConversionFloatSymInt32AbsMaxShortfallOnWideGrids`. `HALF_AWAY` never
+  produces `qMin`; under `SR_HALF_AWAY` the result is `floor(x)` or `ceil(x)`, so `qMin`
   appears only if `x / scale` overshoots `-qMax` by that float32 ulp and
   `u` is smaller than the overshoot. Likewise an `x / scale` that overshoots
   `qMax` by an ulp can round up to `qMax + 1`; that real overshoot (not an
@@ -691,7 +701,7 @@ published; every cited ID is stated here. (Group-quant IDs: see
 | ID | Decision | Applied in |
 |---|---|---|
 | D1 | Requant primitives in `TensorConversion.c`: a dynamic one (dequant → absmax → fresh scale, wired as `conversionMatrix[SYM_INT32][SYM_INT32]`) and a fixed-scale one (requant into a preset target scale). `convertTensor`'s same-type copy semantics stay untouched. | `TensorConversion.c`, `UnitTestTensorConversion.c` |
-| D3 | The Quantization layer is a generic conversion node over the conversion matrix. Dynamic targets only: forward requant maps absmax to at most qMax (exactly onto qMax under HALF_AWAY; the canonical CEIL grid, "Stored scales are canonical dyadic values"), so it never saturates and backward is a value-identical pass-through (no STE clipping mask). | `QuantizationLayer.c` |
+| D3 | The Quantization layer is a generic conversion node over the conversion matrix. Dynamic targets only: forward requant maps absmax to at most qMax (exactly onto qMax under HALF_AWAY for qMaxBits <= 14, at most `2^(qMaxBits-15)` codes below it on wider grids; the canonical CEIL grid, "Stored scales are canonical dyadic values"), so it never saturates and backward is a value-identical pass-through (no STE clipping mask). | `QuantizationLayer.c` |
 | D7 | Test/gold strategy: shared Python gold helpers in `test/unit/goldgen/` (`sym_gold.py`) plus a C test-helper library. | `test/unit/goldgen/` |
 
 **Arithmetic-type split (2026-07-02), cited as `arithmetic-type-split D<n>`.**

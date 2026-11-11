@@ -1440,7 +1440,7 @@ void convertSymInt32TensorToBfpTensor(tensor_t *inputTensor, tensor_t *outputTen
 /* BFP -> SYM_INT32 is value-preserving onto a FRESH scalar absmax grid
  * (convertAsymTensorToSymTensor's two-pass shape); the target payload is
  * unpacked int32, so plain stores -- no pack guard. Never saturates by
- * construction (absMax maps exactly to +-qMax); the clamp mirrors the
+ * construction (absMax maps to at most qMax); the clamp mirrors the
  * fresh-grid sibling cells. */
 void convertBfpTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor,
                                       rngStream_t *rs) {

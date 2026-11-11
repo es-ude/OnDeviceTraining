@@ -307,6 +307,67 @@ void testConversionFloatSymInt32() {
     }
 }
 
+/* The HALF_AWAY code of the absmax element of the one-element tensor {x}. */
+static int32_t absMaxCodeHalfAway(float x, uint8_t qMaxBits) {
+    size_t dims[] = {1};
+    size_t orderOfDims[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    tensor_t floatTensor;
+    setTensorValues(&floatTensor, (uint8_t *)&x, &shape, &floatQ, NULL);
+    symInt32QConfig_t qc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &qc, qMaxBits);
+    quantization_t q;
+    initSymInt32Quantization(&qc, &q);
+    int32_t code = 0;
+    tensor_t symTensor;
+    setTensorValues(&symTensor, (uint8_t *)&code, &shape, &q, NULL);
+    convertTensor(&floatTensor, &symTensor, NULL);
+    return code;
+}
+
+/* The CEIL15 scale sits at most 2^-14 (relative) above absMax / qMax, so the
+ * absmax lands at most qMax * 2^-14 codes below qMax before rounding. Sweeping
+ * every 7th float32 mantissa in [1, 2) covers the scale-invariant cases. */
+static int32_t worstAbsMaxShortfallHalfAway(uint8_t qMaxBits) {
+    const int32_t qMax = (int32_t)((1u << (qMaxBits - 1)) - 1u);
+    int32_t worst = 0;
+    for (uint32_t m = 0; m < (1u << 23); m += 7) {
+        const uint32_t bits = 0x3f800000u | m;
+        float x;
+        memcpy(&x, &bits, sizeof x);
+        const int32_t code = absMaxCodeHalfAway(x, qMaxBits);
+        TEST_ASSERT_TRUE(code <= qMax);
+        if (qMax - code > worst) {
+            worst = qMax - code;
+        }
+    }
+    return worst;
+}
+
+void testConversionFloatSymInt32AbsMaxHitsQMaxUpTo14Bits(void) {
+    /* qMax * 2^-14 < 0.5 for qMaxBits <= 14: HALF_AWAY lands the absmax on qMax */
+    const uint8_t widths[] = {8, 12, 14};
+    for (size_t w = 0; w < sizeof widths; w++) {
+        TEST_ASSERT_EQUAL_INT32(0, worstAbsMaxShortfallHalfAway(widths[w]));
+    }
+    TEST_ASSERT_EQUAL_INT32(8191, absMaxCodeHalfAway(1.0f, 14));
+}
+
+void testConversionFloatSymInt32AbsMaxShortfallOnWideGrids(void) {
+    /* qMaxBits = 16, x = 1.0: CEIL15(1/32767) = 16385 * 2^-29, 1 / scale = 32766.0001 */
+    TEST_ASSERT_EQUAL_INT32(32766, absMaxCodeHalfAway(1.0f, 16));
+    /* qMaxBits = b >= 15: the absmax code lies in [qMax - 2^(b-15), qMax] */
+    const uint8_t widths[] = {15, 16, 20, 24};
+    for (size_t w = 0; w < sizeof widths; w++) {
+        const int32_t bound = (int32_t)1 << (widths[w] - 15);
+        const int32_t worst = worstAbsMaxShortfallHalfAway(widths[w]);
+        TEST_ASSERT_TRUE(worst <= bound);
+        TEST_ASSERT_TRUE(worst >= 1);
+    }
+}
+
 void testConversionFloatAsym() {
     size_t numValues = 6;
     size_t dims[] = {numValues};
@@ -9272,6 +9333,8 @@ int main(void) {
 
     RUN_TEST(testConversionFloatInt);
     RUN_TEST(testConversionFloatSymInt32);
+    RUN_TEST(testConversionFloatSymInt32AbsMaxHitsQMaxUpTo14Bits);
+    RUN_TEST(testConversionFloatSymInt32AbsMaxShortfallOnWideGrids);
     RUN_TEST(testConversionFloatAsym);
     RUN_TEST(testConversionFloatAsymQBits16NegativeBandZeroPointAtCodeCeiling);
     RUN_TEST(testInitAsymQConfigRejectsQBitsAbove16);

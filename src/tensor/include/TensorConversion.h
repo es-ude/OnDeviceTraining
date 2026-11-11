@@ -23,13 +23,14 @@ void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, f
 /*! @brief SYM_INT32 -> SYM_INT32 requantization with a FRESH dynamic scale.
  *
  * Pass A (reads only): absMax = max_i |mantissa_i * inScale|.
- * scale = (absMax == 0) ? 1.0f : absMax / qMax, with qMax = 2^(qMaxBits-1)-1
- * and qMin = -2^(qMaxBits-1) taken from the OUTPUT tensor's
+ * scale = (absMax == 0) ? 1.0f : CEIL15(absMax / qMax), with qMax =
+ * 2^(qMaxBits-1)-1 and qMin = -2^(qMaxBits-1) taken from the OUTPUT tensor's
  * symInt32QConfig_t. Pass B: out_i = roundByMode(clamp((mantissa_i *
  * inScale) / scale, qMin, qMax), outQConfig->roundingMode). Writes the fresh
  * scale to the output qConfig. Never saturates by construction: absMax maps
- * exactly to +-qMax. (Deutel, IEEE TCAD 44(4) 2025, Eqs. 5-7 idiom: observe
- * range -> fresh scale -> requantize.)
+ * to at most qMax (exactly onto qMax under HALF_AWAY only for qMaxBits <= 14,
+ * see docs/conventions/arithmetic-sym.md "Dynamic absmax encode"). (Deutel, IEEE TCAD 44(4) 2025,
+ * Eqs. 5-7 idiom: observe range -> fresh scale -> requantize.)
  *
  * IN-PLACE CAPABLE: inputTensor == outputTensor is allowed. Pass A only
  * reads; pass B is a same-index read-then-write over int32 storage on both

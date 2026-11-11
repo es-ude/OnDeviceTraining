@@ -850,3 +850,34 @@ add_elastic_ai_unit_test(
         Common
         odt_test_death
 )
+
+# S3 bit-identity pin: the S2 (float-storage) outputs of every canonical-scale
+# boundary case, captured before the storage type became odtScale_t.
+add_executable(UnitTestScaleStorageIdentity UnitTestScaleStorageIdentity.c)
+target_link_libraries(UnitTestScaleStorageIdentity PRIVATE
+        unity
+        LossType
+        TensorApi
+        QuantizationApi
+        Quantization
+        Tensor
+        TensorConversion
+        Matmul
+        Mul
+        Div
+        Serialize
+        Deserialize
+        Layer
+        CommonLayerLibs
+        DropoutApi
+        Dropout
+        LayerNormApi
+        LayerNorm
+        LayerQuant
+        ArithmeticType
+        Common
+        RNG
+        StorageApi
+        DyadicScale
+)
+__register_target_as_unit_test(UnitTestScaleStorageIdentity)

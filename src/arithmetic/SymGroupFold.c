@@ -158,3 +158,35 @@ symGroupFold_t symGroupFoldInit(const symQConfig_t *weightGroups, odtScale_t inS
     }
     return f;
 }
+
+uint64_t symGroupFoldBiasSeedAtFracMax(const int32_t *bias, size_t n, odtScale_t biasScale,
+                                       const symQConfig_t *weightGroups, odtScale_t inScale) {
+    int32_t eMax = INT32_MIN;
+    for (size_t g = 0; g < weightGroups->numGroups; g++) {
+        odtScale_t s = odtScaleLoad(&weightGroups->scales[g]);
+        eMax = s.e > eMax ? s.e : eMax;
+    }
+    uint64_t maxB = 0;
+    for (size_t i = 0; i < n; i++) {
+        uint64_t mag = symAccumMagnitude(bias[i]);
+        maxB = mag > maxB ? mag : maxB;
+    }
+    const uint64_t num = maxB * biasScale.m; /* < 2^46 */
+    const uint64_t den = inScale.m;
+    const int32_t d =
+        (int32_t)biasScale.e - ((int32_t)inScale.e + eMax + 15 - ODT_GROUP_FOLD_FRAC_BITS_MAX);
+    if (num == 0u) {
+        return 0u;
+    }
+    if (d >= 0) {
+        if (d >= 63 || num > (UINT64_MAX >> 1) >> d) {
+            return UINT64_MAX;
+        }
+        return ((num << d) + den - 1u) / den;
+    }
+    if (-d >= 48) {
+        return 1u; /* 0 < value < 2^46 / 2^62: ceil is 1 */
+    }
+    const uint64_t scaledDen = den << (uint32_t)(-d);
+    return (num + scaledDen - 1u) / scaledDen;
+}

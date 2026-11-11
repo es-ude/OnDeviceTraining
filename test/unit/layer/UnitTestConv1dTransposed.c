@@ -1537,11 +1537,11 @@ void testConvT1dForwardGroupedFloatPathAgreesWithinTolerance(void) {
 
 /* ---- Group-quant PR3 (Task 3): ConvT1d backward dx with a grouped SYM
  * weight -- the adjoint GATHER (conv1dKernelSymInt32Grouped in the adjoint
- * role: running group-partial, one rescale-combine per group RUN of the
- * reduction, s_acc = lossScale*max(scales)). Fixture: the forward fixture's
- * weight/group shapes with a seeded random SYM_INT32 lossGrad [1, 3, 6]
- * (generate_expected_convT1d_grouped.py's dx fixtures, torch-autograd
- * cross-checked there). ---- */
+ * role: running group-partial, one integer combine per group RUN of the
+ * reduction at A = {loss.m, loss.e + E + 15 - F}, linq fold T4). Fixture:
+ * the forward fixture's weight/group shapes with a seeded random SYM_INT32
+ * lossGrad [1, 3, 6] (generate_expected_convT1d_grouped.py's dx fixtures,
+ * torch-autograd cross-checked there). ---- */
 
 /*! Shared dx-fixture plumbing (mirrors UnitTestLinear.c's
  *  runGroupedDxBackward): builds the grouped fixture layer into `f`, FREEZES
@@ -1610,11 +1610,11 @@ void testConvT1dBackwardGroupedDxGeneralMatchesGold(void) {
 /* Equal-scales dx twin: same argument as
  * testConvT1dForwardGroupedEqualScalesBitIdenticalToScalar, transplanted to
  * the adjoint gather. All group scales are the SAME power-of-two value
- * (0.25f) and the loss scale (0.5f) is a power of two, so sAcc and every
- * combine's paramScale are BIT-IDENTICAL float32 values and each group-run
- * combine is an EXACT identity (multiply/divide by the same power of two;
- * the raw partials, <= 9 * 40*60 = 21600, are exactly representable) -- the
- * grouped gather's raw dx must be BIT-IDENTICAL to the scalar
+ * (0.25f, m = 2^14) and the loss scale (0.5f) is a power of two, so each
+ * group-run combine is exact: round(partial * 2^14 * 2^-(15 - F)) =
+ * partial * 2^(F-1), F >= 1, at A = lossScale * 2^(E + 15 - F), i.e. exactly
+ * partial * 0.5 * 0.25 -- the grouped gather's dx must dequantize
+ * BIT-IDENTICALLY to the scalar
  * conv1dKernelSymInt32 adjoint on the same mantissas with weight scale ==
  * the common group scale. Both wires are FLOAT32, so identical raw
  * (mantissa, scale) pairs dequantize to identical floats. */
@@ -1678,13 +1678,13 @@ void testConvT1dBackwardGroupedDxEqualScalesBitIdenticalToScalar(void) {
  * by the FLOAT32 arm's groupedSymOperandPos declaration), then the float
  * gather computes the reference value with NO combine rounding.
  *
- * Tolerance derivation (gather error model, |err| <= 0.5*C*s_acc with C =
+ * Tolerance derivation (gather error model, |err| <= 0.5*C*A with C =
  * distinct group RUNS folded per output reduction -- NOT per product, unlike
  * the scatter): the perChannel dx fixture's groups are whole Cin slabs
  * (groupSize = Cout*K = 9), and the reduction for dx[(ic, inPos)] visits
  * EXACTLY the ic slab, so every element folds C = 1 combine
  * (= kConvTDxPerChannelMaxCombines, generator-asserted; the general shape's
- * C would be Cout = 3). dx has NO bias seed. Bound: 0.5*1*s_acc = 0.5 *
+ * C would be Cout = 3). dx has NO bias seed. Bound: 0.5*1*A = 0.5 *
  * kConvTDxPerChannelOutScale, plus 1e-6f headroom for float32 noise. */
 void testConvT1dBackwardGroupedDxFloatPathAgreesWithinTolerance(void) {
     quantization_t *floatQ = quantizationInitFloat();

@@ -589,44 +589,6 @@ SYM_ACCUM_NOINLINE void convTSymGroupedFoldScatter(const convTSymView_t *v,
     }
 }
 
-/* ceil(max_oc |bias[oc]| * biasScale / A) at the finest fold scale
- * A = {inScale.m, inScale.e + E + 15 - ODT_GROUP_FOLD_FRAC_BITS_MAX}: the
- * seed bound symGroupFoldInit scales to each candidate F. Exact (both scales
- * are dyadic), setup-time uint64 math, saturating at UINT64_MAX. */
-static uint64_t convTBiasSeedAtFracMax(const tensor_t *bias, size_t outChannels,
-                                       const symQConfig_t *weightGroups, odtScale_t inScale) {
-    int32_t eMax = INT32_MIN;
-    for (size_t g = 0; g < weightGroups->numGroups; g++) {
-        odtScale_t s = odtScaleLoad(&weightGroups->scales[g]);
-        eMax = s.e > eMax ? s.e : eMax;
-    }
-    const int32_t *bArr = (const int32_t *)bias->data;
-    uint64_t maxB = 0;
-    for (size_t oc = 0; oc < outChannels; oc++) {
-        uint64_t mag = symAccumMagnitude(bArr[oc]);
-        maxB = mag > maxB ? mag : maxB;
-    }
-    odtScale_t bs = odtScaleLoad(&((symInt32QConfig_t *)bias->quantization->qConfig)->scale);
-    const uint64_t num = maxB * bs.m; /* < 2^46 */
-    const uint64_t den = inScale.m;
-    const int32_t d =
-        (int32_t)bs.e - ((int32_t)inScale.e + eMax + 15 - ODT_GROUP_FOLD_FRAC_BITS_MAX);
-    if (num == 0u) {
-        return 0u;
-    }
-    if (d >= 0) {
-        if (d >= 63 || num > (UINT64_MAX >> 1) >> d) {
-            return UINT64_MAX;
-        }
-        return ((num << d) + den - 1u) / den;
-    }
-    if (-d >= 48) {
-        return 1u; /* 0 < value < 2^46 / 2^62: ceil is 1 */
-    }
-    const uint64_t scaledDen = den << (uint32_t)(-d);
-    return (num + scaledDen - 1u) / scaledDen;
-}
-
 /* The grouped entry's output qConfig, checked where the stamps land. */
 static symInt32QConfig_t *convT1dGroupedOutputQC(tensor_t *output) {
     if (output->quantization->qConfig == NULL) {
@@ -714,7 +676,11 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
      * proof (measured at the finest A, scaled per F inside the init). */
     const odtScale_t inScaleD = odtScaleLoad(&inQC->scale);
     const uint64_t seedAtFracMax =
-        bias != NULL ? convTBiasSeedAtFracMax(bias, outChannels, weightGroups, inScaleD) : 0u;
+        bias != NULL ? symGroupFoldBiasSeedAtFracMax(
+                           (const int32_t *)bias->data, outChannels,
+                           odtScaleLoad(&((symInt32QConfig_t *)bias->quantization->qConfig)->scale),
+                           weightGroups, inScaleD)
+                     : 0u;
     const symGroupFold_t fold =
         symGroupFoldInit(weightGroups, inScaleD, inQC->qMaxBits, nMax, wMin, wMax, seedAtFracMax);
     if (!fold.legacy) {

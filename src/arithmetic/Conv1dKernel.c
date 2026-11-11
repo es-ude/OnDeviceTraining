@@ -12,6 +12,7 @@
 #include "SlidingWindow1d.h"
 #include "SymAccumGuard.h"
 #include "SymGroupCursor.h"
+#include "SymGroupFold.h"
 #include "SymGroupedWeight.h"
 
 void conv1dKernelFloat32(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
@@ -458,6 +459,190 @@ SYM_ACCUM_NOINLINE void conv1dSymGroupedLoopsChecked(CONV1D_GROUPED_PARAMS) {
     conv1dSymGroupedLoops(CONV1D_GROUPED_ARGS(true));
 }
 
+/* Fold path of the grouped gather (SymGroupFold.h): each group run's raw
+ * int32 partial is combined ONCE into the accumulator scale A,
+ *     acc += round(partial * m_g * 2^-(E - e_g + 15 - F))   (symMulShiftRound),
+ * instead of the legacy float rescale. Per output element the combines cost
+ * |err| <= 0.5 * A * (number of combines) (HALF_AWAY; SR is unbiased). A
+ * window with no valid tap combines nothing and takes no SR draw.
+ *
+ * Unchecked by construction: m_g < 2^15 and E - e_g + 15 - F >= 15 - F, so
+ * |combine| <= |partial| * 2^F, and |partial| * 2^F is at most the products
+ * of the run with x widened to [xMin * 2^F - 1, xMax * 2^F + 1]. The entry
+ * proves that widened site (plus the bias seeds) before calling in, which
+ * bounds every combine (symMulShiftRound's int32 precondition), every
+ * running acc and, with x unwidened, the raw partial. */
+SYM_ACCUM_ALWAYS_INLINE void
+conv1dSymGroupedFoldAligned(const convSymView_t *v, const symQConfig_t *weightGroups,
+                            const symGroupFold_t *fold, roundingMode_t roundingMode,
+                            rngStream_t *rs, const symAccumSite_t *partialSite,
+                            const symAccumSite_t *accSite) {
+    const size_t batch = v->batch, groups = v->groups, inChPerGroup = v->inChPerGroup;
+    const size_t outChPerGroup = v->outChPerGroup, outChannels = v->outChannels;
+    const size_t outputLength = v->outputLength, inChannels = v->inChannels;
+    const size_t inputLength = v->inputLength, kernelSize = v->kernelSize;
+    const windowGeometry1d_t geom = *v->geom;
+    const int32_t *xArr = v->xArr, *wArr = v->wArr, *seed = v->seed;
+    int32_t *yArr = v->yArr;
+    const size_t rowLength = inChPerGroup * kernelSize;
+    const size_t groupSize = weightGroups->groupSize;
+    const size_t dilation = geom.dilation;
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+
+            for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                size_t oc = outLo + ocOffset;
+                size_t wBase = oc * rowLength;
+                const odtScale_t s = odtScaleLoad(&weightGroups->scales[wBase / groupSize]);
+                const uint32_t shift = symGroupFoldShift(fold, s);
+
+                for (size_t outPos = 0; outPos < outputLength; outPos++) {
+                    windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
+                    int32_t acc = seed[oc];
+                    int32_t partial = 0;
+
+                    for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                        size_t ic = inLo + icOffset;
+                        size_t xIdx =
+                            (b * inChannels + ic) * inputLength + slice.firstValidInputIdx;
+                        size_t wIdx = wBase + icOffset * kernelSize + slice.firstValidKernelOffset;
+                        for (size_t i = 0; i < slice.validCount; i++, wIdx++, xIdx += dilation) {
+                            partial = symMac(partial, xArr[xIdx], wArr[wIdx], false, partialSite);
+                        }
+                    }
+                    if (slice.validCount > 0) {
+                        acc = symAdd(acc, symMulShiftRound(partial, s.m, shift, roundingMode, rs),
+                                     false, accSite);
+                    }
+
+                    yArr[(b * outChannels + oc) * outputLength + outPos] = acc;
+                }
+            }
+        }
+    }
+}
+
+SYM_ACCUM_ALWAYS_INLINE void
+conv1dSymGroupedFoldCursor(const convSymView_t *v, const symQConfig_t *weightGroups,
+                           const symGroupFold_t *fold, roundingMode_t roundingMode, rngStream_t *rs,
+                           const symAccumSite_t *partialSite, const symAccumSite_t *accSite) {
+    const size_t batch = v->batch, groups = v->groups, inChPerGroup = v->inChPerGroup;
+    const size_t outChPerGroup = v->outChPerGroup, outChannels = v->outChannels;
+    const size_t outputLength = v->outputLength, inChannels = v->inChannels;
+    const size_t inputLength = v->inputLength, kernelSize = v->kernelSize;
+    const windowGeometry1d_t geom = *v->geom;
+    const int32_t *xArr = v->xArr, *wArr = v->wArr, *seed = v->seed;
+    int32_t *yArr = v->yArr;
+    const size_t groupSize = weightGroups->groupSize;
+    const size_t dilation = geom.dilation;
+    /* The cursor and its group's scale/shift are kept across windows, as in
+     * conv1dSymGroupedLoops. */
+    symGroupCursor_t cursor = {0};
+    odtScale_t s = {0};
+    uint32_t shift = 0;
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+
+            for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                size_t oc = outLo + ocOffset;
+                size_t wBase = oc * inChPerGroup * kernelSize;
+
+                for (size_t outPos = 0; outPos < outputLength; outPos++) {
+                    windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
+                    int32_t acc = seed[oc];
+                    int32_t partial = 0;
+                    /* whether `partial` belongs to cursor.group yet (see
+                     * conv1dSymGroupedLoops) */
+                    bool visited = false;
+
+                    for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                        size_t ic = inLo + icOffset;
+                        size_t xIdx =
+                            (b * inChannels + ic) * inputLength + slice.firstValidInputIdx;
+                        size_t wIdx = wBase + icOffset * kernelSize + slice.firstValidKernelOffset;
+                        size_t wRowEnd = wIdx + slice.validCount;
+                        while (wIdx < wRowEnd) {
+                            if (!symGroupCursorHolds(&cursor, wIdx)) {
+                                if (visited) {
+                                    /* group-boundary combine of the finished run */
+                                    acc = symAdd(
+                                        acc,
+                                        symMulShiftRound(partial, s.m, shift, roundingMode, rs),
+                                        false, accSite);
+                                    partial = 0;
+                                }
+                                symGroupCursorSeek(&cursor, wIdx, groupSize);
+                                s = odtScaleLoad(&weightGroups->scales[cursor.group]);
+                                shift = symGroupFoldShift(fold, s);
+                            }
+                            visited = true;
+                            size_t runEnd = cursor.end < wRowEnd ? cursor.end : wRowEnd;
+                            for (; wIdx < runEnd; wIdx++, xIdx += dilation) {
+                                partial =
+                                    symMac(partial, xArr[xIdx], wArr[wIdx], false, partialSite);
+                            }
+                        }
+                    }
+                    /* tail combine of the last run */
+                    if (visited) {
+                        acc = symAdd(acc, symMulShiftRound(partial, s.m, shift, roundingMode, rs),
+                                     false, accSite);
+                    }
+
+                    yArr[(b * outChannels + oc) * outputLength + outPos] = acc;
+                }
+            }
+        }
+    }
+}
+
+SYM_ACCUM_NOINLINE void
+conv1dSymGroupedFoldLoops(const convSymView_t *v, const symQConfig_t *weightGroups,
+                          const symGroupFold_t *fold, roundingMode_t roundingMode, rngStream_t *rs,
+                          const symAccumSite_t *partialSite, const symAccumSite_t *accSite) {
+    const size_t rowLength = v->inChPerGroup * v->kernelSize;
+    if (rowLength != 0 && weightGroups->groupSize % rowLength == 0) {
+        conv1dSymGroupedFoldAligned(v, weightGroups, fold, roundingMode, rs, partialSite, accSite);
+    } else {
+        conv1dSymGroupedFoldCursor(v, weightGroups, fold, roundingMode, rs, partialSite, accSite);
+    }
+}
+
+/* Per-output-channel bias seed rescaled into the accumulator scale via the
+ * #189 guarded helper (NULL bias -> all zero); one SR draw per channel. */
+static void conv1dGroupedBiasSeeds(const tensor_t *bias, size_t outChannels, float accScale,
+                                   rngStream_t *rs, int32_t *seed) {
+    if (bias == NULL) {
+        for (size_t oc = 0; oc < outChannels; oc++) {
+            seed[oc] = 0;
+        }
+        return;
+    }
+    int32_t const *bArr = (int32_t const *)bias->data;
+    symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
+    const float biasScale = loadCanonScale(&biasQC->scale);
+    for (size_t oc = 0; oc < outChannels; oc++) {
+        seed[oc] =
+            rescaleIntoAccumulatorScale(bArr[oc], biasScale, accScale, biasQC->roundingMode, rs);
+    }
+}
+
+/* The grouped entry's output qConfig, checked where the stamps land. */
+static symInt32QConfig_t *conv1dGroupedOutputQC(tensor_t *output) {
+    if (output->quantization->qConfig == NULL) {
+        PRINT_ERROR(
+            "conv1dKernelSymInt32Grouped: output qConfig is NULL but SYM_INT32 expected (#187)");
+        exit(1);
+    }
+    return (symInt32QConfig_t *)output->quantization->qConfig;
+}
+
 void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                  tensor_t const *bias, kernel_t const *kernel, size_t groups,
                                  tensor_t *output, const symGroupedWeight_t *groupedWeight,
@@ -495,7 +680,89 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
     int32_t const *wArr = (int32_t const *)weight->data;
     int32_t *yArr = (int32_t *)output->data;
 
-    float inScale = loadCanonScale(&((symInt32QConfig_t *)input->quantization->qConfig)->scale);
+    symInt32QConfig_t *inQC = (symInt32QConfig_t *)input->quantization->qConfig;
+
+    /* `weight`'s own poisoned symInt32QConfig_t carries the OP's rounding
+     * mode (executeOp's prologue sets it via initSymInt32QConfig(arithmetic.
+     * roundingMode, ...) BEFORE poisoning only .scale/.qMaxBits) -- the same
+     * plumbing matmulSymInt32TensorsGroupedWeight reads via its `bQC`. */
+    symInt32QConfig_t *wQC = (symInt32QConfig_t *)weight->quantization->qConfig;
+
+    /* Per-output-channel bias seed (one pass, at the path's accumulator scale). */
+    int32_t seed[outChannels];
+    convSymView_t view = {.batch = batch,
+                          .inChannels = inChannels,
+                          .inputLength = inputLength,
+                          .outChannels = outChannels,
+                          .outputLength = outputLength,
+                          .kernelSize = kernelSize,
+                          .groups = groups,
+                          .inChPerGroup = inChPerGroup,
+                          .outChPerGroup = outChPerGroup,
+                          .geom = &geom,
+                          .xArr = xArr,
+                          .wArr = wArr,
+                          .yArr = yArr,
+                          .seed = seed};
+    /* At most N = inChPerGroup * kernelSize products reach one output element
+     * (padding only shrinks it), at most min(groupSize, N) of them one raw
+     * partial. The weight's operand range is its code domain's
+     * (SymGroupedWeight.h): a stored SYM weight's two's-complement qBits range,
+     * a stored ASYM weight's zp-shifted image +-(2^qBits - 1) -- the scratch's
+     * declared qMaxBits is not read. The abort banner reports each range's
+     * holding width (the image's is qBits + 1). */
+    size_t nTerms = inChPerGroup * kernelSize;
+    int32_t xMin, xMax, wMin, wMax;
+    symAccumWidthRange(inQC->qMaxBits, &xMin, &xMax);
+    symGroupedWeightRange(groupedWeight, &wMin, &wMax);
+    size_t partialTerms = weightGroups->groupSize < nTerms ? weightGroups->groupSize : nTerms;
+    symAccumSite_t partialSite = symAccumSiteInitRanges(
+        "conv1dKernelSymInt32Grouped (raw group partial)", partialTerms, xMin, xMax, wMin, wMax, 0);
+
+    /* The per-group integer combine (SymGroupFold.h) unless the input is wider
+     * than 16 bits or no F >= 1 is provable: then the legacy float path. The
+     * bias seeds the accumulator at A, so its bound takes part in the F proof
+     * (measured at the finest A, scaled per F inside the init). */
+    const odtScale_t inScaleD = odtScaleLoad(&inQC->scale);
+    const uint64_t seedAtFracMax =
+        bias != NULL ? symGroupFoldBiasSeedAtFracMax(
+                           (const int32_t *)bias->data, outChannels,
+                           odtScaleLoad(&((symInt32QConfig_t *)bias->quantization->qConfig)->scale),
+                           weightGroups, inScaleD)
+                     : 0u;
+    const symGroupFold_t fold =
+        symGroupFoldInit(weightGroups, inScaleD, inQC->qMaxBits, nTerms, wMin, wMax, seedAtFracMax);
+    if (!fold.legacy) {
+        /* A is exact canonical, so its float is exact. */
+        conv1dGroupedBiasSeeds(bias, outChannels, odtScaleToFloat(fold.accScale), rs, seed);
+        const int32_t widen = (int32_t)1 << fold.fracBits;
+        /* The init proved the widened site with the seed bound; re-check it,
+         * and the same site with the actual seeds (they enter the unchecked
+         * loops), so the constructions cannot drift. Setup-time only. */
+        symAccumSite_t proven =
+            symAccumSiteInitRanges("conv1dKernelSymInt32Grouped (fold accumulator)", nTerms,
+                                   xMin * widen - 1, xMax * widen + 1, wMin, wMax, fold.maxAbsSeed);
+        symAccumSite_t accSite =
+            symAccumSiteInitRanges("conv1dKernelSymInt32Grouped (fold accumulator)", nTerms,
+                                   xMin * widen - 1, xMax * widen + 1, wMin, wMax, 0);
+        symAccumSiteSetSeeds(&accSite, seed, outChannels);
+        if (!symAccumProvenSafe(&proven) || !symAccumProvenSafe(&accSite) ||
+            !symAccumProvenSafe(&partialSite)) {
+            PRINT_ERROR("conv1dKernelSymInt32Grouped: fold site not proven (F=%u)",
+                        (unsigned)fold.fracBits);
+            exit(1);
+        }
+        conv1dSymGroupedFoldLoops(&view, weightGroups, &fold, wQC->roundingMode, rs, &partialSite,
+                                  &accSite);
+
+        symInt32QConfig_t *outputQC = conv1dGroupedOutputQC(output);
+        odtScaleStore(&outputQC->scale, fold.accScale);
+        outputQC->qMaxBits = symAccumResultBits(&accSite); /* fold site + seeds (#516) */
+        return;
+    }
+
+    /* Legacy float path: each group partial rescaled into sAcc. */
+    float inScale = loadCanonScale(&inQC->scale);
 
     /* s_acc = inScale * max_g(weightGroups->scales[g]) (GGUF pattern, #189):
      * a single linear pass over scales[], NEVER scales[0] alone -- see
@@ -513,59 +780,11 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
      * NEAREST sAcc can sit 2^-15 below the exact product. */
     const float sAcc = canonProductScale(inScale, maxScale, ODT_SCALE_CEIL);
 
-    /* `weight`'s own poisoned symInt32QConfig_t carries the OP's rounding
-     * mode (executeOp's prologue sets it via initSymInt32QConfig(arithmetic.
-     * roundingMode, ...) BEFORE poisoning only .scale/.qMaxBits) -- the same
-     * plumbing matmulSymInt32TensorsGroupedWeight reads via its `bQC`. */
-    symInt32QConfig_t *wQC = (symInt32QConfig_t *)weight->quantization->qConfig;
+    conv1dGroupedBiasSeeds(bias, outChannels, sAcc, rs, seed);
 
-    /* Per-output-channel bias seed, refolded into sAcc via the #189 guarded
-     * helper (NULL bias -> all zero), mirroring conv1dKernelSymInt32. */
-    int32_t seed[outChannels];
-    if (bias != NULL) {
-        int32_t const *bArr = (int32_t const *)bias->data;
-        symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
-        const float biasScale = loadCanonScale(&biasQC->scale);
-        for (size_t oc = 0; oc < outChannels; oc++) {
-            seed[oc] =
-                rescaleIntoAccumulatorScale(bArr[oc], biasScale, sAcc, biasQC->roundingMode, rs);
-        }
-    } else {
-        for (size_t oc = 0; oc < outChannels; oc++) {
-            seed[oc] = 0;
-        }
-    }
-
-    convSymView_t view = {.batch = batch,
-                          .inChannels = inChannels,
-                          .inputLength = inputLength,
-                          .outChannels = outChannels,
-                          .outputLength = outputLength,
-                          .kernelSize = kernelSize,
-                          .groups = groups,
-                          .inChPerGroup = inChPerGroup,
-                          .outChPerGroup = outChPerGroup,
-                          .geom = &geom,
-                          .xArr = xArr,
-                          .wArr = wArr,
-                          .yArr = yArr,
-                          .seed = seed};
-    /* Raw partial: at most min(groupSize, N) products; acc: the rescaled
-     * partials (each factor <= 1, plus the float32 slack of
+    /* acc: the rescaled partials (each factor <= 1, plus the float32 slack of
      * symAccumTermLimitRescaled) plus the seed, so N slacked products plus
      * seed bound it. Proving the acc proves the partial (fewer terms, no seed). */
-    size_t nTerms = inChPerGroup * kernelSize;
-    /* The weight's operand range is its code domain's (SymGroupedWeight.h): a
-     * stored SYM weight's two's-complement qBits range, a stored ASYM weight's
-     * zp-shifted image +-(2^qBits - 1) -- the scratch's declared qMaxBits is
-     * not read. The abort banner reports each range's holding width (the
-     * image's is qBits + 1). */
-    int32_t xMin, xMax, wMin, wMax;
-    symAccumWidthRange(((symInt32QConfig_t *)input->quantization->qConfig)->qMaxBits, &xMin, &xMax);
-    symGroupedWeightRange(groupedWeight, &wMin, &wMax);
-    size_t partialTerms = weightGroups->groupSize < nTerms ? weightGroups->groupSize : nTerms;
-    symAccumSite_t partialSite = symAccumSiteInitRanges(
-        "conv1dKernelSymInt32Grouped (raw group partial)", partialTerms, xMin, xMax, wMin, wMax, 0);
     symAccumSite_t accSite = symAccumSiteInitRangesRescaled(
         "conv1dKernelSymInt32Grouped (rescaled accumulator)", nTerms, xMin, xMax, wMin, wMax, 0);
     symAccumSiteSetSeeds(&accSite, seed, outChannels);
@@ -577,12 +796,7 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                      &partialSite, &accSite);
     }
 
-    if (output->quantization->qConfig == NULL) {
-        PRINT_ERROR(
-            "conv1dKernelSymInt32Grouped: output qConfig is NULL but SYM_INT32 expected (#187)");
-        exit(1);
-    }
-    symInt32QConfig_t *outputQC = (symInt32QConfig_t *)output->quantization->qConfig;
+    symInt32QConfig_t *outputQC = conv1dGroupedOutputQC(output);
     storeCanonScale(&outputQC->scale, sAcc);
     outputQC->qMaxBits = symAccumResultBits(&accSite); /* the rescaled accumulator's width (#516) */
 }

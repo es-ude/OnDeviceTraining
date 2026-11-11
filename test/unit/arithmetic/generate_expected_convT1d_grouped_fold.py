@@ -40,37 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 from dyadic_scale import canon, decompose  # noqa: E402
 from sym_gold import (convt_grouped_fold_ref, convT1d_grouped_ref, emit_float_array,  # noqa: E402
                       emit_float_scalar, emit_int32_array, emit_int32_scalar,
-                      mul_shift_round_half_away, rescale_f32)
-
-INT32_MAX = 2 ** 31 - 1
-
-
-def width_for_range(max_pos: int, max_neg_mag: int) -> int:
-    """symAccumWidthForRange: the smallest two's-complement width in [1, 32]."""
-    w = 1
-    while w < 32 and (max_pos > (1 << (w - 1)) - 1 or max_neg_mag > (1 << (w - 1))):
-        w += 1
-    return w
-
-
-def side_bound(n: int, term: int, seed_shift: int) -> int:
-    """symAccumSideBound on a non-rescaled site."""
-    bound = n * term
-    return bound + seed_shift if seed_shift >= 0 else max(bound + seed_shift, 0)
-
-
-def fold_result_bits(x_bits, frac, n, w_min, w_max, seeds):
-    """symAccumResultBits of the fold path's site: x widened by F, the bias
-    pass's seed range [min(seeds), max(seeds)] ([0, 0] without bias)."""
-    x_min, x_max = -(1 << (x_bits - 1)), (1 << (x_bits - 1)) - 1
-    lo, hi = x_min * 2 ** frac - 1, x_max * 2 ** frac + 1
-    corners = [lo * w_min, lo * w_max, hi * w_min, hi * w_max]
-    t_pos, t_neg = max(max(corners), 0), max(-min(corners), 0)
-    seed_min, seed_max = (min(seeds), max(seeds)) if seeds else (0, 0)
-    max_abs_seed = max(abs(seed_min), abs(seed_max))
-    assert n * max(t_pos, t_neg) + max_abs_seed <= INT32_MAX, "fixture is not proven safe"
-    return width_for_range(side_bound(n, t_pos, seed_max), side_bound(n, t_neg, -seed_min))
-
+                      fold_result_bits, mul_shift_round_half_away, rescale_f32)
 
 def rescaled_bias_seeds(bias, bias_scale, acc_scale):
     return [rescale_f32(b, bias_scale, acc_scale) for b in bias]
@@ -258,7 +228,8 @@ def main() -> int:
     cg_aligned = cg_fixture("cgAligned", CG_ALIGNED_SCALES, (CG_COUT // CG_GROUPS) * FX_K)
     cg_cursor = cg_fixture("cgCursor", CG_CURSOR_SCALES, 4)
     assert cg_aligned["out"] != cg_cursor["out"], "conv-groups golds coincide (vacuous)"
-    assert (CG_COUT // CG_GROUPS) * FX_K % 4 != 0, "cgCursor must not be channel-aligned"
+    # the kernel takes the aligned loop iff groupSize % (outChPerGroup * K) == 0
+    assert 4 % ((CG_COUT // CG_GROUPS) * FX_K) != 0, "cgCursor must not be channel-aligned"
 
     x, w, bias = fx_operands()
     parts = [

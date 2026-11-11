@@ -656,6 +656,43 @@ def fold_frac_bits(x_bits: int, n_max: int, w_min: int, w_max: int, in_e: int, e
     return None
 
 
+def width_for_range(max_pos: int, max_neg_mag: int) -> int:
+    """symAccumWidthForRange: the smallest two's-complement width in [1, 32]."""
+    w = 1
+    while w < 32 and (max_pos > (1 << (w - 1)) - 1 or max_neg_mag > (1 << (w - 1))):
+        w += 1
+    return w
+
+
+def side_bound(n: int, term: int, seed_shift: int) -> int:
+    """symAccumSideBound on a non-rescaled site."""
+    bound = n * term
+    return bound + seed_shift if seed_shift >= 0 else max(bound + seed_shift, 0)
+
+
+def fold_result_bits(x_bits, frac, n, w_min, w_max, seeds):
+    """symAccumResultBits of the fold path's site: x widened by F, the seed
+    range [min(seeds), max(seeds)] ([0, 0] without bias)."""
+    x_min, x_max = -(1 << (x_bits - 1)), (1 << (x_bits - 1)) - 1
+    lo, hi = x_min * 2 ** frac - 1, x_max * 2 ** frac + 1
+    corners = [lo * w_min, lo * w_max, hi * w_min, hi * w_max]
+    t_pos, t_neg = max(max(corners), 0), max(-min(corners), 0)
+    seed_min, seed_max = (min(seeds), max(seeds)) if seeds else (0, 0)
+    max_abs_seed = max(abs(seed_min), abs(seed_max))
+    assert n * max(t_pos, t_neg) + max_abs_seed <= _INT32_MAX, "fixture is not proven safe"
+    return width_for_range(side_bound(n, t_pos, seed_max), side_bound(n, t_neg, -seed_min))
+
+
+def fold_bias_seed_at_max(bias_mantissas, bias_scale, in_m: int, in_e: int, e_max: int) -> int:
+    """The bias seed bound at the finest A (F = 8), exact: ceil(max|b| * bs / A8);
+    0 without bias (symGroupFoldBiasSeedAtFracMax)."""
+    if bias_mantissas is None:
+        return 0
+    a8 = Fraction(in_m) * Fraction(2) ** (in_e + e_max + 15 - FOLD_FRAC_BITS_MAX)
+    q = max(abs(b) for b in bias_mantissas) * Fraction(bias_scale) / a8
+    return -(-q.numerator // q.denominator)
+
+
 def mul_shift_round_half_away(v: int, m: int, s: int) -> int:
     """round(v * m * 2^-s), half away from zero, exact (symMulShiftRound HALF_AWAY)."""
     q = v * m
@@ -702,12 +739,7 @@ def convt_grouped_fold_ref(x_mantissas, in_scale: float, x_bits: int, w_mantissa
     e_max = max(e for _, e in ws)
     assert in_channels % conv_groups == 0 and out_channels % conv_groups == 0
     in_per, out_per = in_channels // conv_groups, out_channels // conv_groups
-    seed_at_max = 0
-    if bias_mantissas is not None:
-        # the bias seed bound at the finest A (F = 8), exact: ceil(max|b| * bs / A8)
-        a8 = Fraction(in_m) * Fraction(2) ** (in_e + e_max + 15 - FOLD_FRAC_BITS_MAX)
-        q = max(abs(b) for b in bias_mantissas) * Fraction(bias_scale) / a8
-        seed_at_max = -(-q.numerator // q.denominator)
+    seed_at_max = fold_bias_seed_at_max(bias_mantissas, bias_scale, in_m, in_e, e_max)
     frac = fold_frac_bits(x_bits, in_per * kernel_size, w_min, w_max, in_e, e_max, seed_at_max)
     assert frac is not None, "convt_grouped_fold_ref: fixture lands on the legacy path"
     acc_e = in_e + e_max + 15 - frac
@@ -782,51 +814,145 @@ def conv1d_dx_grouped_fold_ref(loss_mantissas, loss_scale: float, loss_bits: int
     return r
 
 
+# ---- linq fold T4: the grouped Conv1d gather's integer combine
+# (conv1dKernelSymInt32Grouped's fold path). Python ints only, E/F/A derived
+# here from the canonical (m, e) of each scale, independent of the C code. ----
+
+
+def conv1d_grouped_fold_ref(x_mantissas, in_scale: float, x_bits: int, w_mantissas, w_scales,
+                            group_size: int, w_min: int, w_max: int, batch: int,
+                            in_channels: int, out_channels: int, kernel_size: int,
+                            input_length: int, stride: int = 1, dilation: int = 1,
+                            padding_type: str = "VALID", padding: int = 0,
+                            bias_mantissas=None, bias_scale=None, conv_groups: int = 1,
+                            self_check: bool = True):
+    """The grouped Conv1d gather's fold path, HALF_AWAY, in Python ints.
+
+    E = max_g e_g; F = fold_frac_bits(x_bits, (in_channels/conv_groups)*K, w range,
+    seed bound of the bias at the finest A); A = {in.m, in.e + E + 15 - F}. Per
+    (b, oc, outPos) the reduction walks the visited weight indices exactly like
+    conv1d_grouped_ref; each group RUN's raw int partial is combined ONCE,
+        acc += round(partial * m_g * 2^-(E - e_g + 15 - F)),
+    starting from the bias seed rescaled onto float(A) by the C kernel's float
+    primitive (rescale_f32). A window with no valid tap combines nothing (its
+    output is the seed alone).
+
+    self_check: per element |(out - seed)*A - exact| <= 0.5*A*combines (the
+    fold's error bound; exact = the rational bias-free conv), every combine
+    term |t| <= |partial|*2^F, and every running acc fits int32.
+
+    Returns a dict: out (flat [batch, out_channels, out_len]), acc_scale
+    (float(A)), acc_m, acc_e, frac_bits, out_len, combines (per element),
+    seeds (per oc)."""
+    assert in_channels % conv_groups == 0 and out_channels % conv_groups == 0
+    in_per, out_per = in_channels // conv_groups, out_channels // conv_groups
+    geom = window_geometry_1d(input_length, kernel_size, stride, dilation, padding_type, padding)
+    out_len = geom["out_len"]
+    in_m, in_e = decompose(in_scale)
+    ws = [decompose(s) for s in w_scales]
+    e_max = max(e for _, e in ws)
+    seed_at_max = fold_bias_seed_at_max(bias_mantissas, bias_scale, in_m, in_e, e_max)
+    frac = fold_frac_bits(x_bits, in_per * kernel_size, w_min, w_max, in_e, e_max, seed_at_max)
+    assert frac is not None, "conv1d_grouped_fold_ref: fixture lands on the legacy path"
+    acc_e = in_e + e_max + 15 - frac
+    acc = Fraction(in_m) * Fraction(2) ** acc_e
+    acc_float = float(acc)
+    seeds = [0] * out_channels
+    if bias_mantissas is not None:
+        seeds = [rescale_f32(b, bias_scale, acc_float) for b in bias_mantissas]
+
+    out, combines = [], []
+    for b in range(batch):
+        for oc in range(out_channels):
+            in_lo = (oc // out_per) * in_per
+            w_base = oc * in_per * kernel_size
+            for out_pos in range(out_len):
+                fvi, fvk, vc = window_slice_1d_full(geom, out_pos)
+                total = seeds[oc]
+                exact = Fraction(0)
+                partial, current, n_comb = 0, None, 0
+
+                def combine():
+                    m_g, e_g = ws[current]
+                    t = mul_shift_round_half_away(partial, m_g, e_max - e_g + 15 - frac)
+                    assert abs(t) <= abs(partial) * 2 ** frac
+                    return t
+
+                for ic_off in range(in_per):
+                    ic = in_lo + ic_off
+                    for i in range(vc):
+                        w_idx = w_base + ic_off * kernel_size + fvk + i
+                        g = w_idx // group_size
+                        if g != current:
+                            if current is not None:
+                                total += combine()
+                                n_comb += 1
+                                assert abs(total) <= _INT32_MAX
+                            partial, current = 0, g
+                        x = x_mantissas[(b * in_channels + ic) * input_length + fvi + i * dilation]
+                        w = w_mantissas[w_idx]
+                        partial += x * w
+                        m_g, e_g = ws[g]
+                        exact += Fraction(x * w * in_m * m_g) * Fraction(2) ** (in_e + e_g)
+                if current is not None:
+                    total += combine()
+                    n_comb += 1
+                    assert abs(total) <= _INT32_MAX
+                if self_check:
+                    err = abs((total - seeds[oc]) * acc - exact)
+                    assert err <= Fraction(n_comb, 2) * acc, (
+                        f"conv1d_grouped_fold_ref: ({b}, {oc}, {out_pos}) misses the "
+                        f"0.5*A*combines bound ({float(err)} > {float(Fraction(n_comb, 2) * acc)})")
+                out.append(total)
+                combines.append(n_comb)
+    return {"out": out, "acc_scale": acc_float, "acc_m": in_m, "acc_e": acc_e,
+            "frac_bits": frac, "out_len": out_len, "combines": combines, "seeds": seeds}
+
+
 # ---- Group-quant PR3 Task 3: dx-orientation reference for the ConvT1d
 # adjoint (the Conv1d one is conv1d_dx_grouped_fold_ref above, since linq fold
-# T3). A pure PARAMETER REMAPPING of the forward emulations above
-# -- the flat weight STORAGE index each core computes in the adjoint role is
-# identical to the layer's own storage index, so the group binding
-# (g = w_idx // group_size) carries over unchanged. VALID-only (the dx
-# fixtures' scope; the C kernels additionally handle the SAME/EXPLICIT
-# adjoint, exercised by the FORWARD SAME fixture instead). ----
+# T3). A pure PARAMETER REMAPPING of the forward emulations above -- the flat
+# weight STORAGE index each core computes in the adjoint role is identical to
+# the layer's own storage index, so the group binding (g = w_idx // group_size)
+# carries over unchanged. VALID-only (the dx fixtures' scope; the C kernels
+# additionally handle the SAME/EXPLICIT adjoint, exercised by the FORWARD SAME
+# fixture instead). ----
 
 
-def convT1d_dx_grouped_ref(loss_mantissas, loss_scale: float, w_mantissas, w_scales,
-                           group_size: int, batch: int, in_channels: int, out_channels: int,
-                           kernel_size: int, input_length: int, stride: int = 1,
-                           dilation: int = 1, output_padding: int = 0):
+def convT1d_dx_grouped_fold_ref(loss_mantissas, loss_scale: float, loss_bits: int, w_mantissas,
+                                w_scales, group_size: int, w_min: int, w_max: int, batch: int,
+                                in_channels: int, out_channels: int, kernel_size: int,
+                                input_length: int, stride: int = 1, dilation: int = 1,
+                                output_padding: int = 0):
     """ConvT1d dx (propLoss) with a grouped weight: the adjoint of a VALID
     forward ConvT1d is a GATHER (correlation) of lossGrad with the SAME
     weight -- conv1dTransposedBackward routes it to conv1dKernelSymInt32Grouped
-    (running group-partial), so this ref delegates to conv1d_grouped_ref with
-    the roles swapped: the gather's "input" is lossGrad [batch, out_channels,
-    out_len] and its "output" is dx [batch, in_channels, input_length].
-    Parameters are named from the FORWARD ConvT1d's perspective
-    (in_channels/out_channels/input_length = x's channels/Lin).
+    (running group-partial, one integer combine per group run since linq fold
+    T4), so this ref delegates to conv1d_grouped_fold_ref with the roles
+    swapped: the gather's "input" is lossGrad [batch, out_channels, out_len]
+    and its "output" is dx [batch, in_channels, input_length]. Parameters are
+    named from the FORWARD ConvT1d's perspective (in_channels/out_channels/
+    input_length = x's channels/Lin).
 
-    Weight-index identity: conv1d_grouped_ref reads w at
+    Weight-index identity: conv1d_grouped_fold_ref reads w at
     (oc_ref*inC_ref + ic_ref)*K + k with oc_ref over ITS out-channels
     (= ConvT1d's in_channels) and ic_ref over ITS in-channels (= ConvT1d's
     out_channels) -- i.e. (ic_convT*out_channels + oc_convT)*K + k, exactly
-    ConvT1d's [in_channels, out_channels, K] flat storage index (the same
-    index Conv1dKernel.c computes at its wArr read in the adjoint role), so
+    ConvT1d's [in_channels, out_channels, K] flat storage index, so
     `w_mantissas` is passed in ConvT1d's OWN storage order and the group
     binding carries over unchanged. outputPadding only pads trailing zeros of
     the forward output; the adjoint gather walks the padded length, whose
     tail windows the geometry then clips -- fixtures here use 0.
-    conv-groups==1 only. No bias. Returns (out flat
-    [batch*in_channels*input_length], s_acc)."""
+    conv-groups==1 only. No bias. Returns conv1d_grouped_fold_ref's dict."""
     out_len = ((input_length - 1) * stride + dilation * (kernel_size - 1) +
                output_padding + 1)
-    out, s_acc, dx_len = conv1d_grouped_ref(
-        loss_mantissas, loss_scale, w_mantissas, w_scales, group_size,
-        batch, out_channels, in_channels, kernel_size, out_len,
-        stride, dilation, "VALID", 0)
-    assert dx_len == input_length, (
-        f"convT1d_dx_grouped_ref: adjoint gather length {dx_len} != forward "
+    r = conv1d_grouped_fold_ref(loss_mantissas, loss_scale, loss_bits, w_mantissas, w_scales,
+                                group_size, w_min, w_max, batch, out_channels, in_channels,
+                                kernel_size, out_len, stride, dilation, "VALID", 0)
+    assert r["out_len"] == input_length, (
+        f"convT1d_dx_grouped_fold_ref: adjoint gather length {r['out_len']} != forward "
         f"input length {input_length}")
-    return out, s_acc
+    return r
 
 
 # ---- Group-quant PR3 Task 4: optimizer enablement on grouped params. The

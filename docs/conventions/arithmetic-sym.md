@@ -581,8 +581,9 @@ C by path:
 
 | path | structure | C per output element |
 |---|---|---|
-| forward gather (Linear/Conv1d) | running group-partial | groups crossed by the reduction; per-channel = **1** |
-| dx gather (Linear dx, ConvT1d dx) | running group-partial, strided/adjoint orientation | distinct groups crossed; per-channel Linear dx = **outFeatures** |
+| forward gather, Linear | running group-partial, float rescale into s_acc | groups crossed by the reduction; per-channel = **1** |
+| forward gather, Conv1d (and ConvT1d dx, the same kernel in the adjoint role) | running group-partial; each run's raw int32 partial combined once by an integer multiply-shift, `round(partial·m_g·2^-(E−e_g+15−F))`, at the exact accumulator scale `A = {in.m, in.e+E+15−F}` (`SymGroupFold.h`; the bias seed takes part in the F proof); inputs wider than 16 bits or no provable F ≥ 1 keep the legacy float rescale into s_acc | C = group runs per reduction (per-channel = **1**); fold: \|err\| ≤ 0.5·C·A (A ≈ s_acc·2^(1−F)); legacy: 0.5·C·s_acc |
+| dx gather, Linear | running group-partial, strided orientation, float rescale | distinct groups crossed; per-channel Linear dx = **outFeatures** |
 | scatter (ConvT1d forward, Conv1d dx) | per-group integer fold (scatter targets change per product — no running partial exists): each input code is folded once per group run, `x_g = round(x·m_g·2^-(E−e_g+15−F))`, then plain int32 MACs at the exact accumulator scale `A = {in.m, in.e+E+15−F}` (`SymGroupFold.h`); inputs wider than 16 bits or no provable F ≥ 1 keep the legacy per-product float rescale into s_acc | fold: \|err\| ≤ 0.5·A·Σ\|w\| over the contributing products (each fold off by ≤ 0.5 code; A ≈ s_acc·2^(1−F)); legacy: C = contributing products = (scatter-input channels)·K — ConvT1d fwd: Cin·K, Conv1d dx: **Cout**·K |
 
 The RELATIVE error stays in the single-quantization-step class: the signal is

@@ -70,6 +70,14 @@ symGroupFold_t symGroupFoldInit(const symQConfig_t *weightGroups, odtScale_t inS
                                 size_t nMax, int32_t wMin, int32_t wMax,
                                 uint64_t maxAbsSeedAtFracMax);
 
+/* The maxAbsSeedAtFracMax a kernel passes symGroupFoldInit for a bias of n
+ * int32 codes at biasScale seeded into the accumulator:
+ * ceil(max|bias| * biasScale / A8), A8 = {inScale.m, inScale.e + E + 15 - MAX}.
+ * Exact (both scales are dyadic), setup-time uint64 math, saturating at
+ * UINT64_MAX; 0 for an all-zero (or empty) bias. Scales must be canonical. */
+uint64_t symGroupFoldBiasSeedAtFracMax(const int32_t *bias, size_t n, odtScale_t biasScale,
+                                       const symQConfig_t *weightGroups, odtScale_t inScale);
+
 /* E - s.e + 15 - F for one group's (local-copy) scale. */
 static inline uint32_t symGroupFoldShift(const symGroupFold_t *f, odtScale_t s) {
     return (uint32_t)((int32_t)f->eMax - (int32_t)s.e + 15 - (int32_t)f->fracBits);

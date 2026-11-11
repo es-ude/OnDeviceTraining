@@ -211,6 +211,7 @@ target_include_directories(Conv1dKernel PUBLIC include)
 target_link_libraries(Conv1dKernel PRIVATE
         DyadicScale
         SymAccumGuard
+        SymGroupFold
         SymGroupedWeight
         Tensor
         Kernel

@@ -42,7 +42,8 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
 
 /*! Group-quant PR2 (Task 4): grouped-weight Conv1d forward gather core.
  *  Sibling of conv1dKernelSymInt32, adding the running group-partial
- *  rescale-combine (mirrors matmulIntCoreGrouped's idiom exactly).
+ *  combine (mirrors matmulIntCoreGrouped's idiom; since linq fold T4 the
+ *  combine is integer, see below).
  *
  *  `weight` holds the grouped weight's UNPACKED mantissas as raw int32 (the
  *  same scratch shape executeOp's grouped-operand prologue branch produces:
@@ -69,10 +70,22 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
  *  logical view over its storage, this kernel always indexes `weight`
  *  through the SAME direct flat-array arithmetic conv1dKernelSymInt32 uses,
  *  never through calcElementIndexByIndices/orderOfDimensions). `g` binds to
- *  that index; a running int32 partial folds into the sAcc accumulator via
- *  rescaleIntoAccumulatorScale at every group-boundary crossing AND at the
- *  end of each reduction (GGUF rescale-combine pattern, #189): s_acc = s_in *
- *  max_g(weightGroups->scales[g]) -- never scales[0].
+ *  that index; the running int32 partial of each group RUN is combined once,
+ *  at every group-boundary crossing AND at the end of each reduction, into
+ *  the accumulator scale A = {s_in.m, s_in.e + E + 15 - F} (SymGroupFold.h;
+ *  E = the largest group exponent, F in [1, 8] the largest fraction count
+ *  the accumulator guard proves with the bias seed):
+ *      acc += round(partial * m_g * 2^-(E - e_g + 15 - F))   (symMulShiftRound,
+ *  the op's rounding mode). Error: per output element |err| <= 0.5 * A *
+ *  (number of combines) (HALF_AWAY; SR is unbiased). A window with no valid
+ *  tap combines nothing and takes no SR draw. The bias is seeded at A before
+ *  the reduction. Output scale = A, qMaxBits = the width of the site with x
+ *  widened to [xMin * 2^F - 1, xMax * 2^F + 1] plus the bias seeds.
+ *
+ *  Legacy float path (inputs wider than 16 bits, or no provable F >= 1):
+ *  each partial folds into sAcc = s_in * max_g(scales[g]) (never scales[0])
+ *  via rescaleIntoAccumulatorScale (GGUF rescale-combine pattern, #189); bias
+ *  refolded into sAcc; output scale = sAcc.
  *
  *  @param input  [batch, in_channels, input_length], SYM_INT32
  *  @param weight [out_channels, in_channels/groups, kernel_size], grouped-SYM

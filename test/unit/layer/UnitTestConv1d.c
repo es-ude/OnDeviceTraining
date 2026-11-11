@@ -1754,12 +1754,12 @@ static layer_t *buildGroupedConv1dFixtureLayer(quantization_t *q, size_t numGrou
  * reliably distinguish a correct s_acc from a WRONG-but-still-sound one
  * (e.g. scales[0] instead of max) -- confirmed empirically while building
  * this test (mutation (i) below silently passed against such a comparison).
- * The exact FLOAT32 wire has no such blind spot: it is bit-for-bit the same
- * deterministic float32 formula generate_expected_conv1d_grouped.py's
- * conv1d_grouped_ref computes (python-int MACs, rescale_f32 ==
- * rescaleIntoAccumulatorScale(HALF_AWAY) bit-for-bit), so ANY divergence in
- * the kernel's internal arithmetic (wrong s_acc, dropped combine, wrong
- * rounding mode) changes the compared value measurably. Still routes through
+ * The exact FLOAT32 wire has no such blind spot: it is bit-for-bit the
+ * deterministic integer arithmetic generate_expected_conv1d_grouped.py's
+ * conv1d_grouped_fold_ref computes (python-int MACs, one integer combine per
+ * group run at A, linq fold T4), so ANY divergence in the kernel's internal
+ * arithmetic (wrong A, dropped combine, wrong rounding mode) changes the
+ * compared value measurably. Still routes through
  * conv1dForward -> executeOp's grouped-operand gate, so mutation (iv) (the
  * layer's groupedSymOperandPos wiring) still applies. */
 void testConv1dForwardGroupedPerChannelMatchesGold(void) {
@@ -1804,18 +1804,20 @@ void testConv1dForwardGroupedGeneralMatchesGold(void) {
 
 /* Equal-scales grouped twin: mirrors
  * testMatmulGroupedEqualScalesBitIdenticalToScalar (UnitTestMatmul.c) at the
- * LAYER level. Every group's scale is the SAME power-of-two value (0.25f)
- * and inScale (0.5f, kConv1dGroupedXScale) is also a power of two, so sAcc =
- * inScale*maxScale and every combine's paramScale (inScale*scales[g]) are
- * BIT-IDENTICAL float32 values -- and dividing a float by the SAME
- * power-of-two value it was just multiplied by is an EXACT round trip (pure
- * exponent shifts, no mantissa rounding), so
- * round_half_away(partial*paramScale/sAcc) reproduces `partial` exactly. The
- * grouped kernel's raw output must therefore be BIT-IDENTICAL to the scalar
+ * LAYER level. Every group's scale is the SAME power-of-two value (0.25f,
+ * m = 2^14) and inScale (0.5f, kConv1dGroupedXScale) is also a power of two,
+ * so the grouped kernel's integer combine (linq fold T4) is exact for every
+ * partial -- round(partial * 2^14 * 2^-(15 - F)) = partial * 2^(F-1), F >= 1
+ * -- at A = inScale * 2^(E + 15 - F), i.e. exactly partial * inScale * 0.25.
+ * The grouped output must therefore dequantize BIT-IDENTICALLY to the scalar
  * (non-grouped, per-tensor SYM_INT32) conv1dKernelSymInt32 path run on the
- * SAME mantissas with weight scale == the common group scale -- both wires
- * here are FLOAT32 (same exact-dequant reasoning as the two tests above), so
- * identical raw (mantissa, scale) pairs dequantize to identical floats. */
+ * SAME mantissas with weight scale == the common group scale (both wires
+ * FLOAT32, all values exact in float32). The bias is seeded onto each
+ * kernel's own accumulator grid (A for the grouped one, inScale * 0.25 =
+ * 0.125 for the scalar one), so both layers share a bias with the
+ * power-of-two scale 0.125: its seed is exact on both grids (b * 2^(F-1) and
+ * b), keeping the bias pass under the twin check (a bias off the coarse grid
+ * would legitimately round differently). */
 void testConv1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
     const float commonScale = 0.25f;
     quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
@@ -1824,6 +1826,10 @@ void testConv1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
     tensor_t *groupedInput = NULL;
     layer_t *groupedLayer =
         buildGroupedConv1dFixtureLayer(testQ, 3, 6, groupScales, VALID, &groupedInput);
+    size_t pow2BiasDims[] = {(size_t)kConv1dGroupedOutChannels};
+    parameter_t *pow2Bias = parameterInit(
+        buildSymInt32TensorExact(1, pow2BiasDims, kConv1dGroupedBiasMantissas, 0.125f), NULL);
+    groupedLayer->config->conv1d->bias = pow2Bias;
 
     size_t outputDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedOutChannels,
                            (size_t)kPerChannelOutLen};
@@ -1836,11 +1842,6 @@ void testConv1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
         buildSymInt32TensorExact(3, weightDims, kConv1dGroupedWMantissas, commonScale);
     parameter_t *scalarWeights = parameterInit(scalarWeightParam, NULL);
 
-    size_t biasDims[] = {(size_t)kConv1dGroupedOutChannels};
-    tensor_t *scalarBiasParam =
-        buildSymInt32TensorExact(1, biasDims, kConv1dGroupedBiasMantissas, kConv1dGroupedBiasScale);
-    parameter_t *scalarBias = parameterInit(scalarBiasParam, NULL);
-
     size_t inputDims[] = {(size_t)kConv1dGroupedBatch, (size_t)kConv1dGroupedInChannels,
                           (size_t)kConv1dGroupedInputLength};
     tensor_t *scalarInput =
@@ -1848,11 +1849,16 @@ void testConv1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
 
     kernel_t *scalarKernel = reserveMemory(sizeof(kernel_t));
     initKernel(scalarKernel, (size_t)kConv1dGroupedKernelSize, VALID, 1, 1);
-    layer_t *scalarLayer = buildBorrowedConv1dLayer(scalarWeights, scalarBias, scalarKernel, testQ);
+    layer_t *scalarLayer = buildBorrowedConv1dLayer(scalarWeights, pow2Bias, scalarKernel, testQ);
 
     tensor_t *scalarOutput = makeFloatTensor(outputDims, 3, NULL);
     conv1dForward(scalarLayer, scalarInput, scalarOutput, NULL);
 
+    bool nonDegenerate = false;
+    for (size_t i = 0; i < kPerChannelOutMantissas_len; i++) {
+        nonDegenerate = nonDegenerate || ((float *)groupedOutput->data)[i] != 0.0f;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(nonDegenerate, "equal-scales twin is vacuously all-zero");
     TEST_ASSERT_EQUAL_FLOAT_ARRAY((float *)scalarOutput->data, (float *)groupedOutput->data,
                                   kPerChannelOutMantissas_len);
 }
@@ -2142,13 +2148,13 @@ void testConv1dForwardGroupedConvGroupsMatchesGold(void) {
  *
  * group-quant D5 smoke at the Conv1d layer: after the funnel's ASYM grouped-unpack arm
  * shifts the codes (code - zp[g]) the compute path IS the grouped-SYM path
- * on the resulting mantissas -- same mantissas + same scales through the
- * same gather core give BIT-IDENTICAL raw output and s_acc, so no ASYM conv
- * gold needs deriving: the SYM-grouped fixture layer on the identical
- * mantissas/scales is the reference, both compared over exact FLOAT32
- * wires. Pairwise-distinct zps keep group 1/2 sensitive to a
- * zp[0]-everywhere shift (the mutation-(ii) direction; its named
- * discriminators live in UnitTestExecuteOp.c/UnitTestLinear.c). */
+ * on the resulting mantissas, but over the ASYM image's code range
+ * (+-(2^qBits - 1), twice the SYM range). Since the integer fold (linq fold
+ * T3 dx, T4 forward) that range proves one fraction bit less, so each twin
+ * is pinned to its own Python-int gold over exact FLOAT32 wires.
+ * Pairwise-distinct zps keep group 1/2 sensitive to a zp[0]-everywhere
+ * shift (the mutation-(ii) direction; its named discriminators live in
+ * UnitTestExecuteOp.c/UnitTestLinear.c). */
 
 static const uint16_t kConv1dAsymZps[3] = {10, 25, 40};
 
@@ -2198,7 +2204,10 @@ static layer_t *buildGroupedAsymConv1dTwinLayer(quantization_t *q, tensor_t **in
     return buildBorrowedConv1dLayer(weights, bias, kernel, q);
 }
 
-void testConv1dForwardGroupedAsymBitIdenticalToSymGroupedTwin(void) {
+/* Forward twin: the SYM layer reproduces kPerChannel*, the ASYM layer its
+ * image-range gold kPerChannelAsym* (F one lower, generator-asserted), which
+ * pins that the image range reaches the forward fold. */
+void testConv1dForwardGroupedAsymMatchesItsImageRangeGold(void) {
     quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
 
     tensor_t *symInput = NULL;
@@ -2215,8 +2224,13 @@ void testConv1dForwardGroupedAsymBitIdenticalToSymGroupedTwin(void) {
     tensor_t *asymOutput = makeFloatTensor(outputDims, 3, NULL);
     conv1dForward(asymLayer, asymInput, asymOutput, NULL);
 
-    TEST_ASSERT_EQUAL_FLOAT_ARRAY((float *)symOutput->data, (float *)asymOutput->data,
-                                  kPerChannelOutMantissas_len);
+    TEST_ASSERT_EQUAL_size_t(kPerChannelOutMantissas_len, kPerChannelAsymOutMantissas_len);
+    for (size_t i = 0; i < kPerChannelOutMantissas_len; i++) {
+        TEST_ASSERT_EQUAL_FLOAT((float)kPerChannelOutMantissas[i] * kPerChannelOutScale,
+                                ((float *)symOutput->data)[i]);
+        TEST_ASSERT_EQUAL_FLOAT((float)kPerChannelAsymOutMantissas[i] * kPerChannelAsymOutScale,
+                                ((float *)asymOutput->data)[i]);
+    }
 }
 
 /* dx twin (the adjoint scatter consumes the SAME stored weight): both layers
@@ -4446,7 +4460,7 @@ int main() {
     RUN_TEST(testConv1dBackwardGroupedDxFloatPathAgreesWithinTolerance);
     RUN_TEST(testConv1dForwardGroupedSamePaddingMatchesGold);
     RUN_TEST(testConv1dForwardGroupedConvGroupsMatchesGold);
-    RUN_TEST(testConv1dForwardGroupedAsymBitIdenticalToSymGroupedTwin);
+    RUN_TEST(testConv1dForwardGroupedAsymMatchesItsImageRangeGold);
     RUN_TEST(testConv1dBackwardGroupedAsymDxMatchesItsImageRangeGold);
     RUN_TEST(testConv1dForwardBfpNativeMatchesKernelGold);
     RUN_TEST(testConv1dForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer);

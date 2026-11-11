@@ -2,14 +2,14 @@
 """Generate expected_conv1d_grouped.h for UnitTestConv1d (group-quant PR2,
 Task 4 -- docs/conventions/tensor.md).
 
-Pins conv1dKernelSymInt32Grouped's GGUF-style running group-partial
-rescale-combine (mirrors Task 3's matmulIntCoreGrouped exactly, just walking
-the conv gather core's (icOffset, kernelIdx) reduction via sliding-window
-geometry instead of a flat dot product): int MACs per group (exact), a
-rescale-combine at every group boundary AND at the end of each
-(batch, outChannel, outPos) reduction via rescaleIntoAccumulatorScale
-(HALF_AWAY), s_acc = inScale * max_g(wScales[g]) (never scales[0]). See
-sym_gold.conv1d_grouped_ref for the exact float32-mirrored emulation.
+Pins conv1dKernelSymInt32Grouped's running group-partial gather: int MACs
+per group run (exact), then ONE integer combine per run (linq fold T4,
+SymGroupFold.h) at every group boundary AND at the end of each
+(batch, outChannel, outPos) reduction,
+    acc += round(partial * m_g * 2^-(E - e_g + 15 - F)),
+at the exact accumulator scale A = {in.m, in.e + E + 15 - F}, from the bias
+seed rescaled onto float(A). Golds: sym_gold.conv1d_grouped_fold_ref (Python
+ints; int12 input, the weight's SYM code range [-2048, 2047]).
 
 Fixture: IC=2, OC=3, K=3, L=6, B=1, VALID padding, stride=1, dilation=1
 (outLen = 6-3+1 = 4). Both fixtures share the SAME weight/input/bias
@@ -34,14 +34,10 @@ test) mirror generate_expected_group_matmul.py's Task-3 discipline exactly:
   (i)   general fixture's scales[0] != max(scales).
   (ii)  the LAST group's raw contribution is nonzero for both fixtures (a
         dropped tail combine would otherwise zero it out silently).
-  (iii) at least one combine in the general fixture has a float32 quotient
-        whose |fractional part| >= 0.5 (round-half-away vs
-        truncate-toward-zero divergence point) -- the rounding-mode
-        discriminator. SR_HALF_AWAY vs HALF_AWAY divergence is NOT emulated
-        here for the same reason Task 3 didn't (needs the C-side seeded RNG
-        stream); that mutation direction is instead covered by a dedicated
-        C test running the real kernel under SR_HALF_AWAY with two RNG
-        seeds and asserting the outputs differ.
+  (iii) a combine that truncates toward zero instead of rounding half away
+        changes the general fixture's gold -- the rounding-mode
+        discriminator. SR is not emulated here (needs the C-side seeded RNG
+        stream); UnitTestConv1dKernel covers it.
 
 Group-quant PR3 (Task 3) additions:
   dx        Conv1d backward propLoss with the grouped weight -- the adjoint
@@ -79,10 +75,11 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
-from dyadic_scale import CEIL, canon, product_scale  # noqa: F401
-from sym_gold import (combine_quotient_f32, conv1d_dx_grouped_fold_ref, conv1d_grouped_ref,
+import sym_gold  # noqa: E402
+from dyadic_scale import canon, decompose  # noqa: E402
+from sym_gold import (conv1d_dx_grouped_fold_ref, conv1d_grouped_fold_ref,  # noqa: E402
                       emit_float_array, emit_float_scalar, emit_int32_array, emit_int32_scalar,
-                      rescale_f32, window_geometry_1d, window_slice_1d_full)
+                      mul_shift_round_half_away, window_geometry_1d, window_slice_1d_full)
 
 BATCH = 1
 IN_CHANNELS = 2
@@ -93,7 +90,7 @@ INPUT_LENGTH = 6
 # weight: [out_channels=3, in_channels=2, kernel_size=3] row-major, one
 # 6-element block per output channel (reused from Task 3's Matmul fixture --
 # same numbers, purely for cross-review convenience; the actual gather-core
-# computation is genuinely different, see conv1d_grouped_ref).
+# computation is genuinely different, see conv1d_grouped_fold_ref).
 W_MANTISSAS = [4, -3, 2, -1, 5, -2,
               1, 2, -4, 3, -1, 2,
               -2, 3, 1, -5, 4, -3]
@@ -107,15 +104,44 @@ BIAS_MANTISSAS = [10, -5, 3]
 BIAS_SCALE = canon(0.1)  # stored scales are canonical dyadic: snapped NEAREST
 
 
-def fixture_per_channel():
+X_BITS = 12  # the input wire's declared width (ODT_SYM_OPERAND_QMAXBITS)
+W_SYM_RANGE = (-2048, 2047)  # stored SYM int12 weight
+W_ASYM_IMAGE_RANGE = (-4095, 4095)  # stored ASYM int12 weight's zp-shifted image
+
+
+def fold_forward(x, x_scale, w, w_scales, group_size, in_channels, out_channels, bias,
+                 bias_scale, padding_type="VALID", conv_groups=1, w_range=W_SYM_RANGE,
+                 self_check=True):
+    return conv1d_grouped_fold_ref(x, x_scale, X_BITS, w, w_scales, group_size, w_range[0],
+                                   w_range[1], BATCH, in_channels, out_channels, KERNEL_SIZE,
+                                   INPUT_LENGTH, padding_type=padding_type,
+                                   bias_mantissas=bias, bias_scale=bias_scale,
+                                   conv_groups=conv_groups, self_check=self_check)
+
+
+def truncating_combine_changes(run):
+    """Mutation (iii): replaying `run` with a combine that truncates toward zero
+    instead of rounding half away changes its output."""
+    def trunc(v, m, s):
+        q = abs(v * m) >> s
+        return q if v * m >= 0 else -q
+    gold = run(True)["out"]
+    saved = sym_gold.mul_shift_round_half_away
+    sym_gold.mul_shift_round_half_away = trunc
+    try:
+        truncated = run(False)["out"]
+    finally:
+        sym_gold.mul_shift_round_half_away = saved
+    return truncated != gold
+
+
+def fixture_per_channel(w_range=W_SYM_RANGE):
     group_size, num_groups = 6, 3
     w_scales = [canon(s) for s in (0.02, 0.05, 0.01)]
     assert len(w_scales) == num_groups
 
-    out, s_acc, out_len = conv1d_grouped_ref(
-        X_MANTISSAS, X_SCALE, W_MANTISSAS, w_scales, group_size,
-        BATCH, IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE, INPUT_LENGTH,
-        bias_mantissas=BIAS_MANTISSAS, bias_scale=BIAS_SCALE)
+    r = fold_forward(X_MANTISSAS, X_SCALE, W_MANTISSAS, w_scales, group_size, IN_CHANNELS,
+                     OUT_CHANNELS, BIAS_MANTISSAS, BIAS_SCALE, w_range=w_range)
 
     # Mutation (ii): the last group (output channel 2, its only group) must
     # have a nonzero raw contribution -- else dropping the tail combine would
@@ -127,7 +153,8 @@ def fixture_per_channel():
     assert last_group_partial != 0, "perChannel: last group's contribution is vacuously zero"
 
     return {"wMantissas": W_MANTISSAS, "wScales": w_scales, "groupSize": group_size,
-           "numGroups": num_groups, "outMantissas": out, "outScale": s_acc, "outLen": out_len}
+           "numGroups": num_groups, "outMantissas": r["out"], "outScale": r["acc_scale"],
+           "outLen": r["out_len"], "fracBits": r["frac_bits"]}
 
 
 def fixture_general_groups():
@@ -136,10 +163,10 @@ def fixture_general_groups():
     w_scales = [canon(s) for s in (0.02, 0.05, 0.01, 0.078125, 0.03, 0.05859375)]
     assert w_scales[0] != max(w_scales), "general: scales[0] must differ from max (mutation i)"
 
-    out, s_acc, out_len = conv1d_grouped_ref(
-        X_MANTISSAS, X_SCALE, W_MANTISSAS, w_scales, group_size,
-        BATCH, IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE, INPUT_LENGTH,
-        bias_mantissas=BIAS_MANTISSAS, bias_scale=BIAS_SCALE)
+    def run(self_check):
+        return fold_forward(X_MANTISSAS, X_SCALE, W_MANTISSAS, w_scales, group_size, IN_CHANNELS,
+                            OUT_CHANNELS, BIAS_MANTISSAS, BIAS_SCALE, self_check=self_check)
+    r = run(True)
 
     # Mutation (ii): the LAST group (output channel 2's second group,
     # ic=1's taps) must have a nonzero raw contribution at out_pos=0.
@@ -151,47 +178,14 @@ def fixture_general_groups():
         for k in range(KERNEL_SIZE))
     assert last_group_partial != 0, "general: last group's contribution is vacuously zero"
 
-    # Mutation (iii): at least one combine across the whole fixture must have
-    # a float32 quotient with |fractional part| >= 0.5 (round-half-away vs
-    # truncate-toward-zero divergence point). Recompute every weight-group
-    # combine's quotient the same way conv1d_grouped_ref does internally.
-    geom = window_geometry_1d(INPUT_LENGTH, KERNEL_SIZE, 1, 1, "VALID", 0)
-    found_divergent = False
-    for b in range(BATCH):
-        for oc in range(OUT_CHANNELS):
-            w_base = oc * IN_CHANNELS * KERNEL_SIZE
-            for out_pos in range(geom["out_len"]):
-                first_valid_idx, first_valid_k, valid_count = window_slice_1d_full(geom, out_pos)
-                partial, current_group = 0, None
-                for icc in range(IN_CHANNELS):
-                    for i in range(valid_count):
-                        kernel_idx = first_valid_k + i
-                        w_idx = w_base + icc * KERNEL_SIZE + kernel_idx
-                        g = w_idx // group_size
-                        if g != current_group:
-                            if current_group is not None:
-                                param_scale = (torch.tensor(X_SCALE, dtype=torch.float32) *
-                                              torch.tensor(w_scales[current_group],
-                                                           dtype=torch.float32)).item()
-                                q = combine_quotient_f32(partial, param_scale, s_acc)
-                                if abs(abs(q) - int(abs(q)) - 0.5) < 1e-4:
-                                    found_divergent = True
-                            partial = 0
-                            current_group = g
-                        input_idx = first_valid_idx + i
-                        partial += (X_MANTISSAS[(b * IN_CHANNELS + icc) * INPUT_LENGTH + input_idx] *
-                                   W_MANTISSAS[w_idx])
-                param_scale = (torch.tensor(X_SCALE, dtype=torch.float32) *
-                              torch.tensor(w_scales[current_group], dtype=torch.float32)).item()
-                q = combine_quotient_f32(partial, param_scale, s_acc)
-                if abs(abs(q) - int(abs(q)) - 0.5) < 1e-4:
-                    found_divergent = True
-    assert found_divergent, (
-        "general: no combine has a round-vs-truncate-divergent quotient "
-        "(fixture is vacuous against a truncation-instead-of-rounding mutation)")
+    # Mutation (iii): the rounding-mode discriminator.
+    assert truncating_combine_changes(run), (
+        "general: no combine rounds (fixture is vacuous against a "
+        "truncation-instead-of-rounding mutation)")
 
     return {"wMantissas": W_MANTISSAS, "wScales": w_scales, "groupSize": group_size,
-           "numGroups": num_groups, "outMantissas": out, "outScale": s_acc, "outLen": out_len}
+           "numGroups": num_groups, "outMantissas": r["out"], "outScale": r["acc_scale"],
+           "outLen": r["out_len"]}
 
 
 # ---- PR3 Task 3: Conv1d dx (adjoint scatter) fixture. Seeded random lossGrad
@@ -213,8 +207,6 @@ def dequant_grouped(mantissas, scales, group_size):
 
 
 DX_LOSS_BITS = 12  # the lossGrad wire's declared width (ODT_SYM_OPERAND_QMAXBITS)
-W_SYM_RANGE = (-2048, 2047)  # stored SYM int12 weight
-W_ASYM_IMAGE_RANGE = (-4095, 4095)  # stored ASYM int12 weight's zp-shifted image
 
 
 def fixture_dx(name, w_scales, group_size, w_range=W_SYM_RANGE):
@@ -284,21 +276,23 @@ def assert_same_padding_geometry():
         "the per-element lookup is not exercised where it matters")
 
 
-def ref_same_group_once_per_row():
+def ref_same_group_once_per_row(gold):
     """C mutation (ii) replay: the group id computed ONCE per (oc, ic) row
     (from the row's first VISITED element) and held for the whole row -- the
     run-based assumption the per-element division exists to prevent. Same
-    float32-mirrored arithmetic as conv1d_grouped_ref otherwise."""
+    integer combine as conv1d_grouped_fold_ref otherwise (E, F, seeds taken
+    from the gold's run)."""
     geom = same_geom()
-    s_acc = product_scale(X_SCALE, max(SAME_W_SCALES), CEIL)
+    ws = [decompose(s) for s in SAME_W_SCALES]
+    e_max = max(e for _, e in ws)
+    frac = gold["frac_bits"]
     out = []
     for b in range(BATCH):
         for oc in range(OUT_CHANNELS):
             w_base = oc * IN_CHANNELS * KERNEL_SIZE
-            seed = rescale_f32(BIAS_MANTISSAS[oc], BIAS_SCALE, s_acc)
             for out_pos in range(geom["out_len"]):
                 fvi, fvk, vc = window_slice_1d_full(geom, out_pos)
-                acc = seed
+                acc = gold["seeds"][oc]
                 partial = 0
                 current_group = None
                 for ic in range(IN_CHANNELS):
@@ -306,20 +300,17 @@ def ref_same_group_once_per_row():
                     for i in range(vc):
                         if row_group != current_group:
                             if current_group is not None:
-                                ps = (torch.tensor(X_SCALE, dtype=torch.float32) *
-                                      torch.tensor(SAME_W_SCALES[current_group],
-                                                   dtype=torch.float32)).item()
-                                acc += rescale_f32(partial, ps, s_acc)
+                                m_g, e_g = ws[current_group]
+                                acc += mul_shift_round_half_away(partial, m_g,
+                                                                 e_max - e_g + 15 - frac)
                             partial = 0
                             current_group = row_group
                         w_idx = w_base + ic * KERNEL_SIZE + fvk + i
                         x_val = X_MANTISSAS[(b * IN_CHANNELS + ic) * INPUT_LENGTH + fvi + i]
                         partial += x_val * W_MANTISSAS[w_idx]
                 if current_group is not None:
-                    ps = (torch.tensor(X_SCALE, dtype=torch.float32) *
-                          torch.tensor(SAME_W_SCALES[current_group],
-                                       dtype=torch.float32)).item()
-                    acc += rescale_f32(partial, ps, s_acc)
+                    m_g, e_g = ws[current_group]
+                    acc += mul_shift_round_half_away(partial, m_g, e_max - e_g + 15 - frac)
                 out.append(acc)
     return out
 
@@ -348,13 +339,15 @@ def gather_combine_counts(group_size, conv_groups, in_channels, out_channels, ke
     return counts
 
 
-def torch_forward_check(name, gold, s_acc, x_mant, x_scale, w_mant, w_scales, group_size,
+def torch_forward_check(name, r, x_mant, x_scale, w_mant, w_scales, group_size,
                         bias_mant, bias_scale, in_channels, out_channels, kernel_size,
                         input_length, conv_groups, torch_padding):
-    """Cross-check the forward emulation against F.conv1d on the SAME
-    dequantized operands: per element |gold*s_acc - ref| <= 0.5*(combines_i +
-    1)*s_acc (weight-run combines + the bias seed, each one HALF_AWAY
-    rounding) + float-noise headroom."""
+    """Cross-check the forward fold emulation against F.conv1d on the SAME
+    dequantized operands: per element |gold*A - ref| <= 0.5*(combines_i + 1)*A
+    (one rounding per group-run combine + the bias seed) + float-noise
+    headroom. The combine counts are recounted here independently of the
+    reference (BATCH == 1)."""
+    gold, acc = r["out"], r["acc_scale"]
     w_deq = torch.tensor(dequant_grouped(w_mant, w_scales, group_size),
                          dtype=torch.float32).reshape(out_channels,
                                                       in_channels // conv_groups, kernel_size)
@@ -365,12 +358,13 @@ def torch_forward_check(name, gold, s_acc, x_mant, x_scale, w_mant, w_scales, gr
     counts = gather_combine_counts(group_size, conv_groups, in_channels, out_channels,
                                    kernel_size, input_length,
                                    "SAME" if torch_padding != 0 else "VALID")
+    assert counts == r["combines"], f"{name}: combine counts disagree with the reference"
     assert len(ref) == len(gold) == len(counts)
-    for i, (g, r) in enumerate(zip(gold, ref)):
-        bound = 0.5 * (counts[i] + 1) * s_acc + 1e-4
-        assert abs(g * s_acc - r) <= bound, (
+    for i, (g, rv) in enumerate(zip(gold, ref)):
+        bound = 0.5 * (counts[i] + 1) * acc + 1e-4
+        assert abs(g * acc - rv) <= bound, (
             f"{name}: emulation deviates from torch beyond the combine bound at "
-            f"{i}: |{g * s_acc} - {r}| > {bound}")
+            f"{i}: |{g * acc} - {rv}| > {bound}")
 
 
 def fixture_same_padding():
@@ -381,23 +375,21 @@ def fixture_same_padding():
     # while the minimal SAME pad is symmetric (total=2, padLeft=1 here).
     assert geom["pad_left"] == 1 and geom["out_len"] == INPUT_LENGTH
 
-    out, s_acc, out_len = conv1d_grouped_ref(
-        X_MANTISSAS, X_SCALE, W_MANTISSAS, SAME_W_SCALES, SAME_GROUP_SIZE,
-        BATCH, IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE, INPUT_LENGTH,
-        padding_type="SAME", bias_mantissas=BIAS_MANTISSAS, bias_scale=BIAS_SCALE)
-    assert out_len == INPUT_LENGTH
+    r = fold_forward(X_MANTISSAS, X_SCALE, W_MANTISSAS, SAME_W_SCALES, SAME_GROUP_SIZE,
+                     IN_CHANNELS, OUT_CHANNELS, BIAS_MANTISSAS, BIAS_SCALE, padding_type="SAME")
+    assert r["out_len"] == INPUT_LENGTH
 
-    wrong = ref_same_group_once_per_row()
-    assert wrong != out, (
+    wrong = ref_same_group_once_per_row(r)
+    assert wrong != r["out"], (
         "samePad: the once-per-row group lookup reproduces the gold -- "
         "mutation (ii) would be vacuous")
 
-    torch_forward_check("samePad", out, s_acc, X_MANTISSAS, X_SCALE, W_MANTISSAS,
+    torch_forward_check("samePad", r, X_MANTISSAS, X_SCALE, W_MANTISSAS,
                         SAME_W_SCALES, SAME_GROUP_SIZE, BIAS_MANTISSAS, BIAS_SCALE,
                         IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE, INPUT_LENGTH, 1, 1)
     return {"wMantissas": W_MANTISSAS, "wScales": SAME_W_SCALES,
             "groupSize": SAME_GROUP_SIZE, "numGroups": SAME_NUM_GROUPS,
-            "outMantissas": out, "outScale": s_acc, "outLen": out_len}
+            "outMantissas": r["out"], "outScale": r["acc_scale"], "outLen": r["out_len"]}
 
 
 # ---- PR3 Task 3, coverage gap (b): conv-groups=2 x quant-groups. Weight
@@ -440,19 +432,18 @@ def fixture_conv_groups():
         "systems never disagree (fixture vacuous)")
     assert CG_W_SCALES[0] != max(CG_W_SCALES)
 
-    out, s_acc, out_len = conv1d_grouped_ref(
-        CG_X_MANTISSAS, CG_X_SCALE, CG_W_MANTISSAS, CG_W_SCALES, CG_GROUP_SIZE,
-        BATCH, CG_IN_CHANNELS, CG_OUT_CHANNELS, CG_KERNEL_SIZE, CG_INPUT_LENGTH,
-        bias_mantissas=CG_BIAS_MANTISSAS, bias_scale=CG_BIAS_SCALE,
-        conv_groups=CG_CONV_GROUPS)
-    assert out_len == CG_OUT_LEN
-    assert any(v != 0 for v in out), "cg: gold is vacuously all-zero"
+    assert CG_INPUT_LENGTH == INPUT_LENGTH and CG_KERNEL_SIZE == KERNEL_SIZE
+    r = fold_forward(CG_X_MANTISSAS, CG_X_SCALE, CG_W_MANTISSAS, CG_W_SCALES, CG_GROUP_SIZE,
+                     CG_IN_CHANNELS, CG_OUT_CHANNELS, CG_BIAS_MANTISSAS, CG_BIAS_SCALE,
+                     conv_groups=CG_CONV_GROUPS)
+    assert r["out_len"] == CG_OUT_LEN
+    assert any(v != 0 for v in r["out"]), "cg: gold is vacuously all-zero"
 
-    torch_forward_check("cg", out, s_acc, CG_X_MANTISSAS, CG_X_SCALE, CG_W_MANTISSAS,
+    torch_forward_check("cg", r, CG_X_MANTISSAS, CG_X_SCALE, CG_W_MANTISSAS,
                         CG_W_SCALES, CG_GROUP_SIZE, CG_BIAS_MANTISSAS, CG_BIAS_SCALE,
                         CG_IN_CHANNELS, CG_OUT_CHANNELS, CG_KERNEL_SIZE, CG_INPUT_LENGTH,
                         CG_CONV_GROUPS, 0)
-    return {"outMantissas": out, "outScale": s_acc}
+    return {"outMantissas": r["out"], "outScale": r["acc_scale"]}
 
 
 def emit_fixture(parts, prefix, fx):
@@ -492,8 +483,17 @@ def main() -> int:
         "\n",
     ]
 
-    emit_fixture(parts, "PerChannel", fixture_per_channel())
+    per_channel = fixture_per_channel()
+    emit_fixture(parts, "PerChannel", per_channel)
     emit_fixture(parts, "General", fixture_general_groups())
+    # the ASYM twin layer's forward: same mantissas and scales, the image's code
+    # range, which proves one fraction bit less than the SYM range
+    per_channel_asym = fixture_per_channel(W_ASYM_IMAGE_RANGE)
+    assert per_channel_asym["fracBits"] == per_channel["fracBits"] - 1, (
+        "forward: the ASYM image's doubled range must cost exactly one fold fraction bit")
+    parts.append(emit_int32_array("kPerChannelAsymOutMantissas",
+                                  torch.tensor(per_channel_asym["outMantissas"])))
+    parts.append(emit_float_scalar("kPerChannelAsymOutScale", per_channel_asym["outScale"]))
 
     # PR3 Task 3: dx fixtures reuse the forward fixtures' group shapes/scales;
     # only the lossGrad and the adjoint-scatter golds are new.

@@ -58,14 +58,15 @@ test):
 
 Group-quant PR3 (Task 3) addition -- ConvT1d dx (adjoint GATHER): backward
 propLoss consumes the grouped weight through conv1dKernelSymInt32Grouped in
-the adjoint role (running group-partial, one rescale-combine per group RUN of
-the reduction, s_acc = lossScale*max(scales)). Gold via
-sym_gold.convT1d_dx_grouped_ref (the PR2 gather emulation under the
-ConvT1d-adjoint parameter remapping); cross-checked against a PyTorch float
-autograd reference (y.backward(lossGrad)) within the per-element bound
-0.5*C_i*s_acc, C_i = combines (group runs) per output reduction -- the gather
-error model, vs the scatter's per-product model above. The per-fixture max
-C_i is emitted (kConvTDx*MaxCombines) for the C float-path tolerance.
+the adjoint role (running group-partial, one integer combine per group RUN of
+the reduction at A = {loss.m, loss.e + E + 15 - F}, linq fold T4). Gold via
+sym_gold.convT1d_dx_grouped_fold_ref (the gather fold emulation under the
+ConvT1d-adjoint parameter remapping; int12 lossGrad, SYM weight range);
+cross-checked against a PyTorch float autograd reference (y.backward(lossGrad))
+within the per-element bound 0.5*C_i*A, C_i = combines (group runs) per
+output reduction -- the gather error model, vs the scatter's per-input-code
+model above. The per-fixture max C_i is emitted (kConvTDx*MaxCombines) for the
+C float-path tolerance.
 
 Run via `uv run` (CMake wires this automatically, see CMakeLists.txt).
 """
@@ -79,7 +80,7 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
 from dyadic_scale import CEIL, canon, product_scale  # noqa: F401
-from sym_gold import (assert_rounding_canary, convT1d_dx_grouped_ref, convT1d_grouped_ref,
+from sym_gold import (assert_rounding_canary, convT1d_dx_grouped_fold_ref, convT1d_grouped_ref,
                       convt_grouped_fold_ref, decompose, emit_float_array, emit_float_scalar,
                       emit_int32_array, emit_int32_scalar, rescale_f32, window_geometry_1d,
                       window_slice_1d_full)
@@ -256,10 +257,12 @@ def dx_combine_counts(group_size):
 
 
 def fixture_dx(name, w_scales, group_size):
-    out, s_acc = convT1d_dx_grouped_ref(
-        DX_LOSS_MANTISSAS, DX_LOSS_SCALE, W_MANTISSAS, w_scales, group_size,
-        BATCH, IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE, INPUT_LENGTH,
-        STRIDE, DILATION, OUTPUT_PADDING)
+    # the lossGrad wire is declared X_BITS (12) wide, like the forward input
+    r = convT1d_dx_grouped_fold_ref(
+        DX_LOSS_MANTISSAS, DX_LOSS_SCALE, X_BITS, W_MANTISSAS, w_scales, group_size,
+        W_SYM_RANGE[0], W_SYM_RANGE[1], BATCH, IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE,
+        INPUT_LENGTH, STRIDE, DILATION, OUTPUT_PADDING)
+    out, s_acc = r["out"], r["acc_scale"]
     assert any(v != 0 for v in out), f"dx {name}: gold is vacuously all-zero"
 
     # Cross-check vs the PyTorch float autograd reference on the SAME
@@ -276,12 +279,13 @@ def fixture_dx(name, w_scales, group_size):
     y.backward(gy)
     ref = x.grad.flatten().tolist()
     counts = dx_combine_counts(group_size)
+    assert counts == r["combines"], f"dx {name}: combine counts disagree with the reference"
     assert len(ref) == len(out) == len(counts)
-    for i, (g, r) in enumerate(zip(out, ref)):
+    for i, (g, rv) in enumerate(zip(out, ref)):
         bound = 0.5 * counts[i] * s_acc + 1e-4
-        assert abs(g * s_acc - r) <= bound, (
+        assert abs(g * s_acc - rv) <= bound, (
             f"dx {name}: emulation deviates from torch autograd beyond the gather "
-            f"bound at {i}: |{g * s_acc} - {r}| > {bound}")
+            f"bound at {i}: |{g * s_acc} - {rv}| > {bound}")
     return {"outMantissas": out, "outScale": s_acc, "maxCombines": max(counts)}
 
 

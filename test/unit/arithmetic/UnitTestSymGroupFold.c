@@ -400,6 +400,73 @@ void testGroupFoldInitSeedForcesLegacy(void) {
     TEST_ASSERT_EQUAL_UINT8(1, edge.fracBits);
 }
 
+/* ---- symGroupFoldBiasSeedAtFracMax ----
+ * ceil(max|bias| * biasScale / A8), A8 = {inScale.m, inScale.e + E + 15 - 8}:
+ * the bias seed bound symGroupFoldInit takes, in exact dyadic arithmetic. */
+
+void testGroupFoldBiasSeedAtFracMaxIsTheExactCeil(void) {
+    /* E = -14, inScale = 1: A8 = 2^14 * 2^(-14 - 14 + 15 - 8) = 2^-7 */
+    odtScale_t scales[2] = {{.m = 16384, .e = -14}, {.m = 16384, .e = -20}};
+    symQConfig_t qc = groupedConfig(scales, 2);
+    const odtScale_t one = {.m = 16384, .e = -14};
+    const int32_t bias[3] = {3, -7, 5};
+    /* max|b| = 7 at bias scale 1: 7 * 2^7, exact */
+    TEST_ASSERT_EQUAL_UINT64(896u, symGroupFoldBiasSeedAtFracMax(bias, 3, one, &qc, one));
+    /* bias scale 1 + 2^-14: 7 * 128 * (1 + 2^-14) = 896.05..., ceil 897 */
+    const odtScale_t justAboveOne = {.m = 16385, .e = -14};
+    TEST_ASSERT_EQUAL_UINT64(897u, symGroupFoldBiasSeedAtFracMax(bias, 3, justAboveOne, &qc, one));
+    /* the max magnitude sits on the negative side, INT32_MIN included */
+    const int32_t minBias[2] = {1, INT32_MIN};
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)1 << 38,
+                             symGroupFoldBiasSeedAtFracMax(minBias, 2, one, &qc, one));
+}
+
+void testGroupFoldBiasSeedAtFracMaxEdges(void) {
+    odtScale_t scales[2] = {{.m = 16384, .e = -14}, {.m = 16384, .e = -20}};
+    symQConfig_t qc = groupedConfig(scales, 2);
+    const odtScale_t one = {.m = 16384, .e = -14};
+    const int32_t zeros[2] = {0, 0};
+    TEST_ASSERT_EQUAL_UINT64(0u, symGroupFoldBiasSeedAtFracMax(zeros, 2, one, &qc, one));
+    TEST_ASSERT_EQUAL_UINT64(0u, symGroupFoldBiasSeedAtFracMax(zeros, 0, one, &qc, one));
+    /* a bias far below A8 still needs one code of seed room */
+    const int32_t tinyBias[1] = {1};
+    const odtScale_t tiny = {.m = 16384, .e = -140};
+    TEST_ASSERT_EQUAL_UINT64(1u, symGroupFoldBiasSeedAtFracMax(tinyBias, 1, tiny, &qc, one));
+    /* a bias far above A8 saturates instead of wrapping */
+    const odtScale_t huge = {.m = 32767, .e = 100};
+    TEST_ASSERT_EQUAL_UINT64(UINT64_MAX,
+                             symGroupFoldBiasSeedAtFracMax(tinyBias, 1, huge, &qc, one));
+}
+
+/* The HAR forward shapes (linq fold T4): conv1 9->16 K7 (N = 63), conv2
+ * 16->32 K5 (N = 80), conv3 32->64 K3 (N = 96); int12 activations, int8
+ * per-channel weights, a bias of real magnitude 0.25 (int12 codes at
+ * 0.25/2047). Activations absmax 4.0 (0.0019541...), weights absmax 0.4
+ * (scales 0.4/127 ... 0.1/127). Without the bias F = 7 / 6 / 6. The bias
+ * seed is ~8.4e6 codes at F = 8 and ~4.2e6 at conv1's F = 7, inside the
+ * ~3.4e7 the conv1 terms leave free, so the bias costs no fraction bit (a
+ * bias ~16x larger, real ~4, would drop conv1 to F = 6). */
+void testGroupFoldInitHarForwardShapes(void) {
+    odtScale_t scales[3] = {odtScaleFromFloat(0.4f / 127.0f, ODT_SCALE_NEAREST),
+                            odtScaleFromFloat(0.25f / 127.0f, ODT_SCALE_NEAREST),
+                            odtScaleFromFloat(0.1f / 127.0f, ODT_SCALE_NEAREST)};
+    symQConfig_t qc = groupedConfig(scales, 3);
+    const odtScale_t inScale = odtScaleFromFloat(4.0f / 2047.0f, ODT_SCALE_NEAREST);
+    const odtScale_t biasScale = odtScaleFromFloat(0.25f / 2047.0f, ODT_SCALE_NEAREST);
+    const int32_t bias[2] = {2047, -1500};
+    const uint64_t seed = symGroupFoldBiasSeedAtFracMax(bias, 2, biasScale, &qc, inScale);
+    const size_t nMax[3] = {63, 80, 96};
+    const uint8_t expectF[3] = {7, 6, 6};
+    for (size_t i = 0; i < 3; i++) {
+        symGroupFold_t seedless = symGroupFoldInit(&qc, inScale, 12, nMax[i], -128, 127, 0);
+        symGroupFold_t withBias = symGroupFoldInit(&qc, inScale, 12, nMax[i], -128, 127, seed);
+        TEST_ASSERT_FALSE(seedless.legacy);
+        TEST_ASSERT_FALSE(withBias.legacy);
+        TEST_ASSERT_EQUAL_UINT8(expectF[i], seedless.fracBits);
+        TEST_ASSERT_EQUAL_UINT8(expectF[i], withBias.fracBits);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMulShiftRoundMatchesInt64ReferenceHalfAway);
@@ -414,5 +481,8 @@ int main(void) {
     RUN_TEST(testGroupFoldInitAccScaleIsExactDyadic);
     RUN_TEST(testGroupFoldInitSeedAtFracMaxLowersF);
     RUN_TEST(testGroupFoldInitSeedForcesLegacy);
+    RUN_TEST(testGroupFoldBiasSeedAtFracMaxIsTheExactCeil);
+    RUN_TEST(testGroupFoldBiasSeedAtFracMaxEdges);
+    RUN_TEST(testGroupFoldInitHarForwardShapes);
     return UNITY_END();
 }

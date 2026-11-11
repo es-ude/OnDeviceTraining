@@ -22,6 +22,7 @@
 #define GOLD_I32(e, a, n) TEST_ASSERT_EQUAL_INT32_ARRAY((e), (a), (n))
 #define GOLD_F32_SCALAR(e, a) TEST_ASSERT_EQUAL_MEMORY(&(float){(e)}, &(float){(a)}, sizeof(float))
 #define GOLD_U32_SCALAR(e, a) TEST_ASSERT_EQUAL_UINT32((e), (a))
+#include "expected_conv1d_grouped_fold.h"
 #include "golden_conv1d_grouped.h"
 
 /* Grouped-weight ctx fixture: the stored dtype's code domain fixes the
@@ -1700,40 +1701,45 @@ void testConv1dKernelSymStampsResultWidthIncludesSeed(void) {
     TEST_ASSERT_EQUAL_UINT8(12, gCgOutBits);
 }
 
-/* int4 x grouped int4 (2 groups x 4) over 8 terms plus a bias at the
- * accumulator scale. The output is the RESCALED accumulator, so its width is
- * the rescaled site's over the weight's EXACT code range (Conv1dKernel.c,
- * SymGroupedWeight.h). A stored SYM int4 weight is [-8, 7]: one term spans
- * [-56, 64], 8 slacked terms [-457, 521] (slack 9 per side); bias 1023 -> 1544
- * -> 12, bias 500 -> 1021 -> 11, bias -1023 -> 1480 on the negative side ->
- * 12. Counting the weight one bit wide ([-16, 15], 1033 per side) would say
- * 13 for the bias 1023. The raw group partial alone is 11 (4 * 2^7 = 512). */
-void testConv1dKernelSymGroupedStampsRescaledWidth(void) {
+/* int4 x grouped int4 (2 groups x 4) over 8 terms of code 1, scales 1: the
+ * fold path with F = 8 (Conv1dKernel.c, SymGroupFold.h), so the codes are the
+ * sum times 2^(F-1) = 128 at A = 2^-7 and a bias b seeds as 128b. The width is
+ * the fold site's over the weight's EXACT code range (SymGroupedWeight.h): a
+ * stored SYM int4 weight is [-8, 7] against x widened to [-2049, 1793], one
+ * term spans [-14344, 16392], 8 terms [-114752, 131136] -> 19 bits seedless.
+ * Bias 1024 (seed 131072) -> 262208 -> 20, bias 1023 -> 262080 -> 19, bias
+ * -1200 -> -268352 on the negative side -> 20, bias -1023 -> 19. */
+void testConv1dKernelSymGroupedStampsFoldWidthIncludesBiasSeed(void) {
     cgFill(8, 1, 1, false);
-    int32_t bias = 1023;
-    TEST_ASSERT_EQUAL_INT32(1023 + 8, cgRun(8, 1, 1, 4, 4, &bias, 2));
-    symAccumSite_t rescaled = symAccumSiteInitRescaled("t", 8, 4, 4, 1023);
-    TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&rescaled), gCgOutBits);
-    TEST_ASSERT_EQUAL_UINT8(12, gCgOutBits);
-    bias = 500;
-    TEST_ASSERT_EQUAL_INT32(500 + 8, cgRun(8, 1, 1, 4, 4, &bias, 2));
-    TEST_ASSERT_EQUAL_UINT8(11, gCgOutBits);
+    TEST_ASSERT_EQUAL_INT32(8 * 128, cgRun(8, 1, 1, 4, 4, NULL, 2));
+    symAccumSite_t fold = symAccumSiteInitRanges("t", 8, -2049, 1793, -8, 7, 0);
+    TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&fold), gCgOutBits);
+    TEST_ASSERT_EQUAL_UINT8(19, gCgOutBits);
+    int32_t bias = 1024;
+    TEST_ASSERT_EQUAL_INT32((8 + 1024) * 128, cgRun(8, 1, 1, 4, 4, &bias, 2));
+    TEST_ASSERT_EQUAL_UINT8(20, gCgOutBits);
+    bias = 1023;
+    TEST_ASSERT_EQUAL_INT32((8 + 1023) * 128, cgRun(8, 1, 1, 4, 4, &bias, 2));
+    TEST_ASSERT_EQUAL_UINT8(19, gCgOutBits);
+    bias = -1200;
+    TEST_ASSERT_EQUAL_INT32((8 - 1200) * 128, cgRun(8, 1, 1, 4, 4, &bias, 2));
+    TEST_ASSERT_EQUAL_UINT8(20, gCgOutBits);
     bias = -1023;
-    TEST_ASSERT_EQUAL_INT32(8 - 1023, cgRun(8, 1, 1, 4, 4, &bias, 2));
-    TEST_ASSERT_EQUAL_UINT8(12, gCgOutBits);
+    TEST_ASSERT_EQUAL_INT32((8 - 1023) * 128, cgRun(8, 1, 1, 4, 4, &bias, 2));
+    TEST_ASSERT_EQUAL_UINT8(19, gCgOutBits);
 }
 
-/* The same site over a stored ASYM int4 weight's image [-15, 15]: +-120 per
- * term, 969 per side; bias 54 -> 1023 -> 11 (the image counted one bit wide
- * says 12), bias 500 -> 1469 -> 12 (the SYM range says 11). */
+/* The same fold site over a stored ASYM int4 weight's image [-15, 15]: +-30735
+ * per term, 245880 per side -> 19 seedless (the image counted one bit wide,
+ * [-16, 15], says 20); bias 500 (seed 64000) -> 309880 -> 20 (the SYM range
+ * says 19). */
 void testConv1dKernelSymGroupedAsymImageStampsItsFullRange(void) {
     cgFill(8, 1, 1, false);
-    int32_t bias = 54;
-    TEST_ASSERT_EQUAL_INT32(54 + 8, cgRunAsymImage(8, 1, 1, 4, 4, &bias, 2));
-    TEST_ASSERT_EQUAL_UINT8(11, gCgOutBits);
-    bias = 500;
-    TEST_ASSERT_EQUAL_INT32(500 + 8, cgRunAsymImage(8, 1, 1, 4, 4, &bias, 2));
-    TEST_ASSERT_EQUAL_UINT8(12, gCgOutBits);
+    TEST_ASSERT_EQUAL_INT32(8 * 128, cgRunAsymImage(8, 1, 1, 4, 4, NULL, 2));
+    TEST_ASSERT_EQUAL_UINT8(19, gCgOutBits);
+    int32_t bias = 500;
+    TEST_ASSERT_EQUAL_INT32((8 + 500) * 128, cgRunAsymImage(8, 1, 1, 4, 4, &bias, 2));
+    TEST_ASSERT_EQUAL_UINT8(20, gCgOutBits);
 }
 
 /* The #516 repro on a conv output: the raw 1x1x1 product -2048 * -2048 = 2^22
@@ -1798,10 +1804,12 @@ CG_DTYPE_DEATH(testConv1dKernelSymGroupedRejectsFloatBias, CG_POISON_BIAS, 2, &k
 CG_DTYPE_DEATH(testConv1dKernelSymGroupedRejectsFloatOutput, CG_POISON_Y, 2, NULL,
                "conv1dKernelSymInt32Grouped: output must be SYM_INT32")
 
-/* ---- Goldens captured before the grouped-kernel range-cursor refactor -----
- * Outputs of conv1dKernelSymInt32Grouped as it was before its per-element
- * group division is replaced by a range cursor; the refactor must be
- * bit-identical, SR stream included. batch 2, Cin 2 (conv groups 1, so
+/* ---- Grouped-kernel goldens (LCG fixture) -------------------------------
+ * kCgGold* were captured before the per-element group division became a
+ * range cursor (that refactor was bit-identical, SR stream included); since
+ * linq fold T4 they pin the LEGACY float path (17-bit input), and the int8
+ * fixture's fold-path golds are kCgFold* (Python-int HALF_AWAY, kernel-recorded
+ * SR). batch 2, Cin 2 (conv groups 1, so
  * inChPerGroup 2), L 8, K 5, stride 2, dilation 2: one weight row is 10 codes.
  * Every quantization group size {3, 4, 7, 10 (per channel)} runs under SAME
  * (padLeft 3), EXPLICIT 3, and EXPLICIT 9 (>= the dilated reach 9: output 0
@@ -1855,12 +1863,13 @@ typedef struct cgGoldOut {
     int32_t y[CG_GOLD_MAX_OUT];
     float scale;
     uint8_t bits;
-    float sAcc;      /* recomputed here for the fully-padded check */
     int32_t bias[7]; /* codes */
     float biasScale;
 } cgGoldOut_t;
 
-static void cgGoldRun(const cgGoldCase_t *c, roundingMode_t rm, rngStream_t *rs, cgGoldOut_t *out) {
+/* xBits: the input's declared width (8; 17 takes the legacy float path). */
+static void cgGoldRun(const cgGoldCase_t *c, uint8_t xBits, roundingMode_t rm, rngStream_t *rs,
+                      cgGoldOut_t *out) {
     uint32_t s = 4049u + (uint32_t)(c->groupSize * 16 + c->padding);
     size_t wElems = c->outC * CG_GOLD_CIN * 5;
     size_t numGroups = wElems / c->groupSize;
@@ -1876,11 +1885,8 @@ static void cgGoldRun(const cgGoldCase_t *c, roundingMode_t rm, rngStream_t *rs,
         out->bias[i] = cgGoldCode(&s, 200);
     }
     odtScale_t scales[10];
-    float maxScale = 0.0f;
     for (size_t g = 0; g < numGroups; g++) {
         scales[g] = odtTestScale(cgGoldGroupScale(g, numGroups));
-        maxScale =
-            cgGoldGroupScale(g, numGroups) > maxScale ? cgGoldGroupScale(g, numGroups) : maxScale;
     }
     symQConfig_t groups = {.scales = scales,
                            .numGroups = numGroups,
@@ -1898,7 +1904,7 @@ static void cgGoldRun(const cgGoldCase_t *c, roundingMode_t rm, rngStream_t *rs,
     setShape(&yS, yDims, 3, order);
     setShape(&bS, bDims, 1, order);
     symInt32QConfig_t xQC, wQC, yQC, bQC;
-    initSymInt32QConfigWithQMaxBits(rm, &xQC, 8);
+    initSymInt32QConfigWithQMaxBits(rm, &xQC, xBits);
     initSymInt32QConfigWithQMaxBits(rm, &wQC, 8); /* grouped scratch: mode = the op's */
     initSymInt32QConfigWithQMaxBits(rm, &yQC, UNSTAMPED_WIDTH);
     initSymInt32QConfigWithQMaxBits(rm, &bQC, 12);
@@ -1923,23 +1929,55 @@ static void cgGoldRun(const cgGoldCase_t *c, roundingMode_t rm, rngStream_t *rs,
     conv1dKernelSymInt32Grouped(&xT, &wT, &bT, &kernel, 1, &yT, &groupedWeight, rs);
     out->scale = odtScaleToFloat(yQC.scale);
     out->bits = yQC.qMaxBits;
-    out->sAcc = 0.25f * maxScale;
     out->biasScale = odtScaleToFloat(bQC.scale);
 }
 
+static float cgFoldScale(int32_t accM, int32_t accE) {
+    return odtScaleToFloat((odtScale_t){.m = (uint16_t)accM, .e = (int16_t)accE});
+}
+
+/* SR against the HALF_AWAY gold on a fixture whose combines are all exact
+ * (k/64 group scales, generator-asserted): every code equals the gold except
+ * through the bias seed, which SR may lift by 1 -- the same lift for every
+ * (b, outPos) of one output channel. */
+static void cgAssertSrIsHaUpToSeedLift(const int32_t *ha, const int32_t *sr, size_t batch,
+                                       size_t outC, size_t outLen) {
+    for (size_t oc = 0; oc < outC; oc++) {
+        const int32_t lift = sr[oc * outLen] - ha[oc * outLen];
+        TEST_ASSERT_TRUE(lift >= -1 && lift <= 1);
+        for (size_t b = 0; b < batch; b++) {
+            for (size_t p = 0; p < outLen; p++) {
+                size_t i = (b * outC + oc) * outLen + p;
+                TEST_ASSERT_EQUAL_INT32(ha[i] + lift, sr[i]);
+            }
+        }
+    }
+}
+
+static const int32_t *const kCgFoldHa[CG_GOLD_NUM_CASES] = {
+    kCgFoldHa0, kCgFoldHa1, kCgFoldHa2, kCgFoldHa3, kCgFoldHa4,  kCgFoldHa5,
+    kCgFoldHa6, kCgFoldHa7, kCgFoldHa8, kCgFoldHa9, kCgFoldHa10, kCgFoldHa11};
+static const int32_t *const kCgFoldSr[CG_GOLD_NUM_CASES] = {
+    kCgFoldSr0, kCgFoldSr1, kCgFoldSr2, kCgFoldSr3, kCgFoldSr4,  kCgFoldSr5,
+    kCgFoldSr6, kCgFoldSr7, kCgFoldSr8, kCgFoldSr9, kCgFoldSr10, kCgFoldSr11};
+
+/* int8 input: the fold path (F = 8). The gold is the Python-int fold reference
+ * (generate_expected_conv1d_grouped_fold.py), which reproduces this fixture's
+ * LCG operands; scale A = {inScale.m, inScale.e + E + 15 - F}, qMaxBits the
+ * fold site's width with the bias seeds. */
 void testConv1dGroupedGoldenHalfAway(void) {
     for (size_t ci = 0; ci < CG_GOLD_NUM_CASES; ci++) {
         const cgGoldCase_t *c = &kCgGoldCases[ci];
         cgGoldOut_t out;
-        cgGoldRun(c, HALF_AWAY, NULL, &out);
-        GOLD_I32(kCgGoldHa[ci], out.y, CG_GOLD_B * c->outC * c->outLen);
-        GOLD_F32_SCALAR(kCgGoldScale[ci], out.scale);
-        GOLD_U32_SCALAR(kCgGoldBits[ci], out.bits);
+        cgGoldRun(c, 8, HALF_AWAY, NULL, &out);
+        GOLD_I32(kCgFoldHa[ci], out.y, CG_GOLD_B * c->outC * c->outLen);
+        GOLD_F32_SCALAR(cgFoldScale(kCgFoldAccM[ci], kCgFoldAccE[ci]), out.scale);
+        GOLD_U32_SCALAR((uint32_t)kCgFoldBits[ci], out.bits);
         if (c->padding == 9) {
             /* output 0 has no valid tap: it is the bias seed alone */
             for (size_t b = 0; b < CG_GOLD_B; b++) {
                 for (size_t oc = 0; oc < c->outC; oc++) {
-                    int32_t seed = (int32_t)roundf((float)out.bias[oc] * out.biasScale / out.sAcc);
+                    int32_t seed = (int32_t)roundf((float)out.bias[oc] * out.biasScale / out.scale);
                     TEST_ASSERT_EQUAL_INT32(seed, out.y[(b * c->outC + oc) * c->outLen]);
                 }
             }
@@ -1947,18 +1985,23 @@ void testConv1dGroupedGoldenHalfAway(void) {
     }
 }
 
+/* SR on the fold path, recorded from the kernel (kCgFoldSr*, the Python
+ * reference has no C RNG); checked here against the HALF_AWAY gold up to the
+ * bias seed's lift. The stream state pins one draw per combine and per bias
+ * seed. SR rounding of inexact combines: testConv1dGroupedFoldSrIsUnbiased. */
 void testConv1dGroupedGoldenSr(void) {
     for (size_t ci = 0; ci < CG_GOLD_NUM_CASES; ci++) {
         const cgGoldCase_t *c = &kCgGoldCases[ci];
         rngStream_t rs = rngOpen(rngKeyFromSeed(0xC1D00000u + ci));
         uint32_t before = rs.state;
         cgGoldOut_t out;
-        cgGoldRun(c, SR_HALF_AWAY, &rs, &out);
+        cgGoldRun(c, 8, SR_HALF_AWAY, &rs, &out);
         TEST_ASSERT_NOT_EQUAL_UINT32(before, rs.state);
-        GOLD_I32(kCgGoldSr[ci], out.y, CG_GOLD_B * c->outC * c->outLen);
-        GOLD_U32_SCALAR(kCgGoldSrState[ci], rs.state);
-        GOLD_F32_SCALAR(kCgGoldScale[ci], out.scale);
-        GOLD_U32_SCALAR(kCgGoldBits[ci], out.bits);
+        cgAssertSrIsHaUpToSeedLift(kCgFoldHa[ci], out.y, CG_GOLD_B, c->outC, c->outLen);
+        GOLD_I32(kCgFoldSr[ci], out.y, CG_GOLD_B * c->outC * c->outLen);
+        GOLD_U32_SCALAR(kCgFoldSrState[ci], rs.state);
+        GOLD_F32_SCALAR(cgFoldScale(kCgFoldAccM[ci], kCgFoldAccE[ci]), out.scale);
+        GOLD_U32_SCALAR((uint32_t)kCgFoldBits[ci], out.bits);
     }
 }
 
@@ -1966,8 +2009,8 @@ void testConv1dGroupedGoldenSr(void) {
  * conv groups 2 (inChPerGroup 2), outC 4 (outChPerGroup 2), L 8, K 5, stride
  * 2, dilation 2, EXPLICIT 3, so outLen 3 and left padding enters every row
  * mid-row. A weight row (one oc) is 10 codes; group sizes 4 and 8 straddle
- * both the ic rows (5 codes) and the oc rows. Captured, like the cases above,
- * from the kernel before the range-cursor refactor. */
+ * both the ic rows (5 codes) and the oc rows (cursor loop); 10 and 20 are
+ * channel-aligned (one group per row / per two rows: the cursor-free loop). */
 #define CG2_GOLD_NUM_CASES 2
 #define CG2_GOLD_B 2
 #define CG2_GOLD_CIN 4
@@ -1977,17 +2020,14 @@ void testConv1dGroupedGoldenSr(void) {
 #define CG2_GOLD_W (CG2_GOLD_OUTC * 2 * 5)
 #define CG2_GOLD_Y (CG2_GOLD_B * CG2_GOLD_OUTC * CG2_GOLD_OUTLEN)
 
-static const size_t kCg2GoldGroupSize[CG2_GOLD_NUM_CASES] = {4, 8};
-static const int32_t *const kCg2GoldHa[CG2_GOLD_NUM_CASES] = {kCg2GoldHa0, kCg2GoldHa1};
-static const int32_t *const kCg2GoldSr[CG2_GOLD_NUM_CASES] = {kCg2GoldSr0, kCg2GoldSr1};
-
 typedef struct cg2GoldOut {
     int32_t y[CG2_GOLD_Y];
     float scale;
     uint8_t bits;
 } cg2GoldOut_t;
 
-static void cg2GoldRun(size_t groupSize, roundingMode_t rm, rngStream_t *rs, cg2GoldOut_t *out) {
+static void cg2GoldRun(size_t groupSize, uint8_t xBits, roundingMode_t rm, rngStream_t *rs,
+                       cg2GoldOut_t *out) {
     uint32_t s = 7121u + (uint32_t)groupSize;
     size_t numGroups = CG2_GOLD_W / groupSize;
     int32_t x[CG2_GOLD_B * CG2_GOLD_CIN * CG2_GOLD_L], w[CG2_GOLD_W], bias[CG2_GOLD_OUTC];
@@ -2020,7 +2060,7 @@ static void cg2GoldRun(size_t groupSize, roundingMode_t rm, rngStream_t *rs, cg2
     setShape(&yS, yDims, 3, order);
     setShape(&bS, bDims, 1, order);
     symInt32QConfig_t xQC, wQC, yQC, bQC;
-    initSymInt32QConfigWithQMaxBits(rm, &xQC, 8);
+    initSymInt32QConfigWithQMaxBits(rm, &xQC, xBits);
     initSymInt32QConfigWithQMaxBits(rm, &wQC, 8);
     initSymInt32QConfigWithQMaxBits(rm, &yQC, UNSTAMPED_WIDTH);
     initSymInt32QConfigWithQMaxBits(rm, &bQC, 12);
@@ -2043,47 +2083,511 @@ static void cg2GoldRun(size_t groupSize, roundingMode_t rm, rngStream_t *rs, cg2
     out->bits = yQC.qMaxBits;
 }
 
+typedef struct cg2FoldGold {
+    size_t groupSize;
+    const int32_t *ha, *sr;
+    uint32_t srState;
+    int32_t accM, accE, bits;
+    uint32_t srSeed;
+} cg2FoldGold_t;
+
+static void cg2AssertFoldGold(const cg2FoldGold_t *g) {
+    cg2GoldOut_t ha, sr;
+    cg2GoldRun(g->groupSize, 8, HALF_AWAY, NULL, &ha);
+    rngStream_t rs = rngOpen(rngKeyFromSeed(g->srSeed));
+    uint32_t before = rs.state;
+    cg2GoldRun(g->groupSize, 8, SR_HALF_AWAY, &rs, &sr);
+    TEST_ASSERT_NOT_EQUAL_UINT32(before, rs.state);
+    GOLD_I32(g->ha, ha.y, CG2_GOLD_Y);
+    cgAssertSrIsHaUpToSeedLift(g->ha, sr.y, CG2_GOLD_B, CG2_GOLD_OUTC, CG2_GOLD_OUTLEN);
+    GOLD_I32(g->sr, sr.y, CG2_GOLD_Y);
+    GOLD_U32_SCALAR(g->srState, rs.state);
+    GOLD_F32_SCALAR(cgFoldScale(g->accM, g->accE), ha.scale);
+    GOLD_F32_SCALAR(cgFoldScale(g->accM, g->accE), sr.scale);
+    GOLD_U32_SCALAR((uint32_t)g->bits, ha.bits);
+    GOLD_U32_SCALAR((uint32_t)g->bits, sr.bits);
+}
+
+/* Cursor loop (group sizes 4, 8), fold path: Python-int HALF_AWAY gold, SR
+ * recorded from the kernel. */
 void testConv1dGroupedGoldenConvGroups2(void) {
+    const cg2FoldGold_t golds[CG2_GOLD_NUM_CASES] = {
+        {4, kCg2FoldHa0, kCg2FoldSr0, kCg2FoldSrState[0], kCg2FoldAccM[0], kCg2FoldAccE[0],
+         kCg2FoldBits[0], 0xC2D00000u},
+        {8, kCg2FoldHa1, kCg2FoldSr1, kCg2FoldSrState[1], kCg2FoldAccM[1], kCg2FoldAccE[1],
+         kCg2FoldBits[1], 0xC2D00001u},
+    };
     for (size_t ci = 0; ci < CG2_GOLD_NUM_CASES; ci++) {
-        cg2GoldOut_t ha, sr;
-        cg2GoldRun(kCg2GoldGroupSize[ci], HALF_AWAY, NULL, &ha);
-        rngStream_t rs = rngOpen(rngKeyFromSeed(0xC2D00000u + ci));
-        uint32_t before = rs.state;
-        cg2GoldRun(kCg2GoldGroupSize[ci], SR_HALF_AWAY, &rs, &sr);
-        TEST_ASSERT_NOT_EQUAL_UINT32(before, rs.state);
-        GOLD_I32(kCg2GoldHa[ci], ha.y, CG2_GOLD_Y);
-        GOLD_I32(kCg2GoldSr[ci], sr.y, CG2_GOLD_Y);
-        GOLD_U32_SCALAR(kCg2GoldSrState[ci], rs.state);
-        GOLD_F32_SCALAR(kCg2GoldScale[ci], ha.scale);
-        GOLD_F32_SCALAR(kCg2GoldScale[ci], sr.scale);
-        GOLD_U32_SCALAR(kCg2GoldBits[ci], ha.bits);
-        GOLD_U32_SCALAR(kCg2GoldBits[ci], sr.bits);
+        cg2AssertFoldGold(&golds[ci]);
     }
 }
 
 /* Channel-aligned groups on the cg2 fixture: group size 10 is one group per
  * weight row (group == oc), 20 spans two rows (group == oc / 2). Pins the
- * group lookup of the cursor-free channel-aligned path; recorded from the
- * cursor kernel before that path existed. */
-static const size_t kCg2AlignedGoldGroupSize[2] = {10, 20};
-static const int32_t *const kCg2AlignedGoldHa[2] = {kCg2AlignedGoldHa0, kCg2AlignedGoldHa1};
-static const int32_t *const kCg2AlignedGoldSr[2] = {kCg2AlignedGoldSr0, kCg2AlignedGoldSr1};
-
+ * group lookup of the cursor-free channel-aligned fold loop. */
 void testConv1dGroupedGoldenConvGroups2ChannelAligned(void) {
+    const cg2FoldGold_t golds[2] = {
+        {10, kCg2AlignedFoldHa0, kCg2AlignedFoldSr0, kCg2AlignedFoldSrState[0],
+         kCg2AlignedFoldAccM[0], kCg2AlignedFoldAccE[0], kCg2AlignedFoldBits[0], 0xC2A00000u},
+        {20, kCg2AlignedFoldHa1, kCg2AlignedFoldSr1, kCg2AlignedFoldSrState[1],
+         kCg2AlignedFoldAccM[1], kCg2AlignedFoldAccE[1], kCg2AlignedFoldBits[1], 0xC2A00001u},
+    };
     for (size_t ci = 0; ci < 2; ci++) {
-        cg2GoldOut_t ha, sr;
-        cg2GoldRun(kCg2AlignedGoldGroupSize[ci], HALF_AWAY, NULL, &ha);
-        rngStream_t rs = rngOpen(rngKeyFromSeed(0xC2A00000u + ci));
-        uint32_t before = rs.state;
-        cg2GoldRun(kCg2AlignedGoldGroupSize[ci], SR_HALF_AWAY, &rs, &sr);
-        TEST_ASSERT_NOT_EQUAL_UINT32(before, rs.state);
-        GOLD_I32(kCg2AlignedGoldHa[ci], ha.y, CG2_GOLD_Y);
-        GOLD_I32(kCg2AlignedGoldSr[ci], sr.y, CG2_GOLD_Y);
-        GOLD_U32_SCALAR(kCg2AlignedGoldSrState[ci], rs.state);
-        GOLD_F32_SCALAR(kCg2AlignedGoldScale[ci], ha.scale);
-        GOLD_F32_SCALAR(kCg2AlignedGoldScale[ci], sr.scale);
-        GOLD_U32_SCALAR(kCg2AlignedGoldBits[ci], ha.bits);
-        GOLD_U32_SCALAR(kCg2AlignedGoldBits[ci], sr.bits);
+        cg2AssertFoldGold(&golds[ci]);
+    }
+}
+
+/* Review Focus 3: a 17-bit input takes the legacy float path, bit-identical
+ * to the pre-fold kernel -- kCgGold*, kCg2Gold* and kCg2AlignedGold* are the
+ * goldens recorded before the fold existed (codes, scale and the SR stream).
+ * Covers both legacy loops: the cursor loop (cgGold, cg2 4/8) and the
+ * channel-aligned loop (cgGold group size 10, cg2 10/20). The stamped width
+ * (#516) is the legacy rescaled site over the 17-bit x range with the bias
+ * seeds at sAcc; cgLegacyStampCountsTheSeed pins the seed's part of it. */
+static uint8_t cgLegacyBits(size_t nTerms, int32_t wMin, int32_t wMax, int32_t seedMin,
+                            int32_t seedMax) {
+    int32_t xMin, xMax;
+    symAccumWidthRange(17, &xMin, &xMax);
+    symAccumSite_t site = symAccumSiteInitRangesRescaled("t", nTerms, xMin, xMax, wMin, wMax, 0);
+    symAccumSiteSetSeedRange(&site, seedMin, seedMax);
+    return symAccumResultBits(&site);
+}
+
+/* 17-bit x times grouped int4 over 8 terms, scales 1 (sAcc = 1, so a bias b
+ * seeds as b): the rescaled site's positive side is 8 * 2^16 * 8 plus slack
+ * (4194313) -> 24 bits seedless; a bias of 2^22 lifts it past 2^23 -> 25. */
+static void cgLegacyStampCountsTheSeed(void) {
+    cgFill(8, 1, 1, false);
+    int32_t bias = 1 << 22;
+    TEST_ASSERT_EQUAL_INT32(8 + (1 << 22), cgRun(8, 1, 1, 17, 4, &bias, 2));
+    TEST_ASSERT_EQUAL_UINT8(cgLegacyBits(8, -8, 7, bias, bias), gCgOutBits);
+    TEST_ASSERT_EQUAL_UINT8(25, gCgOutBits);
+    TEST_ASSERT_EQUAL_UINT8(24, cgLegacyBits(8, -8, 7, 0, 0));
+}
+
+void testConv1dGroupedFoldFallsBackToLegacyForWideInput(void) {
+    for (size_t ci = 0; ci < CG_GOLD_NUM_CASES; ci++) {
+        const cgGoldCase_t *c = &kCgGoldCases[ci];
+        size_t n = CG_GOLD_B * c->outC * c->outLen;
+        cgGoldOut_t out;
+        cgGoldRun(c, 17, HALF_AWAY, NULL, &out);
+        GOLD_I32(kCgGoldHa[ci], out.y, n);
+        GOLD_F32_SCALAR(kCgGoldScale[ci], out.scale);
+        int32_t seedMin = 0, seedMax = 0;
+        for (size_t oc = 0; oc < c->outC; oc++) {
+            /* rescaleIntoAccumulatorScale(HALF_AWAY): round half away of the float quotient */
+            int32_t seed = (int32_t)roundf((float)out.bias[oc] * out.biasScale / out.scale);
+            seedMin = (oc == 0 || seed < seedMin) ? seed : seedMin;
+            seedMax = (oc == 0 || seed > seedMax) ? seed : seedMax;
+        }
+        GOLD_U32_SCALAR(cgLegacyBits(CG_GOLD_CIN * 5, -128, 127, seedMin, seedMax), out.bits);
+        rngStream_t rs = rngOpen(rngKeyFromSeed(0xC1D00000u + ci));
+        cgGoldRun(c, 17, SR_HALF_AWAY, &rs, &out);
+        GOLD_I32(kCgGoldSr[ci], out.y, n);
+        GOLD_U32_SCALAR(kCgGoldSrState[ci], rs.state);
+        GOLD_F32_SCALAR(kCgGoldScale[ci], out.scale);
+    }
+    const size_t groupSizes[4] = {4, 8, 10, 20};
+    const int32_t *ha[4] = {kCg2GoldHa0, kCg2GoldHa1, kCg2AlignedGoldHa0, kCg2AlignedGoldHa1};
+    const int32_t *sr[4] = {kCg2GoldSr0, kCg2GoldSr1, kCg2AlignedGoldSr0, kCg2AlignedGoldSr1};
+    const uint32_t state[4] = {kCg2GoldSrState[0], kCg2GoldSrState[1], kCg2AlignedGoldSrState[0],
+                               kCg2AlignedGoldSrState[1]};
+    const float scale[4] = {kCg2GoldScale[0], kCg2GoldScale[1], kCg2AlignedGoldScale[0],
+                            kCg2AlignedGoldScale[1]};
+    const uint32_t seeds[4] = {0xC2D00000u, 0xC2D00001u, 0xC2A00000u, 0xC2A00001u};
+    for (size_t ci = 0; ci < 4; ci++) {
+        cg2GoldOut_t out;
+        cg2GoldRun(groupSizes[ci], 17, HALF_AWAY, NULL, &out);
+        GOLD_I32(ha[ci], out.y, CG2_GOLD_Y);
+        GOLD_F32_SCALAR(scale[ci], out.scale);
+        rngStream_t rs = rngOpen(rngKeyFromSeed(seeds[ci]));
+        cg2GoldRun(groupSizes[ci], 17, SR_HALF_AWAY, &rs, &out);
+        GOLD_I32(sr[ci], out.y, CG2_GOLD_Y);
+        GOLD_U32_SCALAR(state[ci], rs.state);
+        GOLD_F32_SCALAR(scale[ci], out.scale);
+    }
+    cgLegacyStampCountsTheSeed();
+}
+
+/* ---- linq fold T4: the grouped gather's integer combine -------------------
+ * Each group run's raw int32 partial is combined once into the accumulator
+ * scale A = {inScale.m, inScale.e + E + 15 - F} (SymGroupFold.h):
+ * acc += round(partial * m_g * 2^-(E - e_g + 15 - F)). Golds:
+ * generate_expected_conv1d_grouped_fold.py (Python ints). Fixtures: batch 2,
+ * K 5, L 8, stride 2, dilation 2; channel/group2: Cin 2, Cout 3, EXPLICIT 9
+ * (Lout 9, output 0 has no valid tap); cg: Cin 4, Cout 4, conv groups 2,
+ * EXPLICIT 3 (Lout 3). int8 operands, non-dyadic group scales. */
+
+#define C1F_B 2
+#define C1F_K 5
+#define C1F_L 8
+#define C1F_MAX_CIN 4
+#define C1F_MAX_COUT 4
+#define C1F_MAX_W 40
+#define C1F_MAX_OUT (C1F_B * C1F_MAX_COUT * 9)
+#define C1F_MAX_GROUPS 20
+
+typedef struct c1FoldFixture {
+    size_t cin, cout, convGroups, padding, outLen;
+    const int32_t *x, *w, *bias;
+} c1FoldFixture_t;
+
+typedef struct c1FoldOut {
+    int32_t y[C1F_MAX_OUT];
+    odtScale_t scale;
+    uint8_t bits;
+} c1FoldOut_t;
+
+static const c1FoldFixture_t kC1FoldFx = {
+    2, 3, 1, 9, 9, kConv1dFoldX, kConv1dFoldW, kConv1dFoldBias};
+static const c1FoldFixture_t kC1FoldCg = {
+    4, 4, 2, 3, 3, kConv1dFoldCgX, kConv1dFoldCgW, kConv1dFoldCgBias};
+
+static size_t c1FoldOutN(const c1FoldFixture_t *f) {
+    return C1F_B * f->cout * f->outLen;
+}
+
+static void c1FoldScales(const float *values, size_t n, odtScale_t *scales) {
+    for (size_t g = 0; g < n; g++) {
+        scales[g] = odtTestScale(values[g]);
+    }
+}
+
+/* x / w default to the fixture's operands when NULL. */
+static void c1FoldRun(const c1FoldFixture_t *f, const int32_t *x, const int32_t *w,
+                      const odtScale_t *scales, size_t numGroups, size_t groupSize, bool withBias,
+                      roundingMode_t rm, rngStream_t *rs, c1FoldOut_t *out) {
+    const size_t xN = C1F_B * f->cin * C1F_L;
+    const size_t wN = f->cout * (f->cin / f->convGroups) * C1F_K;
+    TEST_ASSERT_EQUAL_size_t(wN, numGroups * groupSize);
+    int32_t xData[C1F_B * C1F_MAX_CIN * C1F_L], wData[C1F_MAX_W], biasData[C1F_MAX_COUT];
+    memcpy(xData, x != NULL ? x : f->x, xN * sizeof(int32_t));
+    memcpy(wData, w != NULL ? w : f->w, wN * sizeof(int32_t));
+    memcpy(biasData, f->bias, f->cout * sizeof(int32_t));
+    odtScale_t groupScales[C1F_MAX_GROUPS];
+    memcpy(groupScales, scales, numGroups * sizeof(odtScale_t));
+    symQConfig_t groups = {.scales = groupScales,
+                           .numGroups = numGroups,
+                           .groupSize = groupSize,
+                           .qBits = 8,
+                           .roundingMode = rm};
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&groups);
+    size_t xDims[] = {C1F_B, f->cin, C1F_L}, wDims[] = {f->cout, f->cin / f->convGroups, C1F_K};
+    size_t yDims[] = {C1F_B, f->cout, f->outLen}, bDims[] = {f->cout};
+    size_t order[] = {0, 1, 2};
+    shape_t xS, wS, yS, bS;
+    setShape(&xS, xDims, 3, order);
+    setShape(&wS, wDims, 3, order);
+    setShape(&yS, yDims, 3, order);
+    setShape(&bS, bDims, 1, order);
+    symInt32QConfig_t xQC, wQC, yQC, bQC;
+    initSymInt32QConfigWithQMaxBits(rm, &xQC, 8);
+    initSymInt32QConfigWithQMaxBits(rm, &wQC, 8);
+    initSymInt32QConfigWithQMaxBits(rm, &yQC, UNSTAMPED_WIDTH);
+    initSymInt32QConfigWithQMaxBits(rm, &bQC, 12);
+    xQC.scale = odtTestScale(kConv1dFoldXScale);
+    bQC.scale = odtTestScale(kConv1dFoldBiasScale);
+    quantization_t xQ, wQ, yQ, bQ;
+    initSymInt32Quantization(&xQC, &xQ);
+    initSymInt32Quantization(&wQC, &wQ);
+    initSymInt32Quantization(&yQC, &yQ);
+    initSymInt32Quantization(&bQC, &bQ);
+    tensor_t xT, wT, yT, bT;
+    setTensorValues(&xT, (uint8_t *)xData, &xS, &xQ, NULL);
+    setTensorValues(&wT, (uint8_t *)wData, &wS, &wQ, NULL);
+    setTensorValues(&yT, (uint8_t *)out->y, &yS, &yQ, NULL);
+    setTensorValues(&bT, (uint8_t *)biasData, &bS, &bQ, NULL);
+    kernel_t kernel;
+    initKernelExplicit(&kernel, C1F_K, f->padding, 2, 2);
+    conv1dKernelSymInt32Grouped(&xT, &wT, withBias ? &bT : NULL, &kernel, f->convGroups, &yT,
+                                &groupedWeight, rs);
+    out->scale = odtScaleLoad(&yQC.scale);
+    out->bits = yQC.qMaxBits;
+}
+
+static void c1FoldAssertGold(const c1FoldFixture_t *f, const float *wScales, size_t numGroups,
+                             size_t groupSize, const int32_t *expected, int32_t accM, int32_t accE,
+                             int32_t bits) {
+    odtScale_t scales[C1F_MAX_GROUPS];
+    c1FoldScales(wScales, numGroups, scales);
+    c1FoldOut_t out;
+    c1FoldRun(f, NULL, NULL, scales, numGroups, groupSize, true, HALF_AWAY, NULL, &out);
+    GOLD_I32(expected, out.y, c1FoldOutN(f));
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)accM, out.scale.m);
+    TEST_ASSERT_EQUAL_INT16((int16_t)accE, out.scale.e);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)bits, out.bits);
+}
+
+/* groupSize 10 = Cin * K: one group per output channel (cursor-free loop). */
+void testConv1dGroupedFoldGoldenHalfAwayChannel(void) {
+    TEST_ASSERT_EQUAL_size_t(c1FoldOutN(&kC1FoldFx), kConv1dFoldChannelOut_len);
+    c1FoldAssertGold(&kC1FoldFx, kConv1dFoldChannelWScales, (size_t)kConv1dFoldChannelNumGroups,
+                     (size_t)kConv1dFoldChannelGroupSize, kConv1dFoldChannelOut,
+                     kConv1dFoldChannelAccM, kConv1dFoldChannelAccE, kConv1dFoldChannelBits);
+}
+
+/* groupSize 2 against K = 5: groups straddle the tap rows, several combines
+ * per window (cursor loop). */
+void testConv1dGroupedFoldGoldenHalfAwayGroupSize2(void) {
+    c1FoldAssertGold(&kC1FoldFx, kConv1dFoldGroup2WScales, (size_t)kConv1dFoldGroup2NumGroups,
+                     (size_t)kConv1dFoldGroup2GroupSize, kConv1dFoldGroup2Out,
+                     kConv1dFoldGroup2AccM, kConv1dFoldGroup2AccE, kConv1dFoldGroup2Bits);
+}
+
+/* conv groups 2 on both fold loops: aligned (groupSize 10, one group per row)
+ * and cursor (groupSize 4, groups straddle the ic and oc rows). */
+void testConv1dGroupedFoldGoldenConvGroups2(void) {
+    TEST_ASSERT_EQUAL_size_t(c1FoldOutN(&kC1FoldCg), kConv1dFoldCgAlignedOut_len);
+    c1FoldAssertGold(&kC1FoldCg, kConv1dFoldCgAlignedWScales, (size_t)kConv1dFoldCgAlignedNumGroups,
+                     (size_t)kConv1dFoldCgAlignedGroupSize, kConv1dFoldCgAlignedOut,
+                     kConv1dFoldCgAlignedAccM, kConv1dFoldCgAlignedAccE, kConv1dFoldCgAlignedBits);
+    c1FoldAssertGold(&kC1FoldCg, kConv1dFoldCgCursorWScales, (size_t)kConv1dFoldCgCursorNumGroups,
+                     (size_t)kConv1dFoldCgCursorGroupSize, kConv1dFoldCgCursorOut,
+                     kConv1dFoldCgCursorAccM, kConv1dFoldCgCursorAccE, kConv1dFoldCgCursorBits);
+}
+
+/* The wire describes the codes: scale {inScale.m, inScale.e + E + 15 - F},
+ * F = 8 here (int8 x int8 over N = Cin * K = 10 terms), and qMaxBits the width
+ * of the fold site -- x widened to [xMin * 2^F - 1, xMax * 2^F + 1], no
+ * rescale slack -- with the bias seeds' range (none without bias). */
+void testConv1dGroupedFoldStampsFoldScaleAndWidth(void) {
+    odtScale_t scales[C1F_MAX_GROUPS];
+    const size_t numGroups = (size_t)kConv1dFoldGroup2NumGroups;
+    c1FoldScales(kConv1dFoldGroup2WScales, numGroups, scales);
+    int32_t eMax = INT32_MIN;
+    for (size_t g = 0; g < numGroups; g++) {
+        eMax = scales[g].e > eMax ? scales[g].e : eMax;
+    }
+    const int32_t frac = 8;
+    odtScale_t inScale = odtTestScale(kConv1dFoldXScale);
+    symAccumSite_t site =
+        symAccumSiteInitRanges("t", 2 * C1F_K, -128 * 256 - 1, 127 * 256 + 1, -128, 127, 0);
+    TEST_ASSERT_TRUE(symAccumProvenSafe(&site));
+
+    c1FoldOut_t out;
+    c1FoldRun(&kC1FoldFx, NULL, NULL, scales, numGroups, (size_t)kConv1dFoldGroup2GroupSize, false,
+              HALF_AWAY, NULL, &out);
+    TEST_ASSERT_EQUAL_UINT16(inScale.m, out.scale.m);
+    TEST_ASSERT_EQUAL_INT16((int16_t)(inScale.e + eMax + 15 - frac), out.scale.e);
+    TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&site), out.bits);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)kConv1dFoldChannelBitsNoBias, out.bits);
+
+    c1FoldRun(&kC1FoldFx, NULL, NULL, scales, numGroups, (size_t)kConv1dFoldGroup2GroupSize, true,
+              HALF_AWAY, NULL, &out);
+    symAccumSiteSetSeeds(&site, kConv1dFoldGroup2Seeds, kConv1dFoldGroup2Seeds_len);
+    TEST_ASSERT_EQUAL_UINT8(symAccumResultBits(&site), out.bits);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)kConv1dFoldGroup2Bits, out.bits);
+}
+
+/* A window with no valid tap (output 0 under EXPLICIT 9) combines nothing:
+ * its output is the bias seed alone, and under SR the stream advances by
+ * exactly one draw per combine the reference counts -- none for the empty
+ * windows -- on the cursor-free loop (channel) and the cursor loop (group2). */
+void testConv1dGroupedFoldEmptyWindowCombinesNothing(void) {
+    struct {
+        const float *wScales;
+        size_t numGroups, groupSize;
+        const int32_t *seeds;
+        int32_t combines;
+    } shapes[2] = {
+        {kConv1dFoldChannelWScales, (size_t)kConv1dFoldChannelNumGroups,
+         (size_t)kConv1dFoldChannelGroupSize, kConv1dFoldChannelSeeds, kConv1dFoldChannelCombines},
+        {kConv1dFoldGroup2WScales, (size_t)kConv1dFoldGroup2NumGroups,
+         (size_t)kConv1dFoldGroup2GroupSize, kConv1dFoldGroup2Seeds, kConv1dFoldGroup2Combines},
+    };
+    for (size_t s = 0; s < 2; s++) {
+        odtScale_t scales[C1F_MAX_GROUPS];
+        c1FoldScales(shapes[s].wScales, shapes[s].numGroups, scales);
+        c1FoldOut_t out;
+        c1FoldRun(&kC1FoldFx, NULL, NULL, scales, shapes[s].numGroups, shapes[s].groupSize, true,
+                  HALF_AWAY, NULL, &out);
+        for (size_t b = 0; b < C1F_B; b++) {
+            for (size_t oc = 0; oc < kC1FoldFx.cout; oc++) {
+                TEST_ASSERT_EQUAL_INT32(shapes[s].seeds[oc],
+                                        out.y[(b * kC1FoldFx.cout + oc) * kC1FoldFx.outLen]);
+            }
+        }
+
+        rngStream_t rs = rngOpen(rngKeyFromSeed(0xE3D7u));
+        rngStream_t expected = rngOpen(rngKeyFromSeed(0xE3D7u));
+        for (int32_t d = 0; d < shapes[s].combines; d++) {
+            (void)rngNextU32(&expected);
+        }
+        c1FoldRun(&kC1FoldFx, NULL, NULL, scales, shapes[s].numGroups, shapes[s].groupSize, false,
+                  SR_HALF_AWAY, &rs, &out);
+        TEST_ASSERT_EQUAL_UINT32(expected.state, rs.state);
+    }
+}
+
+/* SR combines are unbiased: over 2048 streams the mean output sits within 3
+ * sigma (empirical, of that mean) of the exact conv for the sum over all
+ * outputs, and within 5 sigma per element; an element with no spread must be
+ * exact. No bias (its seed is the float primitive's). Both fold loops. */
+#define C1F_SR_RUNS 2048
+static void c1FoldAssertSrUnbiased(const float *wScales, size_t numGroups, size_t groupSize) {
+    const c1FoldFixture_t *f = &kC1FoldFx;
+    odtScale_t scales[C1F_MAX_GROUPS];
+    c1FoldScales(wScales, numGroups, scales);
+    const double inScale = (double)kConv1dFoldXScale;
+    const size_t n = c1FoldOutN(f);
+    double exact[C1F_MAX_OUT] = {0};
+    for (size_t b = 0; b < C1F_B; b++) {
+        for (size_t oc = 0; oc < f->cout; oc++) {
+            for (size_t p = 0; p < f->outLen; p++) {
+                for (size_t ic = 0; ic < f->cin; ic++) {
+                    for (size_t k = 0; k < C1F_K; k++) {
+                        long pos = (long)(p * 2 + k * 2) - (long)f->padding;
+                        if (pos < 0 || pos >= C1F_L) {
+                            continue;
+                        }
+                        size_t wIdx = (oc * f->cin + ic) * C1F_K + k;
+                        exact[(b * f->cout + oc) * f->outLen + p] +=
+                            (double)f->x[(b * f->cin + ic) * C1F_L + (size_t)pos] * f->w[wIdx] *
+                            inScale * (double)odtScaleToFloat(scales[wIdx / groupSize]);
+                    }
+                }
+            }
+        }
+    }
+    /* statistics on the deviation from the exact value in codes of A: the
+     * values themselves (~1e3) would swamp the per-code variance in double */
+    c1FoldOut_t out;
+    c1FoldRun(f, NULL, NULL, scales, numGroups, groupSize, false, HALF_AWAY, NULL, &out);
+    const double acc = (double)odtScaleToFloat(out.scale);
+    static double sum[C1F_MAX_OUT], sumSq[C1F_MAX_OUT];
+    memset(sum, 0, sizeof(sum));
+    memset(sumSq, 0, sizeof(sumSq));
+    double totSum = 0.0, totSumSq = 0.0;
+    for (uint32_t r = 0; r < C1F_SR_RUNS; r++) {
+        rngStream_t rs = rngOpen(rngKeyFromSeed(0x5EED1000u + r));
+        c1FoldRun(f, NULL, NULL, scales, numGroups, groupSize, false, SR_HALF_AWAY, &rs, &out);
+        TEST_ASSERT_TRUE(acc == (double)odtScaleToFloat(out.scale));
+        double tot = 0.0;
+        for (size_t i = 0; i < n; i++) {
+            double d = (double)out.y[i] - exact[i] / acc;
+            sum[i] += d;
+            sumSq[i] += d * d;
+            tot += d;
+        }
+        totSum += tot;
+        totSumSq += tot * tot;
+    }
+    const double runs = (double)C1F_SR_RUNS;
+    for (size_t i = 0; i < n; i++) {
+        double mean = sum[i] / runs;
+        double var = sumSq[i] / runs - mean * mean;
+        double sigmaMean = sqrt(var > 0.0 ? var : 0.0) / sqrt(runs);
+        if (sigmaMean < 1e-3) {
+            TEST_ASSERT_TRUE(fabs(mean) <= 1e-6);
+        } else {
+            TEST_ASSERT_TRUE(fabs(mean) <= 5.0 * sigmaMean);
+        }
+    }
+    double totMean = totSum / runs;
+    double totVar = totSumSq / runs - totMean * totMean;
+    TEST_ASSERT_TRUE(totVar > 0.0);
+    TEST_ASSERT_TRUE(fabs(totMean) <= 3.0 * sqrt(totVar) / sqrt(runs));
+}
+
+void testConv1dGroupedFoldSrIsUnbiased(void) {
+    c1FoldAssertSrUnbiased(kConv1dFoldChannelWScales, (size_t)kConv1dFoldChannelNumGroups,
+                           (size_t)kConv1dFoldChannelGroupSize);
+    c1FoldAssertSrUnbiased(kConv1dFoldGroup2WScales, (size_t)kConv1dFoldGroup2NumGroups,
+                           (size_t)kConv1dFoldGroup2GroupSize);
+}
+
+/* The bias seeds the accumulator at A, 2^F times finer than the legacy sAcc,
+ * so it takes part in the F proof (the convT twin is
+ * testConvTGroupedFoldLargeBiasLowersFInsteadOfAborting). Shape: int12 input
+ * with absmax 0.05, per-channel int8 weights with absmax 0.1 / 0.07, Cin 3,
+ * K 5, and a bias of about +-1.0 -- seeded at A_{F=8} it is ~1e10, far past the
+ * seed-rescale guard. The kernel must pick a lower F and not abort, and its
+ * output must sit within 0.5 * A per combine plus 0.5 * A for the seed of the
+ * exact value. */
+#define C1F_BIAS_CIN 3
+#define C1F_BIAS_COUT 2
+#define C1F_BIAS_K 5
+#define C1F_BIAS_L 9
+#define C1F_BIAS_LOUT (C1F_BIAS_L - C1F_BIAS_K + 1)
+/* the seed is ~1.07e10 at F = 8 and ~1.34e9 at F = 5, past the seed guard
+ * (~1.07e9); F = 4 (~6.7e8) is the largest that admits it */
+#define C1F_BIAS_EXPECTED_F 4
+void testConv1dGroupedFoldLargeBiasLowersFInsteadOfAborting(void) {
+    int32_t x[C1F_BIAS_CIN * C1F_BIAS_L], w[C1F_BIAS_COUT * C1F_BIAS_CIN * C1F_BIAS_K];
+    int32_t bias[C1F_BIAS_COUT] = {2000, -1700};
+    int32_t y[C1F_BIAS_COUT * C1F_BIAS_LOUT];
+    uint32_t s = 4243u;
+    for (size_t i = 0; i < sizeof(x) / sizeof(x[0]); i++) {
+        x[i] = cgGoldCode(&s, 2047);
+    }
+    for (size_t i = 0; i < sizeof(w) / sizeof(w[0]); i++) {
+        w[i] = cgGoldCode(&s, 127);
+    }
+    const float wScaleValues[C1F_BIAS_COUT] = {0.1f / 127.0f, 0.07f / 127.0f};
+    odtScale_t scales[C1F_BIAS_COUT];
+    for (size_t g = 0; g < C1F_BIAS_COUT; g++) {
+        scales[g] = odtScaleFromFloat(wScaleValues[g], ODT_SCALE_NEAREST);
+    }
+    symQConfig_t groups = {.scales = scales,
+                           .numGroups = C1F_BIAS_COUT,
+                           .groupSize = C1F_BIAS_CIN * C1F_BIAS_K,
+                           .qBits = 8,
+                           .roundingMode = HALF_AWAY};
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&groups);
+    size_t xDims[] = {1, C1F_BIAS_CIN, C1F_BIAS_L},
+           wDims[] = {C1F_BIAS_COUT, C1F_BIAS_CIN, C1F_BIAS_K};
+    size_t yDims[] = {1, C1F_BIAS_COUT, C1F_BIAS_LOUT}, bDims[] = {C1F_BIAS_COUT};
+    size_t order[] = {0, 1, 2};
+    shape_t xS, wS, yS, bS;
+    setShape(&xS, xDims, 3, order);
+    setShape(&wS, wDims, 3, order);
+    setShape(&yS, yDims, 3, order);
+    setShape(&bS, bDims, 1, order);
+    symInt32QConfig_t xQC, wQC, yQC, bQC;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &xQC, 12);
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &wQC, 8);
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &yQC, UNSTAMPED_WIDTH);
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &bQC, 12);
+    xQC.scale = odtScaleFromFloat(0.05f / 2047.0f, ODT_SCALE_NEAREST);
+    bQC.scale = odtScaleFromFloat(1.0f / 2000.0f, ODT_SCALE_NEAREST);
+    quantization_t xQ, wQ, yQ, bQ;
+    initSymInt32Quantization(&xQC, &xQ);
+    initSymInt32Quantization(&wQC, &wQ);
+    initSymInt32Quantization(&yQC, &yQ);
+    initSymInt32Quantization(&bQC, &bQ);
+    tensor_t xT, wT, yT, bT;
+    setTensorValues(&xT, (uint8_t *)x, &xS, &xQ, NULL);
+    setTensorValues(&wT, (uint8_t *)w, &wS, &wQ, NULL);
+    setTensorValues(&yT, (uint8_t *)y, &yS, &yQ, NULL);
+    setTensorValues(&bT, (uint8_t *)bias, &bS, &bQ, NULL);
+    kernel_t kernel;
+    initKernel(&kernel, C1F_BIAS_K, VALID, 1, 1);
+    conv1dKernelSymInt32Grouped(&xT, &wT, &bT, &kernel, 1, &yT, &groupedWeight, NULL);
+
+    /* it stays on the fold path (A carries inScale's mantissa) at an F below 8 */
+    odtScale_t out = odtScaleLoad(&yQC.scale), in = odtScaleLoad(&xQC.scale);
+    int32_t eMax = scales[0].e > scales[1].e ? scales[0].e : scales[1].e;
+    TEST_ASSERT_EQUAL_UINT16(in.m, out.m);
+    TEST_ASSERT_EQUAL_INT32(C1F_BIAS_EXPECTED_F, in.e + eMax + 15 - out.e);
+
+    const double outScale = (double)odtScaleToFloat(yQC.scale);
+    const double sx = (double)odtScaleToFloat(xQC.scale);
+    const double sb = (double)odtScaleToFloat(bQC.scale);
+    for (size_t oc = 0; oc < C1F_BIAS_COUT; oc++) {
+        for (size_t p = 0; p < C1F_BIAS_LOUT; p++) {
+            double exact = (double)bias[oc] * sb;
+            for (size_t ic = 0; ic < C1F_BIAS_CIN; ic++) {
+                for (size_t k = 0; k < C1F_BIAS_K; k++) {
+                    exact += (double)x[ic * C1F_BIAS_L + p + k] *
+                             w[(oc * C1F_BIAS_CIN + ic) * C1F_BIAS_K + k] * sx *
+                             (double)odtScaleToFloat(scales[oc]);
+                }
+            }
+            double got = (double)y[oc * C1F_BIAS_LOUT + p] * outScale;
+            /* one combine (per-channel group) + the seed, plus float headroom */
+            double bound = 0.5 * outScale * 2.0 + 1e-6 * fabs(exact);
+            TEST_ASSERT_TRUE(fabs(got - exact) <= bound);
+        }
     }
 }
 
@@ -2098,7 +2602,7 @@ int main(void) {
     RUN_TEST(testConv1dKernelSymGroupedRejectsFloatBias);
     RUN_TEST(testConv1dKernelSymGroupedRejectsFloatOutput);
     RUN_TEST(testConv1dKernelSymStampsResultWidthIncludesSeed);
-    RUN_TEST(testConv1dKernelSymGroupedStampsRescaledWidth);
+    RUN_TEST(testConv1dKernelSymGroupedStampsFoldWidthIncludesBiasSeed);
     RUN_TEST(testConv1dKernelSymGroupedAsymImageStampsItsFullRange);
     RUN_TEST(testConv1dKernelSymChainedRawOutputOverflowAborts);
     RUN_TEST(testConv1dKernelSymGroupedWidePartialAboveSeedGuardRunsExactWhenSumFits);
@@ -2162,5 +2666,13 @@ int main(void) {
     RUN_TEST(testConv1dGroupedGoldenSr);
     RUN_TEST(testConv1dGroupedGoldenConvGroups2);
     RUN_TEST(testConv1dGroupedGoldenConvGroups2ChannelAligned);
+    RUN_TEST(testConv1dGroupedFoldFallsBackToLegacyForWideInput);
+    RUN_TEST(testConv1dGroupedFoldGoldenHalfAwayChannel);
+    RUN_TEST(testConv1dGroupedFoldGoldenHalfAwayGroupSize2);
+    RUN_TEST(testConv1dGroupedFoldGoldenConvGroups2);
+    RUN_TEST(testConv1dGroupedFoldStampsFoldScaleAndWidth);
+    RUN_TEST(testConv1dGroupedFoldEmptyWindowCombinesNothing);
+    RUN_TEST(testConv1dGroupedFoldSrIsUnbiased);
+    RUN_TEST(testConv1dGroupedFoldLargeBiasLowersFInsteadOfAborting);
     return UNITY_END();
 }

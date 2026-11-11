@@ -692,9 +692,11 @@ checkpointing, limitations, literature).
   FLOAT32↔SYM conversion, the `executeOp` grouped-operand gate, the ODTS/ODTR serial
   read/write path (reallocation-based, see Serialization above), and — end-to-end
   trainable — group-partial **forward AND dx** on the full GEMM family
-  (Linear/Conv1d/ConvT1d, gather cores via running group-partial, scatter core via
-  a per-group integer fold of each input code, pure int32 MACs (legacy per-product
-  float rescale for inputs wider than 16 bits); per-channel = the special case `groupSize ==
+  (Linear/Conv1d/ConvT1d, gather cores via running group-partial -- the Conv1d gather
+  combines each group run with an int32 fixed-point multiply-shift, Linear keeps a
+  float rescale -- scatter core via a per-group integer fold of each input code, pure
+  int32 MACs (both integer paths: legacy float rescale for inputs wider than 16
+  bits); per-channel = the special case `groupSize ==
   elemsPerOutChannel`) plus **optimizer updates** on grouped params (SGD/AdamW,
   per-group dynamic absmax requant each write-back). Rounding-error bounds for the
   backward/update paths: `docs/conventions/arithmetic-sym.md` §"Grouped backward".

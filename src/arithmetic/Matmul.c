@@ -599,10 +599,11 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
             exit(1);
         }
         symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
+        const float biasScale = loadCanonScale(&biasQC->scale);
         for (size_t c = 0; c < bColumns; c++) {
             int32_t biasIntC = readBytesAsInt32(&bias->data[c * sizeof(int32_t)]);
-            seedBuf[c] = rescaleIntoAccumulatorScale(biasIntC, loadCanonScale(&biasQC->scale), sAcc,
-                                                     biasQC->roundingMode, rs);
+            seedBuf[c] =
+                rescaleIntoAccumulatorScale(biasIntC, biasScale, sAcc, biasQC->roundingMode, rs);
         }
         seedPtr = seedBuf;
     }

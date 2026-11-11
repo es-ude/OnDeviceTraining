@@ -45,8 +45,9 @@ void requantSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStr
 /*! @brief SYM_INT32 -> SYM_INT32 requantization into a PRE-SET target scale.
  *
  * The target scale is the OUTPUT tensor's symInt32QConfig_t->scale and must
- * be set by the caller BEFORE the call; it is never modified. Guard:
- * !(scale > 0.0f) (NaN-robust) -> PRINT_ERROR + exit(1).
+ * be set by the caller BEFORE the call (storeCanonScale); it is never modified.
+ * Guard: an unset (zero) or non-canonical stored target scale fails fast in
+ * odtScaleToFloat (exit(1)).
  * out_i = roundByMode(clamp((mantissa_i * inScale) / targetScale, qMin,
  * qMax), outQConfig->roundingMode) with qMin/qMax from the output qConfig.
  *

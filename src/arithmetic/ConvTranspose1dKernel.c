@@ -176,10 +176,11 @@ static void convTAddBiasSeedsChecked(const convTSymView_t *v, tensor_t const *bi
                                      symAccumSite_t *resultSite) {
     int32_t const *bArr = (int32_t const *)bias->data;
     symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
+    const float biasScale = loadCanonScale(&biasQC->scale);
     int32_t seedMin = 0, seedMax = 0;
     for (size_t oc = 0; oc < v->outChannels; oc++) {
-        int32_t seed = rescaleIntoAccumulatorScale(bArr[oc], loadCanonScale(&biasQC->scale), scale,
-                                                   biasQC->roundingMode, rs);
+        int32_t seed =
+            rescaleIntoAccumulatorScale(bArr[oc], biasScale, scale, biasQC->roundingMode, rs);
         seedMin = (oc == 0 || seed < seedMin) ? seed : seedMin;
         seedMax = (oc == 0 || seed > seedMax) ? seed : seedMax;
         symAccumSite_t biasSite = *scatterSite;

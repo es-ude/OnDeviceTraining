@@ -256,6 +256,7 @@ static void layerNormAffineSymInt32(size_t numNormDims, tensor_t *gamma, tensor_
     symInt32QConfig_t *outQC = output->quantization->qConfig;
     symInt32QConfig_t *gammaQC = gamma->quantization->qConfig;
     symInt32QConfig_t *betaQC = beta->quantization->qConfig;
+    const float betaScale = loadCanonScale(&betaQC->scale);
 
     /* stored product of two stored scales: rounded once from the exact
      * mantissa product; the beta seeds below rescale onto this same value */
@@ -270,8 +271,8 @@ static void layerNormAffineSymInt32(size_t numNormDims, tensor_t *gamma, tensor_
     for (size_t g = 0; g < G; g++) {
         for (size_t j = 0; j < N; j++) {
             size_t off = layerNormPhysOffset(output, numNormDims, g, j);
-            int32_t seed = rescaleIntoAccumulatorScale(betaQ[j], loadCanonScale(&betaQC->scale), sY,
-                                                       outQC->roundingMode, rs);
+            int32_t seed =
+                rescaleIntoAccumulatorScale(betaQ[j], betaScale, sY, outQC->roundingMode, rs);
             out[off] = out[off] * gammaQ[j] + seed;
         }
     }

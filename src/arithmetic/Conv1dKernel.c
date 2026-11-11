@@ -208,9 +208,10 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
     if (bias != NULL) {
         int32_t const *bArr = (int32_t const *)bias->data;
         symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
+        const float biasScale = loadCanonScale(&biasQC->scale);
         for (size_t oc = 0; oc < outChannels; oc++) {
-            seed[oc] = rescaleIntoAccumulatorScale(bArr[oc], loadCanonScale(&biasQC->scale),
-                                                   outputScale, biasQC->roundingMode, rs);
+            seed[oc] = rescaleIntoAccumulatorScale(bArr[oc], biasScale, outputScale,
+                                                   biasQC->roundingMode, rs);
         }
     } else {
         for (size_t oc = 0; oc < outChannels; oc++) {
@@ -457,9 +458,10 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
     if (bias != NULL) {
         int32_t const *bArr = (int32_t const *)bias->data;
         symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
+        const float biasScale = loadCanonScale(&biasQC->scale);
         for (size_t oc = 0; oc < outChannels; oc++) {
-            seed[oc] = rescaleIntoAccumulatorScale(bArr[oc], loadCanonScale(&biasQC->scale), sAcc,
-                                                   biasQC->roundingMode, rs);
+            seed[oc] =
+                rescaleIntoAccumulatorScale(bArr[oc], biasScale, sAcc, biasQC->roundingMode, rs);
         }
     } else {
         for (size_t oc = 0; oc < outChannels; oc++) {

@@ -6,6 +6,7 @@ float f(symInt32QConfig_t *qc, symQConfig_t *sq, const symQConfig_t *src, size_t
     storeCanonScale(&qc->scale, 0.5f);
     odtScaleStore(&sq->scales[g], ODT_SCALE_ONE);
     copyCanonScales(sq->scales, src->scales, src->numGroups);
+    storeCanonScale(&qc->scale, loadCanonScale(&sq->scales[g]) * 0.5f);
     const float s = loadCanonScale(&((symInt32QConfig_t *)qc)->scale);
     return s * odtScaleToFloat(odtScaleLoad(&sq->scales[0]));
 }

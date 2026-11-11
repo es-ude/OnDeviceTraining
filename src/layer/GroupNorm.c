@@ -296,10 +296,10 @@ static void groupNormAffineSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, ten
      * identical (same rescaleIntoAccumulatorScale inputs per channel). Guarded
      * K > 0 && N > 0 by the caller's early-out, so C = numChannels >= 1 here. */
     size_t C = cfg->numChannels;
+    const float betaScale = loadCanonScale(&betaQC->scale);
     int32_t seed[C];
     for (size_t c = 0; c < C; c++) {
-        seed[c] = rescaleIntoAccumulatorScale(betaQ[c], loadCanonScale(&betaQC->scale), sY,
-                                              outQC->roundingMode, rs);
+        seed[c] = rescaleIntoAccumulatorScale(betaQ[c], betaScale, sY, outQC->roundingMode, rs);
     }
 
     size_t G = cfg->numGroups;

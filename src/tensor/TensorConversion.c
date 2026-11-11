@@ -601,19 +601,9 @@ void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor,
     symInt32QConfig_t *inputSymInt32QC = inputTensor->quantization->qConfig;
     symInt32QConfig_t *outputSymInt32QC = outputTensor->quantization->qConfig;
     float inScale = loadCanonScale(&inputSymInt32QC->scale);
-    float targetScale = loadCanonScale(&outputSymInt32QC->scale);
-
-    /* NaN-robust: !(x > 0.f) is also true for NaN, unlike (x <= 0.f) */
-    if (!(targetScale > 0.f)) {
-        PRINT_ERROR("requantSymInt32TensorToScale: target scale must be pre-set and > 0 on "
-                    "the output qConfig, got %f",
-                    targetScale);
-        exit(1);
-    }
-    /* user-fixed target: snapped NEAREST onto the dyadic grid, stored back, and
-     * the codes computed on that stored value */
-    targetScale = canonFixedScale(targetScale);
-    storeCanonScale(&outputSymInt32QC->scale, targetScale);
+    /* the stored odtScale_t is canonical by construction: loadCanonScale exits on
+     * an unset (zero) or non-canonical target, so the codes use it as is */
+    const float targetScale = loadCanonScale(&outputSymInt32QC->scale);
 
     const symGridBounds_t g =
         symGridBoundsOrExit(outputSymInt32QC->qMaxBits, "requantSymInt32TensorToScale");

@@ -16,6 +16,16 @@
 #   - a whole-config copy of a scale-carrying config: memcpy of a qConfig,
 #     a dereferencing struct copy into a *QC / *Config object, or a
 #     SYM / SYM_INT32 / ASYM compound literal.
+# Heuristic limits (a text scan, not a type check; none of these can misread
+# a value, the field type already stops float misuse at compile time):
+#   - a whole-config memcpy whose arguments are not spelled with `qConfig`
+#     (memcpy(dst, src, sizeof(*dst)) on two config pointers) passes;
+#   - a struct copy into a local not named *QC / *Config
+#     (symInt32QConfig_t local = *src;) passes;
+#   - a designated initialiser that leaves the scale zero
+#     (symInt32QConfig_t q = {.qMaxBits = 8};) passes; its first read fails
+#     fast at run time (odtScaleToFloat rejects a zero odtScale_t);
+#   - the paren tracking looks back at most 400 characters from the field.
 # Comments and string literals are ignored. An allow-list entry is
 # "<path><TAB><substring of the offending line><TAB><justification>"; an entry
 # that no longer matches anything is itself an error, so the list stays exact.
@@ -46,6 +56,25 @@ while (my $l = <$af>) {
     push @allow, { path => $p, sub => $s, used => 0 };
 }
 my $acc = qr/(?:odtScaleStore|odtScaleLoad|storeCanonScale|loadCanonScale)\s*\(\s*&/;
+# true when $pre (the text before a field access) ends inside a call opened by
+# a match of $re: from that match to the end of $pre the paren depth never
+# drops below the open paren of the call, and with $firstArg set no top-level
+# comma moves past the first argument
+sub insideOpenCall {
+    my ($pre, $re, $firstArg) = @_;
+    while ($pre =~ /$re/g) {
+        my $seg = substr($pre, $+[0]);
+        next if $seg =~ /[;{}]/;
+        my ($depth, $ok) = (0, 1);
+        for my $c (split //, $seg) {
+            if ($c eq "(") { $depth++; }
+            elsif ($c eq ")") { if (--$depth < 0) { $ok = 0; last; } }
+            elsif ($c eq "," && $depth == 0 && $firstArg) { $ok = 0; last; }
+        }
+        return 1 if $ok;
+    }
+    return 0;
+}
 my $bad = 0;
 for my $f (@ARGV) {
     open(my $fh, "<", $f) or die "cannot read $f\n";
@@ -59,8 +88,11 @@ for my $f (@ARGV) {
         my $p = $-[0]; my $e = $+[0];
         my $pre = substr($t, $p > 400 ? $p - 400 : 0, $p > 400 ? 400 : $p);
         my $post = substr($t, $e, 200);
-        my $isAccessorArg = ($pre =~ /$acc[^,;{}]*\z/s) && ($post =~ /\A\s*(?:\[[^\]]*\])?\s*[,)]/);
-        my $isArrayCopyArg = ($pre =~ /copyCanonScales\s*\([^;{}]*\z/s) && ($post =~ /\A\s*[,)]/);
+        # the field must sit inside the accessor call that is still open (for the
+        # pointer accessors: in its first argument); a raw read later in the same
+        # expression, after the accessor has closed, is not covered
+        my $isAccessorArg = insideOpenCall($pre, $acc, 1) && ($post =~ /\A\s*(?:\[[^\]]*\])?\s*[,)]/);
+        my $isArrayCopyArg = insideOpenCall($pre, qr/copyCanonScales\s*\(/, 0) && ($post =~ /\A\s*[,)]/);
         push @hits, [$p, "raw scale access"] unless $isAccessorArg || $isArrayCopyArg;
     }
     while ($t =~ /\bodtScale_t\s*\*\s*(?:const\s+)?\w+\s*=/g) { push @hits, [$-[0], "scale alias pointer"]; }

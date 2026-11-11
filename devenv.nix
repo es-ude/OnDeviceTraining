@@ -218,6 +218,11 @@ in
 					echo "$matches"
 					exit 1
 				fi
+				# scale-access gate (linq S3): the step of the c-build-and-test job in
+				# .github/workflows/ci.yml; plain find + perl, so it also runs in a jj
+				# secondary workspace.
+				tools/check-scale-access.sh --self-test
+				tools/check-scale-access.sh
 				# remat-row-contract (#4): the run block of the remat-row-contract job in
 				# .github/workflows/ci.yml, verbatim but for indentation. Outside a git work
 				# tree (a jj secondary workspace) git grep cannot scan: skip loudly here, never

@@ -95,9 +95,12 @@ grid (`clampInt32(..., qMin, qMax)`).
 
 **Stored scales are canonical dyadic values** (LINQ S2). Every stored SYM,
 SYM_INT32 and ASYM scale is an exact 15-bit dyadic value `m · 2^e`,
-`16384 <= m <= 32767` (`DyadicScale.h`), held in a float until the storage
-type changes. Each site rounds ONCE from the exact value it derives, and the
-codes are computed on the same value that is stored (`ScaleCanon.h`):
+`16384 <= m <= 32767` (`DyadicScale.h`). Since LINQ S3 the fields are
+`odtScale_t` (`symInt32QConfig_t.scale`, `symQConfig_t.scales`,
+`asymQConfig_t.scales`); the rules below still compute in float on canonical
+values, which is exact, and convert once at the field. Each site rounds ONCE
+from the exact value it derives, and the codes are computed on the same value
+that is stored (`ScaleCanon.h`):
 
 | Site class | Stored scale |
 |---|---|
@@ -117,6 +120,16 @@ codes are computed on the same value that is stored (`ScaleCanon.h`):
 the exact value it rounds; a CEIL15 fit is within `2^-14` (one full 15-bit
 unit, always upward). `ODT_SCALE_STRICT` (preset `unit_test_scale_strict`)
 asserts canonicality at every store.
+
+Field access goes only through the accessors: `loadCanonScale(&qc->scale)`
+(latched once per op into a float local), `storeCanonScale(&qc->scale, v)`,
+`odtScaleStore` / `odtScaleLoad` for an exact `odtScale_t` value such as
+`ODT_SCALE_ONE`, and `copyCanonScales` for a verbatim array copy. The CI gate
+`tools/check-scale-access.sh` (a step of the `c-build-and-test` job) rejects
+any other read, write, alias or whole-config copy outside its allow-list
+(`tools/check-scale-access.allow`, ownership sites only). The serialized
+format stays the v7 float: Serialize writes `loadCanonScale`, Deserialize
+stores `NEAREST15` of the read float.
 
 **Staging a FLOAT32 operand under `ARITH_SYM_INT32`** (`executeOp` prologue,
 `src/arithmetic/ExecuteOp.c`). Each storage type has its own route into stack

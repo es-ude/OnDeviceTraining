@@ -635,7 +635,7 @@ def resolve_leg_a_kernel(c_codes: np.ndarray, c_scale: float, inp: LegAInputs, k
         "census": res.to_json(),
         "mismatch_class": "+".join(sorted(classes)) if classes else "none",
         "seed": seed_summary(inp, chosen, extra),
-        "scale": census.scale_check(c_scale, inp.raw.s_raw),
+        "scale": census.scale_check(c_scale, inp.raw.s_raw, SCALE_TOL_KERNEL),
         "ref_scale": inp.raw.s_raw,
     }
 
@@ -852,27 +852,20 @@ def classify_overflow(drv: DriverResult, out_name: str, raw_exact: np.ndarray, r
 
 
 # --------------------------------------------------------------------------- #
-# Scale tolerances (derived per path from the float32 rounding count)         #
+# Scale tolerances                                                            #
 # --------------------------------------------------------------------------- #
 
 
-def scale_tol(n_roundings: int) -> float:
-    """Relative tolerance for a scale produced by `n_roundings` float32
-    roundings: (1+u)^n - 1, u = 2^-24; the 2^-22 cell-0 figure is the 4-rounding
-    case rounded up. Stated per path BEFORE the run, never widened after."""
-    return (1.0 + F32_U) ** n_roundings - 1.0
-
-
-# kernel tier: s_raw = NEAREST15(s_a * s_b), the stored canonical product; Leg A
-# computes the same value exactly, so the 2^-22 tolerance is not exercised
-SCALE_TOL_KERNEL = census.SCALE_REL_TOL
-# layer tier, SYM_INT32 operands: restore scale = CEIL15(s_raw * max|raw| /
-# qMax), exact in Leg A too; the 4-rounding tolerance of the former float
-# expression is kept as stated before the run
-SCALE_TOL_LAYER = max(census.SCALE_REL_TOL, scale_tol(4))
-# layer tier with a staged FLOAT32 input: the staging scale absmax / qMax (1,
-# exact for grid-exact fixtures but counted) multiplies into s_raw: 5
-SCALE_TOL_LAYER_STAGED = max(census.SCALE_REL_TOL, scale_tol(5))
+# Every stored SYM scale is a canonical 15-bit dyadic value that Leg A
+# reproduces exactly (arithmetic-sym 'Stored scales are canonical dyadic
+# values'): the scale checks below are exact (tolerance 0).
+# kernel tier: s_raw = NEAREST15(s_a * s_b), the stored canonical product
+SCALE_TOL_KERNEL = 0.0
+# layer tier, SYM_INT32 operands: restore scale = CEIL15(s_raw * max|raw| / qMax)
+SCALE_TOL_LAYER = 0.0
+# layer tier with a staged FLOAT32 input: staging scale CEIL15(absmax / qMax)
+# feeds s_raw = NEAREST15(s_stage * s_w); still reproduced exactly
+SCALE_TOL_LAYER_STAGED = 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -1184,11 +1177,11 @@ def run_convert_row(cell: dict, fx: Fixture, drv: DriverResult, k: int) -> dict:
     if direction == "encode":
         values = op.values.astype(np.float64)
         ref = sym_ref.encode_sym(values, out_bits)
-        scale_ok_tol = scale_tol(1)  # absmax / qMax, one float32 division
+        scale_ok_tol = 0.0  # CEIL15(absmax / qMax), reproduced exactly
     elif direction == "requant_dynamic":
         values = exact_ref.dequant(op.codes, op.scale)
         ref = sym_ref.restore_sym(op.codes, op.scale, out_bits)
-        scale_ok_tol = scale_tol(3)  # (float)m * s_in (1 each: product, absmax exact), / qMax
+        scale_ok_tol = 0.0  # CEIL15(s_in * max|code| / qMax) from the codes, reproduced exactly
     else:
         values = exact_ref.dequant(op.codes, op.scale)
         ref = sym_ref.requant_fixed(op.codes, op.scale, fx.scale("target_scale"), out_bits)

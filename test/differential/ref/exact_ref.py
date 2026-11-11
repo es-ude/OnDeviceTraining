@@ -17,10 +17,11 @@ import torch.nn.functional as F
 
 F32_U = 2.0**-24  # float32 unit roundoff
 # A stored scale is its exact value rounded ONCE to a 15-bit dyadic mantissa
-# (arithmetic-sym 'Stored scales are canonical dyadic values'): at most half a
-# 15-bit unit, 2^-15 relative (reached at m = 16384). This is the scale term
-# of every bound below; it was 2^-23 (two float32 units) while scales were
-# plain float32 products.
+# (arithmetic-sym 'Stored scales are canonical dyadic values'). NEAREST15 is at
+# most half a 15-bit unit, 2^-15 relative (reached at m = 16384); a CEIL15 fit
+# is up to one unit, 2^-14. The bounds below use SCALE_U for the NEAREST15
+# product scale only; it was 2^-23 (two float32 units) while scales were plain
+# float32 products.
 SCALE_U = 2.0**-15
 F32_REL = SCALE_U  # the stored product scale NEAREST15(s_in * s_w)
 
@@ -208,14 +209,15 @@ def bound_float32_grad(g_absmax: float, n_roundings: int, staging: float = 0.0, 
 
 def bound_requant_roundtrip(s_out: float, q_max: int, k: int) -> float:
     """|value - code * s_out| for an encode / requant onto a fresh or preset
-    grid: the rounding (0.5 LSB), the census-legal tie flip (slack), and the
-    representation of the scale the codes are read back with (|code| <=
-    qMax, a stored scale within SCALE_U relative of its exact value):
-    s_out * (0.5 + slack + qMax * SCALE_U).
-    Clamped elements are outside this bound by construction and are
-    reported separately.
+    grid: the rounding (0.5 LSB) and the census-legal tie flip (slack):
+    s_out * (0.5 + slack). s_out is the C's own stored scale, the exact grid
+    the codes were rounded onto, so no scale-representation term enters (the
+    15-bit rounding of the scale -- 2^-15 relative for NEAREST15, 2^-14 for a
+    CEIL15 fit -- moves the grid, not the distance to it). Leg A checks the
+    stored scale itself exactly. Clamped elements are outside this bound by
+    construction and are reported separately.
     """
-    return float(s_out) * (0.5 + restore_slack_codes(q_max, k) + q_max * SCALE_U)
+    return float(s_out) * (0.5 + restore_slack_codes(q_max, k))
 
 
 # --------------------------------------------------------------------------- #

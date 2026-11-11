@@ -113,8 +113,9 @@ codes are computed on the same value that is stored (`ScaleCanon.h`):
 | copy | unchanged |
 
 `CEIL15` / `NEAREST15` round a positive rational to 15 significant bits
-(NEAREST: half up). A stored scale is therefore within `2^-15` relative of
-the exact value it rounds. `ODT_SCALE_STRICT` (preset `unit_test_scale_strict`)
+(NEAREST: half up). A NEAREST15 scale is therefore within `2^-15` relative of
+the exact value it rounds; a CEIL15 fit is within `2^-14` (one full 15-bit
+unit, always upward). `ODT_SCALE_STRICT` (preset `unit_test_scale_strict`)
 asserts canonicality at every store.
 
 **Staging a FLOAT32 operand under `ARITH_SYM_INT32`** (`executeOp` prologue,

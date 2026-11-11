@@ -68,7 +68,7 @@ signed-overflow behaviour is that of a plain wrapping build.
 
 | Leg A | meaning |
 |---|---|
-| `EXACT` | codes bit-equal, scale within the path's derived tolerance, every bias channel at the real-valued rounding of the documented seed rule; a FLOAT32 output equal to the float32 rounding of the reference everywhere |
+| `EXACT` | codes bit-equal, scale bit-equal, every bias channel at the real-valued rounding of the documented seed rule; a FLOAT32 output equal to the float32 rounding of the reference everywhere |
 | `TIE_ONLY` | the only differences are what the doc leaves to float32: on the layer tier, +-1 codes whose reference pre-rounding value is within k ulp32 of a .5 boundary; on either tier, a bias channel resolved to the other side of a float32-tied seed or to the float32 reading (see the seed policy); a FLOAT32 output within the float32 roundings its documented production takes (a weight grad: 2 when every |raw| < 2^24, because the int->float cast is then exact, else 3 -- cast, scale product, multiply; a bias grad: 2 -- `sym_ref.DOC_GAPS[3]`) |
 | `MISMATCH` | a difference away from a tie, a seed outside the policy, or a scale miss -- implementation finding. The kernel tier also prints the `class`: `seed` (a constant per-channel residual that is not an allowed seed) or `mac` (a non-constant residual, i.e. the integer sum itself); `float` for a FLOAT32 output beyond its roundings |
 | `ABORT` / `MATCH` / `WRAP` / `SATURATE` | F9 rows only -- a reduction whose EXACT integer accumulator does not fit int32 (Leg A computes this per fixture). The contract of the shipped accumulator guard is `ABORT`: exit 1 **and** the guard's banner (`<op>: SYM int32 accumulator overflow -- N=.. terms, operand widths (a, b), max\|seed\|=..`) agrees with Leg A on op, N, the width pair and (inside the range the seed policy allows) max\|seed\|; an exit 1 without that banner, or with another one, is a `MISMATCH`, not an abort. A run that completes is classified against `restore(exact)` (`MATCH`), `restore(wrap_int32(exact))` (`WRAP`, the silent overflow F9 is about) and `restore(clip(exact))` (`SATURATE`); all three FAIL a cell that expects `ABORT`. The kernel tier is the authoritative row: on the layer tier the width restore can map different raw wires onto the same codes |
@@ -100,19 +100,16 @@ earlier version, and at |acc| >= 2^20 it waived every +-1 -- a planted
 seed+1 mutant passed). The only latitude on that tier is the bias seed, per
 channel, judged on the seed's own pre-rounding value.
 
-Scale tolerances are derived per path from the float32 rounding count BEFORE
-a run, never widened after one (`run_cells.py::scale_tol`): kernel tier
-2^-22 (one product, two units), layer tier `(1+u)^4 - 1` (restore chain),
-staged layer tier `(1+u)^5 - 1` (the staging scale multiplies in), encode
-`(1+u)^1 - 1`, dynamic requant `(1+u)^3 - 1`, fixed requant 0 (preset).
-Since every stored scale is canonical (arithmetic-sym 'Stored scales are
-canonical dyadic values') Leg A computes each of these scales exactly -- the
-stored product `NEAREST15(s_a * s_b)`, the fitted grid `CEIL15(absMax / qMax)`
-or, for the requant diagonal, `CEIL15(s_in * max|code| / qMax)` -- with the one
-Python copy of the 15-bit rule (`test/unit/goldgen/dyadic_scale.py`); the
-tolerances above are kept as stated. The cell fixtures draw canonical
-operand scales (`random_scale`, `canonical_scale_pair`); a grid-exact 13-bit
-scale is canonical already.
+Scale checks are exact (tolerance 0, `run_cells.py::SCALE_TOL_*`). Every
+stored scale is canonical (arithmetic-sym 'Stored scales are canonical
+dyadic values'), so Leg A computes each scale bit for bit -- the stored
+product `NEAREST15(s_a * s_b)`, the fitted grid `CEIL15(absMax / qMax)` or,
+for the requant diagonal, `CEIL15(s_in * max|code| / qMax)`, and the preset
+fixed-requant target -- with the one Python copy of the 15-bit rule
+(`test/unit/goldgen/dyadic_scale.py`). (Before the canonical rule these were
+float32 expressions with per-path tolerances of 2^-22 to `(1+u)^5 - 1`.) The
+cell fixtures draw canonical operand scales (`random_scale`,
+`canonical_scale_pair`); a grid-exact 13-bit scale is canonical already.
 
 ## Bias-seed policy (an interpretation, recorded as a doc finding)
 
@@ -142,7 +139,7 @@ dev` is the largest |used - real-valued rounding| in raw LSB. The policy
 never enumerates seed combinations: on the kernel tier the seed decouples
 per channel; on the layer tier the restore couples channels only through the
 fresh scale, so the realizable absmax values (at most 2 x Cout) are
-enumerated, the observed C scale selects those within the path's tolerance,
+enumerated, the observed C scale selects those it equals exactly,
 and channels are resolved independently under each -- linear in Cout, so
 wide layers run. The same resolvers serve Conv1d (`[B, Cout, Lout]`) and
 Linear (`[B, outF, 1]`; dx `[B, inF, 1]`; weightGrad `[1, outF, inF]`).
@@ -438,7 +435,8 @@ reported alongside (`ratio_rigorous`) and never needed.
   kernel-tier grads are raw int32 at `s_raw`: only the stored product scale
   applies (`y_absmax * 2^-15`; the bias-grad scale is copied verbatim).
 - Encode / requant round trip (`bound_requant_roundtrip`):
-  `s_out * (0.5 + slack + qMax * 2^-15)`; elements the fixed requant clamps are
+  `s_out * (0.5 + slack)` -- `s_out` is the C's own stored scale, so no
+  scale-representation term enters; elements the fixed requant clamps are
   outside any round-trip bound by construction and are excluded (reported
   as `n_clamped_excluded` with their own max error).
 - BFP GEMM family (`bound_bfp_fold`, elementwise): the walk-order-free `N * 2^-24 * (sum_i |a_i b_i| + |bias|)` with `S = sum|.|`

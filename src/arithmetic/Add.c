@@ -12,6 +12,7 @@
 #include "Arithmetic.h"
 #include "Common.h"
 #include "DTypes.h"
+#include "ScaleCanon.h"
 #include "SymAccumGuard.h"
 #include "Tensor.h"
 #include "TensorConversion.h"
@@ -160,7 +161,7 @@ void addSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
     if (aScale == bScale) {
         /* read both widths before any config write: the output may alias an operand */
         uint8_t width = symSumWidth(aSymInt32QConfig->qMaxBits, bSymInt32QConfig->qMaxBits);
-        outputSymInt32QConfig->scale = aScale;
+        storeCanonScale(&outputSymInt32QConfig->scale, aScale);
         outputSymInt32QConfig->qMaxBits = width;
 
         int32_t aValues[aNumberOfValues];

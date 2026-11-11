@@ -15,6 +15,18 @@
 #include "Common.h"
 #include "DTypes.h"
 #include "Div.h"
+#include "ScaleCanon.h"
+
+/* a / b of two stored scales, rounded once (NEAREST): MulRatio forms
+ * ma * 2^ea * 2^14 / mb exactly rounded, and the power-of-two factor
+ * 2^(-14 - eb) is exact. b >= 2^127 (eb = 113) has no POW2 factor and fails
+ * fast. */
+static float canonQuotientScale(float a, float b) {
+    odtScale_t sb = odtScaleFromFloat(b, ODT_SCALE_NEAREST);
+    odtScale_t q = odtScaleMulRatio(odtScaleFromFloat(a, ODT_SCALE_NEAREST), 1u << 14,
+                                    (uint32_t)sb.m, ODT_SCALE_NEAREST);
+    return odtScaleToFloat(odtScaleMul(q, ODT_SCALE_POW2(-14 - (int32_t)sb.e), ODT_SCALE_NEAREST));
+}
 
 size_t divInstructionCounter = 0;
 
@@ -100,7 +112,7 @@ void divSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
 
     writeInt32ArrayToByteArray(aNumberOfValues, output, outputTensor->data);
     symInt32QConfig_t *outputConfig = outputTensor->quantization->qConfig;
-    outputConfig->scale = DIV_FUNC_FLOAT(aConfig->scale, bConfig->scale);
+    storeCanonScale(&outputConfig->scale, canonQuotientScale(aConfig->scale, bConfig->scale));
 }
 
 void divSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor) {
@@ -127,7 +139,7 @@ void divSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor) {
     symInt32QConfig_t *aConfig = aTensor->quantization->qConfig;
     symInt32QConfig_t *bConfig = bTensor->quantization->qConfig;
 
-    aConfig->scale = DIV_FUNC_FLOAT(aConfig->scale, bConfig->scale);
+    storeCanonScale(&aConfig->scale, canonQuotientScale(aConfig->scale, bConfig->scale));
 }
 
 size_t getDivInstructionCounter() {

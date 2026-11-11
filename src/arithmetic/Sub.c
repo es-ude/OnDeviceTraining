@@ -14,6 +14,7 @@
 #include "Arithmetic.h"
 #include "Common.h"
 #include "DTypes.h"
+#include "ScaleCanon.h"
 #include "Sub.h"
 #include "TensorConversion.h"
 
@@ -103,7 +104,7 @@ void subSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
     float bScale = bSymInt32QConfig->scale;
 
     if (aScale == bScale) {
-        outputSymInt32QConfig->scale = aScale;
+        storeCanonScale(&outputSymInt32QConfig->scale, aScale);
 
         int32_t aValues[aNumberOfValues];
         readBytesAsInt32Array(aNumberOfValues, aTensor->data, aValues);

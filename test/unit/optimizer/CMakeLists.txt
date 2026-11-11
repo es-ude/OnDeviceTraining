@@ -14,6 +14,7 @@ add_elastic_ai_unit_test(
         LayerQuant
         ArithmeticType
         RNG
+        DyadicScale
         OptimizerKeys
         odt_test_death
         odt_test_layer_builders
@@ -133,6 +134,7 @@ add_custom_command(
                 --out ${GEN_SGD_GROUPED_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_sgd_grouped.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_sgd_grouped.h (group-quant PR3 Task 4)"
         VERBATIM
 )

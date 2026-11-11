@@ -2360,12 +2360,12 @@ static const int32_t kGroupedAMantissas[] = {1, -2, 3, -1, 2, -3, 2, 1, -1, 3, -
 static const float kGroupedAScale = 0.5f;
 static const int32_t kGroupedWMantissas[] = {4, -3, 2, -1, 5, -2, 1,  2, -4,
                                              3, -1, 2, -2, 3, 1,  -5, 4, -3};
-static const float kGroupedWScales[] = {0.019999999552965164f, 0.05000000074505806f,
-                                        0.009999999776482582f};
+static const float kGroupedWScales[] = {0.020000457763671875f, 0.049999237060546875f,
+                                        0.010000228881835938f};
 static const int32_t kGroupedBiasMantissas[] = {10, -5, 3};
-static const float kGroupedBiasScale = 0.1f;
+static const float kGroupedBiasScale = 0.09999847412109375f;
 static const int32_t kGroupedOutMantissas[] = {53, -46, 15, 35, 1, 6};
-static const float kGroupedOutScale = 0.02500000037252903f;
+static const float kGroupedOutScale = 0.024999618530273438f;
 
 /*! Builds the shared grouped-SYM weight/bias/input parameters (borrowed,
  *  caller frees via freeLinearLayer + freeTensor(input) as usual). `q` is
@@ -2548,7 +2548,7 @@ static const int32_t kGroupedDxLossMantissas[] = {33, -12, -2, -29, 13, 40};
 static const float kGroupedDxLossScale = 0.5f;
 static const int32_t kGroupedDxOutMantissas[] = {42,  -65, 74,  -47, 76,  -49,
                                                  -49, 85,  -67, 11,  -39, 25};
-static const float kGroupedDxOutScale = 0.02500000037252903f;
+static const float kGroupedDxOutScale = 0.024999618530273438f;
 
 /*! Shared dx-fixture plumbing for the two backward tests below: builds the
  *  grouped layer (via buildGroupedFixtureLayer), the SYM_INT32 loss and the

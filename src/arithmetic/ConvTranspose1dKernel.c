@@ -8,6 +8,7 @@
 #include "Common.h"
 #include "Mul.h"
 #include "Rounding.h"
+#include "ScaleCanon.h"
 #include "SlidingWindow1d.h"
 #include "SymAccumGuard.h"
 #include "SymGroupCursor.h"
@@ -292,7 +293,9 @@ void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight
 
     float inScale = ((symInt32QConfig_t *)input->quantization->qConfig)->scale;
     float wScale = ((symInt32QConfig_t *)weight->quantization->qConfig)->scale;
-    float outputScale = inScale * wScale;
+    /* the stored product scale, rounded once from the exact mantissa product;
+     * the bias seed is refolded onto this same value */
+    const float outputScale = canonProductScale(inScale, wScale, ODT_SCALE_NEAREST);
 
     size_t totalOut = batch * outChannels * outputLength;
     for (size_t i = 0; i < totalOut; i++) {
@@ -338,7 +341,7 @@ void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight
         exit(1);
     }
     symInt32QConfig_t *outputQC = (symInt32QConfig_t *)output->quantization->qConfig;
-    outputQC->scale = outputScale;
+    storeCanonScale(&outputQC->scale, outputScale);
     outputQC->qMaxBits = symAccumResultBits(&resultSite);
 }
 
@@ -491,7 +494,11 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
             maxScale = weightGroups->scales[g];
         }
     }
-    float sAcc = inScale * maxScale;
+    /* Stored, so canonical. CEIL, not the product rule's NEAREST: the rescaled
+     * accumulator proof (symAccumSiteInitRangesRescaled) needs every group
+     * factor (scale * scales[g]) / sAcc <= 1 up to float slack 2^-22, and a
+     * NEAREST sAcc can sit 2^-15 below the exact product. */
+    const float sAcc = canonProductScale(inScale, maxScale, ODT_SCALE_CEIL);
 
     /* `weight`'s own poisoned symInt32QConfig_t carries the OP's rounding
      * mode (executeOp's prologue sets it via initSymInt32QConfig(arithmetic.
@@ -551,7 +558,7 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
         exit(1);
     }
     symInt32QConfig_t *outputQC = (symInt32QConfig_t *)output->quantization->qConfig;
-    outputQC->scale = sAcc;
+    storeCanonScale(&outputQC->scale, sAcc);
     outputQC->qMaxBits = symAccumResultBits(&resultSite); /* rescaled site + seeds (#516) */
 }
 

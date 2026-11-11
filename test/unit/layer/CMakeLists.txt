@@ -7,6 +7,7 @@ add_custom_command(
                 --out ${GEN_CONV1D_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_conv1d.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_conv1d.h via PyTorch"
         VERBATIM
 )
@@ -20,6 +21,7 @@ add_custom_command(
                 --out ${GEN_CONV1D_GROUPED_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_conv1d_grouped.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_conv1d_grouped.h via PyTorch"
         VERBATIM
 )
@@ -33,6 +35,7 @@ add_custom_command(
                 --out ${GEN_CONV1D_TRANSPOSED_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_conv1d_transposed.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_conv1d_transposed.h via PyTorch"
         VERBATIM
 )
@@ -46,6 +49,7 @@ add_custom_command(
                 --out ${GEN_CONVT1D_GROUPED_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_convT1d_grouped.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_convT1d_grouped.h via PyTorch"
         VERBATIM
 )
@@ -59,6 +63,7 @@ add_custom_command(
                 --out ${GEN_LINEAR_GROUPED_ASYM_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_linear_grouped_asym.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_linear_grouped_asym.h via PyTorch"
         VERBATIM
 )
@@ -75,6 +80,7 @@ add_custom_command(
                 --out ${GEN_BFP_LAYER_FORWARD_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_layer_forward.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_bfp_layer_forward.h via PyTorch"
         VERBATIM
 )
@@ -91,6 +97,7 @@ add_custom_command(
                 --out ${GEN_BFP_DROPOUT_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_dropout.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_bfp_dropout.h via PyTorch"
         VERBATIM
 )
@@ -104,6 +111,7 @@ add_custom_command(
                 --out ${GEN_MAX_POOL_1D_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_max_pool_1d.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_max_pool_1d.h via PyTorch"
         VERBATIM
 )
@@ -117,6 +125,7 @@ add_custom_command(
                 --out ${GEN_AVG_POOL_1D_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_avg_pool_1d.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_avg_pool_1d.h via PyTorch"
         VERBATIM
 )
@@ -128,6 +137,7 @@ add_elastic_ai_unit_test(
         Conv1d
         MORE_LIBS
         CommonLayerLibs
+        DyadicScale
         TensorApi
         QuantizationApi
         Conv1dApi
@@ -220,6 +230,7 @@ add_custom_command(
                 --out ${GEN_SOFTMAX_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_softmax.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_softmax.h via PyTorch"
         VERBATIM
 )
@@ -237,6 +248,7 @@ add_custom_command(
                 --out ${GEN_BFP_SOFTMAX_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_softmax.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_bfp_softmax.h via PyTorch"
         VERBATIM
 )
@@ -285,6 +297,7 @@ add_elastic_ai_unit_test(
         Conv1dTransposed
         MORE_LIBS
         CommonLayerLibs
+        DyadicScale
         TensorApi
         QuantizationApi
         Conv1dTransposedApi
@@ -354,6 +367,7 @@ add_custom_command(
                 --out ${GEN_ADAPTIVE_AVG_POOL_1D_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_adaptive_avg_pool_1d.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_adaptive_avg_pool_1d.h via PyTorch"
         VERBATIM
 )
@@ -382,6 +396,7 @@ add_elastic_ai_unit_test(
         Dropout
         MORE_LIBS
         CommonLayerLibs
+        DyadicScale
         Bernoulli
         RNG
         LayerExec
@@ -417,6 +432,8 @@ add_custom_command(
         COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_layernorm_sym.py
                 --out ${GEN_LAYERNORM_SYM_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_layernorm_sym.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_layernorm_sym.h via PyTorch"
         VERBATIM
 )
@@ -429,6 +446,7 @@ add_custom_command(
         COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_layernorm_sym_bwd.py
                 --out ${GEN_LAYERNORM_SYM_BWD_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_layernorm_sym_bwd.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_layernorm_sym_bwd.h via PyTorch"
         VERBATIM
 )
@@ -445,6 +463,7 @@ add_custom_command(
                 --out ${GEN_BFP_LAYERNORM_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_layernorm.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_bfp_layernorm.h via PyTorch"
         VERBATIM
 )
@@ -468,6 +487,7 @@ add_elastic_ai_unit_test(
         LayerExec
         RNG
         TensorConversion
+        DyadicScale
         odt_test_death
         odt_test_keyed_draw
 )
@@ -507,6 +527,7 @@ add_elastic_ai_unit_test(
         LayerExec
         RNG
         TensorConversion
+        DyadicScale
         odt_test_death
         odt_test_keyed_draw
 )

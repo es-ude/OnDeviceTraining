@@ -19,10 +19,13 @@ Fixtures:
                (testConversionFloatAsym / IntAsym / SymInt32Asym). Band spans
                zero, nudge is a no-op; zp flips -10 -> +10 and the codes
                happen to coincide with the old grid (verified, not assumed).
-  f2NegBand16  {-10,-1,-5.5,-2.5,-9.25,-3.75} @ qBits=16 -- all-negative
-               band; the nudge extends it to [-10, 0] so zp lands exactly on
-               the uint16 ceiling 2^16-1 = 65535 (the group-quant D6 boundary pin that
-               replaces the old -72817 int32-width pin).
+  f2NegBand16  {-B,-1,-5.5,-2.5,-9.25,-3.75} @ qBits=16, B = 65535 * 2^-12
+               (= 15.999755859375) -- all-negative band; the nudge extends it
+               to [-B, 0], whose grid B / 65535 = 2^-12 is exactly dyadic (the
+               canonical CEIL grid keeps it), so zp lands exactly on the uint16
+               ceiling 2^16-1 = 65535 (the group-quant D6 boundary pin that
+               replaces the old -72817 int32-width pin). A non-dyadic band
+               such as [-10, 0] gets a coarser CEIL grid and zp 65533.
   f3NegFar     {-5000000, -4999999.5} @ qBits=8 -- the old
                ZeroPointBeyondInt32 DEATH data: un-nudged zpReal ~ -2.55e9
                was an int32-overflow abort; nudged it derives a VALID grid
@@ -85,7 +88,7 @@ from sym_gold import (dequant_asym_grouped, emit_float_array, emit_float_scalar,
 
 FIXTURES = [
     ("f1SpanZero", [1.0, 2.0, 3.0, 4.0, -1.0, -2.0], 5),
-    ("f2NegBand16", [-10.0, -1.0, -5.5, -2.5, -9.25, -3.75], 16),
+    ("f2NegBand16", [-15.999755859375, -1.0, -5.5, -2.5, -9.25, -3.75], 16),
     ("f3NegFar", [-5000000.0, -4999999.5], 8),
     ("f4ClampTie", [-1.5, 5.5, 0.0, 2.0], 3),
     ("f5SymDeq", [5.0, -4.0, 2.0, -1.0, 3.0, -5.0], 5),
@@ -214,7 +217,9 @@ def main() -> int:
 
     # -- cross-fixture self-checks (see module docstring) --
     codes, scale, zp = results["f1SpanZero"]
-    assert zp == 10 and codes == [15, 20, 26, 31, 5, 0], (
+    # 3.0 sits at 15.5 steps of the exact 6/31 grid; the canonical CEIL grid is
+    # a hair coarser, so its quotient is just below the tie: code 15 + zp = 25.
+    assert zp == 10 and codes == [15, 20, 25, 31, 5, 0], (
         f"f1SpanZero drifted from the hand derivation: codes {codes}, zp {zp}")
     _codes2, _scale2, zp2 = results["f2NegBand16"]
     assert zp2 == 2 ** 16 - 1, f"f2NegBand16: zp {zp2} != uint16 ceiling 65535"

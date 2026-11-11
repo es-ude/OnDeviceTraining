@@ -14,6 +14,7 @@
 #include "LayerExec.h"
 #include "Quantization.h"
 #include "Rounding.h"
+#include "ScaleCanon.h"
 #include "Tensor.h"
 #include "TensorConversion.h"
 
@@ -84,7 +85,7 @@ static void dropoutForwardSymInt32(dropoutConfig_t *cfg, tensor_t *input, tensor
         for (size_t i = 0; i < numberOfElements; i++) {
             out[i] = in[i];
         }
-        outQC->scale = inQC->scale;
+        storeCanonScale(&outQC->scale, inQC->scale);
         return;
     }
 
@@ -92,8 +93,9 @@ static void dropoutForwardSymInt32(dropoutConfig_t *cfg, tensor_t *input, tensor
     for (size_t i = 0; i < numberOfElements; i++) {
         out[i] = tensorBoolGet(cfg->mask, i) ? in[i] : 0;
     }
-    outQC->scale = inQC->scale * scale; // scale-fold: ints copied unchanged, the 1/(1-p) factor
-                                        // goes into the quant scale
+    /* scale-fold: ints copied unchanged, the 1/(1-p) factor goes into the quant
+     * scale -- canonicalized NEAREST, folded with odtScaleMul (canonCoeffScale) */
+    storeCanonScale(&outQC->scale, canonCoeffScale(inQC->scale, scale));
 }
 
 /* Eval-mode / mask-free carry: identical element count and geometry mean
@@ -372,8 +374,9 @@ static void dropoutBackwardSymInt32(dropoutConfig_t *cfg, tensor_t *loss, tensor
     for (size_t i = 0; i < numberOfElements; i++) {
         gradIn[i] = tensorBoolGet(cfg->mask, i) ? gradOut[i] : 0;
     }
-    propLossQC->scale = lossQC->scale * scale; // scale-fold: ints copied unchanged, the 1/(1-p)
-                                               // factor goes into the quant scale
+    /* scale-fold: ints copied unchanged, the 1/(1-p) factor goes into the quant
+     * scale -- canonicalized NEAREST, folded with odtScaleMul (canonCoeffScale) */
+    storeCanonScale(&propLossQC->scale, canonCoeffScale(lossQC->scale, scale));
 }
 
 void dropoutBackward(layer_t *dropoutLayer, tensor_t *forwardInput, tensor_t *loss,

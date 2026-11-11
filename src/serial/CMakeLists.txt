@@ -37,6 +37,7 @@ target_include_directories(Deserialize PUBLIC include)
 target_link_libraries(Deserialize PRIVATE
         LossType
         Model
+        DyadicScale
         Common
         SerialWire
         Tensor

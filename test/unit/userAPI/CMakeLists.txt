@@ -43,6 +43,7 @@ add_elastic_ai_unit_test(
         Kernel
         Tensor
         TensorApi
+        DyadicScale
         odt_test_layer_builders
 )
 
@@ -508,6 +509,7 @@ add_executable(UnitTestOptimizerScaling UnitTestOptimizerScaling.c)
 target_link_libraries(UnitTestOptimizerScaling PRIVATE
         LossType
         unity
+        DyadicScale
         OptimizerApi
         SgdApi
         Sgd

@@ -8,6 +8,7 @@
 #include "Common.h"
 #include "Flatten.h"
 #include "Quantization.h"
+#include "ScaleCanon.h"
 
 /* BFP epic PR4 (R-P5, exponent array carried verbatim): Flatten is a
  * pure reshape — storage order and element count are unchanged, so the packed
@@ -53,7 +54,7 @@ void flattenForward(layer_t *flattenLayer, tensor_t *input, tensor_t *output,
     if (input->quantization->type == SYM_INT32) {
         symInt32QConfig_t *inputQC = input->quantization->qConfig;
         symInt32QConfig_t *outputQC = output->quantization->qConfig;
-        outputQC->scale = inputQC->scale;
+        storeCanonScale(&outputQC->scale, inputQC->scale);
     } else if (input->quantization->type == BFP) {
         const bfpQConfig_t *inputQC = input->quantization->qConfig;
         bfpQConfig_t *outputQC = output->quantization->qConfig;
@@ -80,7 +81,7 @@ void flattenBackward(layer_t *flattenLayer, tensor_t *forwardInput, tensor_t *lo
     if (loss->quantization->type == SYM_INT32) {
         symInt32QConfig_t *lossQC = loss->quantization->qConfig;
         symInt32QConfig_t *propLossQC = propLoss->quantization->qConfig;
-        propLossQC->scale = lossQC->scale;
+        storeCanonScale(&propLossQC->scale, lossQC->scale);
     } else if (loss->quantization->type == BFP) {
         const bfpQConfig_t *lossQC = loss->quantization->qConfig;
         bfpQConfig_t *propLossQC = propLoss->quantization->qConfig;

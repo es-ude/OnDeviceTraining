@@ -78,6 +78,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
+from dyadic_scale import CEIL, canon, product_scale  # noqa: F401
 from sym_gold import (combine_quotient_f32, conv1d_dx_grouped_ref, conv1d_grouped_ref,
                       emit_float_array, emit_float_scalar, emit_int32_array, emit_int32_scalar,
                       rescale_f32, window_geometry_1d, window_slice_1d_full)
@@ -102,12 +103,12 @@ X_MANTISSAS = [1, -2, 3, -1, 2, -3,
 X_SCALE = 0.5
 
 BIAS_MANTISSAS = [10, -5, 3]
-BIAS_SCALE = 0.1
+BIAS_SCALE = canon(0.1)  # stored scales are canonical dyadic: snapped NEAREST
 
 
 def fixture_per_channel():
     group_size, num_groups = 6, 3
-    w_scales = [0.02, 0.05, 0.01]
+    w_scales = [canon(s) for s in (0.02, 0.05, 0.01)]
     assert len(w_scales) == num_groups
 
     out, s_acc, out_len = conv1d_grouped_ref(
@@ -131,7 +132,7 @@ def fixture_per_channel():
 def fixture_general_groups():
     group_size, num_groups = 3, 6
     # Deliberately scales[0] != max(scales) (mutation (i)'s pin).
-    w_scales = [0.02, 0.05, 0.01, 0.08, 0.03, 0.06]
+    w_scales = [canon(s) for s in (0.02, 0.05, 0.01, 0.078125, 0.03, 0.05859375)]
     assert w_scales[0] != max(w_scales), "general: scales[0] must differ from max (mutation i)"
 
     out, s_acc, out_len = conv1d_grouped_ref(
@@ -258,7 +259,7 @@ def fixture_dx(name, w_scales, group_size):
 
 SAME_GROUP_SIZE = 2
 SAME_NUM_GROUPS = 9
-SAME_W_SCALES = [0.02, 0.05, 0.01, 0.08, 0.03, 0.06, 0.04, 0.07, 0.02]
+SAME_W_SCALES = [canon(s) for s in (0.02, 0.05, 0.01, 0.078125, 0.03, 0.05859375, 0.04, 0.07, 0.02)]
 
 
 def same_geom():
@@ -295,8 +296,7 @@ def ref_same_group_once_per_row():
     run-based assumption the per-element division exists to prevent. Same
     float32-mirrored arithmetic as conv1d_grouped_ref otherwise."""
     geom = same_geom()
-    s_acc = (torch.tensor(X_SCALE, dtype=torch.float32) *
-            torch.tensor(max(SAME_W_SCALES), dtype=torch.float32)).item()
+    s_acc = product_scale(X_SCALE, max(SAME_W_SCALES), CEIL)
     out = []
     for b in range(BATCH):
         for oc in range(OUT_CHANNELS):
@@ -420,10 +420,10 @@ CG_INPUT_LENGTH = 6
 CG_OUT_LEN = CG_INPUT_LENGTH - CG_KERNEL_SIZE + 1
 CG_GROUP_SIZE = 4
 CG_NUM_GROUPS = 6
-CG_W_SCALES = [0.02, 0.05, 0.01, 0.08, 0.03, 0.06]
+CG_W_SCALES = [canon(s) for s in (0.02, 0.05, 0.01, 0.078125, 0.03, 0.05859375)]
 CG_X_SCALE = 0.5
 CG_BIAS_MANTISSAS = [10, -5, 3, -7]
-CG_BIAS_SCALE = 0.1
+CG_BIAS_SCALE = canon(0.1)  # stored scales are canonical dyadic: snapped NEAREST
 
 torch.manual_seed(20260731)
 CG_W_MANTISSAS = [int(v) for v in torch.randint(
@@ -503,8 +503,8 @@ def main() -> int:
 
     # PR3 Task 3: dx fixtures reuse the forward fixtures' group shapes/scales;
     # only the lossGrad and the adjoint-scatter golds are new.
-    dx_pc = fixture_dx("perChannel", [0.02, 0.05, 0.01], 6)
-    dx_gen = fixture_dx("general", [0.02, 0.05, 0.01, 0.08, 0.03, 0.06], 3)
+    dx_pc = fixture_dx("perChannel", [canon(s) for s in (0.02, 0.05, 0.01)], 6)
+    dx_gen = fixture_dx("general", [canon(s) for s in (0.02, 0.05, 0.01, 0.078125, 0.03, 0.05859375)], 3)
     assert ([v * dx_pc["outScale"] for v in dx_pc["outMantissas"]] !=
             [v * dx_gen["outScale"] for v in dx_gen["outMantissas"]]), (
         "dx: perChannel and general golds dequantize identically -- the group "

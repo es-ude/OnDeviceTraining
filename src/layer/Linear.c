@@ -17,6 +17,7 @@
 #include "Linear.h"
 #include "Matmul.h"
 #include "Rounding.h"
+#include "ScaleCanon.h"
 #include "SymAccumGuard.h"
 #include "SymGroupedWeight.h"
 #include "TensorConversion.h"
@@ -313,7 +314,7 @@ void linearCalcBiasGradsSymInt32(tensor_t *biasGrads, tensor_t *loss) {
      * user tensor (not the funnel scratch) this output can re-enter a SYM op
      * as an operand, whose guard sizes its proof from the declared width. */
     symInt32QConfig_t *bgQC = biasGrads->quantization->qConfig;
-    bgQC->scale = ((symInt32QConfig_t *)loss->quantization->qConfig)->scale;
+    storeCanonScale(&bgQC->scale, ((symInt32QConfig_t *)loss->quantization->qConfig)->scale);
     bgQC->qMaxBits = symAccumResultBits(&site);
 }
 

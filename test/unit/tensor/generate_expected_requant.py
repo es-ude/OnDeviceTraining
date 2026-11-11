@@ -15,9 +15,11 @@ Fixtures (qMaxBits = 16, qMax = 32767, qMin = -32768 throughout):
                 pins scale-blindness (pass A must dequantize) and the exact
                 absmax -> qMax mapping (max|out| == 32767).
   f2AbsmaxZero  dynamic; all-zero mantissas -> zero mantissas, scale 1.0.
-  f3Rescale     dynamic; same mantissas at inScale s and 10*s; the C test
+  f3Rescale     dynamic; same mantissas at inScale s and 8*s; the C test
                 reuses ONE output qConfig across both calls -> pins
-                freeze-the-scale (scale must track the input rescale ~10x).
+                freeze-the-scale (scale must track the input rescale 8x; a
+                power of two, so the canonical CEIL grids scale exactly and
+                the mantissas stay invariant).
   f4Tie         dynamic; scale lands on exactly 4.0, quotients exactly
                 k + 0.5 -> pins half-away-from-zero vs half-to-even AND vs
                 floor/trunc casts (positive and negative ties).
@@ -39,6 +41,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
+from dyadic_scale import canon, fit_scale_from_codes
 from sym_gold import (QMAX, QMIN, emit_float_scalar, emit_int32_array,
                       emit_int32_scalar, round_half_away)
 
@@ -56,16 +59,16 @@ def scale_tol(scale: float) -> float:
 
 
 def emulate_requant_dynamic(mantissas: torch.Tensor, in_scale: float):
-    """requantSymInt32Tensor mirrored in float32: pass A absmax over
-    |(float)m_i * inScale| (reads only), scale = absmax/qMax (1.0 if
-    absmax == 0), pass B round-clamp of ((float)m_i * inScale)/scale."""
-    deq = mantissas.to(torch.float32) * _f32(in_scale)
-    absmax = deq.abs().max()
-    if absmax.item() == 0.0:
-        scale = _f32(1.0)
-    else:
-        scale = absmax / _f32(QMAX)
-    quot = torch.clamp(deq / scale, QMIN, QMAX).to(torch.float64)
+    """requantSymInt32Tensor mirrored: pass A takes the largest code
+    magnitude (reads only); the grid is the canonical dyadic CEIL of the exact
+    absMax max|m| * inScale over qMax (1.0 if every code is 0); pass B
+    round-clamps (float)m_i * (inScale / scale), all float32 -- the C
+    expression."""
+    in_s = canon(in_scale)
+    max_abs = int(mantissas.to(torch.int64).abs().max().item())
+    scale = _f32(fit_scale_from_codes(in_s, max_abs, int(QMAX)))
+    quot = torch.clamp(mantissas.to(torch.float32) * (_f32(in_s) / scale), QMIN,
+                       QMAX).to(torch.float64)
     out = round_half_away(quot).to(torch.int32)
     return out, float(scale.item())
 
@@ -95,7 +98,7 @@ def _roundtrip_check(name, out, scale, mantissas, in_scale, max_abs_mantissa):
 def fixture_f1_accum_range():
     m = torch.tensor([1999999999, -2000000000, 123456789, -987654321,
                       31415926, -27182818, 500000000, 0], dtype=torch.int32)
-    in_scale = 3.05e-5
+    in_scale = canon(3.05e-5)  # stored scales are canonical dyadic values
     out, scale = emulate_requant_dynamic(m, in_scale)
     assert out.abs().max().item() == int(QMAX), (
         f"f1AccumRange: absmax must map exactly to qMax, got "
@@ -118,14 +121,14 @@ def fixture_f2_absmax_zero():
 def fixture_f3_rescale():
     m = torch.tensor([1000, -2000, 30, 4500, -16000, 12345], dtype=torch.int32)
     in_scale_a = 2.0 ** -8     # 0.00390625, exact in float32
-    in_scale_b = 10.0 * in_scale_a  # 0.0390625 = 5*2^-7, ALSO exact in float32
+    in_scale_b = 8.0 * in_scale_a  # 2^-5: a power-of-two factor keeps the dyadic grids exact
     out_a, scale_a = emulate_requant_dynamic(m, in_scale_a)
     out_b, scale_b = emulate_requant_dynamic(m, in_scale_b)
-    # Same mantissas + exactly-10x input scale => identical quotients up to
-    # float32 ulps (no quotient sits near a tie) => identical mantissas.
+    # Same mantissas + exactly-8x input scale => the CEIL grid scales by
+    # exactly 8 => identical quotients => identical mantissas.
     assert torch.equal(out_a, out_b), "f3Rescale: mantissas must be invariant"
-    assert abs(scale_b / scale_a - 10.0) < 1e-6, (
-        f"f3Rescale: scale ratio {scale_b / scale_a} != 10")
+    assert scale_b / scale_a == 8.0, (
+        f"f3Rescale: scale ratio {scale_b / scale_a} != 8")
     assert out_a.abs().max().item() == int(QMAX), "f3Rescale: absmax->qMax"
     _roundtrip_check("f3Rescale/A", out_a, scale_a, m, in_scale_a, 16000.0)
     _roundtrip_check("f3Rescale/B", out_b, scale_b, m, in_scale_b, 16000.0)

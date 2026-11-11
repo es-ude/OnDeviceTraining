@@ -14,6 +14,7 @@
 #include "Arithmetic.h"
 #include "DTypes.h"
 #include "Mul.h"
+#include "ScaleCanon.h"
 #include "SymAccumGuard.h"
 
 #include <Common.h>
@@ -121,7 +122,8 @@ void mulSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
 
     writeInt32ArrayToByteArray(aNumberOfValues, output, outputTensor->data);
     symInt32QConfig_t *outputConfig = outputTensor->quantization->qConfig;
-    outputConfig->scale = MUL_FUNC_FLOAT(aConfig->scale, bConfig->scale);
+    storeCanonScale(&outputConfig->scale,
+                    canonProductScale(aConfig->scale, bConfig->scale, ODT_SCALE_NEAREST));
     outputConfig->qMaxBits = width;
 }
 
@@ -151,7 +153,8 @@ void mulSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor) {
 
     /* a's config is the output: read both widths before writing it */
     uint8_t width = symProductWidth(aConfig->qMaxBits, bConfig->qMaxBits);
-    aConfig->scale = MUL_FUNC_FLOAT(aConfig->scale, bConfig->scale);
+    storeCanonScale(&aConfig->scale,
+                    canonProductScale(aConfig->scale, bConfig->scale, ODT_SCALE_NEAREST));
     aConfig->qMaxBits = width;
 }
 

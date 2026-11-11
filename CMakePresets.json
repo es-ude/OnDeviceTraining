@@ -77,6 +77,14 @@
       }
     },
     {
+      "name": "unit_test_scale_strict",
+      "displayName": "Unit-Test-Scale-Strict",
+      "inherits": "unit_test_debug",
+      "cacheVariables": {
+        "ODT_SCALE_STRICT": "ON"
+      }
+    },
+    {
       "name": "examples",
       "displayName": "Examples (BUILD_EXAMPLES=ON)",
       "inherits": "host",
@@ -166,6 +174,12 @@
       "name": "unit_test_ubsan",
       "inherits": "host",
       "configurePreset": "unit_test_ubsan",
+      "targets": "all_unit_tests"
+    },
+    {
+      "name": "unit_test_scale_strict",
+      "inherits": "host",
+      "configurePreset": "unit_test_scale_strict",
       "targets": "all_unit_tests"
     },
     {
@@ -286,6 +300,20 @@
       "environment": {
         "ASAN_OPTIONS": "detect_leaks=0:abort_on_error=1:halt_on_error=1:strict_string_checks=1:check_initialization_order=1",
         "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1:abort_on_error=1"
+      }
+    },
+    {
+      "name": "unit_test_scale_strict",
+      "displayName": "Unit Tests (ODT_SCALE_STRICT)",
+      "configurePreset": "unit_test_scale_strict",
+      "output": {
+        "outputJUnitFile": "unit-test-scale-strict.junit",
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "unit"
+        }
       }
     },
     {

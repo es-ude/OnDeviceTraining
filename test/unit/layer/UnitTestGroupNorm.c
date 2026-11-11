@@ -8,6 +8,7 @@
 
 #include "Arithmetic.h"
 #include "ArithmeticType.h"
+#include "DyadicScale.h"
 #include "ExecuteOp.h"
 #include "GroupNorm.h"
 #include "GroupNormApi.h"
@@ -1169,11 +1170,12 @@ void testFactorySymInt32StorageQuantizesGammaBeta(void) {
 
     for (size_t i = 0; i < 4; i++) {
         /* gamma=ones is OPERAND storage (default int12, #227): absmax=1 ->
-         * every mantissa = qMax = 2047, scale = 1/2047. beta=zeros -> 0, scale 1. */
+         * every mantissa = qMax = 2047, scale = CEIL15(1/2047). beta=zeros -> 0,
+         * scale 1. */
         TEST_ASSERT_EQUAL_INT(2047, g[i]);
         TEST_ASSERT_EQUAL_INT(0, b[i]);
     }
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 1.0f / 2047.0f, gScale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, odtScaleCanonFloat(1.0f / 2047.0f, ODT_SCALE_CEIL), gScale);
     TEST_ASSERT_FLOAT_WITHIN(1e-9f, 1.0f, bScale);
     TEST_ASSERT_TRUE(gammaGradFloat);
     TEST_ASSERT_TRUE(betaGradFloat);
@@ -2822,13 +2824,13 @@ static uint32_t groupNormNormDxStateOfSeed(uint64_t seed) {
 }
 
 /* One group of 2 channels x 8 steps, x = +-1 at scale 1 (mean 0, variance 1,
- * eps 0): every normalized value is +-1 and absmax 1, so the stretch is qMax
- * and element 0 sits exactly on qMax = 2047, drawn with a near-1 u. Saturated
- * SR stays on the grid. Under exact SR the integer clamp after the round is
- * defensive (an exactly representable qMax has no fraction and never moves),
- * so this is a behavioural pin and no longer distinguishes clamp presence. The
- * kernel's raw output is q * gammaCode (beta 0), read off the SYM->SYM
- * epilogue cell. */
+ * eps 0): every normalized value is +-1 and absmax 1. The canonical CEIL grid
+ * sNorm sits just above 1/qMax, so the stretch 1/sNorm sits just below qMax
+ * (2046.88) and element 0, drawn with a near-1 u, rounds DOWN to 2046 --
+ * inside the grid, never past qMax. Saturated SR stays on the grid. The
+ * integer clamp after the round is defensive, so this is a behavioural pin and
+ * no longer distinguishes clamp presence. The kernel's raw output is
+ * q * gammaCode (beta 0), read off the SYM->SYM epilogue cell. */
 void testGroupNormSymForwardSrKeepsSaturatedCodeOnTheGrid(void) {
     size_t dims[] = {1, 2, 8};
     tensor_t *x = buildSymCodes(3, dims, kNormDxX, 1.0f, HALF_AWAY, 12);
@@ -2860,7 +2862,10 @@ void testGroupNormSymForwardSrKeepsSaturatedCodeOnTheGrid(void) {
     freeTensor(x);
 
     TEST_ASSERT_EQUAL_size_t(NORM_DX_N, rawN);
-    TEST_ASSERT_EQUAL_INT32_MESSAGE(2047 * gammaCode, raw0, "element 0 stays on qMax");
+    const float stretch = 1.0f / odtScaleCanonFloat(1.0f / 2047.0f, ODT_SCALE_CEIL);
+    TEST_ASSERT_TRUE(stretch < 2047.0f && stretch > 2046.0f);
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(2046 * gammaCode, raw0,
+                                    "element 0 rounds down onto the grid, under qMax");
 }
 
 /* x = +-1, gamma = 1 and dy in +-pairs, so dx = dy exactly; dy[0] = 2047 at

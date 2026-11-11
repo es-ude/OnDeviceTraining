@@ -80,6 +80,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
+from dyadic_scale import CEIL, canon, product_scale  # noqa: F401
 from sym_gold import (assert_rounding_canary, combine_quotient_f32, convT1d_dx_grouped_ref,
                       convT1d_grouped_ref, emit_float_array, emit_float_scalar, emit_int32_array,
                       emit_int32_scalar, rescale_f32, window_geometry_1d, window_slice_1d_full)
@@ -104,7 +105,7 @@ X_MANTISSAS = [int(v) for v in torch.randint(-40, 41,
 X_SCALE = 0.5  # power of two -- the equal-scales twin's exactness argument needs it
 
 BIAS_MANTISSAS = [17, -9, 23]
-BIAS_SCALE = 0.1
+BIAS_SCALE = canon(0.1)  # stored scales are canonical dyadic: snapped NEAREST
 
 
 def param_scale_f32(w_scale):
@@ -113,7 +114,8 @@ def param_scale_f32(w_scale):
 
 
 def s_acc_f32(w_scales):
-    return param_scale_f32(max(w_scales))
+    # the stored sAcc: canonical product, CEIL (every group factor stays <= 1)
+    return product_scale(X_SCALE, max(w_scales), CEIL)
 
 
 def scatter_targets():
@@ -329,8 +331,8 @@ def main() -> int:
 
     assert_rounding_canary()
 
-    per_channel = fixture("perChannel", [0.02, 0.05], 9, 2)
-    general = fixture("general", [0.02, 0.05, 0.01, 0.08, 0.03, 0.06], 3, 6)
+    per_channel = fixture("perChannel", [canon(s) for s in (0.02, 0.05)], 9, 2)
+    general = fixture("general", [canon(s) for s in (0.02, 0.05, 0.01, 0.078125, 0.03, 0.05859375)], 3, 6)
 
     # (iv) rounding discriminator on the general fixture.
     assert ref_truncating(general["wScales"], general["groupSize"]) != general["outMantissas"], (

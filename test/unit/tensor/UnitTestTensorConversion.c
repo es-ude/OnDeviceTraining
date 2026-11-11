@@ -1,5 +1,6 @@
 #include "DTypes.h"
 #include "DeathTest.h"
+#include "DyadicScale.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
 #include "RNG.h"
@@ -22,6 +23,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Expected canonical grids (DyadicScale.h): a grid fitted to float data is the
+ * float32 quotient absMax / hi rounded UP to 15 bits; a grid fitted to integer
+ * codes is the exact ratio inScale * maxAbsCode / hi rounded UP once. */
+static float fitFloat(float absMax, float hi) {
+    return odtScaleCanonFloat(absMax / hi, ODT_SCALE_CEIL);
+}
+
+static float fitCodes(float inScale, uint32_t maxAbsCode, uint32_t hi) {
+    return odtScaleToFloat(odtScaleMulRatio(odtScaleFromFloat(inScale, ODT_SCALE_NEAREST),
+                                            maxAbsCode, hi, ODT_SCALE_CEIL));
+}
 
 /* File-internal helper of TensorConversion.c (external linkage, no header entry);
  * declared locally to characterize its packed-size memset. */
@@ -342,10 +355,11 @@ void testConversionFloatAsym() {
 void testConversionFloatAsymQBits16NegativeBandZeroPointAtCodeCeiling() {
     /* Re-pinned to the nudged code-domain grid (group-quant PR4, D6). This
      * used to be the -72817 int32-zeroPoint width pin (#246); the nudge
-     * extends the all-negative band [-10, -1] to [-10, 0], so the code-domain
+     * extends the all-negative band [-B, -1] to [-B, 0], so the code-domain
      * zp lands EXACTLY on the uint16 ceiling 2^16-1 = 65535 -- the group-quant D6
-     * boundary this fixture now pins (zpReal = -mn/scale = qMax by
-     * construction whenever mx nudges to 0). The old max value -1 no longer
+     * boundary this fixture now pins (zpReal = -mn/scale = qMax whenever mx
+     * nudges to 0 and the grid B / 65535 is exactly dyadic, as B = 65535 * 2^-12
+     * makes it; a non-dyadic band gets a coarser CEIL grid). The old max value -1 no longer
      * maps to code 65535 (that code now represents 0.0); the min still maps
      * to code 0. Gold: expected_asym_nudged.h f2NegBand16.
      * Mutation guard: dropping the nudge re-derives the old [-10,-1] band
@@ -1108,7 +1122,7 @@ void testRequantDynamicScaleTracksInputRescale() {
     TEST_ASSERT_FLOAT_WITHIN(scaleTolA_requant_f3Rescale, expectedScaleA_requant_f3Rescale,
                              outQc.scale);
 
-    // same mantissas, input scale x10 -> fresh scale must track ~x10
+    // same mantissas, input scale x8 -> fresh scale must track x8
     inQc.scale = inputScaleB_requant_f3Rescale;
     requantSymInt32Tensor(&inTensor, &outTensor, NULL);
     TEST_ASSERT_EQUAL_INT32_ARRAY(expectedB_requant_f3Rescale, outData,
@@ -1589,7 +1603,8 @@ void testConversionSymInt32ToSymRescaleRoundTrips() {
     setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
 
     /* Output: SYM with qBits=6.
-     * Expected fresh scale = absmax / (2^(6-1) - 1) = 10.0 / 31 ≈ 0.322580645. */
+     * Expected fresh scale = the canonical CEIL of absmax / (2^(6-1) - 1) =
+     * 0.25 * 40 / 31, rounded up once to 15 bits (~0.32258). */
     float outQCScale[1] = {1.f};
     symQConfig_t outQC = {.scales = outQCScale,
                           .numGroups = 1,
@@ -1605,7 +1620,7 @@ void testConversionSymInt32ToSymRescaleRoundTrips() {
     convertTensor(&inTensor, &symTensor, NULL);
 
     /* Assert fresh output scale. */
-    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 10.0f / 31.0f, outQC.scales[0]);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, fitCodes(0.25f, 40u, 31u), outQC.scales[0]);
 
     /* Manually unpack codes and dequantize; verify within one quant step.
      * One quant step = scale ≈ 0.323; tolerance = 0.33f. */
@@ -1861,10 +1876,10 @@ void testConversionSymInt32AsymConstantTensorNoDivByZero() {
 
     symInt32QConfig_t inQC;
     initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inQC, 16);
-    inQC.scale = 0.5f;
+    inQC.scale = 0.484375f; /* 31 * 2^-6: the band [0, 3.875] spans 31 steps of 2^-3 exactly */
     quantization_t inQ;
     initSymInt32Quantization(&inQC, &inQ);
-    int32_t inData[] = {8, 8, 8, 8}; /* dequantized = 4.0 each (constant) */
+    int32_t inData[] = {8, 8, 8, 8}; /* dequantized = 3.875 each (constant) */
     tensor_t inTensor;
     setTensorValues(&inTensor, (uint8_t *)inData, &shape, &inQ, NULL);
 
@@ -1892,11 +1907,11 @@ void testConversionSymInt32AsymConstantTensorNoDivByZero() {
     convertTensor(&asymTensor, &floatTensor, NULL); /* ASYM -> FLOAT32 round-trip */
 
     for (size_t i = 0; i < n; i++) {
-        TEST_ASSERT_FLOAT_WITHIN(1e-4f, 4.0f, outF[i]);
+        TEST_ASSERT_FLOAT_WITHIN(1e-4f, 3.875f, outF[i]);
     }
 
     /* Group-quant PR4: under the nudge a NONZERO constant no longer reaches
-     * the mn==mx fallback (the band [0, 4] is non-degenerate); only the
+     * the mn==mx fallback (the band [0, 3.875] is non-degenerate); only the
      * all-zero tensor does. Pin the adapted fallback: scale 1.f, zp 0,
      * codes 0 -- the value-zero state code 0 decodes from exactly. */
     int32_t zeroData[] = {0, 0, 0, 0};
@@ -1960,8 +1975,8 @@ void testConversionAsymToSymRescaleOffCenterRoundTrips() {
     convertTensor(&asymTensor, &symTensor, NULL);
 
     /* Assert FRESH symmetric scale proves rescale (NOT the carried asym 0.25):
-     * absMax = 6.0; scale = 6.0 / (2^(6-1) - 1) = 6.0/31. */
-    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 6.0f / 31.0f, outQC.scales[0]);
+     * absMax = 6.0 = 24 codes * 0.25; scale = CEIL(6.0 / (2^(6-1) - 1)). */
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, fitCodes(0.25f, 24u, 31u), outQC.scales[0]);
 
     /* Manual unpack + dequant + compare.
      * asym codes are exact integers so the only error is the SYM requantization step
@@ -2118,12 +2133,13 @@ void testAccumulateSymFixedGridFirstStoreDerivesGridThenCarries(void) {
      *
      * Derivation (HALF_AWAY; cross-checked with a throwaway float32 harness
      * mirroring the exact arithmetic below -- house style):
-     * call1: absMax(inc1) = 3.1 -> scale = 3.1/31 ~= 0.1.
+     * call1: absMax(inc1) = 3.875 = 31 * 2^-3 -> scale = 0.125, exactly
+     *   dyadic, so the canonical CEIL grid keeps the -15.5 tie below.
      *   codes1[i] = round(inc1[i]/scale): round(31)=31, round(-15.5)=-16
      *   (HALF_AWAY, ties away from zero), round(7.75)=8, round(3.875)=4.
      * call2 (carried scale): codes2[i] = round(codes1[i] + inc2[i]/scale):
      *   round(31 - 1) = 30, round(-16 + 1) = -15, round(8+0) = 8, round(4+0) = 4.
-     * inc2[0] is -0.1, not +0.1: +0.1 would push element 0 to 32, overflowing
+     * inc2[0] is -0.125, not +0.125: + would push element 0 to 32, overflowing
      * the 6-bit grid (exercised separately by the overflow-aborts test). */
     uint8_t data[3] = {0};
     size_t dims[] = {1, 4};
@@ -2137,17 +2153,17 @@ void testAccumulateSymFixedGridFirstStoreDerivesGridThenCarries(void) {
     tensor_t target;
     setTensorValues(&target, data, &shape, &q, NULL);
 
-    float inc1[] = {3.1f, -1.55f, 0.775f, 0.3875f};
+    float inc1[] = {3.875f, -1.9375f, 0.96875f, 0.484375f};
     accumulateFloatIntoSymTensorFixedGrid(&target, inc1, 4, NULL);
     float scaleAfter1 = qc.scales[0];
-    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 3.1f / 31.0f, scaleAfter1);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.125f, scaleAfter1);
 
     int32_t codes1[4];
     symTestUnpackSignExtend(data, 6, codes1, 4);
     int32_t expectedCodes1[] = {31, -16, 8, 4};
     TEST_ASSERT_EQUAL_INT32_ARRAY(expectedCodes1, codes1, 4);
 
-    float inc2[] = {-0.1f, 0.1f, 0.f, 0.f};
+    float inc2[] = {-0.125f, 0.125f, 0.f, 0.f};
     accumulateFloatIntoSymTensorFixedGrid(&target, inc2, 4, NULL);
 
     TEST_ASSERT_EQUAL_FLOAT(scaleAfter1, qc.scales[0]); /* carried, not re-derived */
@@ -2234,24 +2250,29 @@ void testAccumulateSymFixedGridOverflowAborts(void) {
 }
 
 /* #519 fixture: the first float in [1, 2) whose fresh-grid round trip
- * a / (a / 127.f) lands one ulp ABOVE 127 (29 ulps above 1.0 on IEEE single
- * precision). The same two divisions the engine performs, from the loop
- * variable so nothing constant-folds. 0.f when no such float exists, so a
- * caller can fail on vacuity instead of testing nothing. */
-static float firstFloatWhoseFreshQ8QuotientOvershoots(void) {
+ * a / scale lands one ulp ABOVE the grid maximum, with the engine's own grid
+ * scale = CanonFloat(a / hi, CEIL) (the canonical dyadic fit). The CEIL grid
+ * removes the overshoot at q = 8 entirely (no float in [1, 2) has one), so the
+ * fixture runs at q = 16 (hi = 32767), where the float quotient a / hi can
+ * itself be an exact 15-bit value just BELOW the real a / 32767: the CEIL then
+ * keeps it and the round trip overshoots by one ulp (2^-9 at 32767). The same
+ * two operations the engine performs, from the loop variable so nothing
+ * constant-folds. 0.f when no such float exists, so a caller can fail on
+ * vacuity instead of testing nothing. */
+static float firstFloatWhoseFreshQ16QuotientOvershoots(void) {
     for (float a = 1.0f; a < 2.0f; a = nextafterf(a, 2.0f)) {
-        float s = a / 127.f;
-        if (a / s > 127.f) {
+        float s = odtScaleCanonFloat(a / 32767.f, ODT_SCALE_CEIL);
+        if (a / s > 32767.f) {
             return a;
         }
     }
     return 0.f;
 }
 
-/* Fresh (all-zero) SYM@8 accumulator of n elements under SR with the stream's
+/* Fresh (all-zero) SYM@16 accumulator of n elements under SR with the stream's
  * first draw pinned to 1 (u = 0: draw 0 is xorshift32's fixed point and the
  * pin helper rejects it). Decodes the codes into `codes`; returns the scale. */
-static float accumulateFreshQ8UnderSrFirstDrawOne(const float *inc, size_t n, int32_t *codes) {
+static float accumulateFreshQ16UnderSrFirstDrawOne(const float *inc, size_t n, int32_t *codes) {
     size_t dims[] = {n};
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
@@ -2259,7 +2280,7 @@ static float accumulateFreshQ8UnderSrFirstDrawOne(const float *inc, size_t n, in
     symQConfig_t qc = {.scales = qcScale,
                        .numGroups = 1,
                        .groupSize = 0,
-                       .qBits = 8,
+                       .qBits = 16,
                        .roundingMode = SR_HALF_AWAY};
     quantization_t q;
     initSymQuantization(&qc, &q);
@@ -2271,51 +2292,49 @@ static float accumulateFreshQ8UnderSrFirstDrawOne(const float *inc, size_t n, in
     rngStream_t rs = rngStreamWithNextDraw(1u);
     accumulateFloatIntoSymTensorFixedGrid(&target, inc, n, &rs);
 
-    symTestUnpackSignExtend(data, 8, codes, n);
+    symTestUnpackSignExtend(data, 16, codes, n);
     return qc.scales[0];
 }
 
 void testFixedGridFreshPeakOneUlpAboveQMaxDoesNotAbortUnderSr(void) {
-    /* #519: a FRESH grid's scale is this increment's absMax / 127, so the
-     * peak's quotient absMax / scale is 127 up to one float ulp -- and the
-     * division can land one ulp above it (127 + 2^-17). Under SR (lift iff
-     * u < frac) any draw below 2^-17 then lifted it to 128, which
+    /* #519: a FRESH grid's scale is fitted to this increment's absMax, so the
+     * peak's quotient absMax / scale is the grid maximum up to one float ulp
+     * -- and the division can land one ulp above it (32767 + 2^-9). Under SR
+     * (lift iff u < frac) any draw below 2^-9 then lifted it to 32768, which
      * packChunkGuarded rejected as a #227 overflow although nothing
      * overflowed: the overshoot is a rounding artefact of the grid's own
      * derivation. The fresh branch now clamps the rounded code to the grid.
      * The engine consumes one draw per element: element 0 sees u = 0 and
-     * must come out 127 (RED without the clamp: abort); element 1 sees the
-     * NEXT draw, xorshift32(1) = 270369 -> u = 1056 * 2^-24 ~= 6.3e-5 >
-     * 2^-17, which does not lift -(127 + 2^-17) to -128. The -127 is a draw
-     * fact, not a clamp fact (that quotient sits strictly inside [-128, 127]);
-     * the law's negative branch is pinned by the single-element test below.
-     * Mutation guard: drop the fresh clamp -> abort. */
-    const float a = firstFloatWhoseFreshQ8QuotientOvershoots();
-    TEST_ASSERT_TRUE_MESSAGE(a != 0.f, "no float in [1, 2) overshoots 127 on this platform");
+     * must come out 32767 (RED without the clamp: abort); element 1 sees the
+     * NEXT draw, xorshift32(1) = 270369 -> u = 1056 * 2^-24 ~= 6.3e-5 < 2^-9,
+     * which lifts -(32767 + 2^-9) to -32768 -- a grid code that exists, so the
+     * clamp leaves it alone. Mutation guard: drop the fresh clamp -> abort. */
+    const float a = firstFloatWhoseFreshQ16QuotientOvershoots();
+    TEST_ASSERT_TRUE_MESSAGE(a != 0.f, "no float in [1, 2) overshoots 32767 on this platform");
 
     float inc[] = {a, -a};
     int32_t codes[2];
-    float scale = accumulateFreshQ8UnderSrFirstDrawOne(inc, 2, codes);
+    float scale = accumulateFreshQ16UnderSrFirstDrawOne(inc, 2, codes);
 
-    TEST_ASSERT_EQUAL_FLOAT(a / 127.f, scale);
-    int32_t expected[] = {127, -127};
+    TEST_ASSERT_EQUAL_FLOAT(odtScaleCanonFloat(a / 32767.f, ODT_SCALE_CEIL), scale);
+    int32_t expected[] = {32767, -32768};
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, codes, 2);
 }
 
 void testFixedGridFreshNegativePeakSrLiftsToGridMin(void) {
     /* Same overshoot on the negative side, alone so it receives the pinned
-     * u = 0: quotient -(127 + 2^-17), law t - (u < -f) = -127 - 1 = -128.
+     * u = 0: quotient -(32767 + 2^-9), law t - (u < -f) = -32767 - 1 = -32768.
      * That is a legitimate SR outcome on a grid code that exists, so the
-     * fresh clamp must leave it alone: its lower bound is g.lo = -128, not
-     * -g.hi. Mutation guard: a symmetric [-127, 127] clamp -> -127. */
-    const float a = firstFloatWhoseFreshQ8QuotientOvershoots();
-    TEST_ASSERT_TRUE_MESSAGE(a != 0.f, "no float in [1, 2) overshoots 127 on this platform");
+     * fresh clamp must leave it alone: its lower bound is g.lo = -32768, not
+     * -g.hi. Mutation guard: a symmetric [-32767, 32767] clamp -> -32767. */
+    const float a = firstFloatWhoseFreshQ16QuotientOvershoots();
+    TEST_ASSERT_TRUE_MESSAGE(a != 0.f, "no float in [1, 2) overshoots 32767 on this platform");
 
     float inc[] = {-a};
     int32_t codes[1];
-    (void)accumulateFreshQ8UnderSrFirstDrawOne(inc, 1, codes);
+    (void)accumulateFreshQ16UnderSrFirstDrawOne(inc, 1, codes);
 
-    TEST_ASSERT_EQUAL_INT32(-128, codes[0]);
+    TEST_ASSERT_EQUAL_INT32(-32768, codes[0]);
 }
 
 void testFixedGridFreshQ26PeakSaturatesAtGridMax(void) {
@@ -2357,9 +2376,10 @@ void testAccumulateSymRescaleRederivesGridEachCall(void) {
      * scale=0.5 grid cannot hold mant+100) or, on a fresh all-zero target,
      * keep an unrelated scale -> the scale1/codes1 asserts RED either way.
      *
-     * Seed directly: scale=0.5, mant={2,-1,0,0} -> dequant={1.0,-0.5,0,0}
-     * (bit-exact: both values are exact powers of two at this scale).
-     * call1 (inc=0): absMax=1.0 -> scale1=1.0/31; codes1=round(dequant/scale1)
+     * Seed directly: scale=31*2^-6, mant={2,-1,0,0} -> dequant={0.96875,
+     * -0.484375,0,0} (bit-exact). call1 (inc=0): absMax=0.96875=31*2^-5 ->
+     * scale1=2^-5, exactly dyadic, so the canonical CEIL grid keeps the tie;
+     * codes1=round(dequant/scale1)
      *   = round(31)=31, round(-15.5)=-16 (HALF_AWAY), round(0)=0, round(0)=0.
      * call2 (inc=50 each): reference2[i] = codes1[i]*scale1 + 50 (computed at
      *   runtime from the SUT's own call1 output -- no hand-rounded literal
@@ -2374,7 +2394,7 @@ void testAccumulateSymRescaleRederivesGridEachCall(void) {
     int32_t seedMant[] = {2, -1, 0, 0};
     uint8_t data[3];
     byteConversion((uint8_t *)seedMant, 32, data, 6, 4);
-    float qcScale[1] = {0.5f};
+    float qcScale[1] = {0.484375f};
     symQConfig_t qc = {
         .scales = qcScale, .numGroups = 1, .groupSize = 0, .qBits = 6, .roundingMode = HALF_AWAY};
     quantization_t q;
@@ -2385,7 +2405,7 @@ void testAccumulateSymRescaleRederivesGridEachCall(void) {
     float inc1[] = {0.f, 0.f, 0.f, 0.f};
     accumulateFloatIntoSymTensorRescale(&target, inc1, n, NULL);
     float scale1 = qc.scales[0];
-    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.0f / 31.0f, scale1);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.03125f, scale1);
 
     int32_t codes1[4];
     symTestUnpackSignExtend(data, 6, codes1, 4);
@@ -2410,7 +2430,7 @@ void testAccumulateSymRescaleRederivesGridEachCall(void) {
             absMax2 = reference2[i];
         }
     }
-    TEST_ASSERT_FLOAT_WITHIN(1e-4f, absMax2 / 31.0f, scale2);
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, fitFloat(absMax2, 31.0f), scale2);
 
     int32_t codes2[4];
     symTestUnpackSignExtend(data, 6, codes2, 4);
@@ -2828,7 +2848,7 @@ void testChunkedSymInt32ToSymRoundTripsAtChunkBoundary(void) {
 
     convertTensor(&inTensor, &symOut, NULL);
 
-    float expectedScale = (100000.f * inQC.scale) / 31.f; /* qMax = 2^(6-1) - 1 */
+    float expectedScale = fitCodes(inQC.scale, 100000u, 31u); /* qMax = 2^(6-1) - 1 */
     TEST_ASSERT_FLOAT_WITHIN(1e-3f, expectedScale, outQC.scales[0]);
 
     float *decoded = (float *)reserveMemory(n * sizeof(float));
@@ -2895,7 +2915,7 @@ void testChunkedAsymToSymRoundTripsAtChunkBoundary(void) {
 
     convertTensor(&asymTensor, &symOut, NULL);
 
-    float expectedScale = 127.0f / 31.0f; /* qMax = 2^(6-1) - 1 */
+    float expectedScale = fitCodes(1.0f, 127u, 31u); /* qMax = 2^(6-1) - 1 */
     TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedScale, outQC.scales[0]);
 
     float *decoded = (float *)reserveMemory(n * sizeof(float));
@@ -5173,10 +5193,12 @@ void testSymInt32ToBfpPreservesValues(void) {
 
 void testBfpToSymInt32FreshAbsmaxGrid(void) {
     /* mantissas {6, -3} @ E=+1 (stored 128, scale 2) = values {12, -6};
-     * target qMaxBits=12 -> qMax 2047, fresh grid: scale = 12/2047.
+     * target qMaxBits=3 -> qMax 3, fresh grid: scale = 12/3 = 4, exactly
+     * dyadic (a fitted grid over an odd qMax is dyadic only when absMax is a
+     * dyadic multiple of qMax, so the canonical CEIL grid keeps this tie).
      * codes = roundByMode(v/scale, target HALF_AWAY), float32-exact:
-     *   12.f / (12.f/2047.f)  = 2047.0f  -> 2047
-     *   -6.f / (12.f/2047.f)  = -1023.5f (exact float tie) -> -1024. */
+     *   12.f / 4.f  = 3.0f  -> 3
+     *   -6.f / 4.f  = -1.5f (exact float tie) -> -2. */
     size_t n = 2;
     size_t dims[] = {2};
     size_t order[] = {0};
@@ -5186,7 +5208,7 @@ void testBfpToSymInt32FreshAbsmaxGrid(void) {
     uint8_t exponents[1] = {128}; /* E=+1, scale 2 */
     /* SOURCE roundingMode deliberately SR: dequant is rounding-free, so the
      * converter must never read it -- rounding with the source's mode instead
-     * of the TARGET's HALF_AWAY would turn the exact -1023.5 tie (and the
+     * of the TARGET's HALF_AWAY would turn the exact -1.5 tie (and the
      * exact asserts below) stochastic. */
     bfpQConfig_t inQC = {.exponents = exponents,
                          .numGroups = 1,
@@ -5202,7 +5224,7 @@ void testBfpToSymInt32FreshAbsmaxGrid(void) {
     setTensorValues(&src, bfpData, &shape, &inQ, NULL);
 
     /* scale sentinel -1: the converter must derive and write the fresh grid */
-    symInt32QConfig_t outQC = {.scale = -1.f, .roundingMode = HALF_AWAY, .qMaxBits = 12};
+    symInt32QConfig_t outQC = {.scale = -1.f, .roundingMode = HALF_AWAY, .qMaxBits = 3};
     quantization_t outQ;
     initSymInt32Quantization(&outQC, &outQ);
     int32_t outData[2] = {-777, -777}; /* sentinel != expected */
@@ -5211,9 +5233,9 @@ void testBfpToSymInt32FreshAbsmaxGrid(void) {
 
     convertTensor(&src, &dst, NULL);
 
-    TEST_ASSERT_EQUAL_FLOAT(12.f / 2047.f, outQC.scale);
-    TEST_ASSERT_EQUAL_INT32(2047, ((int32_t *)dst.data)[0]);
-    TEST_ASSERT_EQUAL_INT32(-1024, ((int32_t *)dst.data)[1]);
+    TEST_ASSERT_EQUAL_FLOAT(4.f, outQC.scale);
+    TEST_ASSERT_EQUAL_INT32(3, ((int32_t *)dst.data)[0]);
+    TEST_ASSERT_EQUAL_INT32(-2, ((int32_t *)dst.data)[1]);
 }
 
 void testBfpGroupedToSymInt32UsesPerGroupScales(void) {
@@ -5255,7 +5277,7 @@ void testBfpGroupedToSymInt32UsesPerGroupScales(void) {
 
     convertTensor(&src, &dst, NULL);
 
-    TEST_ASSERT_EQUAL_FLOAT(24.f / 127.f, outQC.scale);
+    TEST_ASSERT_EQUAL_FLOAT(fitFloat(24.f, 127.f), outQC.scale);
     TEST_ASSERT_EQUAL_INT32(127, ((int32_t *)dst.data)[0]);
     TEST_ASSERT_EQUAL_INT32(-106, ((int32_t *)dst.data)[1]);
     TEST_ASSERT_EQUAL_INT32(11, ((int32_t *)dst.data)[2]);
@@ -5600,7 +5622,7 @@ void testBfpToAsymUsesCanonicalGrid(void) {
 
     convertTensor(&src, &dst, NULL);
 
-    TEST_ASSERT_EQUAL_FLOAT(16.f / 15.f, outQC.scales[0]);
+    TEST_ASSERT_EQUAL_FLOAT(fitFloat(16.f, 15.f), outQC.scales[0]);
     TEST_ASSERT_EQUAL_UINT16(4, outQC.zeroPoints[0]);
     int32_t codes[4];
     byteConversion(dst.data, 4, (uint8_t *)codes, 32, n);
@@ -8434,10 +8456,10 @@ void testRequantSymInt32FromWidth32SourceRestoresTheTargetWidth(void) {
 
     requantSymInt32Tensor(&in, &out, NULL);
 
-    /* absMax = 2^22 * 0.125 = 2^19 -> scale 2^19 / 2047; 15 * 0.125 lands on code 0 */
+    /* absMax = 2^22 * 0.125 = 2^19 -> scale CEIL(2^19 / 2047); 15 * 0.125 lands on code 0 */
     int32_t expected[] = {2047, -2047, 0, 0};
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, outData, 4);
-    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 524288.f / 2047.f, outQc.scale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, fitCodes(0.125f, 1u << 22, 2047u), outQc.scale);
     TEST_ASSERT_EQUAL_UINT8(12, outQc.qMaxBits);
     TEST_ASSERT_EQUAL_UINT8(32, inQc.qMaxBits);
 }
@@ -9039,6 +9061,173 @@ void testBfpRawHasNoOtherConversionCells(void) {
     ASSERT_EXITS_WITH_FAILURE(floatToBfpRawBody());
 }
 
+/* ---- Dyadic scale canonicalization: every stored grid is an exact 15-bit
+ * dyadic value, rounded once (fitted grids CEIL, so absMax never lands past
+ * the top code). ---- */
+
+static uint32_t scaleBits(float s) {
+    uint32_t b;
+    memcpy(&b, &s, sizeof b);
+    return b;
+}
+
+static bool scaleIsCanonical(float s) {
+    return s > 0.f && odtScaleCanonFloat(s, ODT_SCALE_NEAREST) == s;
+}
+
+/* A grid fitted to integer codes: the exact absMax is maxAbsCode * inScale, so
+ * the grid is MulRatio(inScale, maxAbsCode, hi, CEIL), rounded once. The
+ * INT32_MIN code is the magnitude 2^31 MulRatio admits; its float route would
+ * round the absMax and then the quotient. */
+void testRequantGridFromMaxMagnitudeCodeIsCanonicalCeil(void) {
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+
+    symInt32QConfig_t inQc;
+    initSymInt32QConfig(HALF_AWAY, &inQc);
+    inQc.qMaxBits = 32;
+    inQc.scale = 1.0f;
+    quantization_t inQ;
+    initSymInt32Quantization(&inQc, &inQ);
+    int32_t inData[4] = {INT32_MIN, 3, -1000, INT32_MAX};
+    tensor_t in;
+    setTensorValues(&in, (uint8_t *)inData, &shape, &inQ, NULL);
+
+    symInt32QConfig_t outQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &outQc, 8);
+    quantization_t outQ;
+    initSymInt32Quantization(&outQc, &outQ);
+    int32_t outData[4];
+    tensor_t out;
+    setTensorValues(&out, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    requantSymInt32Tensor(&in, &out, NULL);
+
+    float expected =
+        odtScaleToFloat(odtScaleMulRatio(ODT_SCALE_ONE, 0x80000000u, 127u, ODT_SCALE_CEIL));
+    TEST_ASSERT_TRUE(scaleIsCanonical(outQc.scale));
+    TEST_ASSERT_EQUAL_HEX32(scaleBits(expected), scaleBits(outQc.scale));
+    TEST_ASSERT_EQUAL_INT32(-127, outData[0]);
+    TEST_ASSERT_EQUAL_INT32(127, outData[3]);
+}
+
+/* A grid fitted to float data: CanonFloat(absMax / hi, CEIL), rounded up so
+ * the absMax element still maps inside the top code. */
+void testFloatGridFitIsCanonicalCeil(void) {
+    size_t dims[] = {3};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    float vals[3] = {1.0f, -0.3f, 0.71f};
+    tensor_t f;
+    setTensorValues(&f, (uint8_t *)vals, &shape, &floatQ, NULL);
+
+    symInt32QConfig_t outQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &outQc, 8);
+    quantization_t outQ;
+    initSymInt32Quantization(&outQc, &outQ);
+    int32_t outData[3];
+    tensor_t out;
+    setTensorValues(&out, (uint8_t *)outData, &shape, &outQ, NULL);
+    convertTensor(&f, &out, NULL);
+
+    float expected = odtScaleCanonFloat(1.0f / 127.0f, ODT_SCALE_CEIL);
+    TEST_ASSERT_TRUE(scaleIsCanonical(outQc.scale));
+    TEST_ASSERT_EQUAL_HEX32(scaleBits(expected), scaleBits(outQc.scale));
+    TEST_ASSERT_EQUAL_INT32(127, outData[0]);
+
+    /* packed SYM, same rule */
+    float symScales[1] = {1.f};
+    symQConfig_t symQc = {
+        .scales = symScales, .numGroups = 1, .groupSize = 0, .qBits = 4, .roundingMode = HALF_AWAY};
+    quantization_t symQ;
+    initSymQuantization(&symQc, &symQ);
+    uint8_t symData[2];
+    tensor_t sym;
+    setTensorValues(&sym, symData, &shape, &symQ, NULL);
+    convertTensor(&f, &sym, NULL);
+    float expectedSym = odtScaleCanonFloat(1.0f / 7.0f, ODT_SCALE_CEIL);
+    TEST_ASSERT_EQUAL_HEX32(scaleBits(expectedSym), scaleBits(symScales[0]));
+}
+
+/* Raw-int class: an INT32 -> SYM_INT32 carry is exactly scale one. */
+void testInt32ToSymInt32RawScaleIsExactlyOne(void) {
+    size_t dims[] = {2};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    quantization_t intQ;
+    initInt32Quantization(&intQ);
+    int32_t vals[2] = {-5, 100};
+    tensor_t in;
+    setTensorValues(&in, (uint8_t *)vals, &shape, &intQ, NULL);
+    symInt32QConfig_t outQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &outQc, 12);
+    outQc.scale = 0.75f;
+    quantization_t outQ;
+    initSymInt32Quantization(&outQc, &outQ);
+    int32_t outData[2];
+    tensor_t out;
+    setTensorValues(&out, (uint8_t *)outData, &shape, &outQ, NULL);
+    convertTensor(&in, &out, NULL);
+    float one = odtScaleToFloat(ODT_SCALE_ONE);
+    TEST_ASSERT_EQUAL_HEX32(scaleBits(one), scaleBits(outQc.scale));
+}
+
+/* ASYM range fit: scale = CEIL((mx - mn) / qMax) first, zp and codes from the
+ * canonical scale. mn, mx and 0.0 each round-trip without endpoint clipping:
+ * within half a step under HALF_AWAY, under one step under SR (an SR lift moves
+ * by at most one step by definition); 0.0 is exact (code == zp) in both. */
+static void assertAsymCanonicalEndpoints(roundingMode_t mode) {
+    const float mn = -0.37f;
+    const float mx = 1.9f;
+    size_t dims[] = {5};
+    size_t order[] = {0};
+    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
+    quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    float vals[5] = {mn, 0.0f, 0.5f, mx, -0.1f};
+    tensor_t f;
+    setTensorValues(&f, (uint8_t *)vals, &shape, &floatQ, NULL);
+
+    float scales[1] = {1.f};
+    uint16_t zps[1] = {0};
+    asymQConfig_t qc = {.scales = scales,
+                        .zeroPoints = zps,
+                        .numGroups = 1,
+                        .groupSize = 0,
+                        .qBits = 4,
+                        .roundingMode = mode};
+    quantization_t asymQ;
+    initAsymQuantization(&qc, &asymQ);
+    uint8_t data[3];
+    tensor_t a;
+    setTensorValues(&a, data, &shape, &asymQ, NULL);
+    rngStream_t rs = rngOpen(rngKeyFromSeed(11u));
+    convertTensor(&f, &a, mode == SR_HALF_AWAY ? &rs : NULL);
+
+    float expected = odtScaleCanonFloat((mx - mn) / 15.0f, ODT_SCALE_CEIL);
+    TEST_ASSERT_TRUE(scaleIsCanonical(scales[0]));
+    TEST_ASSERT_EQUAL_HEX32(scaleBits(expected), scaleBits(scales[0]));
+
+    uint8_t codes[5];
+    byteConversion(a.data, qc.qBits, codes, 8, 5);
+    const float bound = (mode == SR_HALF_AWAY) ? scales[0] : 0.5f * scales[0];
+    const size_t idx[3] = {0, 1, 3};
+    for (size_t k = 0; k < 3; k++) {
+        size_t i = idx[k];
+        float deq = ((float)codes[i] - (float)zps[0]) * scales[0];
+        TEST_ASSERT_TRUE_MESSAGE(fabsf(deq - vals[i]) <= bound, "endpoint/zero round trip");
+    }
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)zps[0], codes[1]);
+}
+
+void testAsymCanonicalGridKeepsEndpointsAndZero(void) {
+    assertAsymCanonicalEndpoints(HALF_AWAY);
+    assertAsymCanonicalEndpoints(SR_HALF_AWAY);
+}
+
 int main(void) {
     UNITY_BEGIN();
 
@@ -9291,6 +9480,10 @@ int main(void) {
     RUN_TEST(testBfpRawToBfpSrWithoutStreamDies);
     RUN_TEST(testBfpRawToFloat32IsExactPerGroup);
     RUN_TEST(testBfpRawHasNoOtherConversionCells);
+    RUN_TEST(testRequantGridFromMaxMagnitudeCodeIsCanonicalCeil);
+    RUN_TEST(testFloatGridFitIsCanonicalCeil);
+    RUN_TEST(testInt32ToSymInt32RawScaleIsExactlyOne);
+    RUN_TEST(testAsymCanonicalGridKeepsEndpointsAndZero);
 
     return UNITY_END();
 }

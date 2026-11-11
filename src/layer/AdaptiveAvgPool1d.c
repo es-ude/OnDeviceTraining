@@ -14,6 +14,7 @@
 #include "LayerExec.h"
 #include "LayerWireGuards.h"
 #include "Quantization.h"
+#include "ScaleCanon.h"
 #include "Tensor.h"
 
 void initAdaptiveAvgPool1dConfig(adaptiveAvgPool1dConfig_t *cfg, size_t outputSize,
@@ -141,8 +142,8 @@ static void adaptiveAvgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, ten
         }
     }
 
-    ((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale =
-        ((symInt32QConfig_t *)input->quantization->qConfig)->scale;
+    storeCanonScale(&((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale,
+                    ((symInt32QConfig_t *)input->quantization->qConfig)->scale);
 }
 
 /* BFP epic PR4 (R-P4): the PR2 fold contract per adaptive window (int32
@@ -386,8 +387,8 @@ static void adaptiveAvgPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, te
         }
     }
 
-    ((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale =
-        ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->scale;
+    storeCanonScale(&((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale,
+                    ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->scale);
 }
 
 /* dx twin: exact dequant of each output cell divided by ITS window's count,

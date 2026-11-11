@@ -13,6 +13,7 @@
 #include "LayerExec.h"
 #include "LayerWireGuards.h"
 #include "Quantization.h"
+#include "ScaleCanon.h"
 #include "SlidingWindow1d.h"
 #include "Tensor.h"
 
@@ -141,9 +142,10 @@ static void avgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
         }
     }
 
-    ((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale =
-        ((symInt32QConfig_t *)input->quantization->qConfig)->scale /
-        (float)cfg->kernel->size; // count_include_pad=true: divisor = K always
+    /* count_include_pad=true: divisor = K always; s / K folded once (NEAREST) */
+    storeCanonScale(&((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale,
+                    canonRatioScale(((symInt32QConfig_t *)input->quantization->qConfig)->scale, 1u,
+                                    (uint32_t)cfg->kernel->size));
 }
 
 int avgPool1dBfpLog2Divisor(size_t kSize, const char *what) {
@@ -479,8 +481,9 @@ static void avgPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
         }
     }
 
-    ((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale =
-        ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->scale / (float)cfg->kernel->size;
+    storeCanonScale(&((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale,
+                    canonRatioScale(((symInt32QConfig_t *)lossGrad->quantization->qConfig)->scale,
+                                    1u, (uint32_t)cfg->kernel->size));
 }
 
 /* The scatter of the integer dx (BFP_WALK_NOINLINE: no VLA in this frame).

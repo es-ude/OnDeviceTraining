@@ -11,6 +11,7 @@
 #include "DTypes.h"
 #include "MinMax.h"
 #include "RNG.h"
+#include "ScaleCanon.h"
 #include "SymGridBounds.h"
 #include "Tensor.h"
 #include "TensorConversion.h"
@@ -126,7 +127,7 @@ void convertInt32TensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputT
         }
     }
 
-    outputSymInt32QConfig->scale = 1;
+    storeCanonScale(&outputSymInt32QConfig->scale, 1.0f); /* raw-int: exactly scale one */
     memcpy(outputTensor->data, inputTensor->data, numberOfElements * sizeof(int32_t));
 }
 
@@ -314,14 +315,16 @@ static void deriveAsymGridForGroup(float mn, float mx, asymQConfig_t *outQC, siz
          * below, so code 0 decodes to exactly 0.0f. */
         scale = 1.f;
     } else {
-        scale = (mx - mn) / qMax;
+        /* The canonical grid comes FIRST (CEIL, so the band still fits qMax
+         * steps); zp and every code derive from it. */
+        scale = odtScaleCanonFloat((mx - mn) / qMax, ODT_SCALE_CEIL);
     }
     float zpReal = -mn / scale;
     /* Belt-and-suspenders: the nudge bounds zpReal into [0, qMax] (proof
      * above), so this clamp only ever trims rounding at the band edges
      * (e.g. an exact .5 tie at qMax rounding up) -- it cannot mask a
      * genuinely out-of-band zpReal on any reachable path. */
-    outQC->scales[g] = scale;
+    storeCanonScale(&outQC->scales[g], scale);
     outQC->zeroPoints[g] =
         (uint16_t)clampInt32(roundByMode(zpReal, outQC->roundingMode, rs), 0, (int32_t)qMax);
 }
@@ -486,15 +489,10 @@ void convertFloatTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputT
     const symGridBounds_t g = symGridBoundsForAbsMaxOrExit(
         symInt32QC->qMaxBits, "convertFloatTensorToSymInt32Tensor", absMax);
 
-    float scale;
-    if (absMax == 0.f) {
-        scale = 1.f;
-    } else {
-        scale = absMax / (float)g.hi;
-    }
+    const float scale = canonFitScale(absMax, (float)g.hi);
 
     symInt32QConfig_t *outputSymInt32QC = outputTensor->quantization->qConfig;
-    outputSymInt32QC->scale = scale;
+    storeCanonScale(&outputSymInt32QC->scale, scale);
 
     int32_t *outputInt32 = (int32_t *)outputTensor->data;
     float *inputFloat = (float *)inputTensor->data;
@@ -515,7 +513,7 @@ void convertInt32TensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor
                     outQC->numGroups);
         exit(1);
     }
-    outQC->scales[0] = 1.f;
+    storeCanonScale(&outQC->scales[0], 1.0f);
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -567,30 +565,27 @@ void requantSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStr
     symInt32QConfig_t *outputSymInt32QC = outputTensor->quantization->qConfig;
     /* latch BEFORE writing outputSymInt32QC->scale: when called in-place
      * (inputTensor == outputTensor) both pointers alias the same config */
-    float inScale = inputSymInt32QC->scale;
+    const float inScale = canonFixedScale(inputSymInt32QC->scale);
 
     int32_t *inputInt32 = (int32_t *)inputTensor->data;
     int32_t *outputInt32 = (int32_t *)outputTensor->data;
 
-    /* pass A: absmax over dequantized values — reads only (alias-safe) */
-    float absMax = 0.f;
+    /* pass A: the largest code magnitude -- reads only (alias-safe). The exact
+     * absMax is maxAbsCode * inScale, so the grid is fitted from it in
+     * integers, rounded once (canonFitScaleFromCodes). */
+    uint32_t maxAbsCode = 0u;
     for (size_t i = 0; i < numberOfElements; i++) {
-        float dequant = fabsf((float)inputInt32[i] * inScale);
-        if (dequant > absMax) {
-            absMax = dequant;
+        uint32_t a = canonAbsCode(inputInt32[i]);
+        if (a > maxAbsCode) {
+            maxAbsCode = a;
         }
     }
 
-    const symGridBounds_t g =
-        symGridBoundsForAbsMaxOrExit(outputSymInt32QC->qMaxBits, "requantSymInt32Tensor", absMax);
+    const symGridBounds_t g = symGridBoundsForAbsMaxOrExit(
+        outputSymInt32QC->qMaxBits, "requantSymInt32Tensor", (float)maxAbsCode);
 
-    float scale;
-    if (absMax == 0.f) {
-        scale = 1.f;
-    } else {
-        scale = absMax / (float)g.hi;
-    }
-    outputSymInt32QC->scale = scale;
+    const float scale = canonFitScaleFromCodes(inScale, maxAbsCode, g.hi);
+    storeCanonScale(&outputSymInt32QC->scale, scale);
 
     /* pass B: same-index read-then-write — in-place safe (int32 both sides) */
     for (size_t i = 0; i < numberOfElements; i++) {
@@ -615,6 +610,10 @@ void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor,
                     targetScale);
         exit(1);
     }
+    /* user-fixed target: snapped NEAREST onto the dyadic grid, stored back, and
+     * the codes computed on that stored value */
+    targetScale = canonFixedScale(targetScale);
+    storeCanonScale(&outputSymInt32QC->scale, targetScale);
 
     const symGridBounds_t g =
         symGridBoundsOrExit(outputSymInt32QC->qMaxBits, "requantSymInt32TensorToScale");
@@ -760,7 +759,7 @@ void convertAsymTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTe
             out[off + i] = codes[i] - zp;
         }
     }
-    outQC->scale = inQC->scales[0]; /* scale copy unchanged */
+    storeCanonScale(&outQC->scale, inQC->scales[0]); /* scale copy unchanged */
     /* code - zp spans [-(2^qBits - 1), 2^qBits - 1]: one signed bit wider than
      * the stored qBits. The accumulator guard sizes its static proof from this
      * declared width. */
@@ -878,7 +877,7 @@ void convertSymTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTen
     }
 
     unpackSignExtend(inputTensor->data, inQC->qBits, 0, (int32_t *)outputTensor->data, n);
-    outQC->scale = inQC->scales[0];
+    storeCanonScale(&outQC->scale, inQC->scales[0]);
     outQC->qMaxBits = inQC->qBits;
 }
 
@@ -941,7 +940,7 @@ void convertAsymTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor,
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     asymQConfig_t *inQC = inputTensor->quantization->qConfig;
     requirePerTensorAsym(inQC, "convertAsymTensorToSymTensor");
-    const float inScale = inQC->scales[0];
+    const float inScale = canonFixedScale(inQC->scales[0]);
     const int32_t inZp = (int32_t)inQC->zeroPoints[0];
     size_t inBits = calcBitsPerElement(inputTensor->quantization);
     symQConfig_t *outQC = outputTensor->quantization->qConfig;
@@ -953,22 +952,22 @@ void convertAsymTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor,
         exit(1);
     }
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
-    /* pass 1: absmax over dequantized values, chunked unpack (no O(n) scratch) */
-    float absMax = 0.f;
+    /* pass 1: the largest |code - zp|, chunked unpack (no O(n) scratch); the
+     * exact absMax is that magnitude times inScale (canonFitScaleFromCodes) */
+    uint32_t maxAbsCode = 0u;
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackZeroExtendChunk(inputTensor->data, inBits, off, count, codes);
         for (size_t i = 0; i < count; i++) {
-            float v = (float)(codes[i] - inZp) * inScale;
-            if (fabsf(v) > absMax) {
-                absMax = fabsf(v);
+            uint32_t a = canonAbsCode(codes[i] - inZp);
+            if (a > maxAbsCode) {
+                maxAbsCode = a;
             }
         }
     }
     const symGridBounds_t g = symGridBoundsOrExit(outQC->qBits, "convertAsymTensorToSymTensor");
-    const float qMax = (float)g.hi;
-    float outScale = (absMax == 0.f) ? 1.f : absMax / qMax;
-    outQC->scales[0] = outScale;
+    const float outScale = canonFitScaleFromCodes(inScale, maxAbsCode, g.hi);
+    storeCanonScale(&outQC->scales[0], outScale);
     /* pass 2: chunked unpack + emit -- one roundByMode per element, element order */
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -1025,8 +1024,8 @@ static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *ou
         /* Per-tensor fast path -- byte-identical to the pre-group-quant code
          * (regression gate: the existing suite pins this verbatim). */
         float absMax = findAbsMaxFloat((uint8_t *)values, n);
-        float scale = (absMax == 0.f) ? 1.f : absMax / qMax;
-        outQC->scales[0] = scale;
+        const float scale = canonFitScale(absMax, qMax);
+        storeCanonScale(&outQC->scales[0], scale);
         for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
             size_t count =
                 n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -1046,7 +1045,7 @@ static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *ou
     const size_t groupSize = outQC->groupSize;
     for (size_t g = 0; g < outQC->numGroups; g++) {
         float absMax = findAbsMaxFloat((uint8_t *)(values + g * groupSize), groupSize);
-        outQC->scales[g] = (absMax == 0.f) ? 1.f : absMax / qMax;
+        storeCanonScale(&outQC->scales[g], canonFitScale(absMax, qMax));
     }
     /* Phase 2: sequential quantize+pack, chunked exactly like the per-tensor
      * path above (packChunkGuarded keeps its byte-alignment contract: `off`
@@ -1474,8 +1473,8 @@ void convertBfpTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTen
     }
     const symGridBounds_t g =
         symGridBoundsForAbsMaxOrExit(outQC->qMaxBits, "convertBfpTensorToSymInt32Tensor", absMax);
-    float scale = (absMax == 0.f) ? 1.f : absMax / (float)g.hi;
-    outQC->scale = scale;
+    const float scale = canonFitScale(absMax, (float)g.hi);
+    storeCanonScale(&outQC->scale, scale);
     /* pass 2: chunked emit -- one roundByMode per element (TARGET config's
      * roundingMode), element order */
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
@@ -1550,9 +1549,8 @@ void convertBfpTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor, 
         }
     }
     const symGridBounds_t g = symGridBoundsOrExit(outQC->qBits, "convertBfpTensorToSymTensor");
-    const float qMax = (float)g.hi;
-    float outScale = (absMax == 0.f) ? 1.f : absMax / qMax;
-    outQC->scales[0] = outScale;
+    const float outScale = canonFitScale(absMax, (float)g.hi);
+    storeCanonScale(&outQC->scales[0], outScale);
     /* pass 2: chunked emit -- one roundByMode per element (TARGET config's
      * roundingMode), element order */
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
@@ -1848,20 +1846,20 @@ void convertSymInt32TensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTen
                     outQC->numGroups);
         exit(1);
     }
-    float inScale = inQC->scale;
+    const float inScale = canonFixedScale(inQC->scale);
     const int32_t *in = (const int32_t *)inputTensor->data;
-    /* pass 1: absmax over dequantized values (requantSymInt32Tensor precedent) */
-    float absMax = 0.f;
+    /* pass 1: the largest code magnitude (requantSymInt32Tensor precedent: the
+     * grid is fitted from the exact absMax maxAbsCode * inScale) */
+    uint32_t maxAbsCode = 0u;
     for (size_t i = 0; i < n; i++) {
-        float v = fabsf((float)in[i] * inScale);
-        if (v > absMax) {
-            absMax = v;
+        uint32_t a = canonAbsCode(in[i]);
+        if (a > maxAbsCode) {
+            maxAbsCode = a;
         }
     }
     const symGridBounds_t g = symGridBoundsOrExit(outQC->qBits, "convertSymInt32TensorToSymTensor");
-    const float qMax = (float)g.hi;
-    float outScale = (absMax == 0.f) ? 1.f : absMax / qMax;
-    outQC->scales[0] = outScale;
+    const float outScale = canonFitScaleFromCodes(inScale, maxAbsCode, g.hi);
+    storeCanonScale(&outQC->scales[0], outScale);
     /* pass 2: chunked emit -- one roundByMode per element, element order */
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
@@ -1887,7 +1885,7 @@ void repackSymInt32ToSymNoRescale(tensor_t *inputTensor, tensor_t *outputTensor)
                     outQC->numGroups);
         exit(1);
     }
-    outQC->scales[0] = inQC->scale;
+    storeCanonScale(&outQC->scales[0], inQC->scale);
     const int32_t *in = (const int32_t *)inputTensor->data;
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -2106,8 +2104,7 @@ static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *i
                 }
             }
         }
-        const float qMax = (float)g.hi;
-        qc->scales[0] = (absMax == 0.f) ? 1.f : absMax / qMax;
+        storeCanonScale(&qc->scales[0], canonFitScale(absMax, (float)g.hi));
     }
     /* else: carry the grid verbatim -- no re-derivation, no renorm (packed-grad D1/D2). */
 
@@ -2117,7 +2114,8 @@ static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *i
      * the code width is unchanged, so offsets never shift. */
     /* A carried grid is never clamped: growing past it is an overflow and
      * packChunkGuarded aborts (packed-grad D2, #227 discipline). A fresh grid
-     * may clamp (#519): its scale is this increment's absMax / (float)g.hi,
+     * may clamp (#519): its scale is the canonical CEIL fit of this increment's
+     * absMax / (float)g.hi (canonFitScale),
      * so every quotient sits within one float ulp of the grid's float image
      * (from q = 26 that image is itself one past the integer grid); a peak
      * that rounds or SR-lifts off the top is an artefact of the grid's own
@@ -2187,9 +2185,8 @@ static void accumulateIntoSymRescaleEngine(tensor_t *target, const incSrc_t *inc
         }
     }
     const symGridBounds_t g = symGridBoundsOrExit(qc->qBits, "accumulateFloatIntoSymTensorRescale");
-    const float qMax = (float)g.hi;
-    float scale = (absMax == 0.f) ? 1.f : absMax / qMax;
-    qc->scales[0] = scale;
+    const float scale = canonFitScale(absMax, (float)g.hi);
+    storeCanonScale(&qc->scales[0], scale);
 
     /* phase B: chunked read-modify-write, one roundByMode per element in
      * element order (replicates packFloatBufferAsSym's clamp+round); chunk k
@@ -3411,8 +3408,8 @@ void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *inc
     }
     const symGridBounds_t g = symGridBoundsForAbsMaxOrExit(
         tQC->qMaxBits, "accumulateSymInt32IntoSymInt32Rescale", absMax);
-    float scale = (absMax == 0.f) ? 1.f : absMax / (float)g.hi;
-    tQC->scale = scale;
+    const float scale = canonFitScale(absMax, (float)g.hi);
+    storeCanonScale(&tQC->scale, scale);
     /* pass 2: same-index read-then-write, one round per element in order */
     for (size_t i = 0; i < n; i++) {
         float v = (float)tg[i] * tScale + (float)in[i] * iScale;
@@ -3551,7 +3548,7 @@ static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTe
     case SYM_INT32: {
         symInt32QConfig_t *inputSymIntQC = inputTensor->quantization->qConfig;
         symInt32QConfig_t *outputSymIntQC = outputTensor->quantization->qConfig;
-        outputSymIntQC->scale = inputSymIntQC->scale;
+        storeCanonScale(&outputSymIntQC->scale, inputSymIntQC->scale);
         /* the codes were copied verbatim: declare their width, not the
          * destination's old one (the accumulator guard trusts it) */
         outputSymIntQC->qMaxBits = inputSymIntQC->qMaxBits;

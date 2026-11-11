@@ -7,6 +7,7 @@
 #include "Conv1dApi.h"
 #include "Conv1dTransposed.h"
 #include "Conv1dTransposedApi.h"
+#include "DyadicScale.h"
 #include "LayerCommon.h"
 #include "LayerNorm.h"
 #include "LayerNormApi.h"
@@ -317,18 +318,19 @@ void testLayerLoadWeightsLayerNormQuantizesForSymStorage(void) {
     freeQuantization(bwd);
     freeQuantization(symQ);
 
-    /* gamma absmax 4 -> int12 scale 4/2047; mantissas round(v*2047/4):
+    /* gamma absmax 4 -> int12 scale CEIL15(4/2047) (canonical grid, a hair
+     * above 4/2047); mantissas round(v/scale), the same codes as round(v*2047/4):
      * 1023.5 -> 1024 (half-away-from-zero: the framework's roundHalfAway is C
      * round() — see #188), 1535.25 -> 1535, 2047 exact. INT_WITHIN(1)
      * on the non-absmax elements (float division may land a hair off the
      * exact midpoint); exact on the absmax element. */
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 4.0f / 2047.0f, gScale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, odtScaleCanonFloat(4.0f / 2047.0f, ODT_SCALE_CEIL), gScale);
     TEST_ASSERT_INT_WITHIN(1, 1024, g[0]);
     TEST_ASSERT_INT_WITHIN(1, 1535, g[1]);
     TEST_ASSERT_EQUAL_INT(2047, g[2]);
-    /* beta absmax 3 -> int12 scale 3/2047; round(-682.33) = -682,
+    /* beta absmax 3 -> int12 scale CEIL15(3/2047); round(-682.33) = -682,
      * round(-1364.67) = -1365, -2047 exact. */
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 3.0f / 2047.0f, bScale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, odtScaleCanonFloat(3.0f / 2047.0f, ODT_SCALE_CEIL), bScale);
     TEST_ASSERT_INT_WITHIN(1, -682, b[0]);
     TEST_ASSERT_INT_WITHIN(1, -1365, b[1]);
     TEST_ASSERT_EQUAL_INT(-2047, b[2]);

@@ -8,6 +8,7 @@
 #include "Common.h"
 #include "Mul.h"
 #include "Rounding.h"
+#include "ScaleCanon.h"
 #include "SlidingWindow1d.h"
 #include "SymAccumGuard.h"
 #include "SymGroupCursor.h"
@@ -196,7 +197,9 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
 
     float inScale = ((symInt32QConfig_t *)input->quantization->qConfig)->scale;
     float wScale = ((symInt32QConfig_t *)weight->quantization->qConfig)->scale;
-    float outputScale = inScale * wScale;
+    /* the stored product scale, rounded once from the exact mantissa product;
+     * the bias seed is refolded onto this same value */
+    const float outputScale = canonProductScale(inScale, wScale, ODT_SCALE_NEAREST);
 
     /* Per-output-channel bias seed, refolded into the accumulator product scale
      * via the #189 guarded helper (NULL bias -> all zero). VLA over channels
@@ -247,7 +250,7 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
         exit(1);
     }
     symInt32QConfig_t *outputQC = (symInt32QConfig_t *)output->quantization->qConfig;
-    outputQC->scale = outputScale;
+    storeCanonScale(&outputQC->scale, outputScale);
     /* The output carries raw accumulator codes that can exceed the operands'
      * width, so it declares the width the guard proved (#516): a consumer that
      * reads this wire as a SYM operand sizes its own proof from it. */
@@ -431,7 +434,11 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
             maxScale = weightGroups->scales[g];
         }
     }
-    float sAcc = inScale * maxScale;
+    /* Stored, so canonical. CEIL, not the product rule's NEAREST: the rescaled
+     * accumulator proof (symAccumSiteInitRangesRescaled) needs every group
+     * factor (scale * scales[g]) / sAcc <= 1 up to float slack 2^-22, and a
+     * NEAREST sAcc can sit 2^-15 below the exact product. */
+    const float sAcc = canonProductScale(inScale, maxScale, ODT_SCALE_CEIL);
 
     /* `weight`'s own poisoned symInt32QConfig_t carries the OP's rounding
      * mode (executeOp's prologue sets it via initSymInt32QConfig(arithmetic.
@@ -502,7 +509,7 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
         exit(1);
     }
     symInt32QConfig_t *outputQC = (symInt32QConfig_t *)output->quantization->qConfig;
-    outputQC->scale = sAcc;
+    storeCanonScale(&outputQC->scale, sAcc);
     outputQC->qMaxBits = symAccumResultBits(&accSite); /* the rescaled accumulator's width (#516) */
 }
 

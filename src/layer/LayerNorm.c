@@ -20,6 +20,7 @@
 #include "Quantization.h"
 #include "Reduce.h"
 #include "Rounding.h"
+#include "ScaleCanon.h"
 #include "Sub.h"
 #include "SymGridBounds.h"
 #include "Tensor.h"
@@ -256,7 +257,9 @@ static void layerNormAffineSymInt32(size_t numNormDims, tensor_t *gamma, tensor_
     symInt32QConfig_t *gammaQC = gamma->quantization->qConfig;
     symInt32QConfig_t *betaQC = beta->quantization->qConfig;
 
-    float sY = sNorm * gammaQC->scale;
+    /* stored product of two stored scales: rounded once from the exact
+     * mantissa product; the beta seeds below rescale onto this same value */
+    const float sY = canonProductScale(sNorm, gammaQC->scale, ODT_SCALE_NEAREST);
 
     size_t G, N;
     layerNormGroupSizes(output, numNormDims, &G, &N);
@@ -272,7 +275,7 @@ static void layerNormAffineSymInt32(size_t numNormDims, tensor_t *gamma, tensor_
             out[off] = out[off] * gammaQ[j] + seed;
         }
     }
-    outQC->scale = sY;
+    storeCanonScale(&outQC->scale, sY);
 }
 
 /* SYM_INT32 forward (LayerNorm epic #148, verified scale-folding scheme):
@@ -313,7 +316,7 @@ static void layerNormForwardSymInt32(layerNormConfig_t *cfg, tensor_t *gamma, te
     layerNormGroupSizes(input, cfg->numNormDims, &G, &N);
 
     if (G == 0 || N == 0) {
-        outQC->scale = 1.0f; /* nothing to normalize; neutral scale (cf. #160) */
+        storeCanonScale(&outQC->scale, 1.0f); /* nothing to normalize; neutral scale (cf. #160) */
         return;
     }
 
@@ -375,8 +378,10 @@ static void layerNormForwardSymInt32(layerNormConfig_t *cfg, tensor_t *gamma, te
         }
     } else {
         (void)symGridBoundsForDerivedScaleOrExit(outQC->qMaxBits, "layerNormForwardSymInt32");
-        float K = qMax / absMax;
-        sNorm = 1.0f / K;
+        /* the canonical fitted grid first (CEIL); the stretch K is its float
+         * reciprocal, so the codes land on exactly that grid */
+        sNorm = canonFitScale(absMax, qMax);
+        float K = 1.0f / sNorm;
 
         /* Pass 2: normalize the stored stats, quantize. */
         for (size_t g = 0; g < G; g++) {
@@ -692,7 +697,7 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
     layerNormGroupSizes(forwardInput, cfg->numNormDims, &G, &N);
     if (G == 0 || N == 0) {
         if (propLoss != NULL) {
-            plQC->scale = 1.0f; /* nothing to do; neutral scale (cf. #160, forward) */
+            storeCanonScale(&plQC->scale, 1.0f); /* nothing to do; neutral scale (cf. #160) */
         }
         return;
     }
@@ -795,12 +800,12 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
                     dxq[layerNormPhysOffset(propLoss, cfg->numNormDims, g, j)] = 0;
                 }
             }
-            plQC->scale = 1.0f;
+            storeCanonScale(&plQC->scale, 1.0f);
             return;
         }
 
         (void)symGridBoundsForDerivedScaleOrExit(plQC->qMaxBits, "layerNormBackwardSymInt32");
-        float dxScale = absMax / qMax;
+        const float dxScale = canonFitScale(absMax, qMax);
         /* Pass B: recompute dx from the stored stats and quantize. The dx
          * expression is textually IDENTICAL to pass A's absmax expression so
          * gcc's -ffp-contract=fast contracts both the same way; the clamp
@@ -835,7 +840,7 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
                     (int32_t)qMin, (int32_t)qMax);
             }
         }
-        plQC->scale = dxScale;
+        storeCanonScale(&plQC->scale, dxScale);
     }
 }
 

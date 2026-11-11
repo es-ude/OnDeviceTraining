@@ -828,6 +828,50 @@ static void freeBfpWireFixture(bfpWireFixture_t *f) {
 /*! THE Task 8 capstone. Hidden wire is [1, 6] -> 6 elements; the template
  *  declares numGroups=2, which is WRONG for this wire -- the allocator derives
  *  6/2 = 3 groups (PR2-Decision 5). Trains 20 fake-quant SGD steps. */
+/* Pin: the dyadic-scale canonicalization touches only SYM/SYM_INT32/ASYM
+ * stored scales, so a FLOAT32-only Linear (momentum SGD, scaled mean) trains
+ * bit-identically to the pre-canonicalization build. The bits below were
+ * captured from that build. */
+static const uint32_t FLOAT32_PIN_PARAM_BITS[8] = {0x3d89fcfbu, 0x3ea167eau, 0x3e9ab0f0u,
+                                                   0x3edb57f3u, 0x3f7174dbu, 0x3ef86e3du,
+                                                   0xbda93639u, 0xbd92a036u};
+
+void testCanonicalizationLeavesFloat32PathsUntouched(void) {
+    quantization_t *q = quantizationInitFloat();
+    parameter_t *w = buildRampParam2D(2, 3, 0.1f, 0.15f);
+    parameter_t *b = buildRampParam2D(1, 2, -0.05f, 0.1f);
+    layer_t *linear = buildBorrowedLinearLayer(w, b, q);
+    layer_t *model[] = {linear};
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.05f, 0.9f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    tensor_t *input = buildFloatTensor2D(1, 3, (float[]){1.0f, -2.0f, 3.0f});
+    tensor_t *label = buildFloatTensor2D(1, 2, (float[]){0.2f, -0.3f});
+
+    for (size_t step = 0; step < 3; step++) {
+        trainingStats_t *stats = calculateGradsSequential(
+            &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), REDUCTION_MEAN, input, label, NULL);
+        freeTrainingStats(stats);
+        scaleOptimizerGradientsMean(sgd, 8, NULL);
+        optimizerStep(sgd, NULL);
+        optimizerZeroGrad(sgd);
+    }
+
+    uint32_t got[8];
+    memcpy(got, w->param->data, 6 * sizeof(uint32_t));
+    memcpy(got + 6, b->param->data, 2 * sizeof(uint32_t));
+
+    freeTensor(label);
+    freeTensor(input);
+    freeOptim(sgd);
+    freeLinearLayerShellOnly(linear);
+    freeQuantization(momentumQ);
+    freeQuantization(q);
+
+    TEST_ASSERT_EQUAL_HEX32_ARRAY(FLOAT32_PIN_PARAM_BITS, got, 8);
+}
+
 void testBfpWireFakeQuantTrainingLossDecreasesAndWirePacks(void) {
     bfpWireFixture_t f;
     buildBfpWireFixture(&f, /*hidden=*/6, /*templateNumGroups=*/2, /*wireGroupSize=*/2);
@@ -3330,6 +3374,7 @@ int main(void) {
     RUN_TEST(testMultiLayerBackward_WithCrossEntropy_DoesNotCrash);
     RUN_TEST(testMultiLayerBackward_WithManualInit_DoesNotCrash);
     RUN_TEST(testMultiLayerTraining_MultipleSteps_GradsAccumulate);
+    RUN_TEST(testCanonicalizationLeavesFloat32PathsUntouched);
     RUN_TEST(testBfpFakeQuantTrainingLossDecreasesAndGridMoves);
     RUN_TEST(testBfpWireFakeQuantTrainingLossDecreasesAndWirePacks);
     RUN_TEST(testBfpWireGeometryIgnoresTemplateNumGroups);

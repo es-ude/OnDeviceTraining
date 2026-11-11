@@ -839,9 +839,9 @@ static void testDeserializeGroupedSymIntoPerTensorSkeleton(void) {
     int32_t mantissas[] = {1, -2, 3, -4, 5, -6};
     byteConversion((uint8_t *)mantissas, 32, src->data, 8, 6);
     symQConfig_t *srcQc = src->quantization->qConfig;
-    srcQc->scales[0] = 0.1f;
-    srcQc->scales[1] = 0.2f;
-    srcQc->scales[2] = 0.3f;
+    srcQc->scales[0] = 0.125f;
+    srcQc->scales[1] = 0.25f;
+    srcQc->scales[2] = 0.375f;
 
     FILE *f = fopen(FILE_PATH, "wb");
     serializeTensor(src, f);
@@ -874,9 +874,9 @@ static void testDeserializeGroupedSymIntoPerTensorSkeleton(void) {
     /* ASSERT on captured. */
     TEST_ASSERT_EQUAL_size_t(3, capturedNumGroups);
     TEST_ASSERT_EQUAL_size_t(2, capturedGroupSize);
-    TEST_ASSERT_EQUAL_FLOAT(0.1f, capturedScales[0]);
-    TEST_ASSERT_EQUAL_FLOAT(0.2f, capturedScales[1]);
-    TEST_ASSERT_EQUAL_FLOAT(0.3f, capturedScales[2]);
+    TEST_ASSERT_EQUAL_FLOAT(0.125f, capturedScales[0]);
+    TEST_ASSERT_EQUAL_FLOAT(0.25f, capturedScales[1]);
+    TEST_ASSERT_EQUAL_FLOAT(0.375f, capturedScales[2]);
     TEST_ASSERT_EQUAL_HEX8_ARRAY(capturedSrcData, capturedDstData, dataBytes);
 }
 
@@ -2094,9 +2094,9 @@ static void testDeserializeGroupedAsymIntoPerTensorSkeleton(void) {
     int32_t codes[] = {10, 20, 30, 40, 50, 60};
     byteConversion((uint8_t *)codes, 32, src->data, 8, 6);
     asymQConfig_t *srcQc = src->quantization->qConfig;
-    srcQc->scales[0] = 0.1f;
-    srcQc->scales[1] = 0.2f;
-    srcQc->scales[2] = 0.3f;
+    srcQc->scales[0] = 0.125f;
+    srcQc->scales[1] = 0.25f;
+    srcQc->scales[2] = 0.375f;
     srcQc->zeroPoints[0] = 5;
     srcQc->zeroPoints[1] = 120;
     srcQc->zeroPoints[2] = 250;
@@ -2134,9 +2134,9 @@ static void testDeserializeGroupedAsymIntoPerTensorSkeleton(void) {
     /* ASSERT on captured. */
     TEST_ASSERT_EQUAL_size_t(3, capturedNumGroups);
     TEST_ASSERT_EQUAL_size_t(2, capturedGroupSize);
-    TEST_ASSERT_EQUAL_FLOAT(0.1f, capturedScales[0]);
-    TEST_ASSERT_EQUAL_FLOAT(0.2f, capturedScales[1]);
-    TEST_ASSERT_EQUAL_FLOAT(0.3f, capturedScales[2]);
+    TEST_ASSERT_EQUAL_FLOAT(0.125f, capturedScales[0]);
+    TEST_ASSERT_EQUAL_FLOAT(0.25f, capturedScales[1]);
+    TEST_ASSERT_EQUAL_FLOAT(0.375f, capturedScales[2]);
     TEST_ASSERT_EQUAL_UINT16(5, capturedZps[0]);
     TEST_ASSERT_EQUAL_UINT16(120, capturedZps[1]);
     TEST_ASSERT_EQUAL_UINT16(250, capturedZps[2]);

@@ -540,6 +540,24 @@ void testScaleConstants(void) {
     TEST_ASSERT_TRUE(odtScaleEq(ODT_SCALE_ONE, odtScaleLoad(&slots[2])));
 }
 
+/* odtScaleAssertCanonical: a no-op in a normal build; under ODT_SCALE_STRICT
+ * every canonical store site dies on a float that is not exactly a canonical
+ * scale (or not a positive normal float at all). */
+void testScaleAssertCanonical(void) {
+    odtScaleAssertCanonical(1.0f);
+    odtScaleAssertCanonical(odtScaleToFloat((odtScale_t){.m = 32767, .e = 113}));
+    odtScaleAssertCanonical(odtScaleToFloat((odtScale_t){.m = 16384, .e = -140}));
+#ifdef ODT_SCALE_STRICT
+    ASSERT_EXITS_WITH_OUTPUT(1, "not a canonical", odtScaleAssertCanonical(0.1f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "not a canonical", odtScaleAssertCanonical(0.0f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "not a canonical", odtScaleAssertCanonical(-1.0f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "not a canonical", odtScaleAssertCanonical(1.0f + 0x1p-15f));
+#else
+    odtScaleAssertCanonical(0.1f);
+    odtScaleAssertCanonical(0.0f);
+#endif
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testScaleFromFloatRoundTripExactForDyadic);
@@ -549,5 +567,6 @@ int main(void) {
     RUN_TEST(testScaleCmpOrdersByValue);
     RUN_TEST(testScaleRejectsInvalid);
     RUN_TEST(testScaleConstants);
+    RUN_TEST(testScaleAssertCanonical);
     return UNITY_END();
 }

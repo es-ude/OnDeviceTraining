@@ -25,6 +25,7 @@
 #include "QuantizationLayer.h"
 #include "Relu.h"
 #include "Rounding.h"
+#include "ScaleCanon.h"
 #include "SerialWire.h"
 #include "Softmax.h"
 #include "StorageApi.h"
@@ -321,6 +322,23 @@ static void deserializeKernel(kernel_t *kernel, FILE *f) {
  * for it. */
 #define SERIAL_MAX_QCONFIG_GROUPS 65536u
 
+/* A stored SYM / SYM_INT32 / ASYM scale is an exact 15-bit dyadic value. A v7
+ * float that is not is snapped NEAREST (the user-given rule) and accepted; a
+ * non-positive, non-finite or subnormal one fails fast. */
+static float deserializeScale(FILE *f) {
+    float raw = serialReadF32LE(f);
+    if (!(raw > 0.0f && isfinite(raw))) {
+        PRINT_ERROR("deserializeQConfig: scale %a is not a positive finite value", (double)raw);
+        exit(1);
+    }
+    float s = canonFixedScale(raw);
+    if (s != raw) {
+        PRINT_DEBUG("deserializeQConfig: scale %a is not dyadic, snapped to %a", (double)raw,
+                    (double)s);
+    }
+    return s;
+}
+
 static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElements) {
     switch (q->type) {
     case INT32:
@@ -329,7 +347,7 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
         break;
     case SYM_INT32: {
         symInt32QConfig_t *symIntQC = q->qConfig;
-        symIntQC->scale = serialReadF32LE(f);
+        storeCanonScale(&symIntQC->scale, deserializeScale(f));
         symIntQC->roundingMode = (roundingMode_t)serialReadU8(f);
         symIntQC->qMaxBits = serialReadU8(f);
         break;
@@ -391,7 +409,7 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
         }
         symQC->groupSize = fileGroupSize;
         for (size_t g = 0; g < fileNumGroups; g++) {
-            symQC->scales[g] = serialReadF32LE(f);
+            storeCanonScale(&symQC->scales[g], deserializeScale(f));
         }
         uint8_t fileQBits = serialReadU8(f);
         /* #479: unconditional, like the ASYM arm -- the wire-config sites (numberOfElements == 0)
@@ -475,7 +493,7 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
          * an immediate golden-bytes and round-trip failure, never a silent
          * pass). */
         for (size_t g = 0; g < fileNumGroups; g++) {
-            asymQC->scales[g] = serialReadF32LE(f);
+            storeCanonScale(&asymQC->scales[g], deserializeScale(f));
         }
         for (size_t g = 0; g < fileNumGroups; g++) {
             asymQC->zeroPoints[g] = serialReadU16LE(f);

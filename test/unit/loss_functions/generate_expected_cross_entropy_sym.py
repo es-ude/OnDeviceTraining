@@ -27,6 +27,7 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
+from dyadic_scale import fit_scale  # noqa: E402
 from sym_gold import (
     QMAX_I12,
     QMIN_I12,
@@ -65,11 +66,12 @@ def emit_float_array(name: str, tensor: torch.Tensor) -> str:
 
 def _requant_i12_from_f32(values_f32: torch.Tensor):
     """convertFloatTensorToSymInt32Tensor on a float32 array: absmax (f32) ->
-    scale = absmax/2047 (f32), round-clamp half-away. Returns (int32, scale)."""
+    canonical CEIL scale fit_scale(absmax, 2047), round-clamp half-away.
+    Returns (int32, scale)."""
     absmax = values_f32.abs().max().to(torch.float32)
     if absmax.item() == 0.0:
         return torch.zeros_like(values_f32, dtype=torch.int32), 1.0
-    scale = absmax / torch.tensor(QMAX_I12, dtype=torch.float32)
+    scale = torch.tensor(fit_scale(absmax.item(), QMAX_I12), dtype=torch.float32)
     q = round_half_away(torch.clamp(values_f32 / scale, QMIN_I12, QMAX_I12))
     return q.to(torch.int32), scale.item()
 

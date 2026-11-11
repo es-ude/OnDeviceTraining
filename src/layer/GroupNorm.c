@@ -22,6 +22,7 @@
 #include "Quantization.h"
 #include "Reduce.h"
 #include "Rounding.h"
+#include "ScaleCanon.h"
 #include "Sub.h"
 #include "SymGridBounds.h"
 #include "Tensor.h"
@@ -277,7 +278,9 @@ static void groupNormAffineSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, ten
     symInt32QConfig_t *gammaQC = gamma->quantization->qConfig;
     symInt32QConfig_t *betaQC = beta->quantization->qConfig;
 
-    float sY = mulFloat32s(sNorm, gammaQC->scale);
+    /* stored product of two stored scales: rounded once from the exact
+     * mantissa product; the beta seeds below rescale onto this same value */
+    const float sY = canonProductScale(sNorm, gammaQC->scale, ODT_SCALE_NEAREST);
 
     size_t K;
     size_t N;
@@ -309,7 +312,7 @@ static void groupNormAffineSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, ten
             }
         }
     }
-    outQC->scale = sY;
+    storeCanonScale(&outQC->scale, sY);
 }
 
 /* SYM_INT32 forward (the verified LayerNorm scale-folding scheme):
@@ -352,7 +355,7 @@ static void groupNormForwardSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, te
     groupNormGroupGeom(input, cfg, &K, &N, &cpg, &B, &T);
 
     if (K == 0 || N == 0) {
-        outQC->scale = 1.0f; /* nothing to normalize; neutral scale (cf. #160) */
+        storeCanonScale(&outQC->scale, 1.0f); /* nothing to normalize; neutral scale (cf. #160) */
         return;
     }
 
@@ -420,8 +423,10 @@ static void groupNormForwardSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, te
         }
     } else {
         (void)symGridBoundsForDerivedScaleOrExit(outQC->qMaxBits, "groupNormForwardSymInt32");
-        float stretch = divFloat32s(qMax, absMax);
-        sNorm = divFloat32s(1.0f, stretch);
+        /* the canonical fitted grid first (CEIL); the stretch is its float
+         * reciprocal, so the codes land on exactly that grid */
+        sNorm = odtScaleCanonFloat(divFloat32s(absMax, qMax), ODT_SCALE_CEIL);
+        float stretch = divFloat32s(1.0f, sNorm);
 
         /* Pass 2: normalize from the same stored stats, quantize. The n
          * expression is IDENTICAL to pass 1's absmax expression (and both are
@@ -750,7 +755,7 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
     groupNormGroupGeom(forwardInput, cfg, &K, &N, &cpg, &B, &T);
     if (K == 0 || N == 0) {
         if (propLoss != NULL) {
-            plQC->scale = 1.0f; /* nothing to do; neutral scale (cf. #160, forward) */
+            storeCanonScale(&plQC->scale, 1.0f); /* nothing to do; neutral scale (cf. #160) */
         }
         return;
     }
@@ -860,12 +865,12 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
             for (size_t i = 0; i < total; i++) {
                 dxq[i] = 0;
             }
-            plQC->scale = 1.0f;
+            storeCanonScale(&plQC->scale, 1.0f);
             return;
         }
 
         (void)symGridBoundsForDerivedScaleOrExit(plQC->qMaxBits, "groupNormBackwardSymInt32");
-        float dxScale = divFloat32s(absMax, qMax);
+        const float dxScale = odtScaleCanonFloat(divFloat32s(absMax, qMax), ODT_SCALE_CEIL);
         /* Pass B: recompute dx from the stored stats and quantize. The dx
          * expression is IDENTICAL to pass A's absmax expression (all
          * scalar-op calls, no contraction divergence); the clamp absorbs
@@ -907,7 +912,7 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
                 }
             }
         }
-        plQC->scale = dxScale;
+        storeCanonScale(&plQC->scale, dxScale);
     }
 }
 

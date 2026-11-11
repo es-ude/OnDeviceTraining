@@ -35,6 +35,9 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
+from dyadic_scale import fit_scale  # noqa: E402
+
 # SYM_INT32 backward carries the #227 operand-int12 / grad-int16 split (mirrors
 # generate_expected_conv1d.py's quantize_sym_i12 vs the int16 grad requant):
 #   OPERAND width (int12, qMaxBits=12) — default-initialized tensors:
@@ -94,11 +97,11 @@ def emit_int32_scalar(name: str, v: int) -> str:
 
 def quantize_sym(x: torch.Tensor):
     """int12 OPERAND quantize (qMaxBits=12): convertFloatTensorToSymInt32Tensor on
-    a default-initialized tensor — absmax -> scale (1.0 if absmax==0), round-clamp
-    [-2048, 2047] with the C rounding (half-away-from-zero). Used for forwardInput/
+    a default-initialized tensor — absmax -> canonical CEIL scale
+    fit_scale(absmax, QMAX) (1.0 if absmax==0), round-clamp [-2048, 2047] with the C rounding (half-away-from-zero). Used for forwardInput/
     gamma/dy operands, the propLoss (dx) requant, and the grad INCREMENT."""
     absmax = x.abs().max().item()
-    scale = 1.0 if absmax == 0.0 else absmax / QMAX
+    scale = fit_scale(absmax, QMAX)
     q = round_half_away(torch.clamp(x / scale, QMIN, QMAX))
     return q.to(torch.int32), scale
 
@@ -106,10 +109,10 @@ def quantize_sym(x: torch.Tensor):
 def quantize_sym_grad(x: torch.Tensor):
     """int16 GRAD-ACCUMULATOR requant (qMaxBits=16): the running-sum requant of
     dgamma/dbeta back into a gradInitSymInt32 tensor (addSymInt32TensorsInplace ->
-    convertTensor into the int16 grad). absmax -> scale=absmax/32767, round-clamp
-    [-32768, 32767]. ONLY the grad running sum uses this width (#227)."""
+    convertTensor into the int16 grad). absmax -> canonical CEIL scale
+    fit_scale(absmax, 32767), round-clamp [-32768, 32767]. ONLY the grad running sum uses this width (#227)."""
     absmax = x.abs().max().item()
-    scale = 1.0 if absmax == 0.0 else absmax / QMAX_GRAD
+    scale = fit_scale(absmax, QMAX_GRAD)
     q = round_half_away(torch.clamp(x / scale, QMIN_GRAD, QMAX_GRAD))
     return q.to(torch.int32), scale
 
@@ -153,7 +156,7 @@ def emulate_sym_backward(xq, sx, gq, sg, dyq, sdy, n_inner, eps):
         s_dx = 1.0
         dxq = torch.zeros_like(dx)
     else:
-        s_dx = absmax / QMAX
+        s_dx = fit_scale(absmax, QMAX)
         dxq = round_half_away(torch.clamp(dx / s_dx, QMIN, QMAX))
     return dxq.to(torch.int32), s_dx, dgamma_inc, dbeta_inc
 

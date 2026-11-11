@@ -8,6 +8,7 @@
 #include "DeathTest.h"
 #include "Dropout.h"
 #include "DropoutApi.h"
+#include "DyadicScale.h"
 #include "KeyedDrawCheck.h"
 #include "Layer.h"
 #include "LayerExec.h"
@@ -128,7 +129,7 @@ void testForwardEvalIdentitySymInt32(void) {
     for (size_t i = 0; i < n; i++) {
         ((int32_t *)symIn->data)[i] = inInts[i];
     }
-    ((symInt32QConfig_t *)symIn->quantization->qConfig)->scale = 0.1f;
+    ((symInt32QConfig_t *)symIn->quantization->qConfig)->scale = 0.125f;
 
     size_t *odims = reserveMemory(sizeof(size_t));
     odims[0] = n;
@@ -161,7 +162,7 @@ void testForwardEvalIdentitySymInt32(void) {
     freeTensor(symIn);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(inInts, capturedInts, n);
-    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.1f, outScale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.125f, outScale);
 }
 
 /* Stub sampler: keep even indices (bit 1), drop odd (bit 0). Ignores probTrue. */
@@ -373,7 +374,7 @@ void testForwardTrainingSymInt32ScaleFold(void) {
     for (size_t i = 0; i < n; i++) {
         ((int32_t *)symIn->data)[i] = inInts[i];
     }
-    ((symInt32QConfig_t *)symIn->quantization->qConfig)->scale = 0.1f;
+    ((symInt32QConfig_t *)symIn->quantization->qConfig)->scale = 0.125f;
 
     size_t *odims = reserveMemory(sizeof(size_t));
     odims[0] = n;
@@ -412,7 +413,7 @@ void testForwardTrainingSymInt32ScaleFold(void) {
     // keep even idx → int copied, drop odd → 0; scale folded ×2 (s=1/(1-0.5)).
     int32_t expectedInts[] = {10, 0, 30, 0};
     TEST_ASSERT_EQUAL_INT32_ARRAY(expectedInts, capturedInts, n);
-    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.2f, outScale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.25f, outScale);
 }
 
 /* BFP epic PR4 (R-P3, BFP D4 + deviations register 5): Dropout is NON-NATIVE by
@@ -686,7 +687,7 @@ void testBackwardSymInt32UsesMaskAndScaleFold(void) {
     for (size_t i = 0; i < n; i++) {
         ((int32_t *)loss->data)[i] = gradInts[i];
     }
-    ((symInt32QConfig_t *)loss->quantization->qConfig)->scale = 0.2f;
+    ((symInt32QConfig_t *)loss->quantization->qConfig)->scale = 0.25f;
 
     size_t *pdims = reserveMemory(sizeof(size_t));
     pdims[0] = n;
@@ -723,7 +724,7 @@ void testBackwardSymInt32UsesMaskAndScaleFold(void) {
 
     int32_t expectedInts[] = {5, 0, 7, 0};
     TEST_ASSERT_EQUAL_INT32_ARRAY(expectedInts, capturedInts, n);
-    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.4f, outScale); // 0.2 × 2
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.5f, outScale); // 0.25 × 2
 }
 
 void testVtableForwardIdentityFloat(void) {
@@ -1357,6 +1358,67 @@ void testDropoutBackwardBfpRejectsAPayloadAlias(void) {
     freeTensor(loss);
 }
 
+static tensor_t *buildSymInt32Tensor(size_t n) {
+    size_t *dims = reserveMemory(sizeof(size_t));
+    dims[0] = n;
+    size_t *order = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 1, order);
+    return initTensor(shape, quantizationInitSymInt32(HALF_AWAY), NULL);
+}
+
+/* Coefficient class: the 1/(1-p) fold is canonicalized NEAREST and multiplied
+ * into the canonical wire scale with odtScaleMul (one rounding each). p = 0 is
+ * a valid probability: its factor is exactly one, so the scale carries over
+ * unchanged. Forward and backward fold the same way. */
+static void assertSymInt32FoldFor(float p) {
+    const odtScale_t inS = {.m = 24561, .e = -20};
+    const float inScale = odtScaleToFloat(inS);
+    const float expected = odtScaleToFloat(odtScaleMul(
+        inS, odtScaleFromFloat(1.0f / (1.0f - p), ODT_SCALE_NEAREST), ODT_SCALE_NEAREST));
+
+    size_t n = 4;
+    tensor_t *in = buildSymInt32Tensor(n);
+    tensor_t *out = buildSymInt32Tensor(n);
+    for (size_t i = 0; i < n; i++) {
+        ((int32_t *)in->data)[i] = (int32_t)(i * 7) - 9;
+    }
+    ((symInt32QConfig_t *)in->quantization->qConfig)->scale = inScale;
+
+    tensor_t *mask = buildBoolMask(n);
+    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
+    dropoutConfig_t dcfg;
+    initDropoutConfig(&dcfg, p, mask, fq, bq);
+    dcfg.training = true;
+    layerConfig_t lcfg;
+    layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
+
+    bernoulliFillMaskFn_t saved = bernoulliGetFillMaskFn();
+    bernoulliSetFillMaskFn(stubKeepEven);
+    dropoutForward(&layer, in, out, NULL);
+    bernoulliSetFillMaskFn(saved);
+    float fwdScale = ((symInt32QConfig_t *)out->quantization->qConfig)->scale;
+
+    dropoutBackward(&layer, NULL, in, out, NULL);
+    float bwdScale = ((symInt32QConfig_t *)out->quantization->qConfig)->scale;
+
+    freeQuantization(bq);
+    freeQuantization(fq);
+    freeTensor(mask);
+    freeTensor(out);
+    freeTensor(in);
+
+    TEST_ASSERT_EQUAL_MEMORY(&expected, &fwdScale, sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(&expected, &bwdScale, sizeof(float));
+}
+
+void testSymInt32ScaleFoldIsCanonicalNearest(void) {
+    assertSymInt32FoldFor(0.0f);
+    assertSymInt32FoldFor(0.3f);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testForwardEvalIdentityFloat);
@@ -1369,6 +1431,7 @@ int main(void) {
     RUN_TEST(testForwardTrainingSymInt32ScaleFold);
     RUN_TEST(testBackwardFloatUsesMaskAndScale);
     RUN_TEST(testBackwardSymInt32UsesMaskAndScaleFold);
+    RUN_TEST(testSymInt32ScaleFoldIsCanonicalNearest);
     RUN_TEST(testDropoutBackwardFloatAliasedMatchesDisjoint);
     RUN_TEST(testDropoutBackwardSymInt32AliasedMatchesDisjoint);
     RUN_TEST(testDropoutBackwardExitsOnDtypeMismatch);

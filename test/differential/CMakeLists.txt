@@ -8,6 +8,7 @@
 # tensor/quantization core, npy I/O, the examples/_shared npy writer).
 add_executable(odt_diffdrive odt_diffdrive.c)
 target_link_libraries(odt_diffdrive PRIVATE
+        DyadicScale
         CommonLayerLibs
         Conv1d
         Conv1dTransposed

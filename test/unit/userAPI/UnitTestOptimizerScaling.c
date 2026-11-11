@@ -8,6 +8,7 @@
 #include "BfpKernelSupport.h"
 #include "BorrowedLayer.h"
 #include "DeathTest.h"
+#include "DyadicScale.h"
 #include "Layer.h"
 #include "Linear.h"
 #include "LinearApi.h"
@@ -1137,6 +1138,84 @@ void testScaleOptimizerGradientsMeanBfpArmIsNotTheFloatWalker(void) {
     freeParameter(params[0]);
 }
 
+/* Optimizer mean scale on a SYM-family grad: the integer divisor B is threaded
+ * through and folded once, MulRatio(s, 1, B, NEAREST) -- never s * (1.0f / B)
+ * snapped afterwards. B = 8 is a power of two (exact either way); B = 12 is
+ * not. An arbitrary factor folds as Mul(s, FromFloat(factor), NEAREST). */
+static float foldMean(float s, size_t divisor) {
+    return odtScaleToFloat(odtScaleMulRatio(odtScaleFromFloat(s, ODT_SCALE_NEAREST), 1u,
+                                            (uint32_t)divisor, ODT_SCALE_NEAREST));
+}
+
+static float gradScaleOf(const parameter_t *p) {
+    switch (p->grad->quantization->type) {
+    case SYM_INT32:
+        return ((symInt32QConfig_t *)p->grad->quantization->qConfig)->scale;
+    case SYM:
+        return ((symQConfig_t *)p->grad->quantization->qConfig)->scales[0];
+    case ASYM:
+        return ((asymQConfig_t *)p->grad->quantization->qConfig)->scales[0];
+    default:
+        TEST_FAIL_MESSAGE("not a SYM-family grad");
+        return 0.f;
+    }
+}
+
+static void assertMeanFolds(optimizer_t *sgd, parameter_t *w, parameter_t *b, size_t divisor) {
+    float wBefore = gradScaleOf(w);
+    float bBefore = gradScaleOf(b);
+    scaleOptimizerGradientsMean(sgd, divisor, NULL);
+    float wWant = foldMean(wBefore, divisor);
+    float bWant = foldMean(bBefore, divisor);
+    float wGot = gradScaleOf(w);
+    float bGot = gradScaleOf(b);
+    TEST_ASSERT_EQUAL_MEMORY(&wWant, &wGot, sizeof(float));
+    TEST_ASSERT_EQUAL_MEMORY(&bWant, &bGot, sizeof(float));
+}
+
+void testMeanScaleFoldsTheIntegerDivisorIntoSymFamilyScales(void) {
+    const size_t divisors[2] = {8, 12};
+    float wF[6] = {1.f, -2.f, 3.f, -4.f, 5.f, -6.f};
+    float bF[2] = {0.5f, -0.7f};
+    int32_t wI[6] = {10, 20, 30, -40, 50, -60};
+    int32_t bI[2] = {100, -200};
+    for (size_t k = 0; k < 2; k++) {
+        layer_t *model[1];
+        parameter_t *w;
+        parameter_t *b;
+        optimizer_t *sgd = buildSymInt32OneLayerOptim(
+            model, &w, &b, odtScaleToFloat((odtScale_t){.m = 24561, .e = -20}), wI,
+            odtScaleToFloat((odtScale_t){.m = 30001, .e = -16}), bI, 0.01f, 0.f);
+        assertMeanFolds(sgd, w, b, divisors[k]);
+        freeOptim(sgd);
+        freeLinearLayerShellOnly(model[0]);
+
+        sgd = buildSymOneLayerOptim(model, &w, &b, wF, bF, 6, 0.01f, 0.f);
+        assertMeanFolds(sgd, w, b, divisors[k]);
+        freeOptim(sgd);
+        freeLinearLayerShellOnly(model[0]);
+
+        sgd = buildAsymOneLayerOptim(model, &w, &b, wF, bF, 6, 0.01f, 0.f);
+        assertMeanFolds(sgd, w, b, divisors[k]);
+        freeOptim(sgd);
+        freeLinearLayerShellOnly(model[0]);
+    }
+
+    layer_t *model[1];
+    parameter_t *w;
+    parameter_t *b;
+    const odtScale_t s0 = {.m = 24561, .e = -20};
+    optimizer_t *sgd = buildSymInt32OneLayerOptim(model, &w, &b, odtScaleToFloat(s0), wI,
+                                                  odtScaleToFloat(s0), bI, 0.01f, 0.f);
+    scaleOptimizerGradients(sgd, 0.3f, NULL);
+    float want = odtScaleToFloat(
+        odtScaleMul(s0, odtScaleFromFloat(0.3f, ODT_SCALE_NEAREST), ODT_SCALE_NEAREST));
+    float got = gradScaleOf(w);
+    freeOptim(sgd);
+    freeLinearLayerShellOnly(model[0]);
+    TEST_ASSERT_EQUAL_MEMORY(&want, &got, sizeof(float));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testScaleOptimizerGradients_DoublesGradients);
@@ -1164,5 +1243,6 @@ int main(void) {
     RUN_TEST(testScaleOptimizerGradientsMeanBfpPowerOfTwoIsExact);
     RUN_TEST(testScaleOptimizerGradientsMeanRejectsAZeroDivisor);
     RUN_TEST(testScaleOptimizerGradientsMeanBfpArmIsNotTheFloatWalker);
+    RUN_TEST(testMeanScaleFoldsTheIntegerDivisorIntoSymFamilyScales);
     return UNITY_END();
 }

@@ -21,6 +21,7 @@
 #include "Matmul.h"
 #include "Mul.h"
 #include "Rounding.h"
+#include "ScaleCanon.h"
 #include "SymAccumGuard.h"
 #include "SymGroupedWeight.h"
 #include "Tensor.h"
@@ -279,7 +280,8 @@ void matmulSymIntTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputT
     symInt32QConfig_t *bSymInt32QC = bTensor->quantization->qConfig;
     symInt32QConfig_t *outputSymInt32QC = outputTensor->quantization->qConfig;
 
-    outputSymInt32QC->scale = aSymInt32QC->scale * bSymInt32QC->scale;
+    storeCanonScale(&outputSymInt32QC->scale,
+                    canonProductScale(aSymInt32QC->scale, bSymInt32QC->scale, ODT_SCALE_NEAREST));
 }
 
 void matmulSymIntTensorsWithInstructionCounter(tensor_t *aTensor, tensor_t *bTensor,
@@ -289,7 +291,8 @@ void matmulSymIntTensorsWithInstructionCounter(tensor_t *aTensor, tensor_t *bTen
     symInt32QConfig_t *aSymInt32QC = aTensor->quantization->qConfig;
     symInt32QConfig_t *bSymInt32QC = bTensor->quantization->qConfig;
     symInt32QConfig_t *outputSymInt32QC = outputTensor->quantization->qConfig;
-    outputSymInt32QC->scale = aSymInt32QC->scale * bSymInt32QC->scale;
+    storeCanonScale(&outputSymInt32QC->scale,
+                    canonProductScale(aSymInt32QC->scale, bSymInt32QC->scale, ODT_SCALE_NEAREST));
 
     ++matmulInstructionCounter;
 }
@@ -315,6 +318,11 @@ void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_
     matmulValidateSymOperand(bTensor, "bTensor");
     uint8_t aBits = ((symInt32QConfig_t *)aTensor->quantization->qConfig)->qMaxBits;
     uint8_t bBits = ((symInt32QConfig_t *)bTensor->quantization->qConfig)->qMaxBits;
+    /* The stored product scale, rounded once from the exact mantissa product;
+     * the bias seed below is refolded onto this same value. */
+    const float outputScale = canonProductScale(
+        ((symInt32QConfig_t *)aTensor->quantization->qConfig)->scale,
+        ((symInt32QConfig_t *)bTensor->quantization->qConfig)->scale, ODT_SCALE_NEAREST);
     uint8_t resultBits;
     if (bias == NULL) {
         resultBits = matmulIntCore(aTensor, bTensor, outputTensor, NULL, true, aBits, bBits);
@@ -334,10 +342,7 @@ void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_
         }
 
         symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
-        float aScale = ((symInt32QConfig_t *)aTensor->quantization->qConfig)->scale;
-        float bScale = ((symInt32QConfig_t *)bTensor->quantization->qConfig)->scale;
         float biasScale = biasQC->scale;
-        float outputScale = aScale * bScale;
 
         /* Rescale the bias into the accumulator's scale via the shared #189 helper
          * (guarded float->int32 cast): one fixed-point op per output column. */
@@ -350,10 +355,8 @@ void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_
         resultBits = matmulIntCore(aTensor, bTensor, outputTensor, seed, true, aBits, bBits);
     }
 
-    symInt32QConfig_t *aQC = aTensor->quantization->qConfig;
-    symInt32QConfig_t *bQC = bTensor->quantization->qConfig;
     symInt32QConfig_t *outputQC = outputTensor->quantization->qConfig;
-    outputQC->scale = aQC->scale * bQC->scale;
+    storeCanonScale(&outputQC->scale, outputScale);
     outputQC->qMaxBits = resultBits; /* bias seed included (#516) */
 }
 
@@ -562,7 +565,11 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
             maxScale = weightGroups->scales[g];
         }
     }
-    float sAcc = aScale * maxScale;
+    /* Stored, so canonical. CEIL, not the product rule's NEAREST: the rescaled
+     * accumulator proof (symAccumSiteInitRangesRescaled) needs every group
+     * factor (aScale * scales[g]) / sAcc <= 1 up to float slack 2^-22, and a
+     * NEAREST sAcc can sit 2^-15 below the exact product. */
+    const float sAcc = canonProductScale(aScale, maxScale, ODT_SCALE_CEIL);
 
     /* b's roundingMode carries the OP's rounding mode here — the same
      * plumbing the executeOp prologue already uses for every SYM_INT32
@@ -597,7 +604,7 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
                                               groupedWeight, aScale, sAcc, bQC->roundingMode, rs);
 
     symInt32QConfig_t *outputQC = outputTensor->quantization->qConfig;
-    outputQC->scale = sAcc;
+    storeCanonScale(&outputQC->scale, sAcc);
     outputQC->qMaxBits = resultBits; /* the rescaled accumulator's width (#516) */
 }
 

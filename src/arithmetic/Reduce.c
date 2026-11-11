@@ -11,6 +11,7 @@
 #include "Mul.h"
 #include "Quantization.h"
 #include "Rounding.h"
+#include "ScaleCanon.h"
 #include "Square.h"
 #include "Sub.h"
 #include "SymGridBounds.h"
@@ -299,15 +300,15 @@ void rsqrtSymInt32(tensor_t *in, float eps, tensor_t *out, rngStream_t *rs) {
     }
 
     if (absMax == 0.0f) { /* n == 0: nothing to write, neutral scale (cf. #160) */
-        outQC->scale = 1.0f;
+        storeCanonScale(&outQC->scale, 1.0f);
         return;
     }
 
     /* Requant into out via the convertFloatTensorToSymInt32Tensor idiom
      * (scale = absMax/qMax, round-clamp), refreshing out's scale on every call. */
     (void)symGridBoundsForDerivedScaleOrExit(outQC->qMaxBits, "rsqrtSymInt32");
-    float scale = divFloat32s(absMax, qMax);
-    outQC->scale = scale;
+    const float scale = odtScaleCanonFloat(divFloat32s(absMax, qMax), ODT_SCALE_CEIL);
+    storeCanonScale(&outQC->scale, scale);
     for (size_t i = 0; i < n; i++) {
         float r = rsqrtFloat32(mulFloat32s((float)qIn[i], sIn), eps);
         qOut[i] = clampInt32(roundByMode(divFloat32s(r, scale), outQC->roundingMode, rs),

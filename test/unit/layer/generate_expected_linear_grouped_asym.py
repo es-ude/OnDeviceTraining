@@ -49,6 +49,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
+from dyadic_scale import CEIL, canon, product_scale  # noqa: F401
 from sym_gold import (dequant_asym_grouped, dequant_sym_grouped_f32, emit_float_array,
                       emit_float_scalar, emit_int32_array, emit_int32_scalar,
                       matmul_grouped_dx_ref, matmul_grouped_ref, quantize_asym_grouped)
@@ -75,7 +76,7 @@ A_MANTISSAS = [1, -2, 3, -1, 2, -3,
 A_SCALE = 0.5
 
 BIAS_MANTISSAS = [10, -5, 3]
-BIAS_SCALE = 0.1
+BIAS_SCALE = canon(0.1)  # stored scales are canonical dyadic: snapped NEAREST
 
 # dx orientation: out[r][k] = sum_o loss[r][o] * W[o][k], W strided by
 # REDUCE_LEN (its raw [outFeatures=3, inFeatures=6] storage).

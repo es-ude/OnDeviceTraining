@@ -1,6 +1,7 @@
 add_library(Add Add.c)
 target_include_directories(Add PUBLIC include)
 target_link_libraries(Add PRIVATE
+        DyadicScale
         SymAccumGuard
         Tensor
         DTypes
@@ -70,6 +71,7 @@ target_link_libraries(Distributions PUBLIC RNG PRIVATE
 add_library(Div Div.c)
 target_include_directories(Div PUBLIC include)
 target_link_libraries(Div PRIVATE
+        DyadicScale
         Tensor
         DTypes
         Arithmetic
@@ -110,6 +112,7 @@ target_link_libraries(Log PRIVATE
 add_library(Matmul Matmul.c)
 target_include_directories(Matmul PUBLIC include)
 target_link_libraries(Matmul PRIVATE
+        DyadicScale
         SymAccumGuard
         SymGroupedWeight
         Common
@@ -124,6 +127,7 @@ target_link_libraries(Matmul PRIVATE
 add_library(Mul Mul.c)
 target_include_directories(Mul PUBLIC include)
 target_link_libraries(Mul PRIVATE
+        DyadicScale
         SymAccumGuard
         Tensor
         DTypes
@@ -141,7 +145,7 @@ target_link_libraries(MinMax PRIVATE
 
 add_library(Reduce Reduce.c)
 target_include_directories(Reduce PUBLIC include)
-target_link_libraries(Reduce PRIVATE m Common Div Sub Add Mul Square Arithmetic Tensor DTypes Quantization Rounding MinMax)
+target_link_libraries(Reduce PRIVATE m Common DyadicScale Div Sub Add Mul Square Arithmetic Tensor DTypes Quantization Rounding MinMax)
 
 add_library(RowBroadcast RowBroadcast.c)
 target_include_directories(RowBroadcast PUBLIC include)
@@ -172,6 +176,7 @@ target_link_libraries(Square PRIVATE
 add_library(Sub Sub.c)
 target_include_directories(Sub PUBLIC include)
 target_link_libraries(Sub PRIVATE
+        DyadicScale
         Tensor
         DTypes
         Arithmetic
@@ -203,6 +208,7 @@ target_link_libraries(AdaptiveWindow1d PRIVATE
 add_library(Conv1dKernel Conv1dKernel.c)
 target_include_directories(Conv1dKernel PUBLIC include)
 target_link_libraries(Conv1dKernel PRIVATE
+        DyadicScale
         SymAccumGuard
         SymGroupedWeight
         Tensor
@@ -218,6 +224,7 @@ target_link_libraries(Conv1dKernel PRIVATE
 add_library(ConvTranspose1dKernel ConvTranspose1dKernel.c)
 target_include_directories(ConvTranspose1dKernel PUBLIC include)
 target_link_libraries(ConvTranspose1dKernel PRIVATE
+        DyadicScale
         SymAccumGuard
         SymGroupedWeight
         Tensor
@@ -233,6 +240,7 @@ target_link_libraries(ConvTranspose1dKernel PRIVATE
 add_library(ExecuteOp ExecuteOp.c)
 target_include_directories(ExecuteOp PUBLIC include)
 target_link_libraries(ExecuteOp PRIVATE
+        DyadicScale
         Tensor
         Quantization
         ArithmeticType

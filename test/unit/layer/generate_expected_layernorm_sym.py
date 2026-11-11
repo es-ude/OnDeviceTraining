@@ -45,10 +45,15 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
+import sym_gold  # noqa: E402
+from dyadic_scale import NEAREST, fit_scale, product_scale  # noqa: E402
+
 # SYM_INT32 forward is operand-domain end-to-end (#227 int12 operand flip).
 # input/gamma/beta and the normalized OUTPUT all live in default-initialized
 # (quantizationInitSymInt32) tensors, which are now int12 (qMaxBits=12):
-#   absmax -> scale = absmax/2047, round-clamp to [-2048, 2047].
+#   absmax -> canonical CEIL scale fit_scale(absmax, 2047), round-clamp to
+#   [-2048, 2047].
 # There is NO grad accumulator in the forward, so every QMAX/QMIN here is int12.
 # (The backward generator carries the operand-int12 vs grad-int16 split.)
 QMAX = 2047.0
@@ -96,10 +101,10 @@ def emit_int32_scalar(name: str, v: int) -> str:
 
 
 def quantize_sym(x: torch.Tensor):
-    """convertFloatTensorToSymInt32Tensor: absmax -> scale (1.0 if absmax==0),
+    """convertFloatTensorToSymInt32Tensor: absmax -> canonical CEIL scale (1.0 if 0),
     round-clamp with the C rounding (half-away-from-zero)."""
     absmax = x.abs().max().item()
-    scale = 1.0 if absmax == 0.0 else absmax / QMAX
+    scale = fit_scale(absmax, QMAX)
     q = round_half_away(torch.clamp(x / scale, QMIN, QMAX))
     return q.to(torch.int32), scale
 
@@ -133,10 +138,11 @@ def emulate_sym_forward(xq, sx, gq, sg, bq, sb, normalized_shape, eps):
         s_norm = 1.0
         q = torch.zeros_like(n)
     else:
-        k = QMAX / absmax
-        s_norm = 1.0 / k
+        # canonical CEIL grid first, then the stretch K = 1/sNorm (float32)
+        s_norm = fit_scale(absmax, QMAX)
+        k = float(torch.tensor(1.0, dtype=torch.float32) / torch.tensor(s_norm, dtype=torch.float32))
         q = round_half_away(torch.clamp(n * k, QMIN, QMAX))
-    s_y = s_norm * sg
+    s_y = product_scale(s_norm, sg, NEAREST)
     seed = round_half_away(bq.to(torch.float64) * (sb / s_y)).reshape(1, n_inner)
     yq = q * gq.reshape(1, n_inner).to(torch.float64) + seed
     var_ratio = (var / (var + eps)).flatten()
@@ -144,19 +150,11 @@ def emulate_sym_forward(xq, sx, gq, sg, bq, sb, normalized_shape, eps):
 
 
 def _requant_i12_f32(mantissas: torch.Tensor, scale: float):
-    """PR1b.2 (Task 3): mirrors requantSymInt32Tensor's exact float32 sequence
-    (TensorConversion.c) applied to the funnel's raw affine-stage output:
-    dequant (f32) -> absmax (f32) -> scale=absmax/qMax (f32) ->
-    round_half_away(clamp(...)). Returns (restored int32 mantissas, restored
-    scale)."""
-    deq = mantissas.to(torch.float32) * torch.tensor(scale, dtype=torch.float32)
-    absmax = deq.abs().max().to(torch.float32)
-    if absmax.item() == 0.0:
-        return torch.zeros_like(mantissas, dtype=torch.int32), 1.0
-    new_scale = (absmax / QMAX).item()
-    q = round_half_away(
-        torch.clamp(deq / torch.tensor(new_scale, dtype=torch.float32), QMIN, QMAX))
-    return q.to(torch.int32), new_scale
+    """PR1b.2 (Task 3): requantSymInt32Tensor (TensorConversion.c) applied to
+    the funnel's raw affine-stage output -- the canonical grid fitted from the
+    max |code| (sym_gold.requant_absmax_i12_f32). Returns (restored int32
+    mantissas, restored scale)."""
+    return sym_gold.requant_absmax_i12_f32(mantissas, scale)
 
 
 def _restore_tolerances(yq, s_y, mantissa_tol, yq_r, s_y_r):

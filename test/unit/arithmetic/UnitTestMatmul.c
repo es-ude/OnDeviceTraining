@@ -8,6 +8,7 @@
 #include "BfpKernelSupport.h"
 #include "BfpRawFixture.h"
 #include "DeathTest.h"
+#include "DyadicScale.h"
 #include "Matmul.h"
 #include "RNG.h"
 #include "SymAccumGuard.h"
@@ -3119,6 +3120,83 @@ void testMatmulSymNarrowChainStaysExact(void) {
     TEST_ASSERT_EQUAL_UINT8(14, out2.qc.qMaxBits); /* 2^9 * 2^3 = 2^12 -> 14 */
 }
 
+/* Scaled-accumulator class: the stored product scale is odtScaleMul(sa, sb,
+ * NEAREST) on the canonical operands, rounded once from the exact 30-bit
+ * mantissa product. 16385 * 24560 rounds to 24561 in integers but to 24562 via
+ * the float product (the float rounds to a tie first). The bias seed rescales
+ * into that SAME stored value: a bias whose own scale equals it seeds its code
+ * through unchanged. */
+void testMatmulProductScaleIsIntegerNearestAndSeedsOnIt(void) {
+    const float sa = odtScaleToFloat((odtScale_t){.m = 16385, .e = -14});
+    const float sb = odtScaleToFloat((odtScale_t){.m = 24560, .e = -14});
+    const odtScale_t prod = odtScaleMul((odtScale_t){.m = 16385, .e = -14},
+                                        (odtScale_t){.m = 24560, .e = -14}, ODT_SCALE_NEAREST);
+    const float expected = odtScaleToFloat(prod);
+    TEST_ASSERT_EQUAL_UINT16(24561, prod.m);
+
+    int32_t aData[] = {1, 2};
+    size_t aDims[] = {1, 2};
+    size_t aOrder[] = {0, 1};
+    shape_t aShape;
+    setShape(&aShape, aDims, 2, aOrder);
+    symInt32QConfig_t aQC;
+    initSymInt32QConfig(HALF_AWAY, &aQC);
+    aQC.scale = sa;
+    quantization_t aQ;
+    initSymInt32Quantization(&aQC, &aQ);
+    tensor_t aTensor;
+    setTensorValues(&aTensor, (uint8_t *)aData, &aShape, &aQ, NULL);
+
+    int32_t bData[] = {3, 5};
+    size_t bDims[] = {2, 1};
+    size_t bOrder[] = {0, 1};
+    shape_t bShape;
+    setShape(&bShape, bDims, 2, bOrder);
+    symInt32QConfig_t bQC;
+    initSymInt32QConfig(HALF_AWAY, &bQC);
+    bQC.scale = sb;
+    quantization_t bQ;
+    initSymInt32Quantization(&bQC, &bQ);
+    tensor_t bTensor;
+    setTensorValues(&bTensor, (uint8_t *)bData, &bShape, &bQ, NULL);
+
+    int32_t biasData[] = {1 << 20};
+    size_t biasDims[] = {1};
+    size_t biasOrder[] = {0};
+    shape_t biasShape;
+    setShape(&biasShape, biasDims, 1, biasOrder);
+    symInt32QConfig_t biasQC;
+    initSymInt32QConfig(HALF_AWAY, &biasQC);
+    biasQC.qMaxBits = 22;
+    biasQC.scale = expected;
+    quantization_t biasQ;
+    initSymInt32Quantization(&biasQC, &biasQ);
+    tensor_t biasTensor;
+    setTensorValues(&biasTensor, (uint8_t *)biasData, &biasShape, &biasQ, NULL);
+
+    int32_t outData[1];
+    size_t outDims[] = {1, 1};
+    size_t outOrder[] = {0, 1};
+    shape_t outShape;
+    setShape(&outShape, outDims, 2, outOrder);
+    symInt32QConfig_t outQC;
+    initSymInt32QConfig(HALF_AWAY, &outQC);
+    quantization_t outQ;
+    initSymInt32Quantization(&outQC, &outQ);
+    tensor_t outTensor;
+    setTensorValues(&outTensor, (uint8_t *)outData, &outShape, &outQ, NULL);
+
+    matmulSymInt32TensorsWithBias(&aTensor, &bTensor, &outTensor, &biasTensor, NULL);
+    TEST_ASSERT_EQUAL_MEMORY(&expected, &outQC.scale, sizeof(float));
+    TEST_ASSERT_EQUAL_INT32(13 + (1 << 20), outData[0]);
+
+    /* the bias-free product entry stores the same canonical value */
+    outQC.scale = 1.0f;
+    matmulSymInt32Tensors(&aTensor, &bTensor, &outTensor);
+    TEST_ASSERT_EQUAL_MEMORY(&expected, &outQC.scale, sizeof(float));
+    TEST_ASSERT_EQUAL_INT32(13, outData[0]);
+}
+
 int main(void) {
 
     UNITY_BEGIN();
@@ -3154,6 +3232,7 @@ int main(void) {
     RUN_TEST(testMatmulFloat32TensorsWithBiasBroadcastsOverRows);
     RUN_TEST(testMatmulFloat32TensorsWithBiasNullEqualsPlain);
     RUN_TEST(testMatmulSymInt32TensorsWithBiasRescalesBias);
+    RUN_TEST(testMatmulProductScaleIsIntegerNearestAndSeedsOnIt);
     RUN_TEST(testMatmulSymInt32WiderOperandRunsExact);
     RUN_TEST(testMatmulSymInt32TensorsWithBiasRejectsNonSymInt32Bias);
     RUN_TEST(testMatmulGroupedWeightPerChannelMatchesGold);

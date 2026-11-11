@@ -8,6 +8,7 @@
 
 #include "Arithmetic.h"
 #include "ArithmeticType.h"
+#include "DyadicScale.h"
 #include "Layer.h"
 #include "LayerNorm.h"
 #include "LayerNormApi.h"
@@ -1545,15 +1546,15 @@ void testSymForwardMantissaInvariantsViaOnesGamma(void) {
  * accumulator-range producer, Finding A — executeOp's OUT_WRITE epilogue
  * restores width via the SYM->SYM diagonal requant, same as Linear/Conv1d).
  *
- * Derivation of the restored scale: betaScale = absmax(beta)/2047 = 0.5/2047;
- * betaQ = round(beta/betaScale) = round(beta*4094) = [2047, -1024, 512]
- * (half-away: -1023.5 -> -1024). Pre-restoration affine raw output is
- * seed_j = round(betaQ_j * betaScale/sY) with the raw producer scale
- * sY = sNorm*gammaScale = 1.0*(1/2047) (constant input -> sNorm=1, gamma=ones
- * -> gammaScale=1/2047): seed = round(betaQ_j * 0.5) = [1024, -512, 256] (all
- * exact, no .5 ties). The requant's absmax over these raw mantissas is 1024
- * (at scale sY), so the restored scale is max(|seed_j|)/2047 * sY =
- * 1024/2047 * (1/2047). */
+ * Derivation of the restored scale: every grid is the canonical CEIL fit, so
+ * gammaScale = G = CEIL15(1/2047) and betaScale = CEIL15(0.5/2047) = G/2
+ * exactly; betaQ = round(beta/betaScale) = [2047, -1024, 512] (half-away:
+ * -1023.5 -> -1024; the CEIL grid moves no code here). Pre-restoration affine
+ * raw output is seed_j = round(betaQ_j * betaScale/sY) with the raw producer
+ * scale sY = sNorm*gammaScale = 1.0*G (constant input -> sNorm=1): seed =
+ * round(betaQ_j * 0.5) = [1024, -512, 256] (all exact, no .5 ties). The
+ * requant fits its grid from max|seed_j| = 1024 at scale sY, so the restored
+ * scale is CEIL15(1024 * G / 2047) (canonFitScaleFromCodes). */
 void testSymForwardConstantInputAppliesBeta(void) {
     size_t dims[] = {2, 3};
     tensor_t *in = buildSymInt32TensorND(2, dims, (float[]){7.f, 7.f, 7.f, 7.f, 7.f, 7.f});
@@ -1588,7 +1589,9 @@ void testSymForwardConstantInputAppliesBeta(void) {
     freeTensor(out);
     freeTensor(in);
 
-    float expectedScale = (1024.0f / 2047.0f) / 2047.0f;
+    const float gammaScale = odtScaleCanonFloat(1.0f / 2047.0f, ODT_SCALE_CEIL);
+    float expectedScale = odtScaleToFloat(odtScaleMulRatio(
+        odtScaleFromFloat(gammaScale, ODT_SCALE_NEAREST), 1024u, 2047u, ODT_SCALE_CEIL));
     TEST_ASSERT_FLOAT_WITHIN(expectedScale * 1e-4f, expectedScale, scale);
     float expBeta[] = {0.5f, -0.25f, 0.125f};
     for (size_t g = 0; g < 2; g++) {
@@ -1771,11 +1774,12 @@ void testFactorySymInt32StorageQuantizesGammaBeta(void) {
 
     for (size_t i = 0; i < 4; i++) {
         /* gamma=ones is OPERAND storage (default int12, #227): absmax=1 ->
-         * every mantissa = qMax = 2047, scale = 1/2047. beta=zeros -> 0, scale 1. */
+         * every mantissa = qMax = 2047, scale = CEIL15(1/2047). beta=zeros -> 0,
+         * scale 1. */
         TEST_ASSERT_EQUAL_INT(2047, g[i]);
         TEST_ASSERT_EQUAL_INT(0, b[i]);
     }
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 1.0f / 2047.0f, gScale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, odtScaleCanonFloat(1.0f / 2047.0f, ODT_SCALE_CEIL), gScale);
     TEST_ASSERT_FLOAT_WITHIN(1e-9f, 1.0f, bScale);
     TEST_ASSERT_TRUE(gammaGradFloat);
     TEST_ASSERT_TRUE(betaGradFloat);
@@ -3783,12 +3787,13 @@ static uint32_t layerNormNormDxStateOfSeed(uint64_t seed) {
 }
 
 /* x = +-1 at scale 1 over one group of 16 (mean 0, variance 1, eps 0): every
- * normalized value is +-1 and absmax 1, so K = qMax and element 0 sits exactly
- * on qMax = 2047, drawn with a near-1 u. Saturated SR stays on the grid. Under
- * exact SR the integer clamp after the round is defensive (an exactly
- * representable qMax has no fraction and never moves), so this is a
- * behavioural pin and no longer distinguishes clamp presence. The kernel's raw
- * output is q * gammaCode (beta 0), read off the SYM->SYM epilogue cell. */
+ * normalized value is +-1 and absmax 1. The canonical CEIL grid sNorm sits
+ * just above 1/qMax, so K = 1/sNorm sits just below qMax (2046.88) and element
+ * 0, drawn with a near-1 u, rounds DOWN to 2046 -- inside the grid, never past
+ * qMax. Saturated SR stays on the grid. The integer clamp after the round is
+ * defensive, so this is a behavioural pin and no longer distinguishes clamp
+ * presence. The kernel's raw output is q * gammaCode (beta 0), read off the
+ * SYM->SYM epilogue cell. */
 void testLayerNormSymForwardSrKeepsSaturatedCodeOnTheGrid(void) {
     size_t dims[] = {1, NORM_DX_N};
     size_t ns[] = {NORM_DX_N};
@@ -3828,7 +3833,10 @@ void testLayerNormSymForwardSrKeepsSaturatedCodeOnTheGrid(void) {
     freeTensor(x);
 
     TEST_ASSERT_EQUAL_size_t(NORM_DX_N, rawN);
-    TEST_ASSERT_EQUAL_INT32_MESSAGE(2047 * gammaCode, raw0, "element 0 stays on qMax");
+    const float stretch = 1.0f / odtScaleCanonFloat(1.0f / 2047.0f, ODT_SCALE_CEIL);
+    TEST_ASSERT_TRUE(stretch < 2047.0f && stretch > 2046.0f);
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(2046 * gammaCode, raw0,
+                                    "element 0 rounds down onto the grid, under qMax");
 }
 
 /* x = +-1, gamma = 1 and dy in +-pairs, so dx = dy exactly; dy[0] = 2047 at

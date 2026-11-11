@@ -1,6 +1,7 @@
 add_library(Conv1d Conv1d.c)
 target_include_directories(Conv1d PUBLIC include)
 target_link_libraries(Conv1d PRIVATE
+        DyadicScale
         SymAccumGuard
         SymGroupedWeight
         LayerExec
@@ -22,6 +23,7 @@ target_link_libraries(Conv1d PRIVATE
 add_library(Conv1dTransposed Conv1dTransposed.c)
 target_include_directories(Conv1dTransposed PUBLIC include)
 target_link_libraries(Conv1dTransposed PRIVATE
+        DyadicScale
         SymAccumGuard
         SymGroupedWeight
         LayerExec
@@ -43,6 +45,7 @@ target_link_libraries(Conv1dTransposed PRIVATE
 add_library(MaxPool1d MaxPool1d.c)
 target_include_directories(MaxPool1d PUBLIC include)
 target_link_libraries(MaxPool1d PRIVATE
+        DyadicScale
         LayerExec
         RNG
         DTypes
@@ -62,6 +65,7 @@ target_link_libraries(MaxPool1d PRIVATE
 add_library(AvgPool1d AvgPool1d.c)
 target_include_directories(AvgPool1d PUBLIC include)
 target_link_libraries(AvgPool1d PRIVATE
+        DyadicScale
         LayerExec
         RNG
         DTypes
@@ -79,6 +83,7 @@ target_link_libraries(AvgPool1d PRIVATE
 add_library(AdaptiveAvgPool1d AdaptiveAvgPool1d.c)
 target_include_directories(AdaptiveAvgPool1d PUBLIC include)
 target_link_libraries(AdaptiveAvgPool1d PRIVATE
+        DyadicScale
         LayerExec
         RNG
         DTypes
@@ -95,6 +100,7 @@ target_link_libraries(AdaptiveAvgPool1d PRIVATE
 add_library(Dropout Dropout.c)
 target_include_directories(Dropout PUBLIC include)
 target_link_libraries(Dropout PRIVATE
+        DyadicScale
         DTypes
         Tensor
         TensorConversion
@@ -112,6 +118,7 @@ target_link_libraries(Dropout PRIVATE
 add_library(LayerNorm LayerNorm.c)
 target_include_directories(LayerNorm PUBLIC include)
 target_link_libraries(LayerNorm PRIVATE
+        DyadicScale
         LayerExec
         RNG
         DTypes
@@ -134,6 +141,7 @@ target_link_libraries(LayerNorm PRIVATE
 add_library(GroupNorm GroupNorm.c)
 target_include_directories(GroupNorm PUBLIC include)
 target_link_libraries(GroupNorm PRIVATE
+        DyadicScale
         LayerExec
         RNG
         DTypes
@@ -233,6 +241,7 @@ target_link_libraries(OpTable PRIVATE
 add_library(Linear Linear.c)
 target_include_directories(Linear PUBLIC include)
 target_link_libraries(Linear PRIVATE
+        DyadicScale
         SymAccumGuard
         SymGroupedWeight
         LayerExec
@@ -279,6 +288,7 @@ target_link_libraries(AddLayer PRIVATE
 add_library(Relu Relu.c)
 target_include_directories(Relu PUBLIC include)
 target_link_libraries(Relu PRIVATE
+        DyadicScale
         DTypes
         Tensor
         TensorConversion
@@ -309,6 +319,7 @@ target_link_libraries(Softmax PRIVATE
 add_library(Flatten Flatten.c)
 target_include_directories(Flatten PUBLIC include)
 target_link_libraries(Flatten PRIVATE
+        DyadicScale
         DTypes
         Tensor
         Quantization

@@ -75,6 +75,18 @@ bool odtScaleEq(odtScale_t a, odtScale_t b);
 /* odtScaleToFloat(odtScaleFromFloat(x, r)): x snapped onto the dyadic grid. */
 float odtScaleCanonFloat(float x, odtScaleRound_t r);
 
+/* Strict-mode guard for a stored float scale: under ODT_SCALE_STRICT, fail fast
+ * unless x is exactly a canonical scale (a positive normal float whose value has
+ * at most 15 significant bits). Without ODT_SCALE_STRICT it compiles to nothing.
+ * Call it at every site that stores a SYM / SYM_INT32 / ASYM scale. */
+#ifdef ODT_SCALE_STRICT
+void odtScaleAssertCanonical(float x);
+#else
+static inline void odtScaleAssertCanonical(float x) {
+    (void)x;
+}
+#endif
+
 /* __builtin_assume_aligned: without it gcc cannot prove the pointer is word
  * aligned and, on Cortex-M0+ (no unaligned access), emits a memcpy call
  * instead of one str / ldr. The struct's _Alignas(4) makes the promise true.

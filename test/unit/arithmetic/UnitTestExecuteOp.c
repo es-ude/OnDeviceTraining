@@ -121,7 +121,7 @@ static void symTestUnpackSignExtend(const uint8_t *packed, size_t qBits, int32_t
 /* Prologue no-op: dtype matches the arithmetic -> the source is passed
  * through untouched (data AND scale unchanged after the call). */
 void testProloguePassesMatchingOperandThroughUntouched(void) {
-    tensor_t *in = buildSym(3, (int32_t[]){100, -200, 300}, 0.01f);
+    tensor_t *in = buildSym(3, (int32_t[]){100, -200, 300}, 0.0078125f);
     tensor_t *out = buildSym(3, (int32_t[]){0, 0, 0}, 1.0f);
     quantization_t arith;
     symInt32QConfig_t arithQC;
@@ -143,7 +143,7 @@ void testProloguePassesMatchingOperandThroughUntouched(void) {
     freeTensor(out);
     freeTensor(in);
     TEST_ASSERT_EQUAL_INT(100, srcM0);
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.01f, srcScale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.0078125f, srcScale);
 }
 
 /* Prologue conversion: a FLOAT32 operand entering SYM arithmetic is
@@ -211,12 +211,15 @@ static void probeSum3Kernel(tensor_t **operands, size_t nOperands, tensor_t *raw
  * prologue's conversion correctness across MULTIPLE rows -- the offset
  * arithmetic of the Task-2 rewrite lives or dies here. `b`/`c` are seeded
  * so every mantissa round-trips losslessly at default qMaxBits=12 (absmax
- * element hits qMax=2047 exactly; the third element is an exact multiple of
- * the resulting quantum) -- so the sums below are exact, not just "close". */
+ * element is 2047 times a dyadic quantum -- 2^-10 for b, 2^-11 for c -- so
+ * the fitted grid is exactly that quantum; b's third element is 512 quanta)
+ * -- so the sums below are exact, not just "close". */
 void testExecuteOpConvertsOnlyMismatchedOperands(void) {
     tensor_t *a = buildFloat(3, (float[]){0.5f, 1.0f, -1.5f});
-    tensor_t *b = buildSymInt32Tensor1dFromFloats(3, (float[]){2.047f, -2.047f, 0.5f});
-    tensor_t *c = buildSymInt32Tensor1dFromFloats(3, (float[]){1.0f, 1.0f, 1.0f});
+    tensor_t *b =
+        buildSymInt32Tensor1dFromFloats(3, (float[]){1.9990234375f, -1.9990234375f, 0.5f});
+    tensor_t *c = buildSymInt32Tensor1dFromFloats(
+        3, (float[]){0.99951171875f, 0.99951171875f, 0.99951171875f});
     tensor_t *out = buildFloat(3, (float[]){0, 0, 0});
     executeOp(
         &(opSpec_t){.kernel = probeSum3Kernel,
@@ -231,16 +234,17 @@ void testExecuteOpConvertsOnlyMismatchedOperands(void) {
     freeTensor(b);
     freeTensor(c);
     freeTensor(out);
-    TEST_ASSERT_FLOAT_WITHIN(1e-5f, 3.547f, r0);
-    TEST_ASSERT_FLOAT_WITHIN(1e-5f, -0.047f, r1);
-    TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.0f, r2);
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f, 3.49853515625f, r0);
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.00048828125f, r1);
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f, -0.00048828125f, r2);
 }
 
 /* OUT_WRITE SYM->SYM must be bit-identical to requantSymInt32Tensor (the
  * conversionMatrix diagonal) — NOT convertTensor's same-type memmove. Uses
  * accumulator-range mantissas so the memmove-vs-requant difference is huge. */
 void testOutWriteSymToSymBitEqualsDiagonalRequant(void) {
-    tensor_t *in = buildSym(3, (int32_t[]){1500000, -750000, 250000}, 1e-4f);
+    tensor_t *in = buildSym(3, (int32_t[]){1500000, -750000, 250000},
+                            0.0001220703125f); /* 2^-13, a canonical scale */
     tensor_t *out = buildSym(3, (int32_t[]){0, 0, 0}, 1.0f);
     quantization_t arith;
     symInt32QConfig_t arithQC;
@@ -366,10 +370,10 @@ void testAccFixedIntoFloatCollapsesToExactAdd(void) {
 
 /* Dynamic SYM+SYM must be bit-identical to addSymInt32TensorsInplace. */
 void testAccDynamicSymIntoSymBitEqualsAddSymInplace(void) {
-    tensor_t *inc = buildSym(3, (int32_t[]){1000, -2000, 500}, 0.001f);
-    tensor_t *grad = buildSym(3, (int32_t[]){10, 20, 30}, 0.05f);
-    tensor_t *refInc = buildSym(3, (int32_t[]){1000, -2000, 500}, 0.001f);
-    tensor_t *refGrad = buildSym(3, (int32_t[]){10, 20, 30}, 0.05f);
+    tensor_t *inc = buildSym(3, (int32_t[]){1000, -2000, 500}, 0.0009765625f);
+    tensor_t *grad = buildSym(3, (int32_t[]){10, 20, 30}, 0.046875f);
+    tensor_t *refInc = buildSym(3, (int32_t[]){1000, -2000, 500}, 0.0009765625f);
+    tensor_t *refGrad = buildSym(3, (int32_t[]){10, 20, 30}, 0.046875f);
     quantization_t arith;
     symInt32QConfig_t arithQC;
     initSymInt32QConfig(HALF_AWAY, &arithQC);
@@ -408,7 +412,7 @@ void testAccDynamicSymIntoSymBitEqualsAddSymInplace(void) {
 void testAccDynamicFloatIncIntoSymTargetMatchesLayerNormReference(void) {
     float incVals[3] = {0.3f, -0.7f, 0.1f};
     tensor_t *inc = buildFloat(3, incVals);
-    tensor_t *grad = buildSym(3, (int32_t[]){40, -80, 120}, 0.02f);
+    tensor_t *grad = buildSym(3, (int32_t[]){40, -80, 120}, 0.015625f);
     quantization_t floatArith;
     initFloat32Quantization(&floatArith);
 
@@ -423,7 +427,7 @@ void testAccDynamicFloatIncIntoSymTargetMatchesLayerNormReference(void) {
         grad);
 
     /* Reference: exact LayerNorm.c:446-463 sequence on a twin. */
-    tensor_t *refGrad = buildSym(3, (int32_t[]){40, -80, 120}, 0.02f);
+    tensor_t *refGrad = buildSym(3, (int32_t[]){40, -80, 120}, 0.015625f);
     tensor_t *refIncFloat = buildFloat(3, incVals);
     tensor_t *refIncSym = buildSym(3, (int32_t[]){0, 0, 0}, 1.0f); /* int12 shell, HALF_AWAY */
     convertTensor(refIncFloat, refIncSym, NULL);
@@ -451,12 +455,12 @@ void testAccDynamicFloatIncIntoSymTargetMatchesLayerNormReference(void) {
  * NO clamp; the target's roundingMode here is HALF_AWAY (default of buildSym),
  * so this pins the PR1b.2 D4 bit-identical-to-old-behavior case (roundHalfAway ==
  * the pre-migration bare roundf for these inputs). Hand-computed: interm
- * {700, -300} @ 0.01 into target {5, -5} @ 0.02: 700*0.01/0.02 = 350 (exact)
- * -> 355; -300*0.01/0.02 = -150 (exact) -> -155. Target scale must stay
- * EXACTLY 0.02 (never re-derived). */
+ * {700, -300} @ 2^-7 into target {5, -5} @ 2^-6: 700*2^-7/2^-6 = 350 (exact)
+ * -> 355; -300*2^-7/2^-6 = -150 (exact) -> -155. Target scale must stay
+ * EXACTLY 2^-6 (never re-derived). */
 void testAccFixedSymIntoSymRescalesIntoExistingScale(void) {
-    tensor_t *inc = buildSym(2, (int32_t[]){700, -300}, 0.01f);
-    tensor_t *grad = buildSym(2, (int32_t[]){5, -5}, 0.02f);
+    tensor_t *inc = buildSym(2, (int32_t[]){700, -300}, 0.0078125f);
+    tensor_t *grad = buildSym(2, (int32_t[]){5, -5}, 0.015625f);
     quantization_t arith;
     symInt32QConfig_t arithQC;
     initSymInt32QConfig(HALF_AWAY, &arithQC);
@@ -479,7 +483,7 @@ void testAccFixedSymIntoSymRescalesIntoExistingScale(void) {
     freeTensor(inc);
     TEST_ASSERT_EQUAL_INT(355, g0);
     TEST_ASSERT_EQUAL_INT(-155, g1);
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.02f, gScale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.015625f, gScale);
 }
 
 /* CONTRACT FLIP (PR3 Task 3, #261): this test previously pinned "packed
@@ -1276,7 +1280,7 @@ void testAuxOutIsKernelWrittenVerbatimAndNeverFunnelConverted(void) {
 /* OUT_ACC_FIXED_SCALE must consult the TARGET's roundingMode (PR1b.2 D4) via
  * rescaleIntoAccumulatorScale, not a bare roundf (which is HALF_AWAY-only and
  * ignores SR jitter entirely). Values are chosen so the pre-rescale ratio
- * lands exactly on a HALF_AWAY tie (705*0.01/0.02 = 352.5, -705*... = -352.5).
+ * lands exactly on a HALF_AWAY tie (705*2^-7/2^-6 = 352.5, -705*... = -352.5).
  * SR_HALF_AWAY lifts a magnitude iff u < frac (the exact SR law), so element 1
  * (frac 0.5, draw 0.794 >= 0.5) provably diverges from HALF_AWAY; element 0
  * (draw 0.0817 < 0.5) lifts to the same 353 as HALF_AWAY and only pins the
@@ -1294,14 +1298,14 @@ void testAuxOutIsKernelWrittenVerbatimAndNeverFunnelConverted(void) {
  *   SR_HALF_AWAY: 352.5:  t = 352, frac 0.5, j0 = 0.0817 < 0.5 -> lift -> 353
  *                 -352.5: t = -352, frac -0.5, j1 = 0.794 >= 0.5 -> no
  *                         lower -> -352
- * Target scale must stay EXACTLY 0.02 (never re-derived), matching
+ * Target scale must stay EXACTLY 2^-6 (never re-derived), matching
  * testAccFixedSymIntoSymRescalesIntoExistingScale's HALF_AWAY pin (PR1b.2 D4's
  * "bit-identical for HALF_AWAY" case). */
 #define SR_GOLD_KEY_SEED 31u
 
 void testAccFixedScaleHonorsTargetSrRoundingMode(void) {
-    tensor_t *inc = buildSym(2, (int32_t[]){705, -705}, 0.01f);
-    tensor_t *grad = buildSym(2, (int32_t[]){0, 0}, 0.02f);
+    tensor_t *inc = buildSym(2, (int32_t[]){705, -705}, 0.0078125f);
+    tensor_t *grad = buildSym(2, (int32_t[]){0, 0}, 0.015625f);
     ((symInt32QConfig_t *)grad->quantization->qConfig)->roundingMode = SR_HALF_AWAY;
     quantization_t arith;
     symInt32QConfig_t arithQC;
@@ -1330,7 +1334,7 @@ void testAccFixedScaleHonorsTargetSrRoundingMode(void) {
     freeTensor(inc);
     TEST_ASSERT_EQUAL_INT(353, g0);
     TEST_ASSERT_EQUAL_INT_MESSAGE(-352, g1, "SR (-352), not HALF_AWAY (-353)");
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.02f, gScale);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.015625f, gScale);
 }
 
 /* ---- #296 Stage 1: writesInPlaceSafe / rawData aliasing (OUT_WRITE only,
@@ -2328,7 +2332,7 @@ void testExecuteOpBfpMissingStageDies(void) {
  * BFP storage only; anything else must convert explicitly first). */
 void testExecuteOpBfpRejectsSymStoredOperand(void) {
     ASSERT_EXITS_WITH_FAILURE({
-        tensor_t *in = buildSym(4, (int32_t[]){10, -20, 30, -40}, 0.1f);
+        tensor_t *in = buildSym(4, (int32_t[]){10, -20, 30, -40}, 0.125f);
         tensor_t *out = buildFloat(4, (float[]){0, 0, 0, 0});
         executeOp(
             &(opSpec_t){

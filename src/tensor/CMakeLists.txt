@@ -29,6 +29,7 @@ add_library(TensorConversion
 )
 target_include_directories(TensorConversion PUBLIC include)
 target_link_libraries(TensorConversion PRIVATE
+        DyadicScale
         Tensor
         Quantization
         Rounding
@@ -57,3 +58,13 @@ target_include_directories(DyadicScale PUBLIC include)
 target_link_libraries(DyadicScale PRIVATE
         Common
 )
+# ODT_SCALE_STRICT: every canonical store site of a SYM / SYM_INT32 / ASYM
+# scale asserts the stored float is an exact 15-bit dyadic value
+# (odtScaleAssertCanonical, DyadicScale.h; fail fast otherwise). OFF by default:
+# the assert compiles to nothing. The unit_test_scale_strict preset turns it on.
+# PUBLIC on DyadicScale, the one target that exports DyadicScale.h, so every TU
+# that sees the header sees the same declaration.
+option(ODT_SCALE_STRICT "Assert every stored SYM/ASYM scale is canonical dyadic" OFF)
+if(ODT_SCALE_STRICT)
+    target_compile_definitions(DyadicScale PUBLIC ODT_SCALE_STRICT=1)
+endif()

@@ -7,6 +7,7 @@
 #include "BfpKernelSupport.h"
 #include "BorrowedLayer.h"
 #include "DeathTest.h"
+#include "DyadicScale.h"
 #include "Layer.h"
 #include "LayerNorm.h"
 #include "LayerQuant.h"
@@ -1217,9 +1218,10 @@ void testSgdStepMFloatReadsPackedSymGradGeneric(void) {
      * param, grad = SYM@8 seeded via ONE accumulateFloatIntoSymTensorFixedGrid
      * call. The grad starts fresh (all-zero mantissa from initTensor's
      * zero-fill), so the call triggers first-store grid derivation:
-     * scale = absmax(inc)/qMax, qMax = 2^(8-1)-1 = 127. inc = {2.0,
-     * -1.5, 0.5} -> absmax = 2.0 -> scale = 2.0/127. codes = round(inc/scale):
-     *   2.0  / scale =  127.0   (exact) -> code  127
+     * scale = CEIL15(absmax(inc)/qMax) (the canonical grid), qMax = 2^(8-1)-1 =
+     * 127. inc = {2.0, -1.5, 0.5} -> absmax = 2.0 -> scale = CEIL15(2.0/127),
+     * a hair above 2.0/127; codes = round(inc/scale) (unchanged by the CEIL):
+     *   2.0  / scale =  126.99          -> code  127
      *  -1.5  / scale =  -95.25          -> code  -95
      *   0.5  / scale =   31.75          -> code   32
      * (no rounding ties: HALF_AWAY only matters at x.5, none of these land
@@ -1262,7 +1264,7 @@ void testSgdStepMFloatReadsPackedSymGradGeneric(void) {
     sgdStepM(&optim, NULL);
 
     /* CAPTURE -> free -> assert: derive expected with the SAME formula the
-     * comment above walks through (float scale = 2.0f/127.f), not hardcoded
+     * comment above walks through (scale = CEIL15(2.0f/127.f)), not hardcoded
      * decimals, so the tolerance below is only absorbing FP-order noise, not
      * a hand-rounding mismatch. */
     float p0 = ((float *)p->data)[0];
@@ -1272,7 +1274,7 @@ void testSgdStepMFloatReadsPackedSymGradGeneric(void) {
     freeParameter(param);
 
     float lr = 0.1f;
-    float scale = 2.0f / 127.f;
+    float scale = odtScaleCanonFloat(2.0f / 127.f, ODT_SCALE_CEIL);
     float expected0 = 1.f - lr * (127.f * scale);
     float expected1 = 2.f - lr * (-95.f * scale);
     float expected2 = -3.f - lr * (32.f * scale);

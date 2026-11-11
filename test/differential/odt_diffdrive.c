@@ -103,6 +103,7 @@
 #include "Quantization.h"
 #include "QuantizationApi.h"
 #include "Rounding.h"
+#include "ScaleCanon.h"
 #include "SlidingWindow1d.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -700,7 +701,9 @@ static tensor_t *loadOperand(const jsonNode_t *operands, const char *name, const
         }
         tensor_t *t = makeTensor(loaded->shape->numberOfDimensions, loaded->shape->dimensions,
                                  quantizationInitSymInt32WithBits(rm, (uint8_t)bits));
-        ((symInt32QConfig_t *)t->quantization->qConfig)->scale = scale;
+        /* user-given scale: snapped NEAREST onto the dyadic grid */
+        storeCanonScale(&((symInt32QConfig_t *)t->quantization->qConfig)->scale,
+                        canonFixedScale(scale));
         size_t n = calcNumberOfElementsByTensor(loaded);
         memcpy(t->data, loaded->data, calcNumberOfBytesForData(t->quantization, n));
         freeTensor(loaded);
@@ -724,7 +727,8 @@ static tensor_t *loadOperand(const jsonNode_t *operands, const char *name, const
         checkCodeRange((const int32_t *)loaded->data, n, bits, path);
         tensor_t *staged = makeTensor(loaded->shape->numberOfDimensions, loaded->shape->dimensions,
                                       quantizationInitSymInt32WithBits(rm, (uint8_t)bits));
-        ((symInt32QConfig_t *)staged->quantization->qConfig)->scale = scale;
+        storeCanonScale(&((symInt32QConfig_t *)staged->quantization->qConfig)->scale,
+                        canonFixedScale(scale));
         memcpy(staged->data, loaded->data, n * sizeof(int32_t));
         tensor_t *packed = makeTensor(loaded->shape->numberOfDimensions, loaded->shape->dimensions,
                                       quantizationInitSym((uint8_t)bits, rm));
@@ -1816,7 +1820,8 @@ static void runConvertRequantFixed(const runCtx_t *ctx) {
     if (!(target > 0.0f)) {
         failf("spec.output.scale must be > 0 for requant_fixed");
     }
-    ((symInt32QConfig_t *)out->quantization->qConfig)->scale = target;
+    storeCanonScale(&((symInt32QConfig_t *)out->quantization->qConfig)->scale,
+                    canonFixedScale(target));
     requantSymInt32TensorToScale(input, out, NULL);
     addOutput("output", out);
     freeTensor(input);

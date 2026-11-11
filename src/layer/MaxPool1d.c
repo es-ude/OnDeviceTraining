@@ -15,6 +15,7 @@
 #include "LayerExec.h"
 #include "LayerWireGuards.h"
 #include "Quantization.h"
+#include "ScaleCanon.h"
 #include "SlidingWindow1d.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -193,8 +194,8 @@ static void maxPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
         }
     }
 
-    ((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale =
-        ((symInt32QConfig_t *)input->quantization->qConfig)->scale;
+    storeCanonScale(&((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale,
+                    ((symInt32QConfig_t *)input->quantization->qConfig)->scale);
 }
 
 /* Integer-only forward (arithmetic-bfp.md section 13), ARITH_BFP arm. Raw BFP
@@ -631,8 +632,8 @@ static void maxPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
         }
     }
 
-    ((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale =
-        ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->scale;
+    storeCanonScale(&((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale,
+                    ((symInt32QConfig_t *)lossGrad->quantization->qConfig)->scale);
 }
 
 /* An argmax inside the input but outside the span of its own window: a stale

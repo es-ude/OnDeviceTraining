@@ -10,6 +10,7 @@
 #include "Quantization.h"
 #include "RNG.h"
 #include "Rounding.h"
+#include "ScaleCanon.h"
 #include "Tensor.h"
 #include "TensorConversion.h"
 
@@ -23,8 +24,8 @@ void executeOpIdentityKernel(tensor_t **operands, size_t nOperands, tensor_t *ra
     size_t bytes = calcNumberOfBytesForData(src->quantization, n);
     memcpy(rawOut->data, src->data, bytes);
     if (src->quantization->type == SYM_INT32) {
-        ((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale =
-            ((symInt32QConfig_t *)src->quantization->qConfig)->scale;
+        storeCanonScale(&((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale,
+                        ((symInt32QConfig_t *)src->quantization->qConfig)->scale);
     }
 }
 
@@ -38,7 +39,7 @@ void executeOpIdentityKernel(tensor_t **operands, size_t nOperands, tensor_t *ra
  * guard sizes its proof from this width. */
 static void stageInt32Raw(const tensor_t *src, tensor_t *scratch, symInt32QConfig_t *scratchQC) {
     scratchQC->qMaxBits = 32;
-    scratchQC->scale = 1.0f;
+    storeCanonScale(&scratchQC->scale, 1.0f); /* raw-int: exactly scale one */
     memcpy(scratch->data, src->data,
            calcNumberOfElementsByTensor((tensor_t *)src) * sizeof(int32_t));
 }

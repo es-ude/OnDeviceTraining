@@ -200,3 +200,18 @@ bool odtScaleEq(odtScale_t a, odtScale_t b) {
 float odtScaleCanonFloat(float x, odtScaleRound_t r) {
     return odtScaleToFloat(odtScaleFromFloat(x, r));
 }
+
+#ifdef ODT_SCALE_STRICT
+void odtScaleAssertCanonical(float x) {
+    uint32_t bits;
+    memcpy(&bits, &x, sizeof bits);
+    uint32_t biased = bits >> FLOAT_FRAC_BITS;
+    if (biased == 0u || biased >= FLOAT_EXP_ALL_ONES ||
+        (bits & ((1u << FLOAT_DROPPED_BITS) - 1u)) != 0u) {
+        PRINT_ERROR("odtScaleAssertCanonical: input bits 0x%08" PRIx32
+                    " are not a canonical scale (ODT_SCALE_STRICT)",
+                    bits);
+        exit(1);
+    }
+}
+#endif

@@ -84,6 +84,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
+from dyadic_scale import CEIL, canon, product_scale
 from sym_gold import (combine_quotient_f32, emit_float_array, emit_float_scalar,
                       emit_int32_array, emit_int32_scalar, matmul_grouped_dx_ref,
                       matmul_grouped_ref)
@@ -104,7 +105,9 @@ W_MANTISSAS = [4, -3, 2, -1, 5, -2,
               -2, 3, 1, -5, 4, -3]
 
 BIAS_MANTISSAS = [10, -5, 3]
-BIAS_SCALE = 0.1
+# Stored scales are exact 15-bit dyadic values (DyadicScale.h): every fixture
+# scale is canonicalized NEAREST, the value a user-given scale snaps to.
+BIAS_SCALE = canon(0.1)
 
 # ---- PR3 Task 1: dx (Linear propLoss) orientation --------------------------
 # out[r][k] = sum_o loss[r][o] * W[o][k]; W stays in its RAW [outFeatures=3,
@@ -128,8 +131,7 @@ def dx_walk_stats(w_scales, group_size):
     last_partials: the tail combine's raw partial per element, combine_counts:
     combines per element)."""
     max_scale = max(w_scales)
-    s_acc = (torch.tensor(LOSS_SCALE, dtype=torch.float32) *
-            torch.tensor(max_scale, dtype=torch.float32)).item()
+    s_acc = product_scale(LOSS_SCALE, max_scale, CEIL)
     quotients, last_partials, combine_counts = [], [], []
     for r in range(DX_OUT_ROWS):
         for k in range(DX_OUT_COLS):
@@ -222,7 +224,7 @@ def fixture_dx(name, group_size, num_groups, w_scales):
 
 def fixture_per_channel():
     group_size, num_groups = 6, 3
-    w_scales = [0.02, 0.05, 0.01]
+    w_scales = [canon(s) for s in (0.02, 0.05, 0.01)]
     assert len(w_scales) == num_groups
 
     out, s_acc = matmul_grouped_ref(A_MANTISSAS, A_SCALE, W_MANTISSAS, w_scales, group_size,
@@ -245,7 +247,10 @@ def fixture_general_groups():
     group_size, num_groups = 3, 6
     # Deliberately scales[0] != max(scales) (mutation (i)'s pin) and a
     # non-uniform spread so every group differs from its row-mate.
-    w_scales = [0.02, 0.05, 0.01, 0.08, 0.03, 0.06]
+    # 0.078125 = 20480 * 2^-18 and 0.05859375 = 0.75 * 0.078125 = 15360 * 2^-18
+    # are exactly dyadic, so the canonical grid keeps the 22 * 0.75 = 16.5
+    # combine tie the round-vs-truncate check below needs.
+    w_scales = [canon(s) for s in (0.02, 0.05, 0.01, 0.078125, 0.03, 0.05859375)]
     assert w_scales[0] != max(w_scales), "general: scales[0] must differ from max (mutation i)"
 
     out, s_acc = matmul_grouped_ref(A_MANTISSAS, A_SCALE, W_MANTISSAS, w_scales, group_size,
@@ -343,9 +348,10 @@ def main() -> int:
     # dx fixtures reuse the forward weight mantissas/scale shapes: per-channel
     # (groupSize=6, one group per weight row) and general (groupSize=3).
     emit_dx_fixture(parts, "DxPerChannel",
-                    fixture_dx("dxPerChannel", 6, 3, [0.02, 0.05, 0.01]))
+                    fixture_dx("dxPerChannel", 6, 3, [canon(s) for s in (0.02, 0.05, 0.01)]))
     emit_dx_fixture(parts, "DxGeneral",
-                    fixture_dx("dxGeneral", 3, 6, [0.02, 0.05, 0.01, 0.08, 0.03, 0.06]))
+                    fixture_dx("dxGeneral", 3, 6,
+                               [canon(s) for s in (0.02, 0.05, 0.01, 0.08, 0.03, 0.06)]))
 
     parts.append("\n#endif // ODT_EXPECTED_GROUP_MATMUL_H\n")
 

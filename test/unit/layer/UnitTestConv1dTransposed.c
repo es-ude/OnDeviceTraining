@@ -6,6 +6,7 @@
 #include "Conv1dTransposedApi.h"
 #include "ConvTranspose1dKernel.h"
 #include "DeathTest.h"
+#include "DyadicScale.h"
 #include "KeyedDrawCheck.h"
 #include "Layer.h"
 #include "LayerCommon.h"
@@ -2766,7 +2767,12 @@ static float wgRun(size_t batch, size_t len, float xCode, float gyCode, bool gyA
 }
 
 void testConv1dTransposedWgGuardProvenSafeN511RunsExact(void) {
-    TEST_ASSERT_FLOAT_WITHIN(1024.f, 511.f * 4190209.f, wgRun(1, 511, 2047.f, 2047.f, false));
+    /* the exact sum 511 * 2047^2 restored onto the 16-bit grad grid: the
+     * canonical CEIL grid no longer maps it exactly onto qMax, so the expected
+     * value is its own round trip on that grid */
+    const float absMax = 511.f * 4190209.f;
+    const float s = odtScaleCanonFloat(absMax / 32767.f, ODT_SCALE_CEIL);
+    TEST_ASSERT_FLOAT_WITHIN(1024.f, roundf(absMax / s) * s, wgRun(1, 511, 2047.f, 2047.f, false));
 }
 
 void testConv1dTransposedWgGuardDiesAtFirstWrappingNFullScaleCodes(void) {

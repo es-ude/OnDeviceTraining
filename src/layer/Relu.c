@@ -11,6 +11,7 @@
 #include "Layer.h"
 #include "Quantization.h"
 #include "Relu.h"
+#include "ScaleCanon.h"
 #include "Tensor.h"
 #include "TensorConversion.h"
 
@@ -38,7 +39,7 @@ void reluForwardSymInt32(tensor_t *input, tensor_t *output) {
     symInt32QConfig_t *inputSymInt32QC = input->quantization->qConfig;
     symInt32QConfig_t *outputSymInt32QC = output->quantization->qConfig;
     gteSymInt32Zero(input, 0, output);
-    outputSymInt32QC->scale = inputSymInt32QC->scale;
+    storeCanonScale(&outputSymInt32QC->scale, inputSymInt32QC->scale);
 }
 
 void reluForwardBfp(tensor_t *input, tensor_t *output) {
@@ -114,7 +115,7 @@ void reluBackwardSymInt32(tensor_t *forwardInput, tensor_t *loss, tensor_t *prop
 
     symInt32QConfig_t *lossQC = loss->quantization->qConfig;
     symInt32QConfig_t *propLossQC = propLoss->quantization->qConfig;
-    propLossQC->scale = lossQC->scale;
+    storeCanonScale(&propLossQC->scale, lossQC->scale);
 }
 
 /* BFP epic PR4 (R-P2 backward): mask by the SIGN of forwardInput's packed

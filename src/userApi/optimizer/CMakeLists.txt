@@ -2,6 +2,7 @@ add_library(OptimizerApi OptimizerApi.c)
 target_include_directories(OptimizerApi PUBLIC include)
 target_link_libraries(OptimizerApi PRIVATE
         LossType
+        DyadicScale
         Sgd
         Optimizer
         OptimizerKeys

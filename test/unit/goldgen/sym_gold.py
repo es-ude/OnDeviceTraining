@@ -18,6 +18,9 @@ from fractions import Fraction
 import numpy as np
 import torch
 
+from dyadic_scale import (CEIL, NEAREST, canon, fit_scale,  # noqa: F401
+                          fit_scale_from_codes, product_scale)
+
 QMAX = 32767.0
 QMIN = -32768.0
 
@@ -112,7 +115,7 @@ def quantize_sym(x: torch.Tensor):
     """convertFloatTensorToSymInt32Tensor: absmax -> scale (1.0 if absmax==0),
     round-clamp with the C rounding (half-away-from-zero)."""
     absmax = x.abs().max().item()
-    scale = 1.0 if absmax == 0.0 else absmax / QMAX
+    scale = fit_scale(absmax, QMAX)
     q = round_half_away(torch.clamp(x / scale, QMIN, QMAX))
     return q.to(torch.int32), scale
 
@@ -148,7 +151,7 @@ def quantize_sym_grouped(values, q_bits: int, group_size: int):
     for g0 in range(0, n, group_size):
         grp = x[g0:g0 + group_size]
         abs_max = grp.abs().max().item()
-        scale = 1.0 if abs_max == 0.0 else abs_max / q_max
+        scale = fit_scale(abs_max, q_max)
         scales.append(scale)
         q = round_half_away(grp / scale)
         codes.extend(int(v) for v in q.tolist())
@@ -222,8 +225,8 @@ def matmul_grouped_ref(a_mantissas, a_scale: float, w_mantissas, w_scales, group
     Returns (out_mantissas flat list [out_rows*out_cols], s_acc)."""
     assert bias_rounding_mode == "HALF_AWAY", "matmul_grouped_ref only emulates HALF_AWAY"
     max_scale = max(w_scales)
-    s_acc = (torch.tensor(a_scale, dtype=torch.float32) *
-            torch.tensor(max_scale, dtype=torch.float32)).item()
+    # stored sAcc: the canonical product, CEIL (keeps every group factor <= 1)
+    s_acc = product_scale(a_scale, max_scale, CEIL)
 
     out = []
     for r in range(out_rows):
@@ -273,8 +276,8 @@ def matmul_grouped_dx_ref(a_mantissas, a_scale: float, w_mantissas, w_scales, gr
     is emulated (see matmul_grouped_ref's docstring for why SR is excluded).
     Returns (out_mantissas flat list [out_rows*out_cols], s_acc)."""
     max_scale = max(w_scales)
-    s_acc = (torch.tensor(a_scale, dtype=torch.float32) *
-            torch.tensor(max_scale, dtype=torch.float32)).item()
+    # stored sAcc: the canonical product, CEIL (keeps every group factor <= 1)
+    s_acc = product_scale(a_scale, max_scale, CEIL)
 
     out = []
     for r in range(out_rows):
@@ -313,9 +316,10 @@ QMIN_I12 = -2048.0
 
 def quantize_sym_i12(x: torch.Tensor):
     """convertFloatTensorToSymInt32Tensor into an int12 config (qMaxBits=12):
-    absmax -> scale=absmax/2047 (1.0 if absmax==0), round-clamp half-away."""
+    absmax -> canonical CEIL fit_scale(absmax, 2047) (1.0 if absmax==0),
+    round-clamp half-away."""
     absmax = x.abs().max().item()
-    scale = 1.0 if absmax == 0.0 else absmax / QMAX_I12
+    scale = fit_scale(absmax, QMAX_I12)
     q = round_half_away(torch.clamp(x / scale, QMIN_I12, QMAX_I12))
     return q.to(torch.int32), scale
 
@@ -334,24 +338,24 @@ def f32_scale_i12(deq32: torch.Tensor) -> float:
     """int12 scale the C runtime derives from the EMITTED float32 fixture:
     float32(absmax)/2047 computed in float32 (convertFloatTensorToSymInt32Tensor)."""
     absmax = deq32.abs().max().to(torch.float32)
-    if absmax.item() == 0.0:
-        return 1.0
-    return (absmax / torch.tensor(QMAX_I12, dtype=torch.float32)).item()
+    return fit_scale(absmax.item(), QMAX_I12)
 
 
 def requant_absmax_i12_f32(mantissas: torch.Tensor, in_scale: float):
     """executeOp OUT_WRITE epilogue for a SYM_INT32 target: the conversionMatrix
     diagonal (requantSymInt32Tensor, TensorConversion.c) at the target's declared
-    qMaxBits=12. Emulates the same float32 sequence: dequant (f32) -> absmax (f32)
-    -> scale=absmax/2047 (f32) -> round_half_away(clamp(...)). Returns
-    (restored int32 mantissas, restored scale)."""
-    deq = mantissas.to(torch.float32) * torch.tensor(in_scale, dtype=torch.float32)
-    absmax = deq.abs().max().to(torch.float32)
-    if absmax.item() == 0.0:
+    qMaxBits=12. Returns (restored int32 mantissas, restored scale)."""
+    # the grid is fitted from the exact absMax max|code| * in_scale (integer
+    # route, canonFitScaleFromCodes); the codes still go through the float32
+    # quotient code * (in_scale / scale) exactly like the C pass B
+    max_abs = int(mantissas.to(torch.int64).abs().max().item())
+    if max_abs == 0:
         return torch.zeros_like(mantissas, dtype=torch.int32), 1.0
-    scale = absmax / torch.tensor(QMAX_I12, dtype=torch.float32)
-    q = round_half_away(torch.clamp(deq / scale, QMIN_I12, QMAX_I12))
-    return q.to(torch.int32), scale.item()
+    in_s = canon(in_scale)
+    scale = fit_scale_from_codes(in_s, max_abs, int(QMAX_I12))
+    ratio = torch.tensor(in_s, dtype=torch.float32) / torch.tensor(scale, dtype=torch.float32)
+    q = round_half_away(torch.clamp(mantissas.to(torch.float32) * ratio, QMIN_I12, QMAX_I12))
+    return q.to(torch.int32), scale
 
 
 def assert_rounding_canary():
@@ -479,8 +483,8 @@ def conv1d_grouped_ref(x_mantissas, in_scale: float, w_mantissas, w_scales, grou
     geom = window_geometry_1d(input_length, kernel_size, stride, dilation, padding_type, padding)
     out_len = geom["out_len"]
     max_scale = max(w_scales)
-    s_acc = (torch.tensor(in_scale, dtype=torch.float32) *
-            torch.tensor(max_scale, dtype=torch.float32)).item()
+    # stored sAcc: the canonical product, CEIL (keeps every group factor <= 1)
+    s_acc = product_scale(in_scale, max_scale, CEIL)
 
     out = []
     for b in range(batch):
@@ -567,8 +571,8 @@ def convT1d_grouped_ref(x_mantissas, in_scale: float, w_mantissas, w_scales, gro
     Returns (out flat [batch*out_channels*out_len], s_acc, out_len)."""
     out_len = (input_length - 1) * stride + dilation * (kernel_size - 1) + output_padding + 1
     max_scale = max(w_scales)
-    s_acc = (torch.tensor(in_scale, dtype=torch.float32) *
-            torch.tensor(max_scale, dtype=torch.float32)).item()
+    # stored sAcc: the canonical product, CEIL (keeps every group factor <= 1)
+    s_acc = product_scale(in_scale, max_scale, CEIL)
     # Per-group product scale, float32-mirrored exactly like the C kernel's
     # inScale * weightGroups->scales[g] (both float32 operands, float32 mul).
     param_scales = [(torch.tensor(in_scale, dtype=torch.float32) *
@@ -727,10 +731,7 @@ def requant_absmax_grouped_f32(values, q_bits: int, group_size: int):
     for g in range(num_groups):
         grp = x[g * group_size:(g + 1) * group_size]
         abs_max = grp.abs().max()
-        if abs_max.item() == 0.0:
-            scale = torch.tensor(1.0, dtype=torch.float32)
-        else:
-            scale = abs_max / q_max
+        scale = torch.tensor(fit_scale(abs_max.item(), q_max.item()), dtype=torch.float32)
         scales.append(scale.item())
         q = round_half_away(grp / scale)
         q = torch.clamp(q, q_min, q_max)
@@ -777,7 +778,10 @@ def quantize_asym_nudged(values, q_bits: int):
         assert mn.item() == 0.0
         scale = torch.tensor(1.0, dtype=torch.float32)
     else:
-        scale = (mx - mn) / torch.tensor(float(q_max), dtype=torch.float32)
+        # the canonical grid FIRST (CEIL of the float32 quotient's bits),
+        # zp and codes derive from it
+        span = (mx - mn) / torch.tensor(float(q_max), dtype=torch.float32)
+        scale = torch.tensor(canon(span.item(), CEIL), dtype=torch.float32)
     zp_real = (-mn) / scale
     zp = int(round_half_away(zp_real).item())
     zp = max(0, min(q_max, zp))

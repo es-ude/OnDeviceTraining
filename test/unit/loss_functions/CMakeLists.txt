@@ -5,6 +5,7 @@ add_custom_command(
                 --out ${GEN_CROSS_ENTROPY_SYM_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_cross_entropy_sym.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_cross_entropy_sym.h via PyTorch"
         VERBATIM
 )

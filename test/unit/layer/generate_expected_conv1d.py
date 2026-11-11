@@ -20,6 +20,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 import sym_gold
+from dyadic_scale import fit_scale, product_scale
 from sym_gold import (
     round_half_away,
     stable_dequant,
@@ -36,9 +37,10 @@ QMIN_I12 = torch.tensor(-2048.0, dtype=torch.float32)
 
 
 def quantize_sym_i12(x):
-    """int12 operand quantize (qMaxBits=12): absmax->scale=absmax/2047, round-clamp half-away."""
+    """int12 operand quantize (qMaxBits=12): canonical CEIL fit_scale(absmax, 2047),
+    round-clamp half-away."""
     absmax = x.abs().max().item()
-    scale = 1.0 if absmax == 0.0 else absmax / 2047.0
+    scale = fit_scale(absmax, 2047.0)
     q = round_half_away(torch.clamp(x / scale, -2048.0, 2047.0))
     return q.to(torch.int32), scale
 
@@ -54,9 +56,7 @@ def stable_dequant_i12(x):
 def f32_scale_i12(deq32: torch.Tensor) -> float:
     """int12 scale the C runtime derives from the emitted fixture: absmax_f32/2047 in float32."""
     absmax = deq32.abs().max().to(torch.float32)
-    if absmax.item() == 0.0:
-        return 1.0
-    return (absmax / QMAX_I12).item()
+    return fit_scale(absmax.item(), 2047.0)
 
 
 # stable_dequant (sym_gold.py) returns its scale in float64; the C runtime
@@ -67,14 +67,13 @@ def f32_scale(deq32: torch.Tensor) -> float:
     """Scale the C runtime derives from the EMITTED float32 fixture:
     float32(absmax(deq32)) / 32767, all in float32 (convertFloatTensorToSymInt32Tensor)."""
     absmax = deq32.abs().max().to(torch.float32)
-    if absmax.item() == 0.0:
-        return 1.0
-    return (absmax / QMAX_F32).item()
+    return fit_scale(absmax.item(), 32767.0)
 
 
 def f32_mul(a: float, b: float) -> float:
-    """One IEEE-754 float32 multiply (matches the C `aScale * bScale`)."""
-    return (torch.tensor(a, dtype=torch.float32) * torch.tensor(b, dtype=torch.float32)).item()
+    """A stored product scale: odtScaleMul NEAREST on the canonical operands
+    (canonProductScale), rounded once -- not the float32 product."""
+    return product_scale(a, b)
 
 
 def _format_float_literal(v: float) -> str:
@@ -384,12 +383,13 @@ def _round_away_f32(x: torch.Tensor) -> torch.Tensor:
 
 def _requant_absmax_f32(mac_int: torch.Tensor, in_scale: float):
     """addSymInt32TensorsInplace into a zero grad: dequant (f32) -> absmax (f32) ->
-    scale=absmax/32767 (f32) -> round_half_away(clamp(.../scale)). Returns (q int32, scale)."""
+    canonical CEIL fit_scale(absmax, 32767) -> round_half_away(clamp(.../scale)).
+    Returns (q int32, scale)."""
     deq = mac_int.to(torch.float32) * torch.tensor(in_scale, dtype=torch.float32)
     absmax = deq.abs().max().to(torch.float32)
     if absmax.item() == 0.0:
         return torch.zeros_like(mac_int, dtype=torch.int32), 1.0
-    scale = (absmax / QMAX_F32)
+    scale = torch.tensor(fit_scale(absmax.item(), 32767.0), dtype=torch.float32)
     q = round_half_away(torch.clamp(deq / scale, QMIN_F32, QMAX_F32))
     return q.to(torch.int32), scale.item()
 
@@ -400,14 +400,10 @@ def _requant_absmax_i12_f32(mac_int: torch.Tensor, in_scale: float):
     (requantSymInt32Tensor, TensorConversion.c) instead of a raw direct write.
     Mirrors _requant_absmax_f32 above but at propLossQ's declared qMaxBits=12
     (int12) instead of the grad contract's 16 — same dequant(f32) -> absmax(f32)
-    -> scale=absmax/2047(f32) -> round_half_away(clamp(...)) sequence."""
-    deq = mac_int.to(torch.float32) * torch.tensor(in_scale, dtype=torch.float32)
-    absmax = deq.abs().max().to(torch.float32)
-    if absmax.item() == 0.0:
-        return torch.zeros_like(mac_int, dtype=torch.int32), 1.0
-    scale = (absmax / QMAX_I12)
-    q = round_half_away(torch.clamp(deq / scale, QMIN_I12, QMAX_I12))
-    return q.to(torch.int32), scale.item()
+    -> canonical CEIL grid -> round_half_away(clamp(...)) sequence, the grid fitted
+    from the integer codes."""
+    # the diagonal fits the grid from the integer codes (sym_gold mirror)
+    return sym_gold.requant_absmax_i12_f32(mac_int, in_scale)
 
 
 def _restore_tolerances(raw_q, raw_scale, mtol_before, base_q, base_scale):
@@ -553,6 +549,10 @@ def emulate_sym_conv(fx):
     fwd_f32_prec = fwd_q.abs().max().item() * fwd_scale * _eps32
     dx_f32_prec = dx_q.abs().max().item() * dx_scale * _eps32
     dx_raw_f32_prec = dx_raw_q.abs().max().item() * dx_scale_raw * _eps32
+    # The raw kernel's output scale is DEFINED as the canonical product of
+    # s_loss * s_w (NEAREST to 15 bits, DyadicScale.h), not the exact real
+    # product: its reference is the true dx expressed on that stored grid.
+    ref_dx_raw = ref_dx * (dx_scale_raw / (q["s_loss"] * q["s_w"]))
 
     # forward dequant tracks the true (quantized-input) conv within quantization noise + f32 ULP
     fwd_err = (fwd_deq.to(torch.float64) - ref_y).abs().max().item()
@@ -563,7 +563,7 @@ def emulate_sym_conv(fx):
     dx_tol = 8.0 * dx_scale + dx_f32_prec + 1e-9
     assert dx_err <= dx_tol, f"{fx['name']}: dx emulation err {dx_err} > tol {dx_tol}"
     # dx_raw (pre-restoration, direct-kernel characterization) tracks the same autograd dx
-    dx_raw_err = (dx_raw_deq.to(torch.float64) - ref_dx).abs().max().item()
+    dx_raw_err = (dx_raw_deq.to(torch.float64) - ref_dx_raw).abs().max().item()
     dx_raw_tol = 8.0 * dx_scale_raw + dx_raw_f32_prec + 1e-9
     assert dx_raw_err <= dx_raw_tol, \
         f"{fx['name']}: dx_raw emulation err {dx_raw_err} > tol {dx_raw_tol}"
@@ -585,7 +585,7 @@ def emulate_sym_conv(fx):
         fwd_scale_tol=fwd_scale_tol,
         dx_q=dx_q, dx_scale=dx_scale, dx_deq=ref_dx.to(torch.float32),
         dx_mtol=0, dx_dtol=8.0 * dx_scale + dx_f32_prec + 1e-6,
-        dx_raw_q=dx_raw_q, dx_raw_scale=dx_scale_raw, dx_raw_deq=ref_dx.to(torch.float32),
+        dx_raw_q=dx_raw_q, dx_raw_scale=dx_scale_raw, dx_raw_deq=ref_dx_raw.to(torch.float32),
         dx_raw_mtol=0, dx_raw_dtol=8.0 * dx_scale_raw + dx_raw_f32_prec + 1e-6,
         dw_q=dw_q, dw_scale=dw_scale, dw_deq=ref_dw.to(torch.float32),
         dw_mtol=2, dw_dtol=(0.5 * inter_scale + 2.5 * dw_scale) * 1.5 + 1e-6,

@@ -22,6 +22,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         TensorConversion
         MORE_LIBS
+        DyadicScale
         Tensor
         Rounding
         Quantization
@@ -40,6 +41,7 @@ add_custom_command(
                 --out ${GEN_REQUANT_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_requant.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_requant.h via PyTorch"
         VERBATIM
 )
@@ -54,6 +56,7 @@ add_custom_command(
                 --out ${GEN_GROUP_QUANT_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_group_quant.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_group_quant.h via PyTorch"
         VERBATIM
 )
@@ -67,6 +70,7 @@ add_custom_command(
                 --out ${GEN_ASYM_NUDGED_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_asym_nudged.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_asym_nudged.h via PyTorch"
         VERBATIM
 )

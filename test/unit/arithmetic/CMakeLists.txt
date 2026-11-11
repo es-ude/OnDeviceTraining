@@ -31,6 +31,7 @@ add_custom_command(
                 --out ${GEN_GROUP_MATMUL_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_group_matmul.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_group_matmul.h via PyTorch"
         VERBATIM
 )
@@ -44,6 +45,7 @@ add_custom_command(
                 --out ${GEN_BFP_MATMUL_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_matmul.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_bfp_matmul.h via NumPy emulation"
         VERBATIM
 )
@@ -182,6 +184,7 @@ add_elastic_ai_unit_test(
         Matmul
         MORE_LIBS
         Arithmetic
+        DyadicScale
         SymAccumGuard
         SymGroupedWeight
         Tensor
@@ -275,6 +278,7 @@ add_custom_command(
                 --out ${GEN_BFP_CONV1D_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_conv1d.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_bfp_conv1d.h via NumPy emulation"
         VERBATIM
 )
@@ -310,6 +314,7 @@ add_custom_command(
                 --out ${GEN_BFP_CONVT1D_HEADER}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_bfp_convT1d.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/sym_gold.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/../goldgen/dyadic_scale.py
         COMMENT "Generating expected_bfp_convT1d.h via NumPy emulation"
         VERBATIM
 )

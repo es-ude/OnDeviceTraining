@@ -17,6 +17,7 @@
 #include "OptimizerApi.h"
 #include "OptimizerKeys.h"
 #include "Quantization.h"
+#include "ScaleCanon.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
@@ -32,18 +33,41 @@ static void requireParamIndexFitsKey(const optimizer_t *optimizer, const rngKey_
     }
 }
 
+/* What one fold multiplies by. FLOAT32 grads multiply by `factor`. A
+ * SYM_INT32/SYM/ASYM grad folds into its stored scale, which must stay an
+ * exact dyadic value: a mean (divisor != 0) folds s * 1 / divisor rounded once
+ * (canonRatioScale, NEAREST), so the integer divisor is never first turned
+ * into a float 1/B; an arbitrary factor (divisor == 0) is canonicalized NEAREST
+ * and multiplied in with odtScaleMul (canonCoeffScale). */
+typedef struct {
+    float factor;
+    size_t divisor;
+} gradFold_t;
+
+static float foldStoredScale(float s, gradFold_t fold, const char *what) {
+    if (fold.divisor == 0) {
+        return canonCoeffScale(s, fold.factor);
+    }
+    if (fold.divisor > 0x80000000u) {
+        PRINT_ERROR("%s: a mean divisor above 2^31 (%zu) has no dyadic scale fold", what,
+                    fold.divisor);
+        exit(1);
+    }
+    return canonRatioScale(s, 1u, (uint32_t)fold.divisor);
+}
+
 /* The fold of every non-BFP grad dtype: FLOAT32 multiplies, SYM_INT32/SYM/ASYM
  * fold into the per-tensor scale. Kept out of line so the integer mean-scale
  * entry below carries no float arithmetic in its own body (the census reads
  * it as a `self` root). */
-static __attribute__((noinline)) void scaleNonBfpGradient(parameter_t *param, float factor,
+static __attribute__((noinline)) void scaleNonBfpGradient(parameter_t *param, gradFold_t fold,
                                                           const char *what) {
     switch (param->grad->quantization->type) {
     case FLOAT32: {
         size_t numberOfValues = calcNumberOfElementsByParameter(param);
         float *gradArr = (float *)param->grad->data;
         for (size_t j = 0; j < numberOfValues; j++) {
-            gradArr[j] *= factor;
+            gradArr[j] *= fold.factor;
         }
         break;
     }
@@ -52,7 +76,7 @@ static __attribute__((noinline)) void scaleNonBfpGradient(parameter_t *param, fl
          * be absorbed into the per-tensor scale, leaving the int32 storage
          * untouched. O(1) and avoids quantization round-trip loss. */
         symInt32QConfig_t *gradQ = param->grad->quantization->qConfig;
-        gradQ->scale *= factor;
+        storeCanonScale(&gradQ->scale, foldStoredScale(gradQ->scale, fold, what));
         break;
     }
     case SYM: {
@@ -78,7 +102,7 @@ static __attribute__((noinline)) void scaleNonBfpGradient(parameter_t *param, fl
                         what, gradQ->numGroups);
             exit(1);
         }
-        gradQ->scales[0] *= factor;
+        storeCanonScale(&gradQ->scales[0], foldStoredScale(gradQ->scales[0], fold, what));
         break;
     }
     case ASYM: {
@@ -97,7 +121,7 @@ static __attribute__((noinline)) void scaleNonBfpGradient(parameter_t *param, fl
                         what, gradQ->numGroups);
             exit(1);
         }
-        gradQ->scales[0] *= factor;
+        storeCanonScale(&gradQ->scales[0], foldStoredScale(gradQ->scales[0], fold, what));
         break;
     }
     default:
@@ -130,7 +154,7 @@ void scaleOptimizerGradients(optimizer_t *optimizer, float factor, const rngKey_
     for (size_t i = 0; i < optimizer->sizeStates; i++) {
         parameter_t *param = optimizer->parameter[i];
         if (param->grad->quantization->type != BFP) {
-            scaleNonBfpGradient(param, factor, what);
+            scaleNonBfpGradient(param, (gradFold_t){.factor = factor, .divisor = 0}, what);
             continue;
         }
         /* No O(1) fold here: BFP dequant is mantissa * 2^(E-bias) per
@@ -142,11 +166,13 @@ void scaleOptimizerGradients(optimizer_t *optimizer, float factor, const rngKey_
          * tensors correctly, so a hand-assembled grouped grad is scaled
          * right rather than corrupted (in-tree grads are per-tensor
          * anyway, gradInit's carrier gate, #300 axis).
-         * Non-finite-factor asymmetry: every OTHER arm warns (the check
+         * Non-finite-factor asymmetry: the FLOAT32 arm warns (the check
          * at the top of this function) and then PROPAGATES the non-finite
-         * factor -- a float grad element or a per-tensor scale represents
-         * NaN/inf fine, so the failure stays loud downstream. BFP warns
-         * the same way and then HARD-FAILS inside the primitive, because
+         * factor -- a float grad element represents NaN/inf fine, so the
+         * failure stays loud downstream. The SYM_INT32/SYM/ASYM arms and BFP
+         * warn the same way and then HARD-FAIL (a stored scale is a positive
+         * dyadic value, so a zero, negative or non-finite factor has no
+         * fold; BFP inside the primitive), because
          * a (mantissa, shared exponent) grid has no non-finite code:
          * silently skipping would mask the caller's bug and saturating
          * would invent data. Precedent for the exit: optimizerClipGradNorm
@@ -170,7 +196,8 @@ void scaleOptimizerGradientsMean(optimizer_t *optimizer, size_t divisor,
     for (size_t i = 0; i < optimizer->sizeStates; i++) {
         parameter_t *param = optimizer->parameter[i];
         if (param->grad->quantization->type != BFP) {
-            scaleNonBfpGradient(param, meanFactorOf(divisor), what);
+            scaleNonBfpGradient(
+                param, (gradFold_t){.factor = meanFactorOf(divisor), .divisor = divisor}, what);
             continue;
         }
         /* Integer only: 1/divisor once per call, then the in-place integer

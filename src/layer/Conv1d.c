@@ -17,6 +17,7 @@
 #include "LayerWireGuards.h"
 #include "Mul.h"
 #include "Quantization.h"
+#include "ScaleCanon.h"
 #include "SlidingWindow1d.h"
 #include "SymAccumGuard.h"
 #include "SymGroupedWeight.h"
@@ -522,7 +523,8 @@ static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     int32_t *interData = (int32_t *)rawOut->data;
     memset(interData, 0,
            calcNumberOfBytesForData(rawOut->quantization, calcNumberOfElementsByTensor(rawOut)));
-    ((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale = inScale * lossScale;
+    storeCanonScale(&((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale,
+                    canonProductScale(inScale, lossScale, ODT_SCALE_NEAREST));
 
     int32_t const *xArr = (int32_t const *)forwardInput->data;
     int32_t const *gyArr = (int32_t const *)lossGrad->data;
@@ -935,7 +937,7 @@ static void biasGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
     } else {
         biasGradSumLoopsSymChecked(gyArr, rawArr, batch, outChannels, outputLength, &site);
     }
-    ((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale = lossScale;
+    storeCanonScale(&((symInt32QConfig_t *)rawOut->quantization->qConfig)->scale, lossScale);
 }
 
 void conv1dCalcBiasGradsSymInt32(conv1dConfig_t *cfg, tensor_t *lossGrad, const rngKey_t *key) {

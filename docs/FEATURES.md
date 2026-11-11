@@ -693,7 +693,8 @@ checkpointing, limitations, literature).
   read/write path (reallocation-based, see Serialization above), and — end-to-end
   trainable — group-partial **forward AND dx** on the full GEMM family
   (Linear/Conv1d/ConvT1d, gather cores via running group-partial, scatter core via
-  per-product rescale; per-channel = the special case `groupSize ==
+  a per-group integer fold of each input code, pure int32 MACs (legacy per-product
+  float rescale for inputs wider than 16 bits); per-channel = the special case `groupSize ==
   elemsPerOutChannel`) plus **optimizer updates** on grouped params (SGD/AdamW,
   per-group dynamic absmax requant each write-back). Rounding-error bounds for the
   backward/update paths: `docs/conventions/arithmetic-sym.md` §"Grouped backward".

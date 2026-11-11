@@ -71,13 +71,23 @@ void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight
  *  conv1dKernelSymInt32Grouped), there is NO running group-partial here:
  *  consecutive products of a k-run land in DIFFERENT output elements, so no
  *  per-(target, group) run exists across which a raw int32 partial could be
- *  carried. Each product is rescaled into the accumulator scale
- *  INDIVIDUALLY: yAcc[outIdx] += rescaleIntoAccumulatorScale(x*w,
- *  s_in*scales[g], sAcc, op rounding), with sAcc = s_in *
- *  max_g(weightGroups->scales[g]) -- never scales[0]. Error consequence: an
- *  output element that C products scatter into carries |err| <= 0.5*C*sAcc
- *  worst case. Bias is refolded into sAcc AFTER the scatter (same pass order
- *  and primitive as the scalar sibling). Output scale = sAcc.
+ *  carried. Instead the INPUT code is folded into each group it meets
+ *  (SymGroupFold.h): xv_g = round(xv * m_g * 2^-(E - e_g + 15 - F)), once per
+ *  (input element, group run), and the products xv_g * w are plain int32
+ *  MACs at the accumulator scale A = {s_in.m, s_in.e + E + 15 - F} (E = the
+ *  largest group exponent, F in [1, 8] the largest fraction count the
+ *  accumulator guard proves). Error: per output element
+ *  |err| <= 0.5 * A * sum|w| over its contributing products (HALF_AWAY; SR is
+ *  unbiased). An input code of 0 is never folded: it contributes nothing and
+ *  takes no SR draw. Bias is seeded at A AFTER the scatter (same pass order
+ *  and primitive as the scalar sibling). Output scale = A, qMaxBits = the
+ *  fold site's width (x widened to [xMin * 2^F - 1, xMax * 2^F + 1]) with the
+ *  bias seeds.
+ *
+ *  Legacy float path (inputs wider than 16 bits, or no provable F >= 1):
+ *  each product is rescaled into sAcc = s_in * max_g(scales[g]) individually
+ *  (rescaleIntoAccumulatorScale, op rounding), |err| <= 0.5*C*sAcc for C
+ *  contributing products; bias refolded into sAcc; output scale = sAcc.
  *
  *  Same VALID/SAME/EXPLICIT geometry as the scalar sibling; Conv1d's grouped
  *  dx adjoint (PR3 Task 3) reuses this entry with bias==NULL and the

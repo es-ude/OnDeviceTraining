@@ -46,13 +46,14 @@ test) mirror generate_expected_group_matmul.py's Task-3 discipline exactly:
 Group-quant PR3 (Task 3) additions:
   dx        Conv1d backward propLoss with the grouped weight -- the adjoint
             SCATTER (convTranspose1dKernelSymInt32Grouped in the adjoint
-            role, per-PRODUCT rescale into s_acc = lossScale*max(scales)).
-            Gold via sym_gold.conv1d_dx_grouped_ref (the Task-2 scatter
-            emulation under the Conv1d-adjoint parameter remapping); the
-            emulation is cross-checked against a PyTorch float autograd
-            reference (y.backward(lossGrad), the scalar-generator discipline)
-            within the per-element bound 0.5*C_i*s_acc (C_i = contributing
-            products, scatter error model).
+            role). Its fold path (linq fold T3) folds each lossGrad code into
+            its weight group once, at A = {loss.m, loss.e + E + 15 - F}.
+            Gold via sym_gold.conv1d_dx_grouped_fold_ref (Python ints, int12
+            lossGrad, the weight's code range: SYM [-2048, 2047], and the
+            ASYM twin's image +-4095, which proves one fraction bit less);
+            cross-checked against a PyTorch float autograd reference
+            (y.backward(lossGrad)) within the per-element fold bound
+            0.5*A*sum|w| over the contributing products.
   samePad   Conv1d FORWARD grouped under SAME padding -- PR2's disclosed
             coverage gap (a): the per-element group lookup's raison d'être.
             The generator PROVES the discriminating geometry: at least one
@@ -79,7 +80,7 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
 from dyadic_scale import CEIL, canon, product_scale  # noqa: F401
-from sym_gold import (combine_quotient_f32, conv1d_dx_grouped_ref, conv1d_grouped_ref,
+from sym_gold import (combine_quotient_f32, conv1d_dx_grouped_fold_ref, conv1d_grouped_ref,
                       emit_float_array, emit_float_scalar, emit_int32_array, emit_int32_scalar,
                       rescale_f32, window_geometry_1d, window_slice_1d_full)
 
@@ -211,29 +212,22 @@ def dequant_grouped(mantissas, scales, group_size):
     return [float(m) * scales[i // group_size] for i, m in enumerate(mantissas)]
 
 
-def dx_product_counts():
-    """Per-dx-element contributing-product counts C_i (the scatter error
-    model's C): dx[(ic, l)] receives one product per (oc, outPos, k) with
-    outPos + k == l (stride=1, dilation=1, VALID). Flat [IC*L] list."""
-    counts = [0] * (IN_CHANNELS * INPUT_LENGTH)
-    for ic in range(IN_CHANNELS):
-        for _ in range(OUT_CHANNELS):
-            for out_pos in range(FWD_OUT_LEN):
-                for k in range(KERNEL_SIZE):
-                    counts[ic * INPUT_LENGTH + out_pos + k] += 1
-    return counts
+DX_LOSS_BITS = 12  # the lossGrad wire's declared width (ODT_SYM_OPERAND_QMAXBITS)
+W_SYM_RANGE = (-2048, 2047)  # stored SYM int12 weight
+W_ASYM_IMAGE_RANGE = (-4095, 4095)  # stored ASYM int12 weight's zp-shifted image
 
 
-def fixture_dx(name, w_scales, group_size):
-    out, s_acc = conv1d_dx_grouped_ref(
-        DX_LOSS_MANTISSAS, DX_LOSS_SCALE, W_MANTISSAS, w_scales, group_size,
-        BATCH, IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE, INPUT_LENGTH)
+def fixture_dx(name, w_scales, group_size, w_range=W_SYM_RANGE):
+    r = conv1d_dx_grouped_fold_ref(
+        DX_LOSS_MANTISSAS, DX_LOSS_SCALE, DX_LOSS_BITS, W_MANTISSAS, w_scales, group_size,
+        w_range[0], w_range[1], BATCH, IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE, INPUT_LENGTH)
+    out, acc = r["out"], r["acc_scale"]
     assert any(v != 0 for v in out), f"dx {name}: gold is vacuously all-zero"
 
     # Cross-check the integer emulation against the PyTorch float autograd
     # reference (the scalar dx generators' discipline): same dequantized
-    # operands, so the only divergence is the emulation's per-product rounding
-    # -- |gold*s_acc - x.grad| <= 0.5*C_i*s_acc per element (+ float noise).
+    # operands, so the only divergence is the fold rounding --
+    # |gold*A - x.grad| <= 0.5*A*sum|w| per element (+ float noise).
     w_deq = torch.tensor(dequant_grouped(W_MANTISSAS, w_scales, group_size),
                          dtype=torch.float32).reshape(OUT_CHANNELS, IN_CHANNELS, KERNEL_SIZE)
     gy = (torch.tensor(DX_LOSS_MANTISSAS, dtype=torch.float32) * DX_LOSS_SCALE).reshape(
@@ -242,13 +236,13 @@ def fixture_dx(name, w_scales, group_size):
     y = F.conv1d(x, w_deq)
     y.backward(gy)
     ref = x.grad.flatten().tolist()
-    counts = dx_product_counts()
-    for i, (g, r) in enumerate(zip(out, ref)):
-        bound = 0.5 * counts[i] * s_acc + 1e-4
-        assert abs(g * s_acc - r) <= bound, (
-            f"dx {name}: emulation deviates from torch autograd beyond the scatter "
-            f"bound at {i}: |{g * s_acc} - {r}| > {bound}")
-    return {"outMantissas": out, "outScale": s_acc}
+    for i, (g, rv) in enumerate(zip(out, ref)):
+        bound = 0.5 * r["w_abs_sum"][i] * acc + 1e-4
+        assert abs(g * acc - rv) <= bound, (
+            f"dx {name}: emulation deviates from torch autograd beyond the fold "
+            f"bound at {i}: |{g * acc} - {rv}| > {bound}")
+    return {"outMantissas": out, "outScale": acc, "fracBits": r["frac_bits"],
+            "maxWAbsSum": max(r["w_abs_sum"])}
 
 
 # ---- PR3 Task 3, coverage gap (a): Conv1d FORWARD grouped under SAME
@@ -505,24 +499,28 @@ def main() -> int:
     # only the lossGrad and the adjoint-scatter golds are new.
     dx_pc = fixture_dx("perChannel", [canon(s) for s in (0.02, 0.05, 0.01)], 6)
     dx_gen = fixture_dx("general", [canon(s) for s in (0.02, 0.05, 0.01, 0.078125, 0.03, 0.05859375)], 3)
+    # the ASYM twin layer: same mantissas and scales, the image's code range
+    dx_pc_asym = fixture_dx("perChannelAsym", [canon(s) for s in (0.02, 0.05, 0.01)], 6,
+                            W_ASYM_IMAGE_RANGE)
+    assert dx_pc_asym["fracBits"] == dx_pc["fracBits"] - 1, (
+        "dx: the ASYM image's doubled range must cost exactly one fold fraction bit")
     assert ([v * dx_pc["outScale"] for v in dx_pc["outMantissas"]] !=
             [v * dx_gen["outScale"] for v in dx_gen["outMantissas"]]), (
         "dx: perChannel and general golds dequantize identically -- the group "
         "shape does not reach the dx path (fixture vacuous)")
-    counts = dx_product_counts()
-    assert max(counts) == OUT_CHANNELS * KERNEL_SIZE, (
-        f"dx: max products per element is {max(counts)}, expected "
-        f"{OUT_CHANNELS * KERNEL_SIZE} -- re-derive the C float-path tolerance")
 
     parts.append(emit_int32_array("kConv1dDxLossMantissas", torch.tensor(DX_LOSS_MANTISSAS)))
     parts.append(emit_float_scalar("kConv1dDxLossScale", DX_LOSS_SCALE))
     parts.append(emit_int32_scalar("kConv1dDxFwdOutLen", FWD_OUT_LEN))
-    parts.append(emit_int32_scalar("kConv1dDxMaxProductsPerOut", max(counts)))
+    parts.append(emit_int32_scalar("kConv1dDxPerChannelMaxWAbsSum", dx_pc["maxWAbsSum"]))
     parts.append(emit_int32_array("kDxPerChannelOutMantissas",
                                   torch.tensor(dx_pc["outMantissas"])))
     parts.append(emit_float_scalar("kDxPerChannelOutScale", dx_pc["outScale"]))
     parts.append(emit_int32_array("kDxGeneralOutMantissas", torch.tensor(dx_gen["outMantissas"])))
     parts.append(emit_float_scalar("kDxGeneralOutScale", dx_gen["outScale"]))
+    parts.append(emit_int32_array("kDxPerChannelAsymOutMantissas",
+                                  torch.tensor(dx_pc_asym["outMantissas"])))
+    parts.append(emit_float_scalar("kDxPerChannelAsymOutScale", dx_pc_asym["outScale"]))
     parts.append("\n")
 
     emit_fixture(parts, "SamePad", fixture_same_padding())

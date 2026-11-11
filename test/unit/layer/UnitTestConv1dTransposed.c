@@ -1285,10 +1285,11 @@ void testConv1dTransposedBackwardNullPropLossComputesGradsOnly(void) {
  * PR2's deny-pin (testConvT1dForwardGroupedWeightsFailFast, the death test
  * these gold tests REPLACE) is deliberately INVERTED here: grouped ConvT1d
  * forward is now the shipped behavior, routed through the grouped SCATTER
- * core convTranspose1dKernelSymInt32Grouped (per-PRODUCT rescale into
- * s_acc = inScale*max_g(scales[g]) -- a scatter has no per-(target, group)
- * run across which a raw partial could be carried, unlike the gather cores'
- * running-partial idiom).
+ * core convTranspose1dKernelSymInt32Grouped. A scatter has no per-(target,
+ * group) run across which a raw partial could be carried, unlike the gather
+ * cores' running-partial idiom; its fold path (linq fold T3) instead folds
+ * each input code into its weight group once, at the accumulator scale
+ * A = {in.m, in.e + E + 15 - F}, then runs plain int32 MACs.
  *
  * Fixture: Cin=2, Cout=3, K=3, Lin=4, B=1, VALID, stride=1, dilation=1,
  * outputPadding=0 (Lout=6), int12 codes
@@ -1387,12 +1388,12 @@ static void buildGroupedConvTFixture(convTGroupedFixture_t *f, quantization_t *q
  * comparison cannot reliably distinguish a correct s_acc from a
  * WRONG-but-still-sound one (e.g. scales[0] instead of max) -- the same
  * blind spot UnitTestConv1d.c's grouped tests documented empirically. The
- * exact FLOAT32 wire is bit-for-bit the deterministic float32 formula
- * generate_expected_convT1d_grouped.py's convT1d_grouped_ref computes
- * (python-int products, rescale_f32 == rescaleIntoAccumulatorScale
+ * exact FLOAT32 wire is bit-for-bit the Python-int fold that
+ * generate_expected_convT1d_grouped.py's sym_gold.convt_grouped_fold_ref
+ * computes (bias seed via rescale_f32 == rescaleIntoAccumulatorScale
  * (HALF_AWAY) bit-for-bit), so ANY divergence in the kernel's internal
- * arithmetic (wrong s_acc, wrong per-product group, sum-then-rescale-once,
- * wrong rounding) changes the compared value measurably. Still routes
+ * arithmetic (wrong A or F, wrong group per fold, wrong rounding) changes
+ * the compared value measurably. Still routes
  * through conv1dTransposedForward -> executeOp's grouped-operand gate, so
  * the layer's groupedSymOperandPos wiring is under test too. */
 void testConvT1dForwardGroupedPerChannelMatchesGold(void) {
@@ -1434,19 +1435,20 @@ void testConvT1dForwardGroupedGeneralMatchesGold(void) {
 }
 
 /* Equal-scales grouped twin: every group's scale is the SAME power-of-two
- * value (0.25f) and inScale (0.5f, kConvTGroupedXScale) is also a power of
- * two, so sAcc = inScale*maxScale and every product's paramScale
- * (inScale*scales[g]) are BIT-IDENTICAL float32 values -- and multiplying a
- * float by a power-of-two scale then dividing by the SAME value is an EXACT
- * round trip (pure exponent shifts; the int products, <= 60*40 = 2400, are
- * exactly representable), so round_half_away(product * paramScale / sAcc)
- * reproduces `product` exactly, per product. The grouped kernel's raw output
- * must therefore be BIT-IDENTICAL to the scalar (per-tensor SYM_INT32)
+ * value (0.25f, m = 2^14) and inScale (0.5f, kConvTGroupedXScale) is also a
+ * power of two, so the grouped scatter's fold (linq fold T3) is exact for
+ * every code -- x_g = x * 2^14 * 2^-(15 - F) = x * 2^(F-1), F >= 1 -- and its
+ * accumulator scale A = inScale * 2^(E + 15 - F) makes x_g * w * A exactly
+ * x * w * inScale * 0.25. The grouped kernel's output must therefore
+ * dequantize BIT-IDENTICALLY to the scalar (per-tensor SYM_INT32)
  * convTranspose1dKernelSymInt32 path on the SAME mantissas with weight scale
- * == the common group scale -- both wires here are FLOAT32 (same exact-
- * dequant reasoning as the gold tests above), so identical raw (mantissa,
- * scale) pairs dequantize to identical floats. Asserted by the generator's
- * self-check (v) on the emulation side too. */
+ * == the common group scale (all values exact in float32; both wires FLOAT32).
+ * The bias is seeded onto each kernel's own accumulator grid (A for the
+ * grouped one, inScale * 0.25 = 0.125 for the scalar one), so both layers
+ * share a bias with the power-of-two scale 0.125: its seed is exact on both
+ * grids (b * 2^(F-1) and b), keeping the bias pass under the twin check (a
+ * bias off the coarse grid would legitimately round differently).
+ * Asserted by the generator's self-check (v) on the emulation side too. */
 void testConvT1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
     const float commonScale = 0.25f;
     quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
@@ -1454,6 +1456,10 @@ void testConvT1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
     float groupScales[2] = {commonScale, commonScale};
     convTGroupedFixture_t grouped;
     buildGroupedConvTFixture(&grouped, testQ, 2, 9, groupScales);
+    size_t biasDims[] = {(size_t)kConvTGroupedOutChannels};
+    parameter_t *pow2Bias = parameterInit(
+        buildSymInt32TensorExact(1, biasDims, kConvTGroupedBiasMantissas, 0.125f), NULL);
+    grouped.cfg.bias = pow2Bias;
 
     size_t outputDims[] = {(size_t)kConvTGroupedBatch, (size_t)kConvTGroupedOutChannels,
                            (size_t)kConvTGroupedOutLen};
@@ -1466,11 +1472,6 @@ void testConvT1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
         buildSymInt32TensorExact(3, weightDims, kConvTGroupedWMantissas, commonScale);
     parameter_t *scalarWeights = parameterInit(scalarWeightParam, NULL);
 
-    size_t biasDims[] = {(size_t)kConvTGroupedOutChannels};
-    tensor_t *scalarBiasParam =
-        buildSymInt32TensorExact(1, biasDims, kConvTGroupedBiasMantissas, kConvTGroupedBiasScale);
-    parameter_t *scalarBias = parameterInit(scalarBiasParam, NULL);
-
     size_t inputDims[] = {(size_t)kConvTGroupedBatch, (size_t)kConvTGroupedInChannels,
                           (size_t)kConvTGroupedInputLength};
     tensor_t *scalarInput =
@@ -1481,8 +1482,8 @@ void testConvT1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
     conv1dTransposedConfig_t scalarCfg;
     static layerConfig_t scalarLc;
     static layer_t scalarLayer;
-    initConv1dTransposedConfigWithWeightsAndBias(&scalarCfg, &scalarKernel, scalarWeights,
-                                                 scalarBias, 1, 0, testQ, testQ, testQ, testQ);
+    initConv1dTransposedConfigWithWeightsAndBias(&scalarCfg, &scalarKernel, scalarWeights, pow2Bias,
+                                                 1, 0, testQ, testQ, testQ, testQ);
     scalarLayer.type = CONV1D_TRANSPOSED;
     scalarLc.conv1dTransposed = &scalarCfg;
     scalarLayer.config = &scalarLc;
@@ -1490,6 +1491,11 @@ void testConvT1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
     tensor_t *scalarOutput = makeFloatTensor(outputDims, 3, NULL);
     conv1dTransposedForward(&scalarLayer, scalarInput, scalarOutput, NULL);
 
+    bool nonDegenerate = false;
+    for (size_t i = 0; i < kConvTPerChannelOutMantissas_len; i++) {
+        nonDegenerate = nonDegenerate || ((float *)groupedOutput->data)[i] != 0.0f;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(nonDegenerate, "equal-scales twin is vacuously all-zero");
     TEST_ASSERT_EQUAL_FLOAT_ARRAY((float *)scalarOutput->data, (float *)groupedOutput->data,
                                   kConvTPerChannelOutMantissas_len);
 }
@@ -1500,17 +1506,14 @@ void testConvT1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
  * groupedSymOperandPos declaration -- both math arms must declare it:
  * omitting it on the FLOAT32 arm makes this test die with the funnel's deny message.
  *
- * Tolerance derivation (per-product rescale error model, |err| <=
- * 0.5*C*s_acc): the float path is (near-)exact real arithmetic, while the
- * SYM gold rounds ONCE PER CONTRIBUTING PRODUCT (scatter core -- unlike the
- * gather cores' once-per-group-run). C for this fixture's geometry (Lin=4,
- * K=3, stride=1, dilation=1, Lout=6; window clipping counts): valid taps per
- * (oc, outIdx) are k in [outIdx-3, outIdx] ∩ [0, 2], i.e. 1,2,3,3,2,1 for
- * outIdx 0..5, times Cin=2 => C = 2,4,6,6,4,2; C_max = Cin*K = 6
- * (= kConvTGroupedMaxProductsPerOut, generator-asserted). Each product's
- * HALF_AWAY rescale rounds by at most 0.5 quanta of s_acc; the bias seed
- * adds ONE more rounding <= 0.5. Bound: 0.5*(C_max+1)*s_acc = 3.5*s_acc,
- * plus 1e-6f headroom for float32 arithmetic noise. */
+ * Tolerance derivation (fold error model, linq fold T3): the float path is
+ * (near-)exact real arithmetic, while the SYM gold folds each input code into
+ * its weight group once at the accumulator scale A (= kConvTPerChannelOutScale),
+ * each fold off by <= 0.5 code, so an output element is off by
+ * <= 0.5*A*sum|w| over its contributing products; the bias seed adds ONE more
+ * rounding <= 0.5*A. The generator emits the largest such sum
+ * (kConvTPerChannelMaxWAbsSum). Bound: 0.5*(maxSum + 1)*A, plus 1e-6f
+ * headroom for float32 arithmetic noise. */
 void testConvT1dForwardGroupedFloatPathAgreesWithinTolerance(void) {
     quantization_t *floatQ = quantizationInitFloat();
     convTGroupedFixture_t f;
@@ -1525,7 +1528,7 @@ void testConvT1dForwardGroupedFloatPathAgreesWithinTolerance(void) {
 
     float *captured = (float *)output->data;
     const float tolerance =
-        0.5f * (float)(kConvTGroupedMaxProductsPerOut + 1) * kConvTPerChannelOutScale + 1e-6f;
+        0.5f * (float)(kConvTPerChannelMaxWAbsSum + 1) * kConvTPerChannelOutScale + 1e-6f;
     for (size_t i = 0; i < kConvTPerChannelOutMantissas_len; i++) {
         float expected = (float)kConvTPerChannelOutMantissas[i] * kConvTPerChannelOutScale;
         TEST_ASSERT_FLOAT_WITHIN(tolerance, expected, captured[i]);
@@ -1704,10 +1707,12 @@ void testConvT1dBackwardGroupedDxFloatPathAgreesWithinTolerance(void) {
  * group-quant D5 smoke at the ConvT1d layer (the UnitTestConv1d.c ASYM-twin design,
  * transplanted to the scatter core): after the funnel's ASYM grouped-unpack
  * arm shifts the codes (code - zp[g]) the compute path IS the grouped-SYM
- * scatter on the resulting mantissas -- same mantissas + same scales give
- * BIT-IDENTICAL raw output and s_acc, so the grouped-SYM fixture layer on
- * the identical mantissas/scales is the reference (exact FLOAT32 wires, no
- * new ConvT gold). Pairwise-distinct zps; |mantissa| <= 55
+ * scatter on the resulting mantissas. Since the fold (linq fold T3) the twins
+ * are no longer bit-identical: the scatter's fold proves its fraction bits F
+ * over the weight's code range, and the ASYM image (+-4095) is twice the SYM
+ * range, so the ASYM twin folds with F one lower (generator-asserted). Each
+ * twin must reproduce its own Python-int gold exactly (exact FLOAT32 wires),
+ * which pins that the image range reaches the fold. Pairwise-distinct zps; |mantissa| <= 55
  * (kConvTGroupedWMantissas), so codes = mantissa + zp land in [5, 130] of
  * the 12-bit code domain. */
 static const uint16_t kConvTAsymZps[2] = {60, 75};
@@ -1758,7 +1763,7 @@ static void buildGroupedAsymConvTTwinFixture(convTGroupedFixture_t *f, quantizat
     f->layer.config = &f->lc;
 }
 
-void testConvT1dForwardGroupedAsymBitIdenticalToSymGroupedTwin(void) {
+void testConvT1dForwardGroupedAsymMatchesItsImageRangeGold(void) {
     quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
 
     convTGroupedFixture_t symF;
@@ -1774,8 +1779,13 @@ void testConvT1dForwardGroupedAsymBitIdenticalToSymGroupedTwin(void) {
     tensor_t *asymOutput = makeFloatTensor(outputDims, 3, NULL);
     conv1dTransposedForward(&asymF.layer, asymF.input, asymOutput, NULL);
 
-    TEST_ASSERT_EQUAL_FLOAT_ARRAY((float *)symOutput->data, (float *)asymOutput->data,
-                                  kConvTPerChannelOutMantissas_len);
+    for (size_t i = 0; i < kConvTPerChannelOutMantissas_len; i++) {
+        TEST_ASSERT_EQUAL_FLOAT((float)kConvTPerChannelOutMantissas[i] * kConvTPerChannelOutScale,
+                                ((float *)symOutput->data)[i]);
+        TEST_ASSERT_EQUAL_FLOAT((float)kConvTPerChannelAsymOutMantissas[i] *
+                                    kConvTPerChannelAsymOutScale,
+                                ((float *)asymOutput->data)[i]);
+    }
 }
 
 void setUp() {}
@@ -2969,7 +2979,7 @@ int main() {
     RUN_TEST(testConvT1dBackwardGroupedDxGeneralMatchesGold);
     RUN_TEST(testConvT1dBackwardGroupedDxEqualScalesBitIdenticalToScalar);
     RUN_TEST(testConvT1dBackwardGroupedDxFloatPathAgreesWithinTolerance);
-    RUN_TEST(testConvT1dForwardGroupedAsymBitIdenticalToSymGroupedTwin);
+    RUN_TEST(testConvT1dForwardGroupedAsymMatchesItsImageRangeGold);
     RUN_TEST(testConv1dTransposedForwardBfpNativeMatchesKernelGold);
     RUN_TEST(testConv1dTransposedForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer);
     RUN_TEST(testConv1dTransposedForwardBfpRejectsFloat32Weights);

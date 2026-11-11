@@ -12,6 +12,7 @@
 #include "SlidingWindow1d.h"
 #include "SymAccumGuard.h"
 #include "SymGroupCursor.h"
+#include "SymGroupFold.h"
 #include "SymGroupedWeight.h"
 
 /* Shared VALID / adjoint-SAME(/EXPLICIT) geometry resolution for every ConvT
@@ -452,6 +453,190 @@ SYM_ACCUM_NOINLINE void convTSymGroupedScatterChecked(CONVT_GROUPED_PARAMS) {
     convTSymGroupedScatter(CONVT_GROUPED_ARGS(true));
 }
 
+/* Fold path of the grouped scatter (SymGroupFold.h): an input code xv meeting
+ * group g is folded ONCE into the accumulator scale A,
+ *     xvG = round(xv * m_g * 2^-(E - e_g + 15 - F))   (symMulShiftRound),
+ * and every product of that run is a plain int32 MAC xvG * w -- no per-product
+ * rescale. Per output element the folds cost |err| <= 0.5 * A * sum|w| over its
+ * contributing products (HALF_AWAY; SR is unbiased). An xv of 0 is never
+ * folded: its products are 0 and no SR draw is taken.
+ *
+ * Unchecked by construction: symGroupFoldInit returns a non-legacy fold only
+ * when the site over x widened to [xMin * 2^F - 1, xMax * 2^F + 1] (which
+ * holds every xvG) is proven safe, so neither product nor sum can wrap.
+ *
+ * Channel-aligned groups (groupSize a multiple of the outChPerGroup*kernelSize
+ * block one input channel's weights fill) fix the group per input channel:
+ * one fold per (ic, inPos), then convTSymScatter's loop shape with no cursor.
+ * Otherwise the k-runs are split where the cursor's group ends, and xvG is
+ * refolded whenever the cursor moves or a new inPos starts. */
+SYM_ACCUM_ALWAYS_INLINE void
+convTSymGroupedFoldAligned(const convTSymView_t *v, const symQConfig_t *weightGroups,
+                           const symGroupFold_t *fold, roundingMode_t roundingMode, rngStream_t *rs,
+                           const symAccumSite_t *site) {
+    CONVT_SYM_VIEW_LOCALS(v);
+
+    size_t dilation = kernel->dilation;
+    const size_t blockSize = outChPerGroup * kernelSize;
+    const size_t groupSize = weightGroups->groupSize;
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+
+            for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                size_t ic = inLo + icOffset;
+                const odtScale_t s =
+                    odtScaleLoad(&weightGroups->scales[ic * blockSize / groupSize]);
+                const uint32_t shift = symGroupFoldShift(fold, s);
+                for (size_t inPos = 0; inPos < inputLength; inPos++) {
+                    int32_t xv = xArr[(b * inChannels + ic) * inputLength + inPos];
+                    size_t kLo, kHi;
+                    convTValidTapRange(inPos, kernel->stride, dilation, padLeft, outputLength,
+                                       kernelSize, &kLo, &kHi);
+                    if (xv == 0 || kLo >= kHi) {
+                        continue;
+                    }
+                    const int32_t xvG = symMulShiftRound(xv, s.m, shift, roundingMode, rs);
+                    size_t outFirst = inPos * kernel->stride + kLo * dilation - padLeft;
+
+                    for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                        size_t oc = outLo + ocOffset;
+                        size_t outIdx = outFirst;
+                        for (size_t k = kLo; k < kHi; k++, outIdx += dilation) {
+                            int32_t wv = wArr[(ic * outChPerGroup + ocOffset) * kernelSize + k];
+                            size_t yIdx = (b * outChannels + oc) * outputLength + outIdx;
+                            yArr[yIdx] = symMac(yArr[yIdx], xvG, wv, false, site);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+SYM_ACCUM_ALWAYS_INLINE void convTSymGroupedFoldCursor(const convTSymView_t *v,
+                                                       const symQConfig_t *weightGroups,
+                                                       const symGroupFold_t *fold,
+                                                       roundingMode_t roundingMode, rngStream_t *rs,
+                                                       const symAccumSite_t *site) {
+    CONVT_SYM_VIEW_LOCALS(v);
+
+    size_t dilation = kernel->dilation;
+    const size_t groupSize = weightGroups->groupSize;
+    symGroupCursor_t cursor = {0};
+    odtScale_t s = {0};
+
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t g = 0; g < groups; g++) {
+            size_t inLo = g * inChPerGroup;
+            size_t outLo = g * outChPerGroup;
+
+            for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
+                size_t ic = inLo + icOffset;
+                for (size_t inPos = 0; inPos < inputLength; inPos++) {
+                    int32_t xv = xArr[(b * inChannels + ic) * inputLength + inPos];
+                    if (xv == 0) {
+                        continue;
+                    }
+                    size_t kLo, kHi;
+                    convTValidTapRange(inPos, kernel->stride, dilation, padLeft, outputLength,
+                                       kernelSize, &kLo, &kHi);
+                    size_t outFirst = inPos * kernel->stride + kLo * dilation - padLeft;
+                    /* xvG belongs to (this xv, the cursor's group): stale at a new inPos */
+                    bool stale = true;
+                    int32_t xvG = 0;
+
+                    for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
+                        size_t oc = outLo + ocOffset;
+                        size_t yIdx = (b * outChannels + oc) * outputLength + outFirst;
+                        size_t wIdx = (ic * outChPerGroup + ocOffset) * kernelSize + kLo;
+                        size_t wEnd = wIdx + (kHi - kLo);
+                        while (wIdx < wEnd) {
+                            if (!symGroupCursorHolds(&cursor, wIdx)) {
+                                symGroupCursorSeek(&cursor, wIdx, groupSize);
+                                s = odtScaleLoad(&weightGroups->scales[cursor.group]);
+                                stale = true;
+                            }
+                            if (stale) {
+                                xvG = symMulShiftRound(xv, s.m, symGroupFoldShift(fold, s),
+                                                       roundingMode, rs);
+                                stale = false;
+                            }
+                            size_t runEnd = cursor.end < wEnd ? cursor.end : wEnd;
+                            for (; wIdx < runEnd; wIdx++, yIdx += dilation) {
+                                yArr[yIdx] = symMac(yArr[yIdx], xvG, wArr[wIdx], false, site);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+SYM_ACCUM_NOINLINE void convTSymGroupedFoldScatter(const convTSymView_t *v,
+                                                   const symQConfig_t *weightGroups,
+                                                   const symGroupFold_t *fold,
+                                                   roundingMode_t roundingMode, rngStream_t *rs,
+                                                   const symAccumSite_t *site) {
+    const size_t blockSize = v->outChPerGroup * v->kernelSize;
+    if (blockSize != 0 && weightGroups->groupSize % blockSize == 0) {
+        convTSymGroupedFoldAligned(v, weightGroups, fold, roundingMode, rs, site);
+    } else {
+        convTSymGroupedFoldCursor(v, weightGroups, fold, roundingMode, rs, site);
+    }
+}
+
+/* ceil(max_oc |bias[oc]| * biasScale / A) at the finest fold scale
+ * A = {inScale.m, inScale.e + E + 15 - ODT_GROUP_FOLD_FRAC_BITS_MAX}: the
+ * seed bound symGroupFoldInit scales to each candidate F. Exact (both scales
+ * are dyadic), setup-time uint64 math, saturating at UINT64_MAX. */
+static uint64_t convTBiasSeedAtFracMax(const tensor_t *bias, size_t outChannels,
+                                       const symQConfig_t *weightGroups, odtScale_t inScale) {
+    int32_t eMax = INT32_MIN;
+    for (size_t g = 0; g < weightGroups->numGroups; g++) {
+        odtScale_t s = odtScaleLoad(&weightGroups->scales[g]);
+        eMax = s.e > eMax ? s.e : eMax;
+    }
+    const int32_t *bArr = (const int32_t *)bias->data;
+    uint64_t maxB = 0;
+    for (size_t oc = 0; oc < outChannels; oc++) {
+        uint64_t mag = symAccumMagnitude(bArr[oc]);
+        maxB = mag > maxB ? mag : maxB;
+    }
+    odtScale_t bs = odtScaleLoad(&((symInt32QConfig_t *)bias->quantization->qConfig)->scale);
+    const uint64_t num = maxB * bs.m; /* < 2^46 */
+    const uint64_t den = inScale.m;
+    const int32_t d =
+        (int32_t)bs.e - ((int32_t)inScale.e + eMax + 15 - ODT_GROUP_FOLD_FRAC_BITS_MAX);
+    if (num == 0u) {
+        return 0u;
+    }
+    if (d >= 0) {
+        if (d >= 63 || num > (UINT64_MAX >> 1) >> d) {
+            return UINT64_MAX;
+        }
+        return ((num << d) + den - 1u) / den;
+    }
+    if (-d >= 48) {
+        return 1u; /* 0 < value < 2^46 / 2^62: ceil is 1 */
+    }
+    const uint64_t scaledDen = den << (uint32_t)(-d);
+    return (num + scaledDen - 1u) / scaledDen;
+}
+
+/* The grouped entry's output qConfig, checked where the stamps land. */
+static symInt32QConfig_t *convT1dGroupedOutputQC(tensor_t *output) {
+    if (output->quantization->qConfig == NULL) {
+        PRINT_ERROR("convTranspose1dKernelSymInt32Grouped: output qConfig is NULL but "
+                    "SYM_INT32 expected (#187)");
+        exit(1);
+    }
+    return (symInt32QConfig_t *)output->quantization->qConfig;
+}
+
 void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                           tensor_t const *bias, kernel_t const *kernel,
                                           size_t groups, size_t outputPadding, tensor_t *output,
@@ -485,23 +670,7 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
     int32_t const *wArr = (int32_t const *)weight->data;
     int32_t *yArr = (int32_t *)output->data;
 
-    float inScale = loadCanonScale(&((symInt32QConfig_t *)input->quantization->qConfig)->scale);
-
-    /* sAcc = inScale * max_g(weightGroups->scales[g]) (GGUF pattern, #189):
-     * a single linear pass over scales[], NEVER scales[0] alone -- same
-     * derivation as conv1dKernelSymInt32Grouped / matmul's grouped core. */
-    float maxScale = loadCanonScale(&weightGroups->scales[0]);
-    for (size_t g = 1; g < weightGroups->numGroups; g++) {
-        const float groupScale = loadCanonScale(&weightGroups->scales[g]);
-        if (groupScale > maxScale) {
-            maxScale = groupScale;
-        }
-    }
-    /* Stored, so canonical. CEIL, not the product rule's NEAREST: the rescaled
-     * accumulator proof (symAccumSiteInitRangesRescaled) needs every group
-     * factor (scale * scales[g]) / sAcc <= 1 up to float slack 2^-22, and a
-     * NEAREST sAcc can sit 2^-15 below the exact product. */
-    const float sAcc = canonProductScale(inScale, maxScale, ODT_SCALE_CEIL);
+    symInt32QConfig_t *inQC = (symInt32QConfig_t *)input->quantization->qConfig;
 
     /* `weight`'s own poisoned symInt32QConfig_t carries the OP's rounding
      * mode (executeOp's prologue sets it via initSymInt32QConfig(arithmetic.
@@ -532,13 +701,72 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
      * stored SYM weight's two's-complement qBits range, a stored ASYM weight's
      * zp-shifted image +-(2^qBits - 1) -- the scratch's declared qMaxBits is
      * not read. The abort banner reports each range's holding width (the
-     * image's is qBits + 1). */
+     * image's is qBits + 1). At most inChPerGroup * kernelSize products reach
+     * one output element; the scatter is seedless (the bias lands after it). */
     int32_t xMin, xMax, wMin, wMax;
-    symAccumWidthRange(((symInt32QConfig_t *)input->quantization->qConfig)->qMaxBits, &xMin, &xMax);
+    symAccumWidthRange(inQC->qMaxBits, &xMin, &xMax);
     symGroupedWeightRange(groupedWeight, &wMin, &wMax);
-    symAccumSite_t site =
-        symAccumSiteInitRangesRescaled("convTranspose1dKernelSymInt32Grouped",
-                                       inChPerGroup * kernelSize, xMin, xMax, wMin, wMax, 0);
+    const size_t nMax = inChPerGroup * kernelSize;
+
+    /* The per-group integer fold (SymGroupFold.h) unless the input is wider
+     * than 16 bits or no F >= 1 is provable: then the legacy float path. The
+     * bias is seeded at A after the scatter, so its seed takes part in the F
+     * proof (measured at the finest A, scaled per F inside the init). */
+    const odtScale_t inScaleD = odtScaleLoad(&inQC->scale);
+    const uint64_t seedAtFracMax =
+        bias != NULL ? convTBiasSeedAtFracMax(bias, outChannels, weightGroups, inScaleD) : 0u;
+    const symGroupFold_t fold =
+        symGroupFoldInit(weightGroups, inScaleD, inQC->qMaxBits, nMax, wMin, wMax, seedAtFracMax);
+    if (!fold.legacy) {
+        const int32_t widen = (int32_t)1 << fold.fracBits;
+        /* the init proved this site with the seed bound; re-check so the two
+         * constructions cannot drift (setup-time, before the unchecked MACs) */
+        symAccumSite_t proven =
+            symAccumSiteInitRanges("convTranspose1dKernelSymInt32Grouped", nMax, xMin * widen - 1,
+                                   xMax * widen + 1, wMin, wMax, fold.maxAbsSeed);
+        if (!symAccumProvenSafe(&proven)) {
+            PRINT_ERROR("convTranspose1dKernelSymInt32Grouped: fold site not proven (F=%u)",
+                        (unsigned)fold.fracBits);
+            exit(1);
+        }
+        symAccumSite_t site =
+            symAccumSiteInitRanges("convTranspose1dKernelSymInt32Grouped", nMax, xMin * widen - 1,
+                                   xMax * widen + 1, wMin, wMax, 0);
+        convTSymGroupedFoldScatter(&view, weightGroups, &fold, wQC->roundingMode, rs, &site);
+
+        /* Bias seed pass at A (exact canonical, so its float is exact). */
+        symAccumSite_t resultSite = site;
+        if (bias != NULL) {
+            convTAddBiasSeedsChecked(&view, bias, odtScaleToFloat(fold.accScale), rs, &site,
+                                     &resultSite);
+        }
+        symInt32QConfig_t *outputQC = convT1dGroupedOutputQC(output);
+        odtScaleStore(&outputQC->scale, fold.accScale);
+        outputQC->qMaxBits = symAccumResultBits(&resultSite); /* fold site + seeds (#516) */
+        return;
+    }
+
+    /* Legacy float path: each product rescaled into sAcc. */
+    float inScale = loadCanonScale(&inQC->scale);
+
+    /* sAcc = inScale * max_g(weightGroups->scales[g]) (GGUF pattern, #189):
+     * a single linear pass over scales[], NEVER scales[0] alone -- same
+     * derivation as conv1dKernelSymInt32Grouped / matmul's grouped core. */
+    float maxScale = loadCanonScale(&weightGroups->scales[0]);
+    for (size_t g = 1; g < weightGroups->numGroups; g++) {
+        const float groupScale = loadCanonScale(&weightGroups->scales[g]);
+        if (groupScale > maxScale) {
+            maxScale = groupScale;
+        }
+    }
+    /* Stored, so canonical. CEIL, not the product rule's NEAREST: the rescaled
+     * accumulator proof (symAccumSiteInitRangesRescaled) needs every group
+     * factor (scale * scales[g]) / sAcc <= 1 up to float slack 2^-22, and a
+     * NEAREST sAcc can sit 2^-15 below the exact product. */
+    const float sAcc = canonProductScale(inScale, maxScale, ODT_SCALE_CEIL);
+
+    symAccumSite_t site = symAccumSiteInitRangesRescaled("convTranspose1dKernelSymInt32Grouped",
+                                                         nMax, xMin, xMax, wMin, wMax, 0);
     if (symAccumProvenSafe(&site)) {
         convTSymGroupedScatterSafe(&view, weightGroups, inScale, sAcc, wQC->roundingMode, rs,
                                    &site);
@@ -555,12 +783,7 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
         convTAddBiasSeedsChecked(&view, bias, sAcc, rs, &site, &resultSite);
     }
 
-    if (output->quantization->qConfig == NULL) {
-        PRINT_ERROR("convTranspose1dKernelSymInt32Grouped: output qConfig is NULL but "
-                    "SYM_INT32 expected (#187)");
-        exit(1);
-    }
-    symInt32QConfig_t *outputQC = (symInt32QConfig_t *)output->quantization->qConfig;
+    symInt32QConfig_t *outputQC = convT1dGroupedOutputQC(output);
     storeCanonScale(&outputQC->scale, sAcc);
     outputQC->qMaxBits = symAccumResultBits(&resultSite); /* rescaled site + seeds (#516) */
 }

@@ -1899,7 +1899,8 @@ void testConv1dForwardGroupedPerChannelFloatPathAgreesWithinTolerance(void) {
 
 /* ---- Group-quant PR3 (Task 3): Conv1d backward dx with a grouped SYM
  * weight -- the adjoint SCATTER (convTranspose1dKernelSymInt32Grouped in the
- * adjoint role, per-PRODUCT rescale into s_acc = lossScale*max(scales)).
+ * adjoint role; its fold path folds each lossGrad code into its weight group
+ * once, at A = {loss.m, loss.e + E + 15 - F}, then plain int32 MACs).
  * Fixture: the VALID forward fixture's weight/group shapes with a seeded
  * random SYM_INT32 lossGrad [1, 3, 4] (generate_expected_conv1d_grouped.py's
  * dx fixtures, torch-autograd cross-checked there). ---- */
@@ -1967,14 +1968,13 @@ void testConv1dBackwardGroupedDxGeneralMatchesGold(void) {
 /* Equal-scales dx twin: same argument as
  * testConv1dForwardGroupedEqualScalesBitIdenticalToScalar, transplanted to
  * the adjoint scatter. All group scales are the SAME power-of-two value
- * (0.25f) and the loss scale (0.5f) is a power of two, so sAcc and every
- * product's paramScale are BIT-IDENTICAL float32 values and each per-product
- * rescale is an EXACT identity (multiply/divide by the same power of two are
- * pure exponent shifts; the products, <= 40*5 = 200, are exactly
- * representable) -- the grouped scatter's raw dx must be BIT-IDENTICAL to
- * the scalar convTranspose1dKernelSymInt32 adjoint on the same mantissas
- * with weight scale == the common group scale. Both wires are FLOAT32, so
- * identical raw (mantissa, scale) pairs dequantize to identical floats. */
+ * (0.25f, m = 2^14) and the loss scale (0.5f) is a power of two, so the
+ * scatter's fold is exact for every code (x_g = x * 2^(F-1), F >= 1) and
+ * x_g * w * A is exactly x * w * 0.5 * 0.25 -- the grouped scatter's dx must
+ * dequantize BIT-IDENTICALLY to the scalar convTranspose1dKernelSymInt32
+ * adjoint on the same mantissas with weight scale == the common group scale
+ * (dx has no bias seed, whose rounding grid would differ). Both wires are
+ * FLOAT32 and every value is exact in float32. */
 void testConv1dBackwardGroupedDxEqualScalesBitIdenticalToScalar(void) {
     const float commonScale = 0.25f;
     quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
@@ -2028,14 +2028,12 @@ void testConv1dBackwardGroupedDxEqualScalesBitIdenticalToScalar(void) {
  * declare the same operand position), then the float scatter computes the
  * reference value with NO per-product rounding.
  *
- * Tolerance derivation (scatter error model, |err| <= 0.5*C*s_acc): the SYM
- * gold rounds ONCE PER CONTRIBUTING PRODUCT. C for this geometry (VALID
- * forward K=3, stride=1, L=6, Lout=4): dx[l] receives one product per
- * (outPos, k) with outPos + k == l, i.e. 1,2,3,3,2,1 for l = 0..5, times
- * Cout = 3 => C = 3,6,9,9,6,3; C_max = Cout*K = 9
- * (= kConv1dDxMaxProductsPerOut, generator-asserted). dx has NO bias seed
- * (unlike the forward's +1 term). Bound: 0.5*C_max*s_acc = 4.5 *
- * kDxPerChannelOutScale, plus 1e-6f headroom for float32 noise. */
+ * Tolerance derivation (fold error model, linq fold T3): the SYM gold folds
+ * each lossGrad code into its weight group once, at the accumulator scale A
+ * (= kDxPerChannelOutScale), each fold off by <= 0.5 code, so an element is
+ * off by <= 0.5*A*sum|w| over its contributing products. The generator emits
+ * the largest such sum (kConv1dDxPerChannelMaxWAbsSum). dx has NO bias seed
+ * (unlike the forward's +1 term). Plus 1e-6f headroom for float32 noise. */
 void testConv1dBackwardGroupedDxFloatPathAgreesWithinTolerance(void) {
     quantization_t *floatQ = quantizationInitFloat();
     tensor_t *propLoss = runGroupedConv1dDxBackward(
@@ -2043,7 +2041,7 @@ void testConv1dBackwardGroupedDxFloatPathAgreesWithinTolerance(void) {
 
     float *captured = (float *)propLoss->data;
     const float tolerance =
-        0.5f * (float)kConv1dDxMaxProductsPerOut * kDxPerChannelOutScale + 1e-6f;
+        0.5f * (float)kConv1dDxPerChannelMaxWAbsSum * kDxPerChannelOutScale + 1e-6f;
     for (size_t i = 0; i < kDxPerChannelOutMantissas_len; i++) {
         float expected = (float)kDxPerChannelOutMantissas[i] * kDxPerChannelOutScale;
         TEST_ASSERT_FLOAT_WITHIN(tolerance, expected, captured[i]);
@@ -2223,9 +2221,13 @@ void testConv1dForwardGroupedAsymBitIdenticalToSymGroupedTwin(void) {
 
 /* dx twin (the adjoint scatter consumes the SAME stored weight): both layers
  * frozen (dx-only, the grouped-dx test convention above), same SYM_INT32
- * lossGrad, exact FLOAT32 dx wires -- bit-identity for the same reason as
- * the forward twin. */
-void testConv1dBackwardGroupedAsymDxBitIdenticalToSymGroupedTwin(void) {
+ * lossGrad, exact FLOAT32 dx wires. Since the fold (linq fold T3) the twins
+ * are no longer bit-identical: the scatter's fold proves its fraction bits F
+ * over the weight's code range, and the ASYM image (+-4095) is twice the SYM
+ * range, so the ASYM twin folds with F one lower (generator-asserted). It
+ * must reproduce its own Python-int gold (kDxPerChannelAsym*) exactly, and
+ * the SYM twin its gold, which pins that the image range reaches the fold. */
+void testConv1dBackwardGroupedAsymDxMatchesItsImageRangeGold(void) {
     quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
 
     tensor_t *symPropLoss = runGroupedConv1dDxBackward(
@@ -2251,8 +2253,12 @@ void testConv1dBackwardGroupedAsymDxBitIdenticalToSymGroupedTwin(void) {
         }
     }
     TEST_ASSERT_TRUE_MESSAGE(nonDegenerate, "grouped dx twin is vacuously all-zero");
-    TEST_ASSERT_EQUAL_FLOAT_ARRAY((float *)symPropLoss->data, (float *)asymPropLoss->data,
-                                  kDxPerChannelOutMantissas_len);
+    for (size_t i = 0; i < kDxPerChannelOutMantissas_len; i++) {
+        TEST_ASSERT_EQUAL_FLOAT((float)kDxPerChannelOutMantissas[i] * kDxPerChannelOutScale,
+                                ((float *)symPropLoss->data)[i]);
+        TEST_ASSERT_EQUAL_FLOAT((float)kDxPerChannelAsymOutMantissas[i] * kDxPerChannelAsymOutScale,
+                                ((float *)asymPropLoss->data)[i]);
+    }
 }
 
 void setUp() {}
@@ -4441,7 +4447,7 @@ int main() {
     RUN_TEST(testConv1dForwardGroupedSamePaddingMatchesGold);
     RUN_TEST(testConv1dForwardGroupedConvGroupsMatchesGold);
     RUN_TEST(testConv1dForwardGroupedAsymBitIdenticalToSymGroupedTwin);
-    RUN_TEST(testConv1dBackwardGroupedAsymDxBitIdenticalToSymGroupedTwin);
+    RUN_TEST(testConv1dBackwardGroupedAsymDxMatchesItsImageRangeGold);
     RUN_TEST(testConv1dForwardBfpNativeMatchesKernelGold);
     RUN_TEST(testConv1dForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer);
     RUN_TEST(testConv1dForwardBfpRejectsFloat32Weights);

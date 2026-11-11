@@ -583,7 +583,7 @@ C by path:
 |---|---|---|
 | forward gather (Linear/Conv1d) | running group-partial | groups crossed by the reduction; per-channel = **1** |
 | dx gather (Linear dx, ConvT1d dx) | running group-partial, strided/adjoint orientation | distinct groups crossed; per-channel Linear dx = **outFeatures** |
-| scatter (ConvT1d forward, Conv1d dx) | per-product rescale (scatter targets change per product — no running partial exists) | contributing products = (scatter-input channels)·K — ConvT1d fwd: Cin·K, Conv1d dx: **Cout**·K (the products arrive per lossGrad channel) |
+| scatter (ConvT1d forward, Conv1d dx) | per-group integer fold (scatter targets change per product — no running partial exists): each input code is folded once per group run, `x_g = round(x·m_g·2^-(E−e_g+15−F))`, then plain int32 MACs at the exact accumulator scale `A = {in.m, in.e+E+15−F}` (`SymGroupFold.h`); inputs wider than 16 bits or no provable F ≥ 1 keep the legacy per-product float rescale into s_acc | fold: \|err\| ≤ 0.5·A·Σ\|w\| over the contributing products (each fold off by ≤ 0.5 code; A ≈ s_acc·2^(1−F)); legacy: C = contributing products = (scatter-input channels)·K — ConvT1d fwd: Cin·K, Conv1d dx: **Cout**·K |
 
 The RELATIVE error stays in the single-quantization-step class: the signal is
 itself a sum of C-many O(qMax²·s_acc) terms, so √C rounding noise rides on a

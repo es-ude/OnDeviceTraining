@@ -2,12 +2,14 @@
 """Generate expected_convT1d_grouped.h for UnitTestConv1dTransposed (group-quant
 PR3, Task 2 -- docs/conventions/tensor.md).
 
-Pins convTranspose1dKernelSymInt32Grouped's SCATTER core with PER-PRODUCT
-rescale-combine: a scatter's consecutive products land in DIFFERENT output
-elements, so no per-(target, group) running raw partial exists -- each
-product is folded into s_acc = inScale*max_g(scales[g]) immediately
-(rescaleIntoAccumulatorScale, HALF_AWAY), bias AFTER the scatter at s_acc.
-See sym_gold.convT1d_grouped_ref for the exact float32-mirrored emulation.
+Pins convTranspose1dKernelSymInt32Grouped's SCATTER core on its fold path
+(linq fold T3, SymGroupFold.h): each input code is folded into its weight
+group once, x_g = round(x * m_g * 2^-(E - e_g + 15 - F)), then accumulated in
+plain int32 at A = {in.m, in.e + E + 15 - F}; bias AFTER the scatter at A.
+F is the largest fraction count the accumulator guard proves for int12 x
+(the wire's declared width) against the weight's code range -- SYM
+[-2048, 2047], or the ASYM twin's image +-4095. See
+sym_gold.convt_grouped_fold_ref (Python ints, independent of the C code).
 
 Fixture: IC=2, OC=3, K=3, L=4, B=1, VALID, stride=1, dilation=1,
 outputPadding=0 (outLen = (4-1)*1 + 1*(3-1) + 0 + 1 = 6). Seeded random
@@ -32,30 +34,27 @@ INPUT-channel slab, so:
 Self-checks (mutation-discriminating fixture properties, asserted here so a
 broken fixture aborts generation rather than silently passing a vacuous
 test):
-  (i)   scales[0] != max(scales) for BOTH fixtures, and replaying the
-        perChannel fixture with the group taken from the OUTPUT flat index
-        instead of the weight flat index changes the output (mutation (i)).
-  (ii)  the per-product rescale sequence differs from the
-        sum-then-rescale-once-per-(target, ic, group)-run composition (the
-        running-partial idiom wrongly ported to the scatter core) on BOTH
-        fixtures (mutation (ii)).
-  (iii) the bias seed at s_acc differs from a seed at inScale*scales[0] for
-        at least one output channel, BOTH fixtures (mutation (iii)).
+  (i)   scales[0] != max(scales) for BOTH fixtures, and replaying the fold
+        with the group taken from the OUTPUT flat index instead of the weight
+        flat index changes the output (mutation (i)).
+  (ii)  the fold gold differs from the legacy float path's
+        (sym_gold.convT1d_grouped_ref) on BOTH fixtures.
+  (iii) the bias seed at A differs from a seed at inScale*scales[0] for at
+        least one output channel, BOTH fixtures (mutation (iii)).
   (iv)  replaying the general fixture with truncation-toward-zero instead of
-        HALF_AWAY per-product rounding changes the output -- the
-        rounding-mode discriminator. SR_HALF_AWAY vs HALF_AWAY is NOT
-        emulated (needs the C-side seeded RNG stream, same scope note as the
-        Conv1d/Matmul grouped generators).
+        HALF_AWAY in the fold changes the output -- the rounding-mode
+        discriminator. SR_HALF_AWAY is NOT emulated (needs the C-side seeded
+        RNG stream).
   (v)   the equal-scales fixture (all scales 0.25, inScale 0.5, both powers
-        of two) reproduces the SCALAR kernel emulation (raw int scatter at
-        s_in*s_w, bias seed at that same scale) EXACTLY: every per-product
-        rescale is paramScale/s_acc == 1.0 bit-identically, and multiplying/
-        dividing a float by the same power of two is exact, so
-        round_half_away(p * 1.0) == p -- the bit-identity the C twin test
+        of two) folds every code exactly (x_g = x * 2^(F-1)), so its BIAS-FREE
+        scatter dequantizes to the scalar kernel's raw scatter at s_in*s_w
+        EXACTLY -- the bit-identity the C twin test
         (testConvT1dForwardGroupedEqualScalesBitIdenticalToScalar) relies on.
-  (vi)  the max number of contributing products per output element is
-        exactly the value emitted as kConvTGroupedMaxProductsPerOut -- the C
-        float-path test derives its tolerance bound 0.5*(C+1)*s_acc from it.
+        With a bias the twins differ: the grouped seed rounds on A's finer
+        grid, the scalar one on s_in*s_w.
+  (vi)  the largest sum|w| over one output element's contributing products
+        is emitted as kConvTPerChannelMaxWAbsSum -- the C float-path test's
+        tolerance is the fold bound 0.5*A*(that sum + 1) (+1: the bias seed).
 
 Group-quant PR3 (Task 3) addition -- ConvT1d dx (adjoint GATHER): backward
 propLoss consumes the grouped weight through conv1dKernelSymInt32Grouped in
@@ -71,7 +70,6 @@ C_i is emitted (kConvTDx*MaxCombines) for the C float-path tolerance.
 Run via `uv run` (CMake wires this automatically, see CMakeLists.txt).
 """
 import argparse
-import math
 import sys
 from pathlib import Path
 
@@ -81,9 +79,10 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "goldgen"))
 
 from dyadic_scale import CEIL, canon, product_scale  # noqa: F401
-from sym_gold import (assert_rounding_canary, combine_quotient_f32, convT1d_dx_grouped_ref,
-                      convT1d_grouped_ref, emit_float_array, emit_float_scalar, emit_int32_array,
-                      emit_int32_scalar, rescale_f32, window_geometry_1d, window_slice_1d_full)
+from sym_gold import (assert_rounding_canary, convT1d_dx_grouped_ref, convT1d_grouped_ref,
+                      convt_grouped_fold_ref, decompose, emit_float_array, emit_float_scalar,
+                      emit_int32_array, emit_int32_scalar, rescale_f32, window_geometry_1d,
+                      window_slice_1d_full)
 
 BATCH = 1
 IN_CHANNELS = 2
@@ -108,20 +107,22 @@ BIAS_MANTISSAS = [17, -9, 23]
 BIAS_SCALE = canon(0.1)  # stored scales are canonical dyadic: snapped NEAREST
 
 
-def param_scale_f32(w_scale):
-    return (torch.tensor(X_SCALE, dtype=torch.float32) *
-           torch.tensor(w_scale, dtype=torch.float32)).item()
+X_BITS = 12  # the input wire's declared width (ODT_SYM_OPERAND_QMAXBITS)
+W_SYM_RANGE = (-2048, 2047)  # stored SYM int12 weight
+W_ASYM_IMAGE_RANGE = (-4095, 4095)  # stored ASYM int12 weight's zp-shifted image
 
 
-def s_acc_f32(w_scales):
-    # the stored sAcc: canonical product, CEIL (every group factor stays <= 1)
-    return product_scale(X_SCALE, max(w_scales), CEIL)
+def fold(w_scales, group_size, w_range=W_SYM_RANGE, bias=True):
+    return convt_grouped_fold_ref(
+        X_MANTISSAS, X_SCALE, X_BITS, W_MANTISSAS, w_scales, group_size, w_range[0], w_range[1],
+        BATCH, IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE, INPUT_LENGTH, STRIDE, DILATION,
+        OUTPUT_PADDING, bias_mantissas=BIAS_MANTISSAS if bias else None,
+        bias_scale=BIAS_SCALE if bias else None)
 
 
 def scatter_targets():
-    """Yield (out_flat_idx, [(ic, product, w_idx)]) plus bias channel, i.e. the
-    per-output-element contributing-product structure the self-checks below
-    reason over. Batch is 1."""
+    """Yield {out_flat_idx: [(x, w_idx)]}: the per-output-element
+    contributing-product structure the mutation replays walk. Batch is 1."""
     contrib = {}
     for ic in range(IN_CHANNELS):
         for in_pos in range(INPUT_LENGTH):
@@ -131,123 +132,91 @@ def scatter_targets():
                     out_idx = in_pos * STRIDE + k * DILATION
                     w_idx = (ic * OUT_CHANNELS + oc) * KERNEL_SIZE + k
                     flat = oc * OUT_LEN + out_idx
-                    contrib.setdefault(flat, []).append((ic, x_val * W_MANTISSAS[w_idx], w_idx))
+                    contrib.setdefault(flat, []).append((x_val, w_idx))
     return contrib
 
 
-def ref_wrong_group_from_output_index(w_scales, group_size):
-    """Mutation (i) replay: g = OUTPUT flat index // groupSize (both fixtures'
-    group counts stay in range for the 18-element output, so the mutated C
-    kernel reads a VALID-but-wrong scale instead of crashing)."""
-    s_acc = s_acc_f32(w_scales)
+def fold_replay(ref, w_scales, group_size, group_of=None, rnd=None, bias_target=None):
+    """The fold with one piece swapped: the group lookup (group_of(flat, w_idx)),
+    the fold rounding (rnd(v, s) of v * 2^-s), or the bias seed's target scale."""
+    ws = [decompose(sc) for sc in w_scales]
+    e_max = max(e for _, e in ws)
+    frac = ref["frac_bits"]
+    group_of = group_of or (lambda flat, w_idx: w_idx // group_size)
     out = [0] * (BATCH * OUT_CHANNELS * OUT_LEN)
     for flat, products in scatter_targets().items():
-        g = flat // group_size
-        assert g < len(w_scales)
-        for _, p, _ in products:
-            out[flat] += rescale_f32(p, param_scale_f32(w_scales[g]), s_acc)
+        for x_val, w_idx in products:
+            m, e = ws[group_of(flat, w_idx)]
+            sh = e_max - e + 15 - frac
+            v = x_val * m
+            if rnd is None:
+                r = (abs(v) + (1 << (sh - 1))) >> sh
+                x_g = r if v >= 0 else -r
+            else:
+                x_g = rnd(v, sh)
+            out[flat] += x_g * W_MANTISSAS[w_idx]
+    target = bias_target if bias_target is not None else ref["acc_scale"]
     for oc in range(OUT_CHANNELS):
-        seed = rescale_f32(BIAS_MANTISSAS[oc], BIAS_SCALE, s_acc)
+        seed = rescale_f32(BIAS_MANTISSAS[oc], BIAS_SCALE, target)
         for l in range(OUT_LEN):
             out[oc * OUT_LEN + l] += seed
     return out
 
 
-def ref_sum_then_rescale_per_run(w_scales, group_size):
-    """Mutation (ii) replay: the running-partial idiom wrongly ported to the
-    scatter core -- per output element, raw-int-sum each (ic, group) run of
-    contributing products, ONE rescale per run (instead of one per product)."""
-    s_acc = s_acc_f32(w_scales)
-    out = [0] * (BATCH * OUT_CHANNELS * OUT_LEN)
-    for flat, products in scatter_targets().items():
-        runs = {}
-        for ic, p, w_idx in products:
-            g = w_idx // group_size
-            runs[(ic, g)] = runs.get((ic, g), 0) + p
-        for (_, g), partial in runs.items():
-            out[flat] += rescale_f32(partial, param_scale_f32(w_scales[g]), s_acc)
-    for oc in range(OUT_CHANNELS):
-        seed = rescale_f32(BIAS_MANTISSAS[oc], BIAS_SCALE, s_acc)
-        for l in range(OUT_LEN):
-            out[oc * OUT_LEN + l] += seed
-    return out
-
-
-def ref_truncating(w_scales, group_size):
-    """Mutation (iv) replay: per-product truncation-toward-zero instead of
-    HALF_AWAY (same float32 quotient, different rounding)."""
-    s_acc = s_acc_f32(w_scales)
-    out = [0] * (BATCH * OUT_CHANNELS * OUT_LEN)
-    for flat, products in scatter_targets().items():
-        for _, p, w_idx in products:
-            g = w_idx // group_size
-            out[flat] += math.trunc(combine_quotient_f32(p, param_scale_f32(w_scales[g]), s_acc))
-    for oc in range(OUT_CHANNELS):
-        seed = math.trunc(combine_quotient_f32(BIAS_MANTISSAS[oc], BIAS_SCALE, s_acc))
-        for l in range(OUT_LEN):
-            out[oc * OUT_LEN + l] += seed
-    return out
-
-
-def check_fixture(name, w_scales, group_size, out):
+def check_fixture(name, w_scales, group_size, ref):
+    out = ref["out"]
+    assert fold_replay(ref, w_scales, group_size) == out, f"{name}: replay disagrees with the ref"
     # (i) scales[0] != max, and output-index group lookup diverges.
     assert w_scales[0] != max(w_scales), f"{name}: scales[0] must differ from max (mutation i)"
-    wrong_g = ref_wrong_group_from_output_index(w_scales, group_size)
+    n_groups = len(w_scales)
+    wrong_g = fold_replay(ref, w_scales, group_size,
+                          group_of=lambda flat, w_idx: (flat // group_size) % n_groups)
     assert wrong_g != out, (
         f"{name}: output-index group lookup reproduces the gold (mutation (i) vacuous)")
-    # (ii) sum-then-rescale-once per run diverges.
-    wrong_run = ref_sum_then_rescale_per_run(w_scales, group_size)
-    assert wrong_run != out, (
-        f"{name}: sum-then-rescale-once per run reproduces the gold (mutation (ii) vacuous)")
+    # (ii) the legacy float path gives a different gold.
+    legacy, _, _ = convT1d_grouped_ref(
+        X_MANTISSAS, X_SCALE, W_MANTISSAS, w_scales, group_size, BATCH, IN_CHANNELS,
+        OUT_CHANNELS, KERNEL_SIZE, INPUT_LENGTH, STRIDE, DILATION, OUTPUT_PADDING,
+        bias_mantissas=BIAS_MANTISSAS, bias_scale=BIAS_SCALE)
+    assert legacy != out, f"{name}: the fold gold equals the legacy float path's (vacuous)"
     # (iii) bias seed at inScale*scales[0] diverges for at least one channel.
-    s_acc = s_acc_f32(w_scales)
-    seeds_right = [rescale_f32(BIAS_MANTISSAS[oc], BIAS_SCALE, s_acc)
-                   for oc in range(OUT_CHANNELS)]
-    seeds_wrong = [rescale_f32(BIAS_MANTISSAS[oc], BIAS_SCALE, param_scale_f32(w_scales[0]))
-                   for oc in range(OUT_CHANNELS)]
-    assert seeds_right != seeds_wrong, (
-        f"{name}: bias seed at inScale*scales[0] equals the s_acc seed (mutation (iii) vacuous)")
+    wrong_seed_scale = X_SCALE * w_scales[0]
+    assert fold_replay(ref, w_scales, group_size, bias_target=wrong_seed_scale) != out, (
+        f"{name}: bias seed at inScale*scales[0] reproduces the gold (mutation (iii) vacuous)")
 
 
 def fixture(name, w_scales, group_size, num_groups):
     assert len(w_scales) == num_groups
     assert group_size * num_groups == len(W_MANTISSAS)
-    out, s_acc, out_len = convT1d_grouped_ref(
-        X_MANTISSAS, X_SCALE, W_MANTISSAS, w_scales, group_size,
-        BATCH, IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE, INPUT_LENGTH,
-        STRIDE, DILATION, OUTPUT_PADDING, bias_mantissas=BIAS_MANTISSAS, bias_scale=BIAS_SCALE)
-    assert out_len == OUT_LEN
-    check_fixture(name, w_scales, group_size, out)
+    ref = fold(w_scales, group_size)
+    assert ref["out_len"] == OUT_LEN
+    check_fixture(name, w_scales, group_size, ref)
     return {"wScales": w_scales, "groupSize": group_size, "numGroups": num_groups,
-            "outMantissas": out, "outScale": s_acc}
+            "outMantissas": ref["out"], "outScale": ref["acc_scale"], "ref": ref}
 
 
 def check_equal_scales_reproduces_scalar():
-    """Self-check (v): all scales == 0.25 (power of two, like X_SCALE) makes
-    every per-product rescale the exact identity, so the grouped emulation
-    must equal the scalar kernel's raw int scatter + bias seed bit-for-bit."""
+    """Self-check (v): all scales == 0.25 (power of two, like X_SCALE): every
+    fold is exact, so the bias-free grouped scatter dequantizes to the scalar
+    kernel's raw int scatter at s_in*s_w bit for bit."""
     common = 0.25
-    w_scales = [common, common]
-    out, s_acc, _ = convT1d_grouped_ref(
-        X_MANTISSAS, X_SCALE, W_MANTISSAS, w_scales, 9,
-        BATCH, IN_CHANNELS, OUT_CHANNELS, KERNEL_SIZE, INPUT_LENGTH,
-        STRIDE, DILATION, OUTPUT_PADDING, bias_mantissas=BIAS_MANTISSAS, bias_scale=BIAS_SCALE)
+    ref = fold([common, common], 9, bias=False)
     scalar = [0] * (BATCH * OUT_CHANNELS * OUT_LEN)
     for flat, products in scatter_targets().items():
-        for _, p, _ in products:
-            scalar[flat] += p
-    output_scale = param_scale_f32(common)
-    assert output_scale == s_acc, "equal-scales: s_acc must be bit-identical to s_in*s_w"
-    for oc in range(OUT_CHANNELS):
-        seed = rescale_f32(BIAS_MANTISSAS[oc], BIAS_SCALE, output_scale)
-        for l in range(OUT_LEN):
-            scalar[oc * OUT_LEN + l] += seed
-    assert out == scalar, (
-        "equal-scales grouped emulation does not reproduce the scalar scatter exactly")
+        for x_val, w_idx in products:
+            scalar[flat] += x_val * W_MANTISSAS[w_idx]
+    assert [v * ref["acc_scale"] for v in ref["out"]] == [v * X_SCALE * common for v in scalar], (
+        "equal-scales grouped fold does not reproduce the scalar scatter exactly")
 
 
-def max_products_per_out():
-    return max(len(v) for v in scatter_targets().values())
+def check_truncation_discriminates(general):
+    """(iv): truncation toward zero in the fold changes the general gold."""
+    def trunc(v, sh):
+        r = abs(v) >> sh
+        return r if v >= 0 else -r
+    assert fold_replay(general["ref"], general["wScales"], general["groupSize"],
+                       rnd=trunc) != general["outMantissas"], (
+        "general: truncation reproduces the gold (rounding-mode mutation vacuous)")
 
 
 # ---- PR3 Task 3: ConvT1d dx (adjoint gather) fixture. Seeded random
@@ -334,17 +303,13 @@ def main() -> int:
     per_channel = fixture("perChannel", [canon(s) for s in (0.02, 0.05)], 9, 2)
     general = fixture("general", [canon(s) for s in (0.02, 0.05, 0.01, 0.078125, 0.03, 0.05859375)], 3, 6)
 
-    # (iv) rounding discriminator on the general fixture.
-    assert ref_truncating(general["wScales"], general["groupSize"]) != general["outMantissas"], (
-        "general: truncation reproduces the gold (rounding-mode mutation vacuous)")
-
+    check_truncation_discriminates(general)
     check_equal_scales_reproduces_scalar()
 
-    c_max = max_products_per_out()
-    assert c_max == IN_CHANNELS * KERNEL_SIZE, (
-        f"max products per output element is {c_max}, expected "
-        f"{IN_CHANNELS * KERNEL_SIZE} -- the C float-path tolerance comment "
-        "counts Cin*K fully-overlapped taps; re-derive it for this geometry")
+    # the ASYM twin layer: same mantissas and scales, the image's code range
+    per_channel_asym = fold(per_channel["wScales"], per_channel["groupSize"], W_ASYM_IMAGE_RANGE)
+    assert per_channel_asym["frac_bits"] == per_channel["ref"]["frac_bits"] - 1, (
+        "the ASYM image's doubled range must cost exactly one fold fraction bit")
 
     parts = [
         "// AUTOGENERATED by generate_expected_convT1d_grouped.py — DO NOT EDIT\n",
@@ -366,12 +331,16 @@ def main() -> int:
         f"static const int32_t kConvTGroupedKernelSize = {KERNEL_SIZE};\n",
         f"static const int32_t kConvTGroupedInputLength = {INPUT_LENGTH};\n",
         f"static const int32_t kConvTGroupedOutLen = {OUT_LEN};\n",
-        f"static const int32_t kConvTGroupedMaxProductsPerOut = {c_max};\n",
+        f"static const int32_t kConvTPerChannelMaxWAbsSum = "
+        f"{max(per_channel['ref']['w_abs_sum'])};\n",
         "\n",
     ]
 
     emit_fixture(parts, "ConvTPerChannel", per_channel)
     emit_fixture(parts, "ConvTGeneral", general)
+    parts.append(emit_int32_array("kConvTPerChannelAsymOutMantissas",
+                                  torch.tensor(per_channel_asym["out"])))
+    parts.append(emit_float_scalar("kConvTPerChannelAsymOutScale", per_channel_asym["acc_scale"]))
 
     # PR3 Task 3: dx fixtures reuse the forward fixtures' group shapes/scales.
     dx_pc = fixture_dx("perChannel", per_channel["wScales"], per_channel["groupSize"])

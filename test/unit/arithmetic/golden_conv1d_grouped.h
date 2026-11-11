@@ -135,4 +135,25 @@ static const uint32_t kCg2GoldSrState[2] = {2690316087u, 3869888365u};
 static const float kCg2GoldScale[2] = {0x1p-3f, 0x1.1p-4f};
 static const uint32_t kCg2GoldBits[2] = {19u, 19u};
 
+/* Channel-aligned conv-groups-2 goldens (linq fold T2): the cg2 fixture with
+ * group sizes 10 (one group per weight row) and 20 (one group spans two rows),
+ * recorded from the cursor kernel before the channel-aligned fast path so that
+ * path must reproduce them. SR seeds are 0xC2A00000u + i. Index i is
+ * kCg2AlignedGoldGroupSize[i]. */
+static const int32_t kCg2AlignedGoldHa0[24] = {
+    -4598, -4071, 2518,  -1429,  8234, 5732, -5244, -2612, -6897, -1583, -5,    -203,
+    -1904, 3360,  -1118, -16318, 8081, 2127, -3460, -7972, -838,  -6080, -2213, -2135};
+static const int32_t kCg2AlignedGoldSr0[24] = {
+    -4598, -4070, 2519,  -1429,  8234, 5732, -5244, -2612, -6896, -1582, -4,    -202,
+    -1904, 3360,  -1118, -16318, 8081, 2127, -3460, -7972, -838,  -6079, -2212, -2134};
+static const int32_t kCg2AlignedGoldHa1[24] = {
+    -3692, -7996, -12682, -3066, -7346, -2773, 11320, 11416, 9422, -13555, 10996, 21816,
+    6060,  834,   1475,   461,   -4646, -5889, 8167,  4899,  264,  5027,   -2173, 8623};
+static const int32_t kCg2AlignedGoldSr1[24] = {
+    -3691, -7995, -12682, -3065, -7345, -2773, 11320, 11416, 9422, -13555, 10996, 21816,
+    6061,  835,   1475,   460,   -4645, -5890, 8167,  4899,  264,  5027,   -2173, 8623};
+static const uint32_t kCg2AlignedGoldSrState[2] = {910915442u, 289642743u};
+static const float kCg2AlignedGoldScale[2] = {0x1.cp-5f, 0x1p-5f};
+static const uint32_t kCg2AlignedGoldBits[2] = {19u, 19u};
+
 #endif // GOLDEN_CONV1D_GROUPED_H

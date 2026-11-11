@@ -1980,6 +1980,32 @@ void testConv1dGroupedGoldenConvGroups2(void) {
     }
 }
 
+/* Channel-aligned groups on the cg2 fixture: group size 10 is one group per
+ * weight row (group == oc), 20 spans two rows (group == oc / 2). Pins the
+ * group lookup of the cursor-free channel-aligned path; recorded from the
+ * cursor kernel before that path existed. */
+static const size_t kCg2AlignedGoldGroupSize[2] = {10, 20};
+static const int32_t *const kCg2AlignedGoldHa[2] = {kCg2AlignedGoldHa0, kCg2AlignedGoldHa1};
+static const int32_t *const kCg2AlignedGoldSr[2] = {kCg2AlignedGoldSr0, kCg2AlignedGoldSr1};
+
+void testConv1dGroupedGoldenConvGroups2ChannelAligned(void) {
+    for (size_t ci = 0; ci < 2; ci++) {
+        cg2GoldOut_t ha, sr;
+        cg2GoldRun(kCg2AlignedGoldGroupSize[ci], HALF_AWAY, NULL, &ha);
+        rngStream_t rs = rngOpen(rngKeyFromSeed(0xC2A00000u + ci));
+        uint32_t before = rs.state;
+        cg2GoldRun(kCg2AlignedGoldGroupSize[ci], SR_HALF_AWAY, &rs, &sr);
+        TEST_ASSERT_NOT_EQUAL_UINT32(before, rs.state);
+        GOLD_I32(kCg2AlignedGoldHa[ci], ha.y, CG2_GOLD_Y);
+        GOLD_I32(kCg2AlignedGoldSr[ci], sr.y, CG2_GOLD_Y);
+        GOLD_U32_SCALAR(kCg2AlignedGoldSrState[ci], rs.state);
+        GOLD_F32_SCALAR(kCg2AlignedGoldScale[ci], ha.scale);
+        GOLD_F32_SCALAR(kCg2AlignedGoldScale[ci], sr.scale);
+        GOLD_U32_SCALAR(kCg2AlignedGoldBits[ci], ha.bits);
+        GOLD_U32_SCALAR(kCg2AlignedGoldBits[ci], sr.bits);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConv1dKernelSymRejectsFloatInput);
@@ -2051,5 +2077,6 @@ int main(void) {
     RUN_TEST(testConv1dGroupedGoldenHalfAway);
     RUN_TEST(testConv1dGroupedGoldenSr);
     RUN_TEST(testConv1dGroupedGoldenConvGroups2);
+    RUN_TEST(testConv1dGroupedGoldenConvGroups2ChannelAligned);
     return UNITY_END();
 }

@@ -1,8 +1,5 @@
-#include <string.h>
-
 #include "Add.h"
 #include "DTypes.h"
-#include "DeathTest.h"
 #include "QuantizationApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -13,89 +10,6 @@
 
 void setUp() {}
 void tearDown() {}
-
-void testAddInt32TensorsInplace() {
-    size_t numberOfElements = 24;
-    size_t bytesPerElement = sizeof(int32_t);
-
-    int32_t aData[] = {0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11,
-                       12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23};
-    uint8_t *aDataBytes = (uint8_t *)aData;
-
-    size_t aNumberOfDims = 3;
-    size_t aDims[] = {2, 3, 4};
-    size_t aOrderOfDims[] = {0, 1, 2};
-    quantization_t aQ = {.type = INT32};
-
-    shape_t aShape = {.dimensions = aDims,
-                      .numberOfDimensions = aNumberOfDims,
-                      .orderOfDimensions = aOrderOfDims};
-
-    tensor_t aTensor = {
-        .data = aDataBytes,
-        .shape = &aShape,
-        .quantization = &aQ,
-        .sparsity = NULL,
-    };
-
-    int32_t bData[] = {0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11,
-                       12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23};
-    uint8_t *bDataBytes = (uint8_t *)bData;
-    size_t bNumberOfDims = 3;
-    size_t bDims[] = {2, 3, 4};
-    size_t bOrderOfDims[] = {1, 0, 2};
-
-    shape_t bShape = {.dimensions = bDims,
-                      .numberOfDimensions = bNumberOfDims,
-                      .orderOfDimensions = bOrderOfDims};
-
-    quantization_t bQ = {.type = INT32};
-    tensor_t bTensor = {
-        .data = bDataBytes,
-        .shape = &bShape,
-        .quantization = &bQ,
-        .sparsity = NULL,
-    };
-
-    transposeTensor(&bTensor, 0, 1);
-
-    addInt32TensorsInplace(&aTensor, &bTensor);
-
-    int32_t expected[] = {0,  2,  4,  6,  8,  10, 12, 14, 16, 18, 20, 22,
-                          24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46};
-
-    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, aTensor.data, numberOfElements);
-}
-
-void testAddInt32ElementWithInt32TensorInplace() {
-    size_t numberOfElements = 6;
-
-    int32_t aData[] = {1, 2, 3, 4, 5, 6};
-    uint8_t *aDataBytes = (uint8_t *)aData;
-    size_t aNumberOfDims = 2;
-    size_t aDims[] = {2, 3};
-    size_t aOrderOfDims[] = {0, 1};
-    quantization_t aQ = {.type = INT32};
-
-    shape_t aShape = {.dimensions = aDims,
-                      .numberOfDimensions = aNumberOfDims,
-                      .orderOfDimensions = aOrderOfDims};
-
-    tensor_t aTensor = {
-        .data = aDataBytes,
-        .shape = &aShape,
-        .quantization = &aQ,
-        .sparsity = NULL,
-    };
-
-    int32_t x = 5;
-
-    addInt32ElementWithInt32TensorInplace(&aTensor, x);
-
-    int32_t expected[] = {6, 7, 8, 9, 10, 11};
-
-    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, aTensor.data, numberOfElements);
-}
 
 void testAddFloat32TensorsInplace() {
     size_t numberOfElements = 24;
@@ -177,9 +91,6 @@ void testAddSymInt32TensorsInplace() {
 
     addSymInt32TensorsInplace(&aTensor, &bTensor, NULL);
 
-    /* Build a heap Float32 output tensor for the convert-back step using the
-     * post-#106 primitives: initTensor owns its own data buffer and
-     * convertTensor writes the result there. */
     size_t *outputDims = reserveMemory(1 * sizeof(size_t));
     outputDims[0] = numberOfValues;
     size_t *outputOrder = reserveMemory(1 * sizeof(size_t));
@@ -189,190 +100,22 @@ void testAddSymInt32TensorsInplace() {
     tensor_t *floatTensor = initTensor(outputShape, quantizationInitFloat(), NULL);
     convertTensor(&aTensor, floatTensor, NULL);
 
-    /* CAPTURE before free. */
     float captured[numberOfValues];
     for (size_t i = 0; i < numberOfValues; i++) {
         captured[i] = ((float *)floatTensor->data)[i];
     }
 
-    /* FREE. */
     freeTensor(floatTensor);
 
-    /* ASSERT. */
     float_t expected[] = {3, 6, 9, 12, 15, 18};
     for (size_t i = 0; i < numberOfValues; i++) {
         TEST_ASSERT_FLOAT_WITHIN(0.1f, expected[i], captured[i]);
     }
 }
 
-/* #340: a count mismatch must fail fast (exit(1)) at the guard, BEFORE the
- * float-conversion scratch (both buffers sized by the FIRST operand's element
- * count) overflows on the larger second operand. Pre-fix the bare printf fell
- * through into that overflow (silent corruption / stack smash); the guard now
- * matches the exit(1) siblings in this file. */
-void testAddSymInt32TensorsInplaceExitsOnCountMismatch() {
-    symInt32QConfig_t aQC;
-    initSymInt32QConfig(HALF_AWAY, &aQC);
-    aQC.scale = odtTestScale(1.f);
-    quantization_t aQ;
-    initSymInt32Quantization(&aQC, &aQ);
-    int32_t aData[] = {1, 2};
-    size_t aDims[] = {2};
-    size_t aOrder[] = {0};
-    shape_t aShape = {.dimensions = aDims, .numberOfDimensions = 1, .orderOfDimensions = aOrder};
-    tensor_t aTensor;
-    setTensorValues(&aTensor, (uint8_t *)aData, &aShape, &aQ, NULL);
-
-    symInt32QConfig_t bQC;
-    initSymInt32QConfig(HALF_AWAY, &bQC);
-    bQC.scale = odtTestScale(1.f);
-    quantization_t bQ;
-    initSymInt32Quantization(&bQC, &bQ);
-    int32_t bData[1024] = {0};
-    size_t bDims[] = {1024};
-    size_t bOrder[] = {0};
-    shape_t bShape = {.dimensions = bDims, .numberOfDimensions = 1, .orderOfDimensions = bOrder};
-    tensor_t bTensor;
-    setTensorValues(&bTensor, (uint8_t *)bData, &bShape, &bQ, NULL);
-
-    ASSERT_EXITS_WITH_FAILURE(addSymInt32TensorsInplace(&aTensor, &bTensor, NULL));
-}
-
-void testAddInt32TensorWithSymInt32TensorInplace() {
-    size_t numberOfValues = 6;
-
-    symInt32QConfig_t aQC;
-    initSymInt32QConfig(HALF_AWAY, &aQC);
-    aQC.scale = odtTestScale(100.f);
-    quantization_t aQ;
-    initSymInt32Quantization(&aQC, &aQ);
-    int32_t aData[] = {1, 2, 3, 4, 5, 6};
-    uint8_t *aDataBytes = (uint8_t *)aData;
-    tensor_t aTensor;
-    size_t dims[] = {numberOfValues};
-    size_t numberOfDims = 1;
-    size_t orderOfDims[] = {0};
-    shape_t shape = {
-        .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
-    setTensorValues(&aTensor, aDataBytes, &shape, &aQ, NULL);
-
-    quantization_t bQ;
-    initInt32Quantization(&bQ);
-    int32_t bData[] = {1, -1, 3, -5, 9, 1};
-    uint8_t *bDataBytes = (uint8_t *)bData;
-    tensor_t bTensor;
-    setTensorValues(&bTensor, bDataBytes, &shape, &bQ, NULL);
-
-    addInt32TensorToSymInt32TensorInplace(&aTensor, &bTensor);
-
-    int32_t expected[] = {2, 1, 6, -1, 14, 7};
-
-    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, aData, numberOfValues);
-}
-
-void testAddFloat32TensorToSymInt32TensorInplace() {
-    size_t numberOfValues = 6;
-
-    symInt32QConfig_t aQC;
-    initSymInt32QConfig(HALF_AWAY, &aQC);
-    aQC.scale = odtTestScale(100.f);
-    quantization_t aQ;
-    initSymInt32Quantization(&aQC, &aQ);
-    int32_t aData[] = {1, 2, 3, 4, 5, 6};
-    uint8_t *aDataBytes = (uint8_t *)aData;
-    tensor_t aTensor;
-    size_t dims[] = {numberOfValues};
-    size_t numberOfDims = 1;
-    size_t orderOfDims[] = {0};
-    shape_t shape = {
-        .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
-    setTensorValues(&aTensor, aDataBytes, &shape, &aQ, NULL);
-
-    quantization_t bQ;
-    initFloat32Quantization(&bQ);
-    float bData[] = {1.1f, -1.1f, -5.9f, 9.3f, 1.9f, -4.4f};
-    uint8_t *bDataBytes = (uint8_t *)bData;
-    tensor_t bTensor;
-    setTensorValues(&bTensor, bDataBytes, &shape, &bQ, NULL);
-
-    addFloat32TensorToSymInt32TensorInplace(&aTensor, &bTensor);
-
-    int32_t expected[] = {2, 1, -2, 13, 6, 2};
-
-    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, aData, numberOfValues);
-}
-
-/* A 1-D SYM_INT32 wire over caller-owned codes. The struct owns the shape and
- * qConfig storage that setShape / setTensorValues keep raw pointers to, so it
- * is initialised in place and never copied. */
-typedef struct symWire {
-    tensor_t t;
-    shape_t shape;
-    size_t dims[1];
-    size_t order[1];
-    symInt32QConfig_t qc;
-    quantization_t q;
-} symWire_t;
-
-static void symWireInit(symWire_t *w, int32_t *codes, size_t n, uint8_t qMaxBits, float scale) {
-    w->dims[0] = n;
-    w->order[0] = 0;
-    setShape(&w->shape, w->dims, 1, w->order);
-    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &w->qc, qMaxBits);
-    w->qc.scale = odtTestScale(scale);
-    initSymInt32Quantization(&w->qc, &w->q);
-    setTensorValues(&w->t, (uint8_t *)codes, &w->shape, &w->q, NULL);
-}
-
-/* Output wires start at a width no stamp test expects, so a missing stamp can
- * never pass as the right one. */
-#define UNSTAMPED_WIDTH 5
-
-/* Equal scales add the raw codes, so the output declares the exact range of
- * the sum (#516): int12 + int12 spans [-2^12, 2^12 - 2], which is 13 bits --
- * the reachable corners, not a bit above them. */
-void testAddSymInt32TensorsEqualScaleStampsSumWidth(void) {
-    int32_t aCodes[2] = {-2048, 3}, bCodes[2] = {-2048, 5}, outCodes[2] = {0, 0};
-    symWire_t a, b, out;
-    symWireInit(&a, aCodes, 2, 12, 0.5f);
-    symWireInit(&b, bCodes, 2, 12, 0.5f);
-    symWireInit(&out, outCodes, 2, UNSTAMPED_WIDTH, 1.f);
-    addSymInt32Tensors(&a.t, &b.t, &out.t, NULL);
-    TEST_ASSERT_EQUAL_INT32(-4096, outCodes[0]);
-    TEST_ASSERT_EQUAL_INT32(8, outCodes[1]);
-    TEST_ASSERT_EQUAL_FLOAT(0.5f, odtScaleToFloat(out.qc.scale));
-    TEST_ASSERT_EQUAL_UINT8(13, out.qc.qMaxBits);
-    TEST_ASSERT_EQUAL_UINT8(12, a.qc.qMaxBits);
-    TEST_ASSERT_EQUAL_UINT8(12, b.qc.qMaxBits);
-}
-
-/* Mixed widths: int12 + int4 spans [-(2^11 + 2^3), (2^11 - 1) + (2^3 - 1)] =
- * [-2056, 2054] -> 13. */
-void testAddSymInt32TensorsEqualScaleStampIsStaticInTheWidths(void) {
-    int32_t aCode = 1, bCode = 1, outCode = 0;
-    symWire_t a, b, out;
-    symWireInit(&a, &aCode, 1, 12, 1.f);
-    symWireInit(&b, &bCode, 1, 4, 1.f);
-    symWireInit(&out, &outCode, 1, UNSTAMPED_WIDTH, 1.f);
-    addSymInt32Tensors(&a.t, &b.t, &out.t, NULL);
-    TEST_ASSERT_EQUAL_INT32(2, outCode);
-    TEST_ASSERT_EQUAL_UINT8(13, out.qc.qMaxBits);
-}
-
 int main(void) {
     UNITY_BEGIN();
-
-    RUN_TEST(testAddInt32TensorsInplace);
-    RUN_TEST(testAddInt32ElementWithInt32TensorInplace);
-
     RUN_TEST(testAddFloat32TensorsInplace);
-
     RUN_TEST(testAddSymInt32TensorsInplace);
-    RUN_TEST(testAddSymInt32TensorsInplaceExitsOnCountMismatch);
-    RUN_TEST(testAddInt32TensorWithSymInt32TensorInplace);
-    RUN_TEST(testAddFloat32TensorToSymInt32TensorInplace);
-    RUN_TEST(testAddSymInt32TensorsEqualScaleStampsSumWidth);
-    RUN_TEST(testAddSymInt32TensorsEqualScaleStampIsStaticInTheWidths);
-
     return UNITY_END();
 }

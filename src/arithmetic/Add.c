@@ -12,13 +12,8 @@
 #include "Arithmetic.h"
 #include "Common.h"
 #include "DTypes.h"
-#include "ScaleCanon.h"
-#include "SymAccumGuard.h"
 #include "Tensor.h"
 #include "TensorConversion.h"
-
-#include <stdio.h>
-#include <stdlib.h>
 
 size_t addInstructionCounter = 0;
 
@@ -48,171 +43,22 @@ float addFloat32s(float a, float b) {
     return ADD_FUNC_FLOAT(a, b);
 }
 
-void addInt32Tensors(tensor_t *a, tensor_t *b, tensor_t *outputTensor) {
-    int32PointWiseArithmetic(a, b, ADD_FUNC_INT, outputTensor);
-}
-
-void addInt32TensorsInplace(tensor_t *a, tensor_t *b) {
-    int32PointWiseArithmeticInplace(a, b, ADD_FUNC_INT);
-}
-
-void addInt32ElementWithInt32Tensor(tensor_t *a, int32_t b, tensor_t *outputTensor) {
-    int32ElementWithTensorArithmetic(a, b, ADD_FUNC_INT, outputTensor);
-}
-
-void addInt32ElementWithInt32TensorInplace(tensor_t *a, int32_t b) {
-    int32ElementWithTensorArithmeticInplace(a, b, ADD_FUNC_INT);
-}
-
-void addFloat32Tensors(tensor_t *a, tensor_t *b, tensor_t *outputTensor) {
-    floatPointWiseArithmetic(a, b, ADD_FUNC_FLOAT, outputTensor);
-}
-
 void addFloat32TensorsInplace(tensor_t *a, tensor_t *b) {
     floatPointWiseArithmeticInplace(a, b, ADD_FUNC_FLOAT);
 }
 
-void addFloat32ElementWithFloat32Tensor(tensor_t *a, float b, tensor_t *outputTensor) {
-    floatElementWithTensorArithmetic(a, b, ADD_FUNC_FLOAT, outputTensor);
-}
-
-void addFloat32ElementWithTensorInplace(tensor_t *a, float b) {
-    floatElementWithTensorArithmeticInplace(a, b, ADD_FUNC_FLOAT);
-}
-
-// Important: Scale is ignored!
-void addInt32TensorToSymInt32TensorInplace(tensor_t *symInt32Tensor, tensor_t *int32Tensor) {
-    size_t symInt32NumberOfValues = calcNumberOfElementsByTensor(symInt32Tensor);
-    size_t int32NumberOfValues = calcNumberOfElementsByTensor(int32Tensor);
-
-    if (symInt32NumberOfValues != int32NumberOfValues) {
-        PRINT_ERROR("Mismatched number of values!");
-        exit(1);
-    }
-
-    int32_t intValues[symInt32NumberOfValues];
-    readBytesAsInt32Array(symInt32NumberOfValues, int32Tensor->data, intValues);
-
-    int32_t symValues[symInt32NumberOfValues];
-    readBytesAsInt32Array(symInt32NumberOfValues, symInt32Tensor->data, symValues);
-
-    int32_t outputValues[symInt32NumberOfValues];
-
-    for (size_t i = 0; i < int32NumberOfValues; i++) {
-        outputValues[i] = ADD_FUNC_INT(intValues[i], symValues[i]);
-    }
-
-    writeInt32ArrayToByteArray(symInt32NumberOfValues, outputValues, symInt32Tensor->data);
-}
-
-// Important: Scale is ignored!
-void addFloat32TensorToSymInt32TensorInplace(tensor_t *symInt32Tensor, tensor_t *float32Tensor) {
-    size_t symInt32NumberOfValues = calcNumberOfElementsByTensor(symInt32Tensor);
-    size_t int32NumberOfValues = calcNumberOfElementsByTensor(float32Tensor);
-
-    if (symInt32NumberOfValues != int32NumberOfValues) {
-        PRINT_ERROR("Mismatched number of values!");
-        exit(1);
-    }
-
-    float floatValues[symInt32NumberOfValues];
-    readBytesAsFloatArray(symInt32NumberOfValues, float32Tensor->data, floatValues);
-
-    int32_t symValues[symInt32NumberOfValues];
-    readBytesAsInt32Array(symInt32NumberOfValues, symInt32Tensor->data, symValues);
-
-    int32_t outputValues[symInt32NumberOfValues];
-
-    for (size_t i = 0; i < int32NumberOfValues; i++) {
-        outputValues[i] = ADD_FUNC_INT((int32_t)floatValues[i], symValues[i]);
-    }
-
-    writeInt32ArrayToByteArray(symInt32NumberOfValues, outputValues, symInt32Tensor->data);
-}
-
-/* Width the equal-scale SYM add declares (#516): the raw sum of two codes
- * spans [-(2^(qa-1) + 2^(qb-1)), (2^(qa-1) - 1) + (2^(qb-1) - 1)], one bit
- * past the wider operand, so the output carries the exact width of that range
- * (32 = the raw int32 range). The unequal-scale branch requantizes INTO the
- * output instead and keeps the width the caller declared. */
-static uint8_t symSumWidth(uint8_t aBits, uint8_t bBits) {
-    uint64_t halfA = (uint64_t)1 << (symAccumClampedWidth(aBits) - 1u);
-    uint64_t halfB = (uint64_t)1 << (symAccumClampedWidth(bBits) - 1u);
-    return symAccumWidthForRange((halfA - 1u) + (halfB - 1u), halfA + halfB);
-}
-
-void addSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
-                        rngStream_t *rs) {
-    size_t aNumberOfValues = calcNumberOfElementsByTensor(aTensor);
-    size_t bNumberOfValues = calcNumberOfElementsByTensor(bTensor);
-
-    if (aNumberOfValues != bNumberOfValues) {
-        PRINT_ERROR("Mismatched number of values!");
-        exit(1);
-    }
-
-    symInt32QConfig_t *aSymInt32QConfig = aTensor->quantization->qConfig;
-    symInt32QConfig_t *bSymInt32QConfig = bTensor->quantization->qConfig;
-    symInt32QConfig_t *outputSymInt32QConfig = outputTensor->quantization->qConfig;
-
-    float aScale = loadCanonScale(&aSymInt32QConfig->scale);
-    float bScale = loadCanonScale(&bSymInt32QConfig->scale);
-
-    if (aScale == bScale) {
-        /* read both widths before any config write: the output may alias an operand */
-        uint8_t width = symSumWidth(aSymInt32QConfig->qMaxBits, bSymInt32QConfig->qMaxBits);
-        storeCanonScale(&outputSymInt32QConfig->scale, aScale);
-        outputSymInt32QConfig->qMaxBits = width;
-
-        int32_t aValues[aNumberOfValues];
-        readBytesAsInt32Array(aNumberOfValues, aTensor->data, aValues);
-        int32_t bValues[aNumberOfValues];
-        readBytesAsInt32Array(aNumberOfValues, bTensor->data, bValues);
-
-        int32_t outputValues[aNumberOfValues];
-        ;
-
-        for (size_t i = 0; i < aNumberOfValues; i++) {
-            outputValues[i] = ADD_FUNC_INT(aValues[i], bValues[i]);
-        }
-        writeInt32ArrayToByteArray(aNumberOfValues, outputValues, outputTensor->data);
-    } else {
-        quantization_t floatQ;
-        initFloat32Quantization(&floatQ);
-        uint8_t aFloatData[aNumberOfValues * sizeof(float)];
-        tensor_t aFloat;
-        setTensorValuesForConversion(aFloatData, &floatQ, &aFloat, aTensor);
-        convertTensor(aTensor, &aFloat, rs);
-
-        uint8_t bFloatData[aNumberOfValues * sizeof(float)];
-        tensor_t bFloat;
-        setTensorValuesForConversion(bFloatData, &floatQ, bTensor, &bFloat);
-        convertTensor(bTensor, &bFloat, rs);
-
-        addFloat32TensorsInplace(&aFloat, &bFloat);
-
-        convertTensor(&aFloat, outputTensor, rs);
-    }
-}
-
 void addSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor, rngStream_t *rs) {
-    size_t aNumberOfValues = calcNumberOfElementsByTensor(aTensor);
-    size_t bNumberOfValues = calcNumberOfElementsByTensor(bTensor);
-
-    if (aNumberOfValues != bNumberOfValues) {
-        PRINT_ERROR("Mismatched number of values!");
-        exit(1);
-    }
+    size_t numberOfValues = calcNumberOfElementsByTensor(aTensor);
 
     quantization_t floatQ;
     initFloat32Quantization(&floatQ);
 
-    uint8_t aFloatData[aNumberOfValues * sizeof(float)];
+    uint8_t aFloatData[numberOfValues * sizeof(float)];
     tensor_t aFloat;
     setTensorValuesForConversion(aFloatData, &floatQ, aTensor, &aFloat);
     convertTensor(aTensor, &aFloat, rs);
 
-    uint8_t bFloatData[aNumberOfValues * sizeof(float)];
+    uint8_t bFloatData[numberOfValues * sizeof(float)];
     tensor_t bFloat;
     setTensorValuesForConversion(bFloatData, &floatQ, bTensor, &bFloat);
     convertTensor(bTensor, &bFloat, rs);

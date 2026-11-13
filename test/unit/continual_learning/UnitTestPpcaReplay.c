@@ -410,7 +410,8 @@ static void sampleWithoutASlotKey(void) {
 }
 
 void testSampleWithoutASlotKeyExits(void) {
-    ASSERT_EXITS_WITH_OUTPUT(1, "randomNormalCtx: draw without a stream", sampleWithoutASlotKey());
+    ASSERT_EXITS_WITH_OUTPUT(1, "ppcaReplaySample: sampling without a slot key",
+                             sampleWithoutASlotKey());
 }
 
 void testSampleAcceptsReshapedOut(void) {

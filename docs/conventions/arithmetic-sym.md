@@ -11,9 +11,7 @@ LayerNorm affine beta seed — is converted via `rescaleIntoAccumulatorScale`
 (`src/arithmetic/Rounding.c`): `seed = round(param_q * param_scale /
 accumulator_scale)`. The `float -> int32` cast is data-dependent and is UB on
 overflow (#189); the helper guards it NaN-robustly (`!(x <= T)`, reserving one
-worst-case int16 product `32768*32767` of headroom) under `-DODT_SEED_GUARD`
-(default ON; a future MCU/release build disables it, with UBSan #204 covering
-occurrences). All seed-rescale sites route through this one helper.
+worst-case int16 product `32768*32767` of headroom) in every build. All seed-rescale sites route through this one helper.
 
 This refold is deliberate, not a wart: it holds the real-valued bias **constant**
 under ODT's dynamic per-input activation scaling. A fixed integer added raw

@@ -237,8 +237,8 @@ static void layerNormValidateSymTensor(tensor_t *t, const char *what) {
  *   y_q    = q * gamma_q,j + seed_j            (the product q*gamma_q <= qMax^2
  *            fits int32, but the rescaled seed is DATA-DEPENDENT and unbounded:
  *            |seed| ~ |beta| * qMax^2 / (absmax_n * absmax_gamma). The shared
- *            rescaleIntoAccumulatorScale helper (#189) fails fast (under
- *            -DODT_SEED_GUARD) outside the safe envelope instead of casting an
+ *            rescaleIntoAccumulatorScale helper (#189) fails fast
+ *            outside the safe envelope instead of casting an
  *            out-of-range float to int32 (UB). Spec errata: "int32 is safe
  *            throughout" holds only while the rescaled seed leaves one worst-case
  *            int12xint12 product (2047*2047 ≈ 4.2e6, #227) of int32 headroom for the

@@ -1,26 +1,16 @@
 #define SOURCE_FILE "DISTRIBUTIONS"
 
 #include <math.h>
-#include <stdlib.h>
 
-#include "Common.h"
 #include "Distributions.h"
-#include "Quantization.h"
-#include "Tensor.h"
 
-/* Box-Muller on two uniforms, cosine branch only (the second variate is
- * discarded). The caller redraws u1 while it is at or below 1e-7f, so log(u1)
- * is finite. */
+/* Box-Muller, cosine branch only (the second variate is discarded). */
 static float boxMullerFromUniforms(float u1, float u2, float mean, float standardDeviation) {
     float r = sqrtf(-2.0f * logf(u1));
     return mean + standardDeviation * r * cosf(2.0f * (float)M_PI * u2);
 }
 
 float randomNormalCtx(rngStream_t *rs, float mean, float standardDeviation) {
-    if (rs == NULL) {
-        PRINT_ERROR("randomNormalCtx: draw without a stream");
-        exit(1);
-    }
     float u1 = rngNextUnitFloat(rs);
     float u2 = rngNextUnitFloat(rs);
 
@@ -32,23 +22,7 @@ float randomNormalCtx(rngStream_t *rs, float mean, float standardDeviation) {
     return boxMullerFromUniforms(u1, u2, mean, standardDeviation);
 }
 
-void fillNormalFloat32Tensor(tensor_t *out, rngStream_t *rs, float mean, float stddev) {
-    if (out->quantization->type != FLOAT32) {
-        PRINT_ERROR("fillNormalFloat32Tensor: FLOAT32 tensors only");
-        exit(1);
-    }
-    size_t n = calcNumberOfElementsByTensor(out);
-    float *data = (float *)out->data;
-    for (size_t i = 0; i < n; i++) {
-        data[i] = randomNormalCtx(rs, mean, stddev);
-    }
-}
-
 float randomUniformCtx(rngStream_t *rs, float min, float max) {
-    if (rs == NULL) {
-        PRINT_ERROR("randomUniformCtx: draw without a stream");
-        exit(1);
-    }
     float r = rngNextUnitFloat(rs);
     return min + r * (max - min);
 }

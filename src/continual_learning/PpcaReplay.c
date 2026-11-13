@@ -99,6 +99,10 @@ static void ppcaSampleKernelFloat(tensor_t **op, size_t n, tensor_t *rawOut, ten
 
 void ppcaReplaySample(const ppcaReplay_t *g, const rngKey_t *slotKey, tensor_t *out) {
     ppcaValidateFloatArith(g->sampleMath, "ppcaReplaySample sampleMath");
+    if (slotKey == NULL) {
+        PRINT_ERROR("ppcaReplaySample: sampling without a slot key");
+        exit(1);
+    }
     if (g->count == 0) {
         PRINT_ERROR("ppcaReplaySample: generator has absorbed no data (count == 0)");
         exit(1);

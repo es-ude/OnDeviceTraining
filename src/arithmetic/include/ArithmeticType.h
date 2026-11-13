@@ -4,39 +4,30 @@
 #include "Quantization.h"
 #include "Rounding.h"
 
-/* Declared compute representation of an op (arithmetic-type-split D1,
- * docs/conventions/arithmetic-sym.md). BY VALUE in layer configs: no ownership,
+/* Declared compute representation of an op. By value in layer configs: no ownership,
  * no teardown. Only compute-capable representations exist here — storage
  * dtypes (SYM/ASYM/BOOL/INT32) are expressed on tensors/storage configs. */
 typedef enum arithmeticType { ARITH_FLOAT32, ARITH_SYM_INT32, ARITH_BFP } arithmeticType_t;
 
 typedef struct arithmetic {
     arithmeticType_t type;
-    /* The OPERATION's rounding (#282): governs the funnel's SYM compute
-     * intermediates AND the OUT_WRITE epilogue requant into a quantized
-     * target. Derive via arithmeticFromQuantization (rounding == the storage
-     * default; every layer does this) unless the op needs a rounding of its
-     * own — the optimizer's training write-backs set it to
-     * optim->writeBackRounding (#279). Bare conversions (executeConvert) and
-     * the ACC epilogues stay storage-owned. */
+    /* The operation's rounding: governs the funnel's SYM compute intermediates and
+     * the OUT_WRITE requant into a quantized target. Derive it with
+     * arithmeticFromQuantization unless the op needs its own (the optimizer's
+     * write-backs use optim->writeBackRounding). Bare conversions (executeConvert)
+     * and the ACC epilogues keep the storage rounding. */
     roundingMode_t roundingMode;
 } arithmetic_t;
 
-/* Derivation rule (arithmetic-type-split D5, as amended by BFP epic PR2): FLOAT32 ->
- * ARITH_FLOAT32; SYM_INT32 -> ARITH_SYM_INT32; BFP -> ARITH_BFP; the
- * remaining storage-only dtypes (SYM/ASYM/BOOL/INT32) -> ARITH_FLOAT32
- * (float is the universal compute bridge). roundingMode is taken from the
- * qConfig when the dtype carries one, else HALF_AWAY — the storage mode is
- * the DEFAULT the op's rounding seeds from (#282); ops needing a different
- * rounding overwrite the field after deriving. Fake-quant over a NATIVE
- * dtype (BFP/SYM_INT32 storage, float compute) is expressed by pinning the
- * slot to ARITH_FLOAT32 rather than deriving it. */
+/* FLOAT32 -> ARITH_FLOAT32, SYM_INT32 -> ARITH_SYM_INT32, BFP -> ARITH_BFP; the
+ * storage-only dtypes (SYM/ASYM/BOOL/INT32) -> ARITH_FLOAT32, float being the
+ * universal compute bridge. roundingMode comes from the qConfig if the dtype has
+ * one, else HALF_AWAY. For fake-quant over a native dtype (BFP/SYM_INT32 storage,
+ * float compute) set the slot to ARITH_FLOAT32 instead of deriving it. */
 arithmetic_t arithmeticFromQuantization(const quantization_t *q);
 
-/* NULL -> {ARITH_FLOAT32, HALF_AWAY}; else identical to
- * arithmeticFromQuantization(q). Legacy callers may pass NULL quantizations
- * (arithmeticFromQuantization itself does not NULL-check) — this guard lets
- * them derive an arithmetic_t eagerly without crashing on that path. */
+/* Like arithmeticFromQuantization, but a NULL quantization gives
+ * {ARITH_FLOAT32, HALF_AWAY}. Use it where a config slot may be unset. */
 arithmetic_t arithmeticFromQuantizationOrDefault(const quantization_t *q);
 
 #endif // ENV5_RUNTIME_ARITHMETIC_TYPE_H

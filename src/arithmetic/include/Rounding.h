@@ -94,13 +94,8 @@ static inline int32_t roundByMode(const float input, const roundingMode_t roundi
  * integer accumulator (forward bias seed for Matmul/Conv, LayerNorm affine
  * beta seed).
  *
- * The float->int32 cast is data-dependent and is UB on overflow
- * (C17 6.3.1.4, #189). When compiled with -DODT_SEED_GUARD (unit-test/CI
- * builds; off for release/MCU) the cast is guarded: it fails fast when the
- * rescaled value leaves no int32 headroom for one worst-case int16xint16
- * product (32768*32767). NaN-robust via !(x <= T): a 0*inf=NaN from an
- * underflowed accumulator scale is caught, not bypassed. Release builds run
- * the raw cast (UBSan #204 covers occurrences there). */
+ * Fails fast when the rescaled value is NaN or leaves no int32 headroom for one
+ * worst-case int16xint16 product (32768*32767): the float->int32 cast would be UB. */
 int32_t rescaleIntoAccumulatorScale(int32_t paramQ, float paramScale, float accumulatorScale,
                                     roundingMode_t roundingMode, rngStream_t *rs);
 
@@ -110,7 +105,7 @@ int32_t rescaleIntoAccumulatorScale(int32_t paramQ, float paramScale, float accu
  * Unlike rescaleIntoAccumulatorScale this reserves no headroom: the partial is
  * not a bias seed, so a value close to INT32_MAX is legitimate and the
  * following overflow-checked add (SymAccumGuard.h) decides whether the SUM
- * fits. It keeps only the float->int32 cast safe: in every build it fails fast
+ * fits. It keeps only the float->int32 cast safe: it fails fast
  * when the rescaled float is NaN or leaves [-2^31, 2^31). */
 int32_t rescalePartialIntoAccumulatorScale(int32_t paramQ, float paramScale, float accumulatorScale,
                                            roundingMode_t roundingMode, rngStream_t *rs);

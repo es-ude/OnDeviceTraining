@@ -262,7 +262,7 @@ static void groupNormValidateSymTensor(tensor_t *t, const char *what) {
  *   y_q    = q * gamma_q,c + seed_c            (the product q*gamma_q <= qMax^2
  *            fits int32, but the rescaled seed is DATA-DEPENDENT and unbounded:
  *            the shared rescaleIntoAccumulatorScale helper (#189) fails fast
- *            (under -DODT_SEED_GUARD) outside the safe envelope instead of
+ *            outside the safe envelope instead of
  *            casting an out-of-range float to int32 (UB); safe while
  *            |beta| <~ absmax_n * absmax_gamma, #227.)
  * This writes a RAW, unrestored y_q (accumulator-range, same class as

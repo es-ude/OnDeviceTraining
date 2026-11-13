@@ -27,7 +27,7 @@
 #define ODT_GROUP_FOLD_FRAC_BITS_MIN 1
 #define ODT_GROUP_FOLD_FRAC_BITS_MAX 8
 #define ODT_GROUP_FOLD_MAX_X_BITS 16
-/* The largest |seed| rescaleIntoAccumulatorScale's ODT_SEED_GUARD (Rounding.c)
+/* The largest |seed| rescaleIntoAccumulatorScale's overflow guard (Rounding.c)
  * admits: 2^31 - 1 minus the worst int16 product 32768 * 32767. */
 #define ODT_GROUP_FOLD_SEED_LIMIT (2147483647u - 32768u * 32767u)
 

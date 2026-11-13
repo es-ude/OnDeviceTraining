@@ -2110,7 +2110,7 @@ static void cg2AssertFoldGold(const cg2FoldGold_t *g) {
     GOLD_U32_SCALAR((uint32_t)g->bits, sr.bits);
 }
 
-/* Cursor loop (group sizes 4, 8), fold path: Python-int HALF_AWAY gold, SR
+/* Segment walk (group sizes 4, 8), fold path: Python-int HALF_AWAY gold, SR
  * recorded from the kernel. */
 void testConv1dGroupedGoldenConvGroups2(void) {
     const cg2FoldGold_t golds[CG2_GOLD_NUM_CASES] = {

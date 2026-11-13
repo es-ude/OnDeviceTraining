@@ -5,7 +5,8 @@
 #include <stddef.h>
 
 /*! Storage range [start, end) of weight quantization group `group`, for the
- * grouped SYM conv kernels. Their visited weight indices come in contiguous
+ * legacy float-combine grouped SYM loops (the fold paths use the row walk
+ * below). Their visited weight indices come in contiguous
  * runs (one kernel row's valid taps) separated by gaps where padding clips
  * taps, so a kernel splits each run at `end` and the MAC loop between splits
  * needs no group lookup at all. Zero-initialise ({0}) for the empty range, so

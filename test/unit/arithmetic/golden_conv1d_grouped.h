@@ -252,7 +252,7 @@ static const int32_t kCg2AlignedFoldSr1[24] = {
 static const uint32_t kCg2AlignedFoldSrState[2] = {910915442u, 289642743u};
 
 /* Unaligned fold goldens (linq fold T6 step 1), recorded from
- * conv1dKernelSymInt32Grouped's cursor loop (wrrzuzmm, 5941e4de) before the
+ * conv1dKernelSymInt32Grouped's cursor loop before the
  * segment walk replaced it. HALF_AWAY and SR codes, the SR stream state after
  * the call, and the stamped accumulator scale {m, e} and width. Index i is
  * kCuCases[i] in UnitTestConv1dKernel.c. */

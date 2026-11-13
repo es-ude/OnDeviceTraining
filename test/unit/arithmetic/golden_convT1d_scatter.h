@@ -213,7 +213,7 @@ static const int32_t kCtFoldSrC[154] = {
 static const uint32_t kCtFoldSrState[3] = {2211702708u, 1573832094u, 1218822890u};
 
 /* Unaligned fold goldens (linq fold T7 step 1), recorded from
- * convTranspose1dKernelSymInt32Grouped's cursor scatter (ryyvykvy, a1f650a7) before
+ * convTranspose1dKernelSymInt32Grouped's cursor scatter before
  * the segment walk replaced it. HALF_AWAY and SR codes, the SR stream state
  * after the call, and the stamped accumulator scale {m, e} and width. Index i
  * is kCtuCases[i] in UnitTestConvTranspose1dKernel.c. */

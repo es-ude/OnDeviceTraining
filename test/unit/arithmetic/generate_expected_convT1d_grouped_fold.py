@@ -15,11 +15,11 @@ Fixtures:
             groupSize 15 = Cout*K: each input channel's weight block is one
             group (the kernel's cursor-free path).
   group3    the same operands with groupSize 3: groups straddle the K = 5
-            rows (the kernel's cursor path).
+            rows (the kernel's segment walk).
   cgAligned conv groups 2: batch 2, Cin 4, Cout 6 (outChPerGroup 3), K 5,
             Lin 4, stride 2, dilation 2, VALID; groupSize 15 = outChPerGroup*K
             (cursor-free path across both conv-group slabs).
-  cgCursor  the same operands with groupSize 4 (cursor path, groups
+  cgCursor  the same operands with groupSize 4 (segment walk, groups
             straddle rows and input-channel blocks).
 
 Each fixture asserts it is not vacuous: several distinct group exponents, a

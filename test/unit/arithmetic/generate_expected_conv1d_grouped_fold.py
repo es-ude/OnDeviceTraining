@@ -12,15 +12,15 @@ Fixtures:
             batch 2, Cin 2, K 5, L 8, stride 2, dilation 2, conv groups 1,
             twelve (padding, groupSize, outC) cases.
   cg2       cg2GoldRun's LCG fixture: Cin 4, Cout 4, conv groups 2, EXPLICIT 3;
-            group sizes 4, 8 (cursor loop) and 10, 20 (channel-aligned loop).
+            group sizes 4, 8 (segment walk) and 10, 20 (channel-aligned loop).
   channel   batch 2, Cin 2, Cout 3, K 5, L 8, stride 2, dilation 2, EXPLICIT 9
             (output 0 has no valid tap), groupSize 10 = Cin*K: one group per
             output channel (the cursor-free loop). Non-dyadic group scales, so
             the combines round.
   group2    the same operands with groupSize 2: groups straddle the rows and
-            every window combines several runs (the cursor loop).
+            every window combines several runs (the segment walk).
   cgAligned conv groups 2: Cin 4, Cout 4, EXPLICIT 3, groupSize 10 (aligned).
-  cgCursor  the same operands with groupSize 4 (cursor loop).
+  cgCursor  the same operands with groupSize 4 (segment walk).
 
 Each new fixture asserts it is not vacuous: several group exponents, a
 combine that rounds (a truncating combine changes the gold), a zero input

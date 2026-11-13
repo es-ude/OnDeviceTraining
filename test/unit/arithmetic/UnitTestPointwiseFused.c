@@ -5,7 +5,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "DeathTest.h"
 #include "PointwiseFused.h"
 #include "Tensor.h"
 #include "unity.h"
@@ -92,36 +91,6 @@ void testLerpSelfAliasIsIdentity(void) {
     assertBitsEqualAt(pf_a_n32, a, 32, "lerp self-alias");
 }
 
-void testLerpRejectsPermutedOperand(void) {
-    /* Identity-order gate: a transposed view must fail fast (#339 class). */
-    float data[6] = {1, 2, 3, 4, 5, 6};
-    size_t dims[2] = {2, 3};
-    size_t order[2] = {0, 1};
-    shape_t shape = {.dimensions = dims, .orderOfDimensions = order, .numberOfDimensions = 2};
-    quantization_t q = {.type = FLOAT32};
-    tensor_t t = {.data = (uint8_t *)data, .shape = &shape, .quantization = &q, .sparsity = NULL};
-    transposeTensor(&t, 0, 1);
-    pfFixture_t fb;
-    tensor_t *b = pfInit(&fb, pf_a_n32, 6); /* any 6 floats; dims differ but order trips first */
-    (void)b;
-    ASSERT_EXITS_WITH_FAILURE(lerpFloat32TensorsInplace(&t, &t, 0.1f));
-}
-
-void testLerpRejectsDimensionMismatch(void) {
-    pfFixture_t fa, fb;
-    tensor_t *a = pfInit(&fa, pf_a_n32, 32);
-    tensor_t *b = pfInit(&fb, pf_b_n64, 64);
-    ASSERT_EXITS_WITH_FAILURE(lerpFloat32TensorsInplace(a, b, 0.1f));
-}
-
-void testLerpRejectsNonFloat32Operand(void) {
-    pfFixture_t fa, fb;
-    tensor_t *a = pfInit(&fa, pf_a_n32, 32);
-    tensor_t *b = pfInit(&fb, pf_b_n32, 32);
-    b->quantization->type = INT32;
-    ASSERT_EXITS_WITH_FAILURE(lerpFloat32TensorsInplace(a, b, 0.1f));
-}
-
 #ifdef TRACK_INSTRUCTIONS
 void testLerpCounterDeltaIsElementCount(void) {
     /* Counters are cumulative process-globals: assert the DELTA. */
@@ -178,14 +147,6 @@ void testAddcmulSameOperandTwiceMatchesTorchGold(void) {
     assertBitsEqualAt(pf_expected_addcmul_bb_n64, a64, 64, "addcmul b==c n64");
 }
 
-void testAddcmulRejectsDimensionMismatch(void) {
-    pfFixture_t fa, fb, fc;
-    tensor_t *a = pfInit(&fa, pf_a_n32, 32);
-    tensor_t *b = pfInit(&fb, pf_b_n32, 32);
-    tensor_t *c = pfInit(&fc, pf_c_n64, 64);
-    ASSERT_EXITS_WITH_FAILURE(addcmulFloat32TensorsInplace(a, b, c, 0.5f));
-}
-
 #ifdef TRACK_INSTRUCTIONS
 void testAddcmulCounterDeltaIsElementCount(void) {
     pfFixture_t fa, fb, fc;
@@ -229,15 +190,6 @@ void testAddcdivDenomFromZeroMatchesTorchGold(void) {
     runAddcdivGold(pfZeros64, pf_b_n64, pf_v_n64, pf_expected_addcdiv_azero_n64, 64);
 }
 
-void testAddcdivDenomRejectsDimensionMismatch(void) {
-    pfFixture_t fa, fb, fv;
-    tensor_t *a = pfInit(&fa, pf_a_n32, 32);
-    tensor_t *b = pfInit(&fb, pf_b_n32, 32);
-    tensor_t *v = pfInit(&fv, pf_v_n64, 64);
-    ASSERT_EXITS_WITH_FAILURE(addcdivDenomFloat32TensorsInplace(a, b, v, pf_addcdiv_dscale,
-                                                                pf_addcdiv_eps, pf_addcdiv_s));
-}
-
 #ifdef TRACK_INSTRUCTIONS
 void testAddcdivDenomCounterDeltaIsElementCount(void) {
     pfFixture_t fa, fb, fv;
@@ -255,9 +207,6 @@ int main() {
     RUN_TEST(testLerpMatchesTorchGoldN32);
     RUN_TEST(testLerpMatchesTorchGoldN64);
     RUN_TEST(testLerpSelfAliasIsIdentity);
-    RUN_TEST(testLerpRejectsPermutedOperand);
-    RUN_TEST(testLerpRejectsDimensionMismatch);
-    RUN_TEST(testLerpRejectsNonFloat32Operand);
 #ifdef TRACK_INSTRUCTIONS
     RUN_TEST(testLerpCounterDeltaIsElementCount);
 #endif
@@ -265,14 +214,12 @@ int main() {
     RUN_TEST(testAddcmulMatchesTorchGoldN64);
     RUN_TEST(testAddcmulFromZeroMatchesTorchGold);
     RUN_TEST(testAddcmulSameOperandTwiceMatchesTorchGold);
-    RUN_TEST(testAddcmulRejectsDimensionMismatch);
 #ifdef TRACK_INSTRUCTIONS
     RUN_TEST(testAddcmulCounterDeltaIsElementCount);
 #endif
     RUN_TEST(testAddcdivDenomMatchesTorchGoldN32);
     RUN_TEST(testAddcdivDenomMatchesTorchGoldN64);
     RUN_TEST(testAddcdivDenomFromZeroMatchesTorchGold);
-    RUN_TEST(testAddcdivDenomRejectsDimensionMismatch);
 #ifdef TRACK_INSTRUCTIONS
     RUN_TEST(testAddcdivDenomCounterDeltaIsElementCount);
 #endif

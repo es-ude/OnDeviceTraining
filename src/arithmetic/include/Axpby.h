@@ -3,15 +3,10 @@
 
 #include "Tensor.h"
 
-/* out = a*x + b*y, elementwise FLOAT32.
- * Contract (Add/Sub engine conventions): x, y, out must have identical rank
- * and logical dims (fail-fast otherwise); input reads honor each tensor's
- * orderOfDimensions for ARBITRARY permutations (#344 fixed the shared index
- * algebra, calcElementIndexByIndices); the write is flat contiguous row-major,
- * so out must be identity-order (fail-fast otherwise). out may alias x or y
- * for identity-order operands (same-index read-then-write); aliasing a
- * PERMUTED-view input is untested and outside the contract.
- * Serves the PPCA mean-merge and CCIPCA update steps (#326). */
+/* out = a*x + b*y, all FLOAT32 with the same logical dims.
+ * x and y may be permuted views (reads follow orderOfDimensions); out is written
+ * flat row-major, so it must have identity order. out may alias x or y only when
+ * that operand has identity order. */
 void axpbyFloat32Tensors(float a, tensor_t *x, float b, tensor_t *y, tensor_t *out);
 
 #endif // ODT_AXPBY_H

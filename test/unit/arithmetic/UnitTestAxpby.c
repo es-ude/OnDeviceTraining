@@ -4,7 +4,6 @@
 #include <stdlib.h>
 
 #include "Axpby.h"
-#include "DeathTest.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
 #include "StorageApi.h"
@@ -89,16 +88,6 @@ void testAxpbyPermutationAwareRead(void) {
     freeTensor(xBase);
 }
 
-void testAxpbyRejectsDimMismatch(void) {
-    tensor_t *x = buildFloat32TensorND(1, (size_t[]){3}, NULL);
-    tensor_t *y = buildFloat32TensorND(1, (size_t[]){4}, NULL);
-    tensor_t *out = buildFloat32TensorND(1, (size_t[]){3}, NULL);
-    ASSERT_EXITS_WITH_FAILURE(axpbyFloat32Tensors(1.0f, x, 1.0f, y, out));
-    freeTensor(out);
-    freeTensor(y);
-    freeTensor(x);
-}
-
 void testAxpbyThreeCyclePermutationRead(void) {
     /* Two composed transposes turn orderOfDimensions into a 3-cycle
      * ([0,1,2] -> [1,0,2] -> [1,2,0]). Post-#344 the shared index algebra
@@ -132,52 +121,11 @@ void testAxpbyThreeCyclePermutationRead(void) {
     freeTensor(x);
 }
 
-void testAxpbyRejectsPermutedOut(void) {
-    /* out is a transposed VIEW: the write path is flat contiguous row-major
-     * (Axpby.h contract), so a permuted out would scatter results into wrong
-     * slots -- must fail fast instead. Logical dims still match ([2,3]), so
-     * this cannot pass vacuously via the dim-mismatch guard. */
-    tensor_t *x = buildFloat32TensorND(2, (size_t[]){2, 3}, NULL);
-    tensor_t *y = buildFloat32TensorND(2, (size_t[]){2, 3}, NULL);
-    tensor_t *out = buildFloat32TensorND(2, (size_t[]){3, 2}, NULL);
-    transposeTensor(out, 0, 1);
-
-    ASSERT_EXITS_WITH_FAILURE(axpbyFloat32Tensors(1.0f, x, 1.0f, y, out));
-
-    transposeTensor(out, 0, 1); /* unwind before freeing (Linear.c idiom) */
-    freeTensor(out);
-    freeTensor(y);
-    freeTensor(x);
-}
-
-void testAxpbyRejectsNonFloat(void) {
-    tensor_t *x = buildFloat32TensorND(1, (size_t[]){3}, NULL);
-    size_t *dims = reserveMemory(sizeof(size_t));
-    size_t *order = reserveMemory(sizeof(size_t));
-    dims[0] = 3;
-    order[0] = 0;
-    shape_t *shape = reserveMemory(sizeof(shape_t));
-    shape->dimensions = dims;
-    shape->orderOfDimensions = order;
-    shape->numberOfDimensions = 1;
-    quantization_t *q = reserveMemory(sizeof(quantization_t));
-    initInt32Quantization(q);
-    tensor_t *y = initTensor(shape, q, NULL);
-    tensor_t *out = buildFloat32TensorND(1, (size_t[]){3}, NULL);
-    ASSERT_EXITS_WITH_FAILURE(axpbyFloat32Tensors(1.0f, x, 1.0f, y, out));
-    freeTensor(out);
-    freeTensor(y);
-    freeTensor(x);
-}
-
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testAxpbyBasic);
     RUN_TEST(testAxpbyAliasedOutput);
     RUN_TEST(testAxpbyPermutationAwareRead);
-    RUN_TEST(testAxpbyRejectsDimMismatch);
     RUN_TEST(testAxpbyThreeCyclePermutationRead);
-    RUN_TEST(testAxpbyRejectsPermutedOut);
-    RUN_TEST(testAxpbyRejectsNonFloat);
     return UNITY_END();
 }

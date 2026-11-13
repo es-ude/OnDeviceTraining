@@ -2591,6 +2591,205 @@ void testConv1dGroupedFoldLargeBiasLowersFInsteadOfAborting(void) {
     }
 }
 
+/* ---- linq fold T6: groups that do not line up with a weight row ----------
+ * kCuFold* (golden_conv1d_grouped.h) were recorded from the cursor loop
+ * before the segment walk replaced it; the walk must reproduce them, the SR
+ * stream included. Non-dyadic group scales make the combines inexact, so a
+ * misplaced or extra SR draw moves output codes, not just the stream. */
+#define CU_K 5
+#define CU_B 2
+#define CU_MAX_X (CU_B * 6 * 10)
+#define CU_MAX_W 60
+#define CU_MAX_OUTC 4
+#define CU_MAX_Y (CU_B * CU_MAX_OUTC * 10)
+#define CU_MAX_GROUPS 20
+
+typedef struct cuCase {
+    size_t cin, convGroups, cout, len, stride, dilation;
+    paddingType_t padType;
+    size_t padding, groupSize, outLen;
+} cuCase_t;
+
+typedef struct cuOut {
+    int32_t y[CU_MAX_Y];
+    odtScale_t scale;
+    uint8_t bits;
+    int32_t eMax; /* the largest group scale exponent, for the fold stamp */
+} cuOut_t;
+
+static size_t cuWeights(const cuCase_t *c) {
+    return c->cout * (c->cin / c->convGroups) * CU_K;
+}
+
+static size_t cuOutN(const cuCase_t *c) {
+    return CU_B * c->cout * c->outLen;
+}
+
+static odtScale_t cuInScale(void) {
+    return odtScaleFromFloat(0.037f, ODT_SCALE_NEAREST);
+}
+
+static void cuRun(const cuCase_t *c, uint32_t seed, roundingMode_t rm, rngStream_t *rs,
+                  cuOut_t *out) {
+    uint32_t s = seed;
+    const size_t xN = CU_B * c->cin * c->len, wN = cuWeights(c);
+    const size_t numGroups = wN / c->groupSize;
+    TEST_ASSERT_EQUAL_size_t(wN, numGroups * c->groupSize);
+    TEST_ASSERT_TRUE(xN <= CU_MAX_X && wN <= CU_MAX_W && c->cout <= CU_MAX_OUTC);
+    TEST_ASSERT_TRUE(numGroups <= CU_MAX_GROUPS && cuOutN(c) <= CU_MAX_Y);
+    int32_t x[CU_MAX_X], w[CU_MAX_W], bias[CU_MAX_OUTC];
+    for (size_t i = 0; i < xN; i++) {
+        x[i] = cgGoldCode(&s, 127);
+    }
+    for (size_t i = 0; i < wN; i++) {
+        w[i] = cgGoldCode(&s, 127);
+    }
+    for (size_t i = 0; i < c->cout; i++) {
+        bias[i] = cgGoldCode(&s, 900);
+    }
+    odtScale_t scales[CU_MAX_GROUPS];
+    out->eMax = INT32_MIN;
+    for (size_t g = 0; g < numGroups; g++) {
+        float v = 0.0113f + 0.0037f * (float)((g * 7) % numGroups);
+        scales[g] = odtScaleFromFloat(v, ODT_SCALE_NEAREST);
+        out->eMax = scales[g].e > out->eMax ? scales[g].e : out->eMax;
+    }
+    symQConfig_t groups = {.scales = scales,
+                           .numGroups = numGroups,
+                           .groupSize = c->groupSize,
+                           .qBits = 8,
+                           .roundingMode = rm};
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&groups);
+    size_t xDims[] = {CU_B, c->cin, c->len}, wDims[] = {c->cout, c->cin / c->convGroups, CU_K};
+    size_t yDims[] = {CU_B, c->cout, c->outLen}, bDims[] = {c->cout};
+    size_t order[] = {0, 1, 2};
+    shape_t xS, wS, yS, bS;
+    setShape(&xS, xDims, 3, order);
+    setShape(&wS, wDims, 3, order);
+    setShape(&yS, yDims, 3, order);
+    setShape(&bS, bDims, 1, order);
+    symInt32QConfig_t xQC, wQC, yQC, bQC;
+    initSymInt32QConfigWithQMaxBits(rm, &xQC, 8);
+    initSymInt32QConfigWithQMaxBits(rm, &wQC, 8);
+    initSymInt32QConfigWithQMaxBits(rm, &yQC, UNSTAMPED_WIDTH);
+    initSymInt32QConfigWithQMaxBits(rm, &bQC, 12);
+    xQC.scale = cuInScale();
+    bQC.scale = odtScaleFromFloat(0.3f, ODT_SCALE_NEAREST);
+    quantization_t xQ, wQ, yQ, bQ;
+    initSymInt32Quantization(&xQC, &xQ);
+    initSymInt32Quantization(&wQC, &wQ);
+    initSymInt32Quantization(&yQC, &yQ);
+    initSymInt32Quantization(&bQC, &bQ);
+    tensor_t xT, wT, yT, bT;
+    setTensorValues(&xT, (uint8_t *)x, &xS, &xQ, NULL);
+    setTensorValues(&wT, (uint8_t *)w, &wS, &wQ, NULL);
+    setTensorValues(&yT, (uint8_t *)out->y, &yS, &yQ, NULL);
+    setTensorValues(&bT, (uint8_t *)bias, &bS, &bQ, NULL);
+    kernel_t kernel;
+    if (c->padType == SAME) {
+        initKernel(&kernel, CU_K, SAME, c->dilation, c->stride);
+    } else {
+        initKernelExplicit(&kernel, CU_K, c->padding, c->dilation, c->stride);
+    }
+    conv1dKernelSymInt32Grouped(&xT, &wT, &bT, &kernel, c->convGroups, &yT, &groupedWeight, rs);
+    out->scale = odtScaleLoad(&yQC.scale);
+    out->bits = yQC.qMaxBits;
+}
+
+/* The fold path ran, not the legacy float fallback: the stamp is
+ * {inScale.m, inScale.e + eMax + 15 - F} with F >= 1. */
+static void cuAssertFoldPath(const cuOut_t *out) {
+    const odtScale_t in = cuInScale();
+    const int32_t frac = in.e + out->eMax + 15 - out->scale.e;
+    TEST_ASSERT_EQUAL_UINT16(in.m, out->scale.m);
+    TEST_ASSERT_TRUE(frac >= 1 && frac <= 15);
+}
+
+static const cuCase_t kCuCases[4] = {
+    /* straddle, SAME: row 10, G 4 crosses the ic and oc rows; stride 2 */
+    {2, 1, 4, 9, 2, 1, SAME, 0, 4, 5},
+    /* short-segment edge: row 10, G 3, EXPLICIT 3 */
+    {2, 1, 3, 8, 1, 1, EXPLICIT, 3, 3, 10},
+    /* group size 1: one combine per valid tap */
+    {2, 1, 2, 10, 2, 2, EXPLICIT, 4, 1, 5},
+    /* conv groups 2: row 15, G 12 (G / K 2, G % K 2); dilation 2 */
+    {6, 2, 4, 8, 1, 2, EXPLICIT, 2, 12, 4},
+};
+
+static void cuAssertGold(size_t ci) {
+    const cuCase_t *c = &kCuCases[ci];
+    static const int32_t *const ha[4] = {kCuFoldHa0, kCuFoldHa1, kCuFoldHa2, kCuFoldHa3};
+    static const int32_t *const sr[4] = {kCuFoldSr0, kCuFoldSr1, kCuFoldSr2, kCuFoldSr3};
+    const uint32_t seed = 0xC6D00000u + (uint32_t)ci;
+    const size_t n = cuOutN(c);
+    cuOut_t out;
+    cuRun(c, seed, HALF_AWAY, NULL, &out);
+    cuAssertFoldPath(&out);
+    GOLD_I32(ha[ci], out.y, n);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)kCuFoldAccM[ci], out.scale.m);
+    TEST_ASSERT_EQUAL_INT16((int16_t)kCuFoldAccE[ci], out.scale.e);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)kCuFoldBits[ci], out.bits);
+
+    rngStream_t rs = rngOpen(rngKeyFromSeed(seed));
+    cuRun(c, seed, SR_HALF_AWAY, &rs, &out);
+    cuAssertFoldPath(&out);
+    GOLD_I32(sr[ci], out.y, n);
+    GOLD_U32_SCALAR(kCuFoldSrState[ci], rs.state);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)kCuFoldAccM[ci], out.scale.m);
+    TEST_ASSERT_EQUAL_INT16((int16_t)kCuFoldAccE[ci], out.scale.e);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)kCuFoldBits[ci], out.bits);
+}
+
+/* Brute force over (row, group): window outPos has a valid tap, yet some
+ * group piece of a row, shorter than K, has none -- a piece the walk must
+ * skip without a combine (and without an SR draw). EXPLICIT padding only. */
+static bool cuWindowSkipsAShortPiece(const cuCase_t *c, size_t outPos) {
+    const size_t rowLen = (c->cin / c->convGroups) * CU_K, g = c->groupSize;
+    bool anyValid = false, skips = false;
+    for (size_t oc = 0; oc < c->cout; oc++) {
+        const size_t rowStart = oc * rowLen, rowEnd = rowStart + rowLen;
+        for (size_t grp = rowStart / g; grp * g < rowEnd; grp++) {
+            const size_t lo = grp * g > rowStart ? grp * g : rowStart;
+            const size_t hi = (grp + 1) * g < rowEnd ? (grp + 1) * g : rowEnd;
+            size_t valid = 0;
+            for (size_t i = lo; i < hi; i++) {
+                const long pos =
+                    (long)(outPos * c->stride + ((i - rowStart) % CU_K) * c->dilation) -
+                    (long)c->padding;
+                valid += pos >= 0 && pos < (long)c->len;
+            }
+            anyValid = anyValid || valid > 0;
+            skips = skips || (valid == 0 && hi - lo < CU_K);
+        }
+    }
+    return anyValid && skips;
+}
+
+void testConv1dGroupedFoldUnalignedStraddleSame(void) {
+    cuAssertGold(0);
+}
+
+/* Review Focus 1: in the first window only taps 3..4 are valid, so row 0's
+ * 3-tap piece (ch 0, taps 0..2) gets none; in the last window only taps 0..1
+ * are, so row 0's 1-tap piece (ch 1, tap 4) gets none. */
+void testConv1dGroupedFoldUnalignedShortSegmentEdge(void) {
+    const cuCase_t *c = &kCuCases[1];
+    TEST_ASSERT_EQUAL(EXPLICIT, c->padType);
+    TEST_ASSERT_TRUE(cuWindowSkipsAShortPiece(c, 0));
+    TEST_ASSERT_TRUE(cuWindowSkipsAShortPiece(c, c->outLen - 1));
+    cuAssertGold(1);
+}
+
+/* Review Focus 3: G 1 < K, so G / K == 0 and every step is a carry-only one. */
+void testConv1dGroupedFoldUnalignedGroupSize1(void) {
+    cuAssertGold(2);
+}
+
+/* Review Focus 4: the row base is per conv group. */
+void testConv1dGroupedFoldUnalignedConvGroups2(void) {
+    cuAssertGold(3);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConv1dKernelSymRejectsFloatInput);
@@ -2674,5 +2873,9 @@ int main(void) {
     RUN_TEST(testConv1dGroupedFoldEmptyWindowCombinesNothing);
     RUN_TEST(testConv1dGroupedFoldSrIsUnbiased);
     RUN_TEST(testConv1dGroupedFoldLargeBiasLowersFInsteadOfAborting);
+    RUN_TEST(testConv1dGroupedFoldUnalignedStraddleSame);
+    RUN_TEST(testConv1dGroupedFoldUnalignedShortSegmentEdge);
+    RUN_TEST(testConv1dGroupedFoldUnalignedGroupSize1);
+    RUN_TEST(testConv1dGroupedFoldUnalignedConvGroups2);
     return UNITY_END();
 }

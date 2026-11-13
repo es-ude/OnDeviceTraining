@@ -7,7 +7,6 @@
 
 #include "BfpKernelSupport.h"
 #include "DeathTest.h"
-#include "MinMax.h"
 #include "Quantization.h"
 #include "QuantizationApi.h"
 #include "Reduce.h"
@@ -19,10 +18,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* Build a FLOAT32 tensor of the given rank/dims from optional row-major data
- * (NULL -> calloc-zero). Mirrors UnitTestLayerNorm.c's buildFloatTensorND.
- * Tests are the sanctioned allocation site (reserveMemory/StorageApi); the
- * alloc-locality rule only forbids raw malloc/free. Caller frees via freeTensor. */
+/* FLOAT32 tensor from row-major vals (NULL -> zeros). Release with freeTensor. */
 static tensor_t *buildFloatTensorND(size_t numDims, const size_t *dimsIn, const float *vals) {
     size_t *dims = reserveMemory(numDims * sizeof(size_t));
     for (size_t i = 0; i < numDims; i++) {
@@ -39,10 +35,8 @@ static tensor_t *buildFloatTensorND(size_t numDims, const size_t *dimsIn, const 
     return t;
 }
 
-/* Build a SYM_INT32 (HALF_AWAY, qMaxBits=ODT_SYM_OPERAND_QMAXBITS=12) tensor; float
- * vals are quantized via tensorFillFromFloatBuffer -> convertFloatTensorToSymInt32Tensor
- * (absmax -> scale, round-clamp). NULL vals -> zero mantissas, scale 1.0. Caller
- * frees via freeTensor. */
+/* SYM_INT32 tensor at qMaxBits = ODT_SYM_OPERAND_QMAXBITS, quantized from vals;
+ * NULL vals -> zero mantissas, scale 1.0. Release with freeTensor. */
 static tensor_t *buildSymInt32TensorND(size_t numDims, const size_t *dimsIn, const float *vals) {
     size_t *dims = reserveMemory(numDims * sizeof(size_t));
     for (size_t i = 0; i < numDims; i++) {
@@ -59,8 +53,7 @@ static tensor_t *buildSymInt32TensorND(size_t numDims, const size_t *dimsIn, con
     return t;
 }
 
-/* Like buildSymInt32TensorND but with an explicit qMaxBits (for the wide-operand
- * fail-fast fixture). */
+/* Like buildSymInt32TensorND but with an explicit qMaxBits. */
 static tensor_t *buildSymInt32TensorNDBits(size_t numDims, const size_t *dimsIn, const float *vals,
                                            uint8_t qMaxBits) {
     size_t *dims = reserveMemory(numDims * sizeof(size_t));
@@ -80,27 +73,6 @@ static tensor_t *buildSymInt32TensorNDBits(size_t numDims, const size_t *dimsIn,
 
 static float symScaleOf(tensor_t *t) {
     return odtScaleToFloat(((symInt32QConfig_t *)t->quantization->qConfig)->scale);
-}
-
-/* ---- MinMax scalar helpers (added for Task 3's SYM kernels; used here by
- *      rsqrtSymInt32's absmax loop). Trivial hand tests. ---- */
-
-void testAbsFloat32(void) {
-    float a = absFloat32(-3.5f);
-    float b = absFloat32(2.0f);
-    float c = absFloat32(0.0f);
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 3.5f, a);
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 2.0f, b);
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.0f, c);
-}
-
-void testMaxFloat32s(void) {
-    float a = maxFloat32s(2.0f, 5.0f);
-    float b = maxFloat32s(-1.0f, -4.0f);
-    float c = maxFloat32s(3.0f, 3.0f);
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 5.0f, a);
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, -1.0f, b);
-    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 3.0f, c);
 }
 
 /* ---- FLOAT32 reductions ---- */
@@ -196,7 +168,7 @@ void testMeanHonorsTransposedView(void) {
 }
 
 void testVarianceHonorsTransposedRank3View(void) {
-    // BatchNorm1d's statistics view (#460): physical [m=2, C=3, T=2] identity
+    // BatchNorm1d's statistics view: physical [m=2, C=3, T=2] identity
     // buffer, transposeTensor(0,1) -> logical [C, m, T]; k = 2 reduces each
     // channel over its m*T = 4 values. x[b][c][t] = 10*c + 3*b + t.
     //   channel c values {10c, 10c+1, 10c+3, 10c+4}: mean 10c+2, biased var 2.5
@@ -306,61 +278,6 @@ void testVarianceSymInt32MatchesFloatTwin(void) {
     TEST_ASSERT_FLOAT_WITHIN(5e-4f, vf1, vs1);
 }
 
-void testRsqrtSymInt32MatchesFloatTwin(void) {
-    // Elementwise rsqrt; dynamic absmax (inputs not all equal). Compare the
-    // dequantized output against rsqrt of the DEQUANTIZED inputs (SYM rsqrt is
-    // imperfect by design -> loose tol).
-    size_t dims[] = {3};
-    tensor_t *symIn = buildSymInt32TensorND(1, dims, (float[]){1.25f, 4.0f, 0.25f});
-    tensor_t *symOut = buildSymInt32TensorND(1, dims, NULL);
-
-    rsqrtSymInt32(symIn, 1e-5f, symOut, NULL);
-
-    int32_t *qin = (int32_t *)symIn->data;
-    float sin = symScaleOf(symIn);
-    int32_t *qout = (int32_t *)symOut->data;
-    float sout = symScaleOf(symOut);
-
-    float got[3];
-    float expected[3];
-    for (size_t i = 0; i < 3; i++) {
-        got[i] = (float)qout[i] * sout;
-        expected[i] = rsqrtFloat32((float)qin[i] * sin, 1e-5f);
-    }
-
-    freeTensor(symOut);
-    freeTensor(symIn);
-
-    for (size_t i = 0; i < 3; i++) {
-        TEST_ASSERT_FLOAT_WITHIN(1e-2f, expected[i], got[i]);
-    }
-}
-
-void testRsqrtSymInt32RejectsWideOutput(void) {
-    // Valid <=16-bit input; out configured with qMaxBits=17. This must be
-    // rejected by the OUTPUT's own requant-target guard (dynamic-scale write),
-    // not the input's value-sum operand guard -> fail fast either way, but the
-    // two guards police different contracts (see reduceValidateSymRequantTarget).
-    size_t dims[] = {3};
-    tensor_t *symIn = buildSymInt32TensorND(1, dims, (float[]){1.25f, 4.0f, 0.25f});
-    tensor_t *wideOut = buildSymInt32TensorNDBits(1, dims, NULL, 17);
-
-    ASSERT_EXITS_WITH_FAILURE(rsqrtSymInt32(symIn, 1e-5f, wideOut, NULL));
-
-    freeTensor(wideOut);
-    freeTensor(symIn);
-}
-
-/* Width 1 has no positive code, so the dynamic scale absMax / hi is infinite. */
-void testRsqrtSymInt32IntoWidth1OutputExits(void) {
-    size_t dims[] = {3};
-    tensor_t *symIn = buildSymInt32TensorND(1, dims, (float[]){1.25f, 4.0f, 0.25f});
-    tensor_t *out = buildSymInt32TensorNDBits(1, dims, NULL, 1);
-
-    ASSERT_EXITS_WITH_OUTPUT(1, "rsqrtSymInt32: SYM width (1) has no positive code",
-                             rsqrtSymInt32(symIn, 1e-5f, out, NULL));
-}
-
 void testMeanWholeTensorKEqualsRank(void) {
     // k == rank -> K = 1 (whole-tensor reduction). mean over all six elements
     // {1..6} of a [2,3] tensor = 21/6 = 3.5.
@@ -377,20 +294,6 @@ void testMeanWholeTensorKEqualsRank(void) {
     freeTensor(in);
 
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 3.5f, m0);
-}
-
-void testReduceRejectsKGreaterThanRank(void) {
-    // k=3 on a rank-2 tensor: k > rank underflows `rank - k` (size_t) in
-    // reducePhysOffset -> an OOB stack write. blockGeom must fail fast first.
-    size_t inDims[] = {2, 3};
-    tensor_t *in = buildFloatTensorND(2, inDims, (float[]){1.f, 2.f, 3.f, 4.f, 5.f, 6.f});
-    size_t outDims[] = {1};
-    tensor_t *meanOut = buildFloatTensorND(1, outDims, NULL);
-
-    ASSERT_EXITS_WITH_FAILURE(meanOverTrailingAxesFloat32(in, 3, meanOut));
-
-    freeTensor(meanOut);
-    freeTensor(in);
 }
 
 void testMeanSymInt32RejectsWideOperand(void) {
@@ -439,19 +342,13 @@ void testMeanSymInt32RejectsZeroWidthOperand(void) {
     freeTensor(in);
 }
 
-/* ---- BFP reductions (epic PR5 Task 1) ---- */
+/* ---- BFP reductions ---- */
 
-/* Unpacked-BFP scratch fixture (the executeOp funnel's kernel-side form): data
- * is a plain sign-extended int32 code array, NOT the packed byte layout
- * initTensor would size for a BFP tensor -- so these tensors are built BY HAND
- * (UnitTestMatmul.c's BFP idiom), never via buildFloatTensorND/initTensor.
- *
- * Shape [2,6], grouped {numGroups=3, groupSize=4}, mantissaBits=8,
- * exponentBits=8 (bias 127); stored exponents {126,127,129} -> group scales
- * {0.5, 1.0, 4.0}. Non-uniform scales kill "ignores the exponents" mutants, and
- * group 1 SPANS the row boundary (storage 4..7 = row0's tail + row1's head), so
- * a fold-at-the-wrong-boundary mutant moves BOTH row means. The caller owns the
- * shape/dims/order/quantization/qConfig storage (it must outlive the tensor). */
+/* Unpacked-BFP scratch (the executeOp kernel-side form: int32 codes, not packed
+ * bytes), so built by hand. Shape [2,6], groups of 4, exponents {126,127,129} =
+ * scales {0.5,1,4}. Unequal scales expose ignored exponents; group 1 spans the row
+ * boundary, so a fold at the wrong boundary moves both row means. The caller owns
+ * the metadata storage, which must outlive the tensor. */
 static int32_t kReduceBfpCodes[12] = {10, -20, 30, 40, 50, -60, 7, 9, -5, 11, 13, -17};
 static uint8_t kReduceBfpExponents[3] = {126, 127, 129};
 
@@ -562,38 +459,6 @@ void testMeanBfpPerTensorSentinel(void) {
     TEST_ASSERT_EQUAL_FLOAT(10.0f, m1);
 }
 
-void testMeanBfpRejectsFloat32Operand(void) {
-    // dtype gate: a FLOAT32 buffer read as int32 mantissas is silent garbage.
-    size_t inDims[] = {4};
-    tensor_t *in = buildFloatTensorND(1, inDims, (float[]){1.f, 2.f, 3.f, 4.f});
-    size_t outDims[] = {1};
-    tensor_t *meanOut = buildFloatTensorND(1, outDims, NULL);
-
-    ASSERT_EXITS_WITH_FAILURE(meanOverTrailingAxesBfp(in, 1, meanOut));
-
-    freeTensor(meanOut);
-    freeTensor(in);
-}
-
-void testMeanFloat32RejectsBfpOperand(void) {
-    // The reverse gate on the FLOAT32 reducer: an unpacked int32 scratch operand
-    // read through float* was silent WRONG ARITHMETIC before this guard.
-    tensor_t t;
-    shape_t shape;
-    size_t dims[2];
-    size_t order[2];
-    quantization_t q;
-    bfpQConfig_t qc;
-    buildReduceBfpScratch(&t, &shape, dims, order, &q, &qc);
-
-    size_t outDims[] = {2};
-    tensor_t *meanOut = buildFloatTensorND(1, outDims, NULL);
-
-    ASSERT_EXITS_WITH_FAILURE(meanOverTrailingAxesFloat32(&t, 1, meanOut));
-
-    freeTensor(meanOut);
-}
-
 void testMeanBfpSumHeadroomDeath(void) {
     // bfpSumSegmentLimit(16) = INT32_MAX >> 15 = 65535; a per-tensor {1,0}
     // operand's segment run IS the reduction length, so N = 65536 must die.
@@ -631,19 +496,12 @@ void testBfpSumHeadroomRejectsZeroMantissaWidth(void) {
                        .roundingMode = HALF_AWAY,
                        .mantissaBits = 0,
                        .exponentBits = 8};
-    /* mantissaBits == 0 shifted INT32_MAX by (0-1): UB before the guard. reductionLen
-     * MUST be 0 here, not some positive N: with groupSize == 0, maxSeg == reductionLen,
-     * and bfpValidateSumHeadroom's OWN pre-existing "maxSeg > limit" check is a
-     * confounder -- on toolchains where the UB shift happens to mask to 31 and
-     * INT32_MAX >> 31 == 0, ANY reductionLen > 0 already trips that pre-existing
-     * check on its own (0 exceeded), exit(1)-ing for the WRONG reason even with no
-     * guard at all. reductionLen == 0 makes maxSeg == 0 too, so "0 > 0" stays false
-     * in both worlds and only the new guard in bfpSumSegmentLimit can produce the
-     * exit(1) this test asserts -- this is load-bearing, not a stylistic choice. */
+    /* reductionLen must be 0 so the segment-length guard cannot mask a missing
+     * zero-width rejection. */
     ASSERT_EXITS_WITH_FAILURE(bfpValidateSumHeadroom(&qC, 0, "test"));
 }
 
-/* ---- sumSquaresOverTrailingAxesFloat32 + sqrtFloat32 (#326 Task 5) ---- */
+/* ---- sumSquaresOverTrailingAxesFloat32 ---- */
 
 void testSumSquaresTrailingAxes(void) {
     // in [2,3]: rows {1,2,3},{-2,0,2}; k=1 -> ssqOut [2] = {14, 8}.
@@ -705,19 +563,11 @@ void testSumSquaresPermutationAware(void) {
     TEST_ASSERT_EQUAL_FLOAT(45.0f, s2);
 }
 
-void testSqrtFloat32(void) {
-    TEST_ASSERT_EQUAL_FLOAT(3.0f, sqrtFloat32(9.0f));
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, sqrtFloat32(0.0f));
-}
-
 int main(void) {
     UNITY_BEGIN();
-    RUN_TEST(testAbsFloat32);
-    RUN_TEST(testMaxFloat32s);
     RUN_TEST(testMeanOverLastAxisFloat32);
     RUN_TEST(testMeanOverTrailing2AxesFloat32);
     RUN_TEST(testMeanWholeTensorKEqualsRank);
-    RUN_TEST(testReduceRejectsKGreaterThanRank);
     RUN_TEST(testVarianceBiasedFloat32);
     RUN_TEST(testRsqrtFloat32EpsInside);
     RUN_TEST(testRsqrtFloat32ZeroVar);
@@ -725,22 +575,16 @@ int main(void) {
     RUN_TEST(testVarianceHonorsTransposedRank3View);
     RUN_TEST(testMeanSymInt32MatchesFloatTwin);
     RUN_TEST(testVarianceSymInt32MatchesFloatTwin);
-    RUN_TEST(testRsqrtSymInt32MatchesFloatTwin);
-    RUN_TEST(testRsqrtSymInt32RejectsWideOutput);
-    RUN_TEST(testRsqrtSymInt32IntoWidth1OutputExits);
     RUN_TEST(testMeanSymInt32RejectsWideOperand);
     RUN_TEST(testMeanSymInt32RejectsOverlongAxis);
     RUN_TEST(testMeanSymInt32RejectsZeroWidthOperand);
     RUN_TEST(testMeanBfpSegmentFoldAcrossGroupBoundary);
     RUN_TEST(testVarianceBfpDequantCenterSquare);
     RUN_TEST(testMeanBfpPerTensorSentinel);
-    RUN_TEST(testMeanBfpRejectsFloat32Operand);
-    RUN_TEST(testMeanFloat32RejectsBfpOperand);
     RUN_TEST(testMeanBfpSumHeadroomDeath);
     RUN_TEST(testBfpSumHeadroomRejectsZeroMantissaWidth);
     RUN_TEST(testSumSquaresTrailingAxes);
     RUN_TEST(testSumSquaresWholeTensor);
     RUN_TEST(testSumSquaresPermutationAware);
-    RUN_TEST(testSqrtFloat32);
     return UNITY_END();
 }

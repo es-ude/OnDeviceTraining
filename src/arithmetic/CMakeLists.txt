@@ -135,7 +135,7 @@ target_link_libraries(MinMax PRIVATE
 
 add_library(Reduce Reduce.c)
 target_include_directories(Reduce PUBLIC include)
-target_link_libraries(Reduce PRIVATE m Common DyadicScale Div Sub Add Mul Square Arithmetic Tensor DTypes Quantization Rounding MinMax)
+target_link_libraries(Reduce PRIVATE m Common DyadicScale Div Sub Add Mul Square Arithmetic Tensor DTypes Quantization Rounding)
 
 add_library(RowBroadcast RowBroadcast.c)
 target_include_directories(RowBroadcast PUBLIC include)

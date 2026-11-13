@@ -43,9 +43,6 @@ void reluForwardSymInt32(tensor_t *input, tensor_t *output) {
 }
 
 void reluForwardBfp(tensor_t *input, tensor_t *output) {
-    /* Deliberately redundant with gteBfpZero's own gate: this one names the
-     * LAYER in the error, which is what a model author can act on. Both are
-     * pure predicates with no side effects, so the duplicate costs nothing. */
     bfpRequireSameGeometry(input->quantization->qConfig, calcNumberOfElementsByTensor(input),
                            output->quantization->qConfig, calcNumberOfElementsByTensor(output),
                            "ReLU forward BFP");

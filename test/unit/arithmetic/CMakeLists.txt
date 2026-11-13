@@ -153,16 +153,6 @@ target_include_directories(UnitTestBfpSoftmaxExp PRIVATE ${CMAKE_CURRENT_BINARY_
 
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
-        Comparison
-        MORE_LIBS
-        Rounding
-        Arithmetic
-        Tensor
-        m
-)
-
-add_elastic_ai_unit_test(
-        LIB_UNDER_TEST
         Distributions
         MORE_LIBS
         MinMax

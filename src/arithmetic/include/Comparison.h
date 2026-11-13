@@ -3,19 +3,17 @@
 #include "Tensor.h"
 #include <stdint.h>
 
-void gteInt32Value(tensor_t *a, int32_t b, int32_t altNumber, tensor_t *result);
-void gteInt32Tensor(tensor_t *a, tensor_t *b, int32_t altNumber, tensor_t *result);
-
+/*! result[i] = a[i] < b ? altNumber : a[i] (float tensors). */
 void gteFloatValue(tensor_t *a, float b, float altNumber, tensor_t *result);
-void gteFloatTensor(tensor_t *a, tensor_t *b, float altNumber, tensor_t *result);
 
+/*! result[i] = a[i] < 0 ? altNumber : a[i] on SYM_INT32 codes; the caller copies the scale. */
 void gteSymInt32Zero(tensor_t *a, int32_t altNumber, tensor_t *result);
 
-/* BFP epic PR4 (R-P2): packed-BFP ReLU — clamp negative codes to 0, copy the
- * group exponents verbatim. No altNumber parameter: any nonzero alternative
- * would be a value-domain constant with a different code per group. Input and
- * result must hold the same number of elements and share {numGroups,
- * groupSize, mantissaBits, exponentBits}; both are enforced fail-fast. */
+/*!
+ * Packed-BFP ReLU: negative codes become 0, the group exponents are copied. a and result
+ * must share element count and {numGroups, groupSize, mantissaBits, exponentBits}. There
+ * is no altNumber: a nonzero value-domain constant would need a different code per group.
+ */
 void gteBfpZero(tensor_t *a, tensor_t *result);
 
 #endif // ENV5_RUNTIME_COMPARISONS_H

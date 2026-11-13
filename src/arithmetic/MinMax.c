@@ -15,11 +15,7 @@ float maxFloat32s(float a, float b) {
 
 float findAbsMaxFloat(uint8_t *bytes, size_t numberOfElements) {
     float *values = (float *)bytes;
-    /* #420 G4: the absmax of nothing is 0.f -- a DEFINED result, not a trap.
-     * Seeding the running max from values[0] first would read out of bounds
-     * on an empty buffer (#160 family), and 0.f is exactly what the
-     * downstream consumer already means by "no data": deriveBfpStoredExponent's
-     * absMax == 0 branch returns the zero-state exponent (bias, scale 1.0). */
+    /* Empty tensors exist; 0.f is what the BFP exponent derivation reads as "no data". */
     if (numberOfElements == 0) {
         return 0.f;
     }
@@ -52,32 +48,6 @@ float findMinFloat(uint8_t *bytes, size_t numberOfElements) {
     for (size_t i = 1; i < numberOfElements; i++) {
         size_t byteIndex = i * bytesPerElement;
         float current = readBytesAsFloat(&bytes[byteIndex]);
-        if (current < min) {
-            min = current;
-        }
-    }
-    return min;
-}
-
-int32_t findMaxInt32(uint8_t *bytes, size_t numberOfElements) {
-    size_t bytesPerElement = sizeof(int32_t);
-    int32_t max = readBytesAsInt32(&bytes[0]);
-    for (size_t i = 1; i < numberOfElements; i++) {
-        size_t byteIndex = i * bytesPerElement;
-        int32_t current = readBytesAsInt32(&bytes[byteIndex]);
-        if (current > max) {
-            max = current;
-        }
-    }
-    return max;
-}
-
-int32_t findMinInt32(uint8_t *bytes, size_t numberOfElements) {
-    size_t bytesPerElement = sizeof(int32_t);
-    int32_t min = readBytesAsInt32(&bytes[0]);
-    for (size_t i = 1; i < numberOfElements; i++) {
-        size_t byteIndex = i * bytesPerElement;
-        int32_t current = readBytesAsInt32(&bytes[byteIndex]);
         if (current < min) {
             min = current;
         }

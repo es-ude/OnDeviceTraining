@@ -608,7 +608,18 @@ conv1dSymGroupedFoldLoops(const convSymView_t *v, const symQConfig_t *weightGrou
                           const symGroupFold_t *fold, roundingMode_t roundingMode, rngStream_t *rs,
                           const symAccumSite_t *partialSite, const symAccumSite_t *accSite) {
     const size_t rowLength = v->inChPerGroup * v->kernelSize;
-    if (rowLength != 0 && weightGroups->groupSize % rowLength == 0) {
+    if (rowLength == 0) {
+        /* no tap reaches any output: each output is its bias seed */
+        for (size_t b = 0; b < v->batch; b++) {
+            for (size_t oc = 0; oc < v->outChannels; oc++) {
+                for (size_t outPos = 0; outPos < v->outputLength; outPos++) {
+                    v->yArr[(b * v->outChannels + oc) * v->outputLength + outPos] = v->seed[oc];
+                }
+            }
+        }
+        return;
+    }
+    if (weightGroups->groupSize % rowLength == 0) {
         conv1dSymGroupedFoldAligned(v, weightGroups, fold, roundingMode, rs, partialSite, accSite);
     } else {
         conv1dSymGroupedFoldSegments(v, weightGroups, fold, roundingMode, rs, partialSite, accSite);

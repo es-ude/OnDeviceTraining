@@ -468,8 +468,8 @@ SYM_ACCUM_NOINLINE void convTSymGroupedScatterChecked(CONVT_GROUPED_PARAMS) {
  * Channel-aligned groups (groupSize a multiple of the outChPerGroup*kernelSize
  * block one input channel's weights fill) fix the group per input channel:
  * one fold per (ic, inPos), then convTSymScatter's loop shape with no cursor.
- * Otherwise the k-runs are split where the cursor's group ends, and xvG is
- * refolded whenever the cursor moves or a new inPos starts. */
+ * Otherwise convTSymGroupedFoldSegments folds xv once per group piece of the
+ * block that has a valid tap at this inPos. */
 SYM_ACCUM_ALWAYS_INLINE void
 convTSymGroupedFoldAligned(const convTSymView_t *v, const symQConfig_t *weightGroups,
                            const symGroupFold_t *fold, roundingMode_t roundingMode, rngStream_t *rs,
@@ -516,17 +516,22 @@ convTSymGroupedFoldAligned(const convTSymView_t *v, const symQConfig_t *weightGr
     }
 }
 
-SYM_ACCUM_ALWAYS_INLINE void convTSymGroupedFoldCursor(const convTSymView_t *v,
-                                                       const symQConfig_t *weightGroups,
-                                                       const symGroupFold_t *fold,
-                                                       roundingMode_t roundingMode, rngStream_t *rs,
-                                                       const symAccumSite_t *site) {
+/* Groups that do not line up with an input channel's block: the block's group
+ * pieces sit at fixed (ocOffset, tap) positions, so every inPos walks them in
+ * ascending order -- the order the legacy cursor met the groups -- and folds
+ * xv once per piece that has a valid tap there; all MACs of the piece reuse
+ * that xvG. An empty piece folds nothing and takes no SR draw. The block's
+ * first piece costs the only divide. */
+SYM_ACCUM_ALWAYS_INLINE void
+convTSymGroupedFoldSegments(const convTSymView_t *v, const symQConfig_t *weightGroups,
+                            const symGroupFold_t *fold, roundingMode_t roundingMode,
+                            rngStream_t *rs, const symAccumSite_t *site) {
     CONVT_SYM_VIEW_LOCALS(v);
 
     size_t dilation = kernel->dilation;
-    const size_t groupSize = weightGroups->groupSize;
-    symGroupCursor_t cursor = {0};
-    odtScale_t s = {0};
+    const size_t blockSize = outChPerGroup * kernelSize;
+    const symGroupRowWalk_t walk =
+        symGroupRowWalkInit(weightGroups->groupSize, kernelSize, outChPerGroup);
 
     for (size_t b = 0; b < batch; b++) {
         for (size_t g = 0; g < groups; g++) {
@@ -535,41 +540,50 @@ SYM_ACCUM_ALWAYS_INLINE void convTSymGroupedFoldCursor(const convTSymView_t *v,
 
             for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
                 size_t ic = inLo + icOffset;
+                size_t wBase = ic * blockSize;
+                const symGroupRowPiece_t first = symGroupRowFirstPiece(&walk, wBase);
+
                 for (size_t inPos = 0; inPos < inputLength; inPos++) {
                     int32_t xv = xArr[(b * inChannels + ic) * inputLength + inPos];
                     if (xv == 0) {
+                        continue; /* before the tap range: it costs divides on an M0+ */
+                    }
+                    size_t kValidLo, kValidHi;
+                    convTValidTapRange(inPos, kernel->stride, dilation, padLeft, outputLength,
+                                       kernelSize, &kValidLo, &kValidHi);
+                    if (kValidLo >= kValidHi) {
                         continue;
                     }
-                    size_t kLo, kHi;
-                    convTValidTapRange(inPos, kernel->stride, dilation, padLeft, outputLength,
-                                       kernelSize, &kLo, &kHi);
-                    size_t outFirst = inPos * kernel->stride + kLo * dilation - padLeft;
-                    /* xvG belongs to (this xv, the cursor's group): stale at a new inPos */
-                    bool stale = true;
-                    int32_t xvG = 0;
+                    const size_t yBase = (b * outChannels + outLo) * outputLength +
+                                         inPos * kernel->stride + kValidLo * dilation - padLeft;
+                    symGroupRowPiece_t p = first;
 
-                    for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
-                        size_t oc = outLo + ocOffset;
-                        size_t yIdx = (b * outChannels + oc) * outputLength + outFirst;
-                        size_t wIdx = (ic * outChPerGroup + ocOffset) * kernelSize + kLo;
-                        size_t wEnd = wIdx + (kHi - kLo);
-                        while (wIdx < wEnd) {
-                            if (!symGroupCursorHolds(&cursor, wIdx)) {
-                                symGroupCursorSeek(&cursor, wIdx, groupSize);
-                                s = odtScaleLoad(&weightGroups->scales[cursor.group]);
-                                stale = true;
+                    do {
+                        int32_t xvG = 0;
+                        bool folded = false;
+                        /* a piece ending at tap 0 of chHi takes nothing from it */
+                        const size_t chEnd = p.kHi > 0 ? p.chHi + 1 : p.chHi;
+                        for (size_t ch = p.chLo; ch < chEnd; ch++) {
+                            size_t kLo = ch == p.chLo ? p.kLo : 0;
+                            size_t kHi = ch == p.chHi ? p.kHi : kernelSize;
+                            kLo = kLo > kValidLo ? kLo : kValidLo;
+                            kHi = kHi < kValidHi ? kHi : kValidHi;
+                            if (kLo >= kHi) {
+                                continue;
                             }
-                            if (stale) {
+                            if (!folded) {
+                                const odtScale_t s = odtScaleLoad(&weightGroups->scales[p.group]);
                                 xvG = symMulShiftRound(xv, s.m, symGroupFoldShift(fold, s),
                                                        roundingMode, rs);
-                                stale = false;
+                                folded = true;
                             }
-                            size_t runEnd = cursor.end < wEnd ? cursor.end : wEnd;
-                            for (; wIdx < runEnd; wIdx++, yIdx += dilation) {
+                            size_t yIdx = yBase + ch * outputLength + (kLo - kValidLo) * dilation;
+                            size_t wIdx = wBase + ch * kernelSize + kLo;
+                            for (size_t k = kLo; k < kHi; k++, wIdx++, yIdx += dilation) {
                                 yArr[yIdx] = symMac(yArr[yIdx], xvG, wArr[wIdx], false, site);
                             }
                         }
-                    }
+                    } while (symGroupRowNextPiece(&walk, &p));
                 }
             }
         }
@@ -582,10 +596,13 @@ SYM_ACCUM_NOINLINE void convTSymGroupedFoldScatter(const convTSymView_t *v,
                                                    roundingMode_t roundingMode, rngStream_t *rs,
                                                    const symAccumSite_t *site) {
     const size_t blockSize = v->outChPerGroup * v->kernelSize;
-    if (blockSize != 0 && weightGroups->groupSize % blockSize == 0) {
+    if (blockSize == 0) {
+        return; /* no weight, no product: y keeps the entry's zeros */
+    }
+    if (weightGroups->groupSize % blockSize == 0) {
         convTSymGroupedFoldAligned(v, weightGroups, fold, roundingMode, rs, site);
     } else {
-        convTSymGroupedFoldCursor(v, weightGroups, fold, roundingMode, rs, site);
+        convTSymGroupedFoldSegments(v, weightGroups, fold, roundingMode, rs, site);
     }
 }
 

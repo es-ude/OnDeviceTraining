@@ -2257,7 +2257,7 @@ void testConvTGroupedFoldGoldenHalfAwayChannel(void) {
                      kConvTFoldChannelAccM, kConvTFoldChannelAccE, kConvTFoldChannelBits);
 }
 
-/* groupSize 3 against K = 5: groups straddle the tap rows (cursor path). */
+/* groupSize 3 against K = 5: groups straddle the tap rows (segment walk). */
 void testConvTGroupedFoldGoldenHalfAwayGroupSize3(void) {
     ctFoldAssertGold(kConvTFoldGroup3WScales, (size_t)kConvTFoldGroup3NumGroups,
                      (size_t)kConvTFoldGroup3GroupSize, kConvTFoldGroup3Out, kConvTFoldGroup3AccM,
@@ -2455,7 +2455,7 @@ void testConvTGroupedFoldSrIsUnbiased(void) {
 
 /* The zero rule: an input code of 0 is never folded, so an all-zero gradient
  * draws nothing from the SR stream and leaves an all-zero output -- on the
- * cursor-free channel path and on the cursor path. */
+ * aligned channel path and on the segment walk. */
 void testConvTGroupedFoldZeroGradientDrawsNothing(void) {
     const int32_t zeros[CT_FOLD_X_N] = {0};
     struct {
@@ -2573,7 +2573,7 @@ void testConvTGroupedFoldLargeBiasLowersFInsteadOfAborting(void) {
 
 /* Review I2: conv groups 2 (Cin 4, Cout 6, outChPerGroup 3) on both fold
  * loops -- the per-ic group index over the global ic, the aligned predicate
- * per conv group, and the cursor across conv-group slabs. Python-int golds
+ * per conv group, and the segment walk across conv-group slabs. Python-int golds
  * (convt_grouped_fold_ref with conv_groups). */
 #define CT_CG_CIN 4
 #define CT_CG_COUT 6

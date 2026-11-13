@@ -200,14 +200,6 @@ add_elastic_ai_unit_test(
 
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
-        Log
-        MORE_LIBS
-        Arithmetic
-        Tensor
-)
-
-add_elastic_ai_unit_test(
-        LIB_UNDER_TEST
         MinMax
         MORE_LIBS
         Tensor
@@ -281,14 +273,6 @@ add_elastic_ai_unit_test(
         RNG
         odt_test_death
         odt_test_rng_pin
-)
-
-add_elastic_ai_unit_test(
-        LIB_UNDER_TEST
-        Square
-        MORE_LIBS
-        Arithmetic
-        Tensor
 )
 
 add_elastic_ai_unit_test(

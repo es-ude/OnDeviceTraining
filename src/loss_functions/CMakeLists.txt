@@ -7,7 +7,6 @@ target_link_libraries(CrossEntropy PRIVATE
         ArithmeticType
         Rounding
         ExecuteOp
-        Log
         Common
         CommonLayerLibs
         LayerExec

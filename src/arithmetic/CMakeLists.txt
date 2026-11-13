@@ -1,8 +1,6 @@
 add_library(Add Add.c)
 target_include_directories(Add PUBLIC include)
 target_link_libraries(Add PRIVATE
-        DyadicScale
-        SymAccumGuard
         Tensor
         DTypes
         Arithmetic
@@ -106,15 +104,6 @@ target_link_libraries(Kernel PRIVATE
         Layer
 )
 
-add_library(Log Log.c)
-target_include_directories(Log PUBLIC include)
-target_link_libraries(Log PRIVATE
-        Tensor
-        DTypes
-        Arithmetic
-        Common
-)
-
 add_library(Matmul Matmul.c)
 target_include_directories(Matmul PUBLIC include)
 target_link_libraries(Matmul PRIVATE
@@ -175,24 +164,11 @@ target_link_libraries(Rounding PUBLIC RNG PRIVATE
 
 add_library(Square Square.c)
 target_include_directories(Square PUBLIC include)
-target_link_libraries(Square PRIVATE
-        Tensor
-        DTypes
-        Common
-)
+target_link_libraries(Square PRIVATE Common)
 
 add_library(Sub Sub.c)
 target_include_directories(Sub PUBLIC include)
 target_link_libraries(Sub PRIVATE Common)
-
-add_library(Sum Sum.c)
-target_include_directories(Sum PUBLIC include)
-target_link_libraries(Sum PRIVATE
-        Add
-        Tensor
-        Rounding
-        Common
-)
 
 add_library(SlidingWindow1d SlidingWindow1d.c)
 target_include_directories(SlidingWindow1d PUBLIC include)

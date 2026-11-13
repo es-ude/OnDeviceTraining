@@ -11,7 +11,6 @@
 #include "CrossEntropy.h"
 #include "ExecuteOp.h"
 #include "LayerExec.h"
-#include "Log.h"
 #include "LossFunctionInternal.h"
 #include "TensorConversion.h"
 #include "TensorRows.h"

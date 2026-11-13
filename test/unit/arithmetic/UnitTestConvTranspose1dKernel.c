@@ -2629,6 +2629,220 @@ void testConvTGroupedFoldGoldenConvGroups2Cursor(void) {
                        kConvTFoldCgCursorAccM, kConvTFoldCgCursorAccE, kConvTFoldCgCursorBits);
 }
 
+/* ---- linq fold T7: groups that do not line up with an input channel's block
+ * kCtuFold* (golden_convT1d_scatter.h) were recorded from the cursor scatter
+ * before the segment walk replaced it; the walk must reproduce them, the SR
+ * stream included. Non-dyadic scales make every fold inexact, so an extra or
+ * missing SR draw moves output codes, not just the stream. About one input
+ * code in eight is 0, which must fold nothing. */
+#define CTU_K 5
+#define CTU_B 2
+#define CTU_MAX_X (CTU_B * 4 * 6)
+#define CTU_MAX_W 60
+#define CTU_MAX_OUTC 6
+#define CTU_MAX_Y (CTU_B * CTU_MAX_OUTC * 11)
+#define CTU_MAX_GROUPS 30
+
+typedef struct ctuCase {
+    size_t cin, convGroups, cout, outLen, stride, dilation;
+    paddingType_t padType;
+    size_t padding, groupSize;
+} ctuCase_t;
+
+typedef struct ctuOut {
+    int32_t y[CTU_MAX_Y];
+    odtScale_t scale;
+    uint8_t bits;
+    int32_t eMax; /* the largest group scale exponent, for the fold stamp */
+} ctuOut_t;
+
+static windowGeometry1d_t ctuForwardGeom(const ctuCase_t *c) {
+    kernel_t kernel;
+    if (c->padType == SAME) {
+        initKernel(&kernel, CTU_K, SAME, c->dilation, c->stride);
+    } else {
+        initKernelExplicit(&kernel, CTU_K, c->padding, c->dilation, c->stride);
+    }
+    return windowGeometry1dCalc(c->outLen, &kernel);
+}
+
+static size_t ctuBlock(const ctuCase_t *c) {
+    return (c->cout / c->convGroups) * CTU_K;
+}
+
+static size_t ctuOutN(const ctuCase_t *c) {
+    return CTU_B * c->cout * c->outLen;
+}
+
+static odtScale_t ctuInScale(void) {
+    return odtScaleFromFloat(0.037f, ODT_SCALE_NEAREST);
+}
+
+/* The input codes, drawn first from the case stream s. */
+static void ctuInputCodes(const ctuCase_t *c, uint32_t *s, int32_t *x) {
+    const size_t xN = CTU_B * c->cin * ctuForwardGeom(c).outputLength;
+    TEST_ASSERT_TRUE(xN <= CTU_MAX_X);
+    for (size_t i = 0; i < xN; i++) {
+        x[i] = ctLcg(s) % 8u == 0u ? 0 : ctGoldCode(s, 127);
+    }
+}
+
+static void ctuRun(const ctuCase_t *c, uint32_t seed, roundingMode_t rm, rngStream_t *rs,
+                   ctuOut_t *out) {
+    uint32_t s = seed;
+    /* the adjoint input length is the forward conv's output on outLen */
+    const size_t lin = ctuForwardGeom(c).outputLength;
+    const size_t xN = CTU_B * c->cin * lin, wN = c->cin * ctuBlock(c);
+    const size_t numGroups = wN / c->groupSize;
+    TEST_ASSERT_EQUAL_size_t(wN, numGroups * c->groupSize);
+    TEST_ASSERT_TRUE(c->groupSize % ctuBlock(c) != 0); /* not the aligned path */
+    TEST_ASSERT_TRUE(xN <= CTU_MAX_X && wN <= CTU_MAX_W && c->cout <= CTU_MAX_OUTC);
+    TEST_ASSERT_TRUE(numGroups <= CTU_MAX_GROUPS && ctuOutN(c) <= CTU_MAX_Y);
+    int32_t x[CTU_MAX_X], w[CTU_MAX_W], bias[CTU_MAX_OUTC];
+    ctuInputCodes(c, &s, x);
+    for (size_t i = 0; i < wN; i++) {
+        w[i] = ctGoldCode(&s, 127);
+    }
+    for (size_t i = 0; i < c->cout; i++) {
+        bias[i] = ctGoldCode(&s, 900);
+    }
+    odtScale_t scales[CTU_MAX_GROUPS];
+    out->eMax = INT32_MIN;
+    for (size_t g = 0; g < numGroups; g++) {
+        float v = 0.0113f + 0.0037f * (float)((g * 7) % numGroups);
+        scales[g] = odtScaleFromFloat(v, ODT_SCALE_NEAREST);
+        out->eMax = scales[g].e > out->eMax ? scales[g].e : out->eMax;
+    }
+    symQConfig_t groups = {.scales = scales,
+                           .numGroups = numGroups,
+                           .groupSize = c->groupSize,
+                           .qBits = 8,
+                           .roundingMode = rm};
+    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&groups);
+    size_t xDims[] = {CTU_B, c->cin, lin}, wDims[] = {c->cin, c->cout / c->convGroups, CTU_K};
+    size_t yDims[] = {CTU_B, c->cout, c->outLen}, bDims[] = {c->cout};
+    ctGoldTensor_t xT, wT, yT, bT;
+    ctGoldSym(&xT, 3, xDims, x, 0.037f, 8, rm);
+    ctGoldSym(&wT, 3, wDims, w, 1.0f, 8, rm); /* grouped scratch: scale poisoned, mode = op's */
+    ctGoldSym(&yT, 3, yDims, out->y, 1.0f, UNSTAMPED_WIDTH, rm);
+    ctGoldSym(&bT, 1, bDims, bias, 0.3f, 12, rm);
+    kernel_t kernel;
+    if (c->padType == SAME) {
+        initKernel(&kernel, CTU_K, SAME, c->dilation, c->stride);
+    } else {
+        initKernelExplicit(&kernel, CTU_K, c->padding, c->dilation, c->stride);
+    }
+    convTranspose1dKernelSymInt32Grouped(&xT.t, &wT.t, &bT.t, &kernel, c->convGroups, 0, &yT.t,
+                                         &groupedWeight, rs);
+    out->scale = odtScaleLoad(&yT.qc.scale);
+    out->bits = yT.qc.qMaxBits;
+}
+
+/* The fold path ran, not the legacy float fallback: the stamp is
+ * {inScale.m, inScale.e + eMax + 15 - F} with F >= 1. */
+static void ctuAssertFoldPath(const ctuOut_t *out) {
+    const odtScale_t in = ctuInScale();
+    const int32_t frac = in.e + out->eMax + 15 - out->scale.e;
+    TEST_ASSERT_EQUAL_UINT16(in.m, out->scale.m);
+    TEST_ASSERT_TRUE(frac >= 1 && frac <= 15);
+}
+
+static const ctuCase_t kCtuCases[4] = {
+    /* straddle, SAME: block 10, G 4 crosses the oc rows and the ic blocks; stride 2 */
+    {2, 1, 2, 9, 2, 1, SAME, 0, 4},
+    /* short-piece edge: block 10, G 3, EXPLICIT 3 */
+    {3, 1, 2, 4, 1, 1, EXPLICIT, 3, 3},
+    /* group size 1: one fold per valid tap; stride 2, dilation 2 */
+    {2, 1, 2, 10, 2, 2, EXPLICIT, 3, 1},
+    /* conv groups 2 (2 in, 3 out per group): block 15, G 12 (G / K 2, G % K 2) */
+    {4, 2, 6, 11, 3, 2, EXPLICIT, 4, 12},
+};
+
+static void ctuAssertGold(size_t ci) {
+    const ctuCase_t *c = &kCtuCases[ci];
+    static const int32_t *const ha[4] = {kCtuFoldHa0, kCtuFoldHa1, kCtuFoldHa2, kCtuFoldHa3};
+    static const int32_t *const sr[4] = {kCtuFoldSr0, kCtuFoldSr1, kCtuFoldSr2, kCtuFoldSr3};
+    const uint32_t seed = 0xC7D00000u + (uint32_t)ci;
+    const size_t n = ctuOutN(c);
+    ctuOut_t out;
+    ctuRun(c, seed, HALF_AWAY, NULL, &out);
+    ctuAssertFoldPath(&out);
+    GOLD_I32(ha[ci], out.y, n);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)kCtuFoldAccM[ci], out.scale.m);
+    TEST_ASSERT_EQUAL_INT16((int16_t)kCtuFoldAccE[ci], out.scale.e);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)kCtuFoldBits[ci], out.bits);
+
+    rngStream_t rs = rngOpen(rngKeyFromSeed(seed));
+    ctuRun(c, seed, SR_HALF_AWAY, &rs, &out);
+    ctuAssertFoldPath(&out);
+    GOLD_I32(sr[ci], out.y, n);
+    GOLD_U32_SCALAR(kCtuFoldSrState[ci], rs.state);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)kCtuFoldAccM[ci], out.scale.m);
+    TEST_ASSERT_EQUAL_INT16((int16_t)kCtuFoldAccE[ci], out.scale.e);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)kCtuFoldBits[ci], out.bits);
+}
+
+/* Brute force over (ic block, group) on flat weight indices: input position
+ * inPos has a valid tap, yet some group piece of a block whose input code is
+ * nonzero has none -- a piece the scatter must skip without a fold (and
+ * without an SR draw). A zero code is skipped before the walk, so it would not
+ * exercise the skip. */
+static bool ctuInPosSkipsAPiece(const ctuCase_t *c, const int32_t *x, size_t inPos) {
+    const size_t block = ctuBlock(c), g = c->groupSize;
+    const windowGeometry1d_t fwd = ctuForwardGeom(c);
+    const size_t padLeft = fwd.padLeft, lin = fwd.outputLength;
+    bool anyValid = false, skips = false;
+    for (size_t bIc = 0; bIc < CTU_B * c->cin; bIc++) {
+        if (x[bIc * lin + inPos] == 0) {
+            continue;
+        }
+        const size_t ic = bIc % c->cin;
+        const size_t blockStart = ic * block, blockEnd = blockStart + block;
+        for (size_t grp = blockStart / g; grp * g < blockEnd; grp++) {
+            const size_t lo = grp * g > blockStart ? grp * g : blockStart;
+            const size_t hi = (grp + 1) * g < blockEnd ? (grp + 1) * g : blockEnd;
+            size_t valid = 0;
+            for (size_t i = lo; i < hi; i++) {
+                const long pos =
+                    (long)(inPos * c->stride + ((i - blockStart) % CTU_K) * c->dilation) -
+                    (long)padLeft;
+                valid += pos >= 0 && pos < (long)c->outLen;
+            }
+            anyValid = anyValid || valid > 0;
+            skips = skips || valid == 0;
+        }
+    }
+    return anyValid && skips;
+}
+
+/* Review Focus 2: a group straddles two oc rows and two ic blocks. */
+void testConvTGroupedFoldUnalignedStraddle(void) {
+    ctuAssertGold(0);
+}
+
+/* Review Focus 1: at inPos 0 only taps 3..4 are valid, so e.g. block 0's
+ * 3-tap piece (oc 0, taps 0..2) gets none; at the last inPos only taps 0..1
+ * are, so e.g. block 0's 1-tap piece (oc 1, tap 4) gets none. */
+void testConvTGroupedFoldUnalignedShortSegmentEdge(void) {
+    const ctuCase_t *c = &kCtuCases[1];
+    int32_t x[CTU_MAX_X];
+    uint32_t s = 0xC7D00000u + 1u; /* ctuAssertGold(1)'s seed */
+    ctuInputCodes(c, &s, x);
+    TEST_ASSERT_TRUE(ctuInPosSkipsAPiece(c, x, 0));
+    TEST_ASSERT_TRUE(ctuInPosSkipsAPiece(c, x, ctuForwardGeom(c).outputLength - 1));
+    ctuAssertGold(1);
+}
+
+/* Review Focus 3: G 1 < K, so G / K == 0 and every step is a carry-only one. */
+void testConvTGroupedFoldUnalignedGroupSize1(void) {
+    ctuAssertGold(2);
+}
+
+/* Review Focus 4: the block base is per conv group. */
+void testConvTGroupedFoldUnalignedConvGroups2(void) {
+    ctuAssertGold(3);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConvT1dKernelSymRejectsFloatInput);
@@ -2705,5 +2919,9 @@ int main(void) {
     RUN_TEST(testConvTGroupedFoldLargeBiasLowersFInsteadOfAborting);
     RUN_TEST(testConvTGroupedFoldGoldenConvGroups2Aligned);
     RUN_TEST(testConvTGroupedFoldGoldenConvGroups2Cursor);
+    RUN_TEST(testConvTGroupedFoldUnalignedStraddle);
+    RUN_TEST(testConvTGroupedFoldUnalignedShortSegmentEdge);
+    RUN_TEST(testConvTGroupedFoldUnalignedGroupSize1);
+    RUN_TEST(testConvTGroupedFoldUnalignedConvGroups2);
     return UNITY_END();
 }

@@ -525,10 +525,16 @@ conv1dSymGroupedFoldAligned(const convSymView_t *v, const symQConfig_t *weightGr
     }
 }
 
+/* Groups that do not line up with a weight row: each row's group pieces sit
+ * at fixed (ic, tap) positions, so every window walks them in ascending order
+ * -- the order the legacy cursor met the groups -- and combines a piece once
+ * iff it had a valid tap there. An empty piece neither combines nor draws
+ * from the SR stream. The row's first piece costs the only divide. */
 SYM_ACCUM_ALWAYS_INLINE void
-conv1dSymGroupedFoldCursor(const convSymView_t *v, const symQConfig_t *weightGroups,
-                           const symGroupFold_t *fold, roundingMode_t roundingMode, rngStream_t *rs,
-                           const symAccumSite_t *partialSite, const symAccumSite_t *accSite) {
+conv1dSymGroupedFoldSegments(const convSymView_t *v, const symQConfig_t *weightGroups,
+                             const symGroupFold_t *fold, roundingMode_t roundingMode,
+                             rngStream_t *rs, const symAccumSite_t *partialSite,
+                             const symAccumSite_t *accSite) {
     const size_t batch = v->batch, groups = v->groups, inChPerGroup = v->inChPerGroup;
     const size_t outChPerGroup = v->outChPerGroup, outChannels = v->outChannels;
     const size_t outputLength = v->outputLength, inChannels = v->inChannels;
@@ -536,13 +542,10 @@ conv1dSymGroupedFoldCursor(const convSymView_t *v, const symQConfig_t *weightGro
     const windowGeometry1d_t geom = *v->geom;
     const int32_t *xArr = v->xArr, *wArr = v->wArr, *seed = v->seed;
     int32_t *yArr = v->yArr;
-    const size_t groupSize = weightGroups->groupSize;
+    const size_t rowLength = inChPerGroup * kernelSize;
     const size_t dilation = geom.dilation;
-    /* The cursor and its group's scale/shift are kept across windows, as in
-     * conv1dSymGroupedLoops. */
-    symGroupCursor_t cursor = {0};
-    odtScale_t s = {0};
-    uint32_t shift = 0;
+    const symGroupRowWalk_t walk =
+        symGroupRowWalkInit(weightGroups->groupSize, kernelSize, inChPerGroup);
 
     for (size_t b = 0; b < batch; b++) {
         for (size_t g = 0; g < groups; g++) {
@@ -551,49 +554,47 @@ conv1dSymGroupedFoldCursor(const convSymView_t *v, const symQConfig_t *weightGro
 
             for (size_t ocOffset = 0; ocOffset < outChPerGroup; ocOffset++) {
                 size_t oc = outLo + ocOffset;
-                size_t wBase = oc * inChPerGroup * kernelSize;
+                size_t wBase = oc * rowLength;
+                const symGroupRowPiece_t first = symGroupRowFirstPiece(&walk, wBase);
 
                 for (size_t outPos = 0; outPos < outputLength; outPos++) {
                     windowSlice1d_t slice = windowSlice1dAt(&geom, outPos);
                     int32_t acc = seed[oc];
-                    int32_t partial = 0;
-                    /* whether `partial` belongs to cursor.group yet (see
-                     * conv1dSymGroupedLoops) */
-                    bool visited = false;
+                    const size_t kValidLo = slice.firstValidKernelOffset;
+                    const size_t kValidHi = kValidLo + slice.validCount;
+                    const size_t xBase =
+                        (b * inChannels + inLo) * inputLength + slice.firstValidInputIdx;
+                    symGroupRowPiece_t p = first;
 
-                    for (size_t icOffset = 0; icOffset < inChPerGroup; icOffset++) {
-                        size_t ic = inLo + icOffset;
-                        size_t xIdx =
-                            (b * inChannels + ic) * inputLength + slice.firstValidInputIdx;
-                        size_t wIdx = wBase + icOffset * kernelSize + slice.firstValidKernelOffset;
-                        size_t wRowEnd = wIdx + slice.validCount;
-                        while (wIdx < wRowEnd) {
-                            if (!symGroupCursorHolds(&cursor, wIdx)) {
-                                if (visited) {
-                                    /* group-boundary combine of the finished run */
-                                    acc = symAdd(
-                                        acc,
-                                        symMulShiftRound(partial, s.m, shift, roundingMode, rs),
-                                        false, accSite);
-                                    partial = 0;
-                                }
-                                symGroupCursorSeek(&cursor, wIdx, groupSize);
-                                s = odtScaleLoad(&weightGroups->scales[cursor.group]);
-                                shift = symGroupFoldShift(fold, s);
+                    do {
+                        int32_t partial = 0;
+                        bool hasTap = false;
+                        /* a piece ending at tap 0 of chHi takes nothing from it */
+                        const size_t chEnd = p.kHi > 0 ? p.chHi + 1 : p.chHi;
+                        for (size_t ch = p.chLo; ch < chEnd; ch++) {
+                            size_t kLo = ch == p.chLo ? p.kLo : 0;
+                            size_t kHi = ch == p.chHi ? p.kHi : kernelSize;
+                            kLo = kLo > kValidLo ? kLo : kValidLo;
+                            kHi = kHi < kValidHi ? kHi : kValidHi;
+                            if (kLo >= kHi) {
+                                continue;
                             }
-                            visited = true;
-                            size_t runEnd = cursor.end < wRowEnd ? cursor.end : wRowEnd;
-                            for (; wIdx < runEnd; wIdx++, xIdx += dilation) {
+                            hasTap = true;
+                            size_t xIdx = xBase + ch * inputLength + (kLo - kValidLo) * dilation;
+                            size_t wIdx = wBase + ch * kernelSize + kLo;
+                            for (size_t k = kLo; k < kHi; k++, wIdx++, xIdx += dilation) {
                                 partial =
                                     symMac(partial, xArr[xIdx], wArr[wIdx], false, partialSite);
                             }
                         }
-                    }
-                    /* tail combine of the last run */
-                    if (visited) {
-                        acc = symAdd(acc, symMulShiftRound(partial, s.m, shift, roundingMode, rs),
-                                     false, accSite);
-                    }
+                        if (hasTap) {
+                            const odtScale_t s = odtScaleLoad(&weightGroups->scales[p.group]);
+                            acc = symAdd(acc,
+                                         symMulShiftRound(partial, s.m, symGroupFoldShift(fold, s),
+                                                          roundingMode, rs),
+                                         false, accSite);
+                        }
+                    } while (symGroupRowNextPiece(&walk, &p));
 
                     yArr[(b * outChannels + oc) * outputLength + outPos] = acc;
                 }
@@ -610,7 +611,7 @@ conv1dSymGroupedFoldLoops(const convSymView_t *v, const symQConfig_t *weightGrou
     if (rowLength != 0 && weightGroups->groupSize % rowLength == 0) {
         conv1dSymGroupedFoldAligned(v, weightGroups, fold, roundingMode, rs, partialSite, accSite);
     } else {
-        conv1dSymGroupedFoldCursor(v, weightGroups, fold, roundingMode, rs, partialSite, accSite);
+        conv1dSymGroupedFoldSegments(v, weightGroups, fold, roundingMode, rs, partialSite, accSite);
     }
 }
 

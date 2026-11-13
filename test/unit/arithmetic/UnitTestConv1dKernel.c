@@ -10,6 +10,7 @@
 #include "RNG.h"
 #include "StorageApi.h"
 #include "SymAccumGuard.h"
+#include "SymGroupCursor.h"
 #include "SymGroupedWeight.h"
 #include "Tensor.h"
 #include "TensorApi.h"
@@ -2009,8 +2010,9 @@ void testConv1dGroupedGoldenSr(void) {
  * conv groups 2 (inChPerGroup 2), outC 4 (outChPerGroup 2), L 8, K 5, stride
  * 2, dilation 2, EXPLICIT 3, so outLen 3 and left padding enters every row
  * mid-row. A weight row (one oc) is 10 codes; group sizes 4 and 8 straddle
- * both the ic rows (5 codes) and the oc rows (cursor loop); 10 and 20 are
- * channel-aligned (one group per row / per two rows: the cursor-free loop). */
+ * both the ic rows (5 codes) and the oc rows (legacy cursor loop, fold
+ * segment walk); 10 and 20 are channel-aligned (one group per row / per two
+ * rows: the cursor-free loops). */
 #define CG2_GOLD_NUM_CASES 2
 #define CG2_GOLD_B 2
 #define CG2_GOLD_CIN 4
@@ -2327,7 +2329,7 @@ void testConv1dGroupedFoldGoldenHalfAwayChannel(void) {
 }
 
 /* groupSize 2 against K = 5: groups straddle the tap rows, several combines
- * per window (cursor loop). */
+ * per window (segment walk). */
 void testConv1dGroupedFoldGoldenHalfAwayGroupSize2(void) {
     c1FoldAssertGold(&kC1FoldFx, kConv1dFoldGroup2WScales, (size_t)kConv1dFoldGroup2NumGroups,
                      (size_t)kConv1dFoldGroup2GroupSize, kConv1dFoldGroup2Out,
@@ -2335,7 +2337,7 @@ void testConv1dGroupedFoldGoldenHalfAwayGroupSize2(void) {
 }
 
 /* conv groups 2 on both fold loops: aligned (groupSize 10, one group per row)
- * and cursor (groupSize 4, groups straddle the ic and oc rows). */
+ * and segment walk (groupSize 4, groups straddle the ic and oc rows). */
 void testConv1dGroupedFoldGoldenConvGroups2(void) {
     TEST_ASSERT_EQUAL_size_t(c1FoldOutN(&kC1FoldCg), kConv1dFoldCgAlignedOut_len);
     c1FoldAssertGold(&kC1FoldCg, kConv1dFoldCgAlignedWScales, (size_t)kConv1dFoldCgAlignedNumGroups,
@@ -2382,7 +2384,7 @@ void testConv1dGroupedFoldStampsFoldScaleAndWidth(void) {
 /* A window with no valid tap (output 0 under EXPLICIT 9) combines nothing:
  * its output is the bias seed alone, and under SR the stream advances by
  * exactly one draw per combine the reference counts -- none for the empty
- * windows -- on the cursor-free loop (channel) and the cursor loop (group2). */
+ * windows -- on the aligned loop (channel) and the segment walk (group2). */
 void testConv1dGroupedFoldEmptyWindowCombinesNothing(void) {
     struct {
         const float *wScales;
@@ -2790,6 +2792,69 @@ void testConv1dGroupedFoldUnalignedConvGroups2(void) {
     cuAssertGold(3);
 }
 
+/* ---- SymGroupCursor.h row walk: the group pieces of one weight row ------
+ * Each expected row is {group, chLo, kLo, chHi, kHi}; the row end is
+ * (rows, 0). */
+static void sgAssertRowPieces(size_t groupSize, size_t kernelSize, size_t rows, size_t rowStart,
+                              const size_t (*expected)[5], size_t n) {
+    const symGroupRowWalk_t w = symGroupRowWalkInit(groupSize, kernelSize, rows);
+    symGroupRowPiece_t p = symGroupRowFirstPiece(&w, rowStart);
+    for (size_t i = 0; i < n; i++) {
+        if (i > 0) {
+            TEST_ASSERT_TRUE(symGroupRowNextPiece(&w, &p));
+        }
+        TEST_ASSERT_EQUAL_size_t(expected[i][0], p.group);
+        TEST_ASSERT_EQUAL_size_t(expected[i][1], p.chLo);
+        TEST_ASSERT_EQUAL_size_t(expected[i][2], p.kLo);
+        TEST_ASSERT_EQUAL_size_t(expected[i][3], p.chHi);
+        TEST_ASSERT_EQUAL_size_t(expected[i][4], p.kHi);
+    }
+    TEST_ASSERT_FALSE(symGroupRowNextPiece(&w, &p));
+}
+
+/* G 4 < row 10: the row's groups straddle the channel and the row ends. */
+void testSymGroupRowWalkGroupSize4Kernel5(void) {
+    const size_t at0[3][5] = {{0, 0, 0, 0, 4}, {1, 0, 4, 1, 3}, {2, 1, 3, 2, 0}};
+    sgAssertRowPieces(4, 5, 2, 0, at0, 3);
+    const size_t at10[3][5] = {{2, 0, 0, 0, 2}, {3, 0, 2, 1, 1}, {4, 1, 1, 2, 0}};
+    sgAssertRowPieces(4, 5, 2, 10, at10, 3);
+    /* rowStart off the tap grid; the last group runs past the row end */
+    const size_t at13[3][5] = {{3, 0, 0, 0, 3}, {4, 0, 3, 1, 2}, {5, 1, 2, 2, 0}};
+    sgAssertRowPieces(4, 5, 2, 13, at13, 3);
+}
+
+/* G 3 < K 5 (G / K 0): boundaries inside one channel's taps; at rowStart 10
+ * a piece ends exactly on a channel start (kHi 0). */
+void testSymGroupRowWalkGroupSize3Kernel5(void) {
+    const size_t at0[4][5] = {{0, 0, 0, 0, 3}, {1, 0, 3, 1, 1}, {2, 1, 1, 1, 4}, {3, 1, 4, 2, 0}};
+    sgAssertRowPieces(3, 5, 2, 0, at0, 4);
+    const size_t at10[4][5] = {{3, 0, 0, 0, 2}, {4, 0, 2, 1, 0}, {5, 1, 0, 1, 3}, {6, 1, 3, 2, 0}};
+    sgAssertRowPieces(3, 5, 2, 10, at10, 4);
+}
+
+void testSymGroupRowWalkGroupSize1Kernel3(void) {
+    const size_t at0[6][5] = {{0, 0, 0, 0, 1}, {1, 0, 1, 0, 2}, {2, 0, 2, 1, 0},
+                              {3, 1, 0, 1, 1}, {4, 1, 1, 1, 2}, {5, 1, 2, 2, 0}};
+    sgAssertRowPieces(1, 3, 2, 0, at0, 6);
+    const size_t at6[6][5] = {{6, 0, 0, 0, 1}, {7, 0, 1, 0, 2},  {8, 0, 2, 1, 0},
+                              {9, 1, 0, 1, 1}, {10, 1, 1, 1, 2}, {11, 1, 2, 2, 0}};
+    sgAssertRowPieces(1, 3, 2, 6, at6, 6);
+}
+
+/* G 12 > K 5 (G / K 2, G % K 2): a piece end past the row clamps to (rows, 0). */
+void testSymGroupRowWalkGroupSize12Kernel5(void) {
+    const size_t rows2At8[2][5] = {{0, 0, 0, 0, 4}, {1, 0, 4, 2, 0}};
+    sgAssertRowPieces(12, 5, 2, 8, rows2At8, 2);
+    /* one group covers the whole row */
+    const size_t rows2At0[1][5] = {{0, 0, 0, 2, 0}};
+    sgAssertRowPieces(12, 5, 2, 0, rows2At0, 1);
+    /* rowStart on a group boundary: the first piece is a full group */
+    const size_t rows3At0[2][5] = {{0, 0, 0, 2, 2}, {1, 2, 2, 3, 0}};
+    sgAssertRowPieces(12, 5, 3, 0, rows3At0, 2);
+    const size_t rows3At15[2][5] = {{1, 0, 0, 1, 4}, {2, 1, 4, 3, 0}};
+    sgAssertRowPieces(12, 5, 3, 15, rows3At15, 2);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConv1dKernelSymRejectsFloatInput);
@@ -2877,5 +2942,9 @@ int main(void) {
     RUN_TEST(testConv1dGroupedFoldUnalignedShortSegmentEdge);
     RUN_TEST(testConv1dGroupedFoldUnalignedGroupSize1);
     RUN_TEST(testConv1dGroupedFoldUnalignedConvGroups2);
+    RUN_TEST(testSymGroupRowWalkGroupSize4Kernel5);
+    RUN_TEST(testSymGroupRowWalkGroupSize3Kernel5);
+    RUN_TEST(testSymGroupRowWalkGroupSize1Kernel3);
+    RUN_TEST(testSymGroupRowWalkGroupSize12Kernel5);
     return UNITY_END();
 }

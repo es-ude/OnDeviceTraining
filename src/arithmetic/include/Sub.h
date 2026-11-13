@@ -2,33 +2,10 @@
 #define ENV5_RUNTIME_SUB_H
 
 #include <stddef.h>
-#include <stdint.h>
-
-#include "Tensor.h"
-
-/* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
- * repetition), so this header needs no RNG include path. */
-typedef struct rngStream rngStream_t;
-
-int32_t subInt32s(int32_t a, int32_t b);
 
 float subFloat32s(float a, float b);
 
-void subInt32Tensors(tensor_t *a, tensor_t *b, tensor_t *outputTensor);
-void subInt32TensorsInplace(tensor_t *a, tensor_t *b);
-
-void subInt32ElementWithInt32Tensor(tensor_t *a, int32_t b, tensor_t *outputTensor);
-void subInt32ElementWithInt32TensorInplace(tensor_t *a, int32_t b);
-
-void subFloat32Tensors(tensor_t *a, tensor_t *b, tensor_t *outputTensor);
-void subFloat32TensorsInplace(tensor_t *a, tensor_t *b);
-
-void subFloat32ElementWithFloat32Tensor(tensor_t *a, float b, tensor_t *outputTensor);
-void subFloat32ElementWithFloat32TensorInplace(tensor_t *a, float b);
-
-void subSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
-                        rngStream_t *rs);
-void subSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor, rngStream_t *rs);
-
+/*! Number of subtractions counted so far; only counts when built with TRACK_INSTRUCTIONS. */
 size_t getSubInstructionCounter();
+
 #endif // ENV5_RUNTIME_SUB_H

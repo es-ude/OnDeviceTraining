@@ -184,14 +184,7 @@ target_link_libraries(Square PRIVATE
 
 add_library(Sub Sub.c)
 target_include_directories(Sub PUBLIC include)
-target_link_libraries(Sub PRIVATE
-        DyadicScale
-        Tensor
-        DTypes
-        Arithmetic
-        Common
-        Rounding
-)
+target_link_libraries(Sub PRIVATE Common)
 
 add_library(Sum Sum.c)
 target_include_directories(Sum PUBLIC include)

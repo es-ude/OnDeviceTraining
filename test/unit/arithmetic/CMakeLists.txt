@@ -294,15 +294,6 @@ add_elastic_ai_unit_test(
 
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
-        Sub
-        MORE_LIBS
-        Rounding
-        Arithmetic
-        Tensor
-)
-
-add_elastic_ai_unit_test(
-        LIB_UNDER_TEST
         SlidingWindow1d
         MORE_LIBS
         Kernel

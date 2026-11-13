@@ -33,6 +33,27 @@ the code it describes and carries no information a reader can't get by
 reading the next line. When you find it, delete it — don't rewrite it into
 something that will drift again.
 
+No issue or PR numbers and no change history in code comments; git keeps the
+history. The one exception is a single line at a workaround for a specific bug.
+
+## Validation: check once, at the entry
+
+- **The public entry is `src/userApi`**, in particular its init/create functions.
+  They validate what a user passes in (shapes, sizes, counts, formats).
+- **Everything below trusts its caller.** Layers, kernels, tensor and arithmetic
+  code do not re-check a contract the entry already checked, and do not guard
+  against misuse the contract rules out. Misuse is the caller's problem.
+- **Per-call paths are trusted after init:** a training or inference step does not
+  re-validate what its init checked.
+- **What stays checked anywhere:** things valid use can still hit — overflow and
+  saturation, numeric range, external input (files, sensor data), and allocation
+  failure, which fails loudly once, in `reserveMemory`.
+- **Host first:** code is validated on the host before it runs on an MCU; there is
+  no extra MCU-only defensive code.
+- **Tests must mean something:** each test pins a behaviour someone relies on and
+  that could plausibly break. Misuse tests exist only for documented contracts at
+  the entry, showing that misuse raises an error.
+
 ## Subsystem conventions
 
 - [`conventions/tensor.md`](conventions/tensor.md) — `SYM_INT32` is a compute

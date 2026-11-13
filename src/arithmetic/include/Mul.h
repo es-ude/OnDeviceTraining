@@ -19,27 +19,17 @@ static inline int32_t mulInt32s(int32_t a, int32_t b) {
 
 float mulFloat32s(float a, float b);
 
-void mulInt32Tensors(tensor_t *a, tensor_t *b, tensor_t *outputTensor);
-void mulInt32TensorsInplace(tensor_t *a, tensor_t *b);
-
-void mulInt32ElementWithInt32Tensor(tensor_t *a, int32_t b, tensor_t *outputTensor);
-void mulInt32ElementWithInt32TensorInplace(tensor_t *a, int32_t b);
-
-void mulFloat32Tensors(tensor_t *a, tensor_t *b, tensor_t *outputTensor);
-void mulFloat32TensorsInplace(tensor_t *a, tensor_t *b);
-
-void mulFloat32ElementWithFloat32Tensor(tensor_t *a, float b, tensor_t *outputTensor);
+/*! Scales every element of the float tensor a by b, in place. */
 void mulFloat32ElementWithFloat32TensorInplace(tensor_t *a, float b);
 
-/* SYM_INT32 elementwise product: the output's (in place: aTensor's own) config
- * is overwritten -- scale = sa * sb, qMaxBits = the exact width of the product
- * range [-2^(qa-1) * (2^(qb-1) - 1), 2^(qa-1) * 2^(qb-1)] (or its mirror), up
- * to 32 (#516; Matmul.h has the requant-before-clone rule). The int32 product
- * is unchecked: with qa + qb > 32
- * it is signed-overflow undefined behaviour, documented rather than guarded. */
+/* SYM_INT32 elementwise product of two equal-count tensors; the output may
+ * alias an operand. The output's config is overwritten: scale = sa * sb,
+ * qMaxBits = the exact width of the product range, up to 32 (#516; Matmul.h
+ * has the requant-before-clone rule). The int32 product is unchecked: with
+ * qa + qb > 32 it is signed-overflow undefined behaviour. */
 void mulSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor);
-void mulSymInt32TensorsInplace(tensor_t *aTensor, tensor_t *bTensor);
 
+/*! Number of multiplies counted so far; only counts when built with TRACK_INSTRUCTIONS. */
 size_t getMulInstructionCounter();
 
 #endif // ENV5_RUNTIME_MUL_H

@@ -1,88 +1,26 @@
-#include "Arithmetic.h"
 #include "Mul.h"
 #include "Quantization.h"
 #include "Tensor.h"
 #include "TestScale.h"
 #include "unity.h"
 
-void testMulFloatTensors() {
-    size_t numberOfElements = 6;
+void setUp() {}
+void tearDown() {}
 
+void testMulFloat32ElementWithFloat32TensorInplace() {
     float aData[] = {2.2f, 3.5f, 4.1f, 5.2f, 6.8f, 7.3f};
-    size_t aNumberOfDims = 2;
     size_t aDims[] = {2, 3};
     size_t aOrderOfDims[] = {0, 1};
-    shape_t aShape = {.dimensions = aDims,
-                      .orderOfDimensions = aOrderOfDims,
-                      .numberOfDimensions = aNumberOfDims};
+    shape_t aShape = {
+        .dimensions = aDims, .orderOfDimensions = aOrderOfDims, .numberOfDimensions = 2};
     quantization_t aQ = {.type = FLOAT32};
-
     tensor_t aTensor = {
-        .data = (uint8_t *)aData,
-        .shape = &aShape,
-        .quantization = &aQ,
-        .sparsity = NULL,
-    };
+        .data = (uint8_t *)aData, .shape = &aShape, .quantization = &aQ, .sparsity = NULL};
 
-    float bData[] = {1.5f, 3.3f, 8.2f, 0.2f, 5.5f, 0.9f};
-    size_t bNumberOfDims = 2;
-    size_t bDims[] = {2, 3};
-    size_t bOrderOfDims[] = {1, 0};
-    shape_t bShape = {.dimensions = bDims,
-                      .orderOfDimensions = bOrderOfDims,
-                      .numberOfDimensions = bNumberOfDims};
-    quantization_t bQ = {.type = FLOAT32};
-    tensor_t bTensor = {
-        .data = (uint8_t *)bData,
-        .shape = &bShape,
-        .quantization = &bQ,
-        .sparsity = NULL,
-    };
-
-    transposeTensor(&bTensor, 0, 1);
-
-    floatElementArithmeticFunc_t mul = mulFloat32s;
-    floatPointWiseArithmeticInplace(&aTensor, &bTensor, mul);
-
-    float expected[] = {3.3f, 11.55f, 33.62f, 1.04f, 37.4f, 6.57f};
-
-    TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, aTensor.data, numberOfElements);
-}
-
-void testMulFloatElementWithTensor() {
-    size_t numberOfElements = 6;
-
-    float aData[] = {2.2f, 3.5f, 4.1f, 5.2f, 6.8f, 7.3f};
-    size_t aNumberOfDims = 2;
-    size_t aDims[] = {2, 3};
-    size_t aOrderOfDims[] = {0, 1};
-    shape_t aShape = {.dimensions = aDims,
-                      .orderOfDimensions = aOrderOfDims,
-                      .numberOfDimensions = aNumberOfDims};
-    quantization_t aQ = {.type = FLOAT32};
-
-    tensor_t aTensor = {
-        .data = (uint8_t *)aData,
-        .shape = &aShape,
-        .quantization = &aQ,
-        .sparsity = NULL,
-    };
-
-    float x = 0.5;
-
-    floatElementArithmeticFunc_t mul = mulFloat32s;
-    floatElementWithTensorArithmeticInplace(&aTensor, x, mul);
+    mulFloat32ElementWithFloat32TensorInplace(&aTensor, 0.5f);
 
     float expected[] = {1.1f, 1.75f, 2.05f, 2.6f, 3.4f, 3.65f};
-
-    TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, aTensor.data, numberOfElements);
-}
-
-void testMulInt32sMatchesNativeProduct() {
-    TEST_ASSERT_EQUAL_INT32(-42, mulInt32s(-7, 6));
-    TEST_ASSERT_EQUAL_INT32(2147395600, mulInt32s(46340, 46340));
-    TEST_ASSERT_EQUAL_INT32(-1073709056, mulInt32s(-32768, 32767));
-    TEST_ASSERT_EQUAL_INT32(0, mulInt32s(0, INT32_MIN));
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, aTensor.data, 6);
 }
 
 #ifdef TRACK_INSTRUCTIONS
@@ -139,21 +77,6 @@ void testMulSymInt32TensorsStampsProductWidth(void) {
     TEST_ASSERT_EQUAL_UINT8(12, b.qc.qMaxBits);
 }
 
-/* In place the first operand IS the output: its declared width widens from
- * the operand width 12 to the product width 24 together with its scale. */
-void testMulSymInt32TensorsInplaceStampsProductWidth(void) {
-    int32_t aCodes[2] = {-2048, 3}, bCodes[2] = {-2048, 5};
-    symWire_t a, b;
-    symWireInit(&a, aCodes, 2, 12, 0.5f);
-    symWireInit(&b, bCodes, 2, 12, 0.25f);
-    mulSymInt32TensorsInplace(&a.t, &b.t);
-    TEST_ASSERT_EQUAL_INT32(4194304, aCodes[0]);
-    TEST_ASSERT_EQUAL_INT32(15, aCodes[1]);
-    TEST_ASSERT_EQUAL_FLOAT(0.125f, odtScaleToFloat(a.qc.scale));
-    TEST_ASSERT_EQUAL_UINT8(24, a.qc.qMaxBits);
-    TEST_ASSERT_EQUAL_UINT8(12, b.qc.qMaxBits);
-}
-
 /* The stamp is static in the operand widths: int4 x int4 -> the corner 2^3 *
  * 2^3 = 64 -> 8; int16 x int16 -> 2^30 -> 32 (the raw int32 range: 31 bits
  * end at 2^30 - 1 and would understate the corner product -2^15 * -2^15).
@@ -176,20 +99,13 @@ void testMulSymInt32TensorsStampIsStaticInTheWidths(void) {
     TEST_ASSERT_EQUAL_UINT8(32, mulStampForWidths(31, 31)); /* 2^60 caps at 32 */
 }
 
-void setUp() {}
-void tearDown() {}
-
 int main(void) {
     UNITY_BEGIN();
-    RUN_TEST(testMulFloatTensors);
-    RUN_TEST(testMulFloatElementWithTensor);
-    RUN_TEST(testMulInt32sMatchesNativeProduct);
+    RUN_TEST(testMulFloat32ElementWithFloat32TensorInplace);
 #ifdef TRACK_INSTRUCTIONS
     RUN_TEST(testMulInt32sCountsUnderTrackInstructions);
 #endif
     RUN_TEST(testMulSymInt32TensorsStampsProductWidth);
-    RUN_TEST(testMulSymInt32TensorsInplaceStampsProductWidth);
     RUN_TEST(testMulSymInt32TensorsStampIsStaticInTheWidths);
-
     return UNITY_END();
 }

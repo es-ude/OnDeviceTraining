@@ -435,7 +435,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
                     scratchQC[i].qMaxBits = symQC->qBits;
                 } else {
                     /* PR4 (Task 3), grouped ASYM: zero-extend the packed
-                     * codes (byteConversion widen -- ASYM codes carry no
+                     * codes (unpackZeroExtend -- ASYM codes carry no
                      * sign bit), then shift each element into the
                      * signed-mantissa domain by ITS group's code-domain
                      * zeroPoint: mantissa = code - zp[g], g = i/groupSize
@@ -449,7 +449,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
                      * never per element); numGroups*groupSize == n by the
                      * attach-time shape validation. */
                     int32_t *mant = (int32_t *)scratchTensors[i].data;
-                    byteConversion(inputs[i]->data, asymQC->qBits, (uint8_t *)mant, 32, n);
+                    unpackZeroExtend(inputs[i]->data, asymQC->qBits, 0, mant, n);
                     size_t idx = 0;
                     while (idx < n) {
                         size_t g = idx / asymQC->groupSize;

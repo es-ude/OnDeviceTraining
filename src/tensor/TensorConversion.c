@@ -45,7 +45,7 @@ _Static_assert(ODT_CONVERSION_CHUNK_ELEMS % 8 == 0,
 static size_t packedByteOffset(size_t elemIndex, size_t bits);
 static void unpackSignExtendChunk(const uint8_t *srcBase, size_t srcBits, size_t elemOffset,
                                   size_t count, int32_t *dst);
-/* ASYM codes: byteConversion only (no sign bit to restore). */
+/* ASYM codes: unpackZeroExtend (no sign bit to restore). */
 static void unpackZeroExtendChunk(const uint8_t *srcBase, size_t srcBits, size_t elemOffset,
                                   size_t count, int32_t *dst);
 static void packChunkGuarded(const int32_t *codes, size_t count, uint8_t *dstBase, size_t dstBits,
@@ -144,8 +144,7 @@ static void unpackSignExtendChunk(const uint8_t *srcBase, size_t srcBits, size_t
 
 static void unpackZeroExtendChunk(const uint8_t *srcBase, size_t srcBits, size_t elemOffset,
                                   size_t count, int32_t *dst) {
-    byteConversion((uint8_t *)(srcBase + packedByteOffset(elemOffset, srcBits)), srcBits,
-                   (uint8_t *)dst, 32, count);
+    unpackZeroExtend(srcBase + packedByteOffset(elemOffset, srcBits), srcBits, 0, dst, count);
 }
 
 static void packChunkGuarded(const int32_t *codes, size_t count, uint8_t *dstBase, size_t dstBits,
@@ -801,6 +800,35 @@ void unpackSignExtend(const uint8_t *src, size_t srcBits, size_t srcStartBit, in
         int32_t v = dst[i] & mask;
         dst[i] = (v ^ signBit) - signBit; /* sign-extend from srcBits */
     }
+}
+
+void unpackZeroExtend(const uint8_t *src, size_t srcBits, size_t srcStartBit, int32_t *dst,
+                      size_t n) {
+    if (srcBits == 0) {
+        PRINT_ERROR("unpackZeroExtend: srcBits must be > 0");
+        exit(1);
+    }
+    if (n == 0) {
+        /* N=0 tensor data may be NULL (#160): no pointer arithmetic on src. */
+        return;
+    }
+    if (srcStartBit % 8 == 0 && (srcBits == 8 || srcBits == 16)) {
+        /* Byte-aligned asym8/asym16: byte reads, never halfword loads (an odd
+         * start address faults on Cortex-M0+), as in unpackSignExtend. */
+        const uint8_t *p = src + srcStartBit / 8;
+        if (srcBits == 8) {
+            for (size_t i = 0; i < n; i++) {
+                dst[i] = p[i];
+            }
+        } else {
+            for (size_t i = 0; i < n; i++) {
+                dst[i] = p[2 * i] | (p[2 * i + 1] << 8);
+            }
+        }
+        return;
+    }
+    /* The bit engine zero-fills the high bits on widen. */
+    byteConversionAppend((uint8_t *)src, srcBits, (uint8_t *)dst, 32, n, 0, srcStartBit);
 }
 
 // Important: Scale is ignored! Emits sign-extended integer codes (int_repr).

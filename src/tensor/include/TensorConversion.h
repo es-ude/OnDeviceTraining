@@ -141,6 +141,13 @@ void repackSymInt32ToSymNoRescale(tensor_t *inputTensor, tensor_t *outputTensor)
 void unpackSignExtend(const uint8_t *src, size_t srcBits, size_t srcStartBit, int32_t *dst,
                       size_t n);
 
+/* Unsigned twin of unpackSignExtend for ASYM codes (no sign bit): widens n
+ * packed srcBits-wide codes, LSB-first from bit srcStartBit, to int32 with
+ * the high bits zero. srcBits must be > 0 (ASYM: 1..16); n == 0 returns
+ * before touching src. */
+void unpackZeroExtend(const uint8_t *src, size_t srcBits, size_t srcStartBit, int32_t *dst,
+                      size_t n);
+
 /* Grad-accumulate primitives (PR3, #261). Direct-call only — not conversionMatrix
  * cells. FixedGrid = fit-preserving: carries the target's scale (first store after
  * a zero-fill derives it from the increment) and ABORTS on grid overflow (#227

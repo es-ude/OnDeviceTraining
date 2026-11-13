@@ -3330,7 +3330,7 @@ void testDequantChunkToFloatSymUnpacksSignExtendedAtOffsets(void) {
 
 void testDequantChunkToFloatAsymUnpacksZeroExtendedAtOffsets(void) {
     /* dequantChunkToFloat direct test, ASYM cell: zero-extend unpack via
-     * unpackZeroExtendChunk (byteConversion only, no sign bit), then the
+     * unpackZeroExtendChunk (unpackZeroExtend, no sign bit), then the
      * code-domain decode (code - zp)*scale (PR4). */
     size_t n = 264;
     size_t dims[] = {n};
@@ -3605,6 +3605,70 @@ void testUnpackSignExtend8And16BitZeroCountWritesNothing(void) {
     int32_t got[2] = {12345, 67890};
     unpackSignExtend(NULL, 8, 0, got, 0);
     unpackSignExtend(NULL, 16, 0, got, 0);
+    TEST_ASSERT_EQUAL_INT32(12345, got[0]);
+    TEST_ASSERT_EQUAL_INT32(67890, got[1]);
+}
+
+/* unpackZeroExtend (ASYM codes) is pinned to the generic bit engine it
+ * replaces, over every ASYM width (validateAsymQBits: [1, 16]), aligned and
+ * mid-byte starts. dst is pre-filled 0x5A so stale high bits cannot hide. */
+void testUnpackZeroExtendMatchesByteConversionAllWidths(void) {
+    static const size_t startBits[] = {0, 3, 8, 13, 16};
+    static const size_t counts[] = {1, 7, 33};
+    uint8_t src[80];
+    uint32_t s = 0x1234u;
+    for (size_t i = 0; i < sizeof(src); i++) {
+        s = s * 1664525u + 1013904223u;
+        src[i] = (uint8_t)(s >> 24);
+    }
+    for (size_t bits = 1; bits <= 16; bits++) {
+        for (size_t si = 0; si < sizeof(startBits) / sizeof(startBits[0]); si++) {
+            for (size_t ci = 0; ci < sizeof(counts) / sizeof(counts[0]); ci++) {
+                const size_t start = startBits[si];
+                const size_t n = counts[ci];
+                TEST_ASSERT_TRUE(start + n * bits <= sizeof(src) * 8);
+                int32_t ref[33];
+                int32_t got[33];
+                memset(ref, 0xA5, sizeof(ref));
+                byteConversionAppend(src, bits, (uint8_t *)ref, 32, n, 0, start);
+                memset(got, 0x5A, sizeof(got));
+                unpackZeroExtend(src, bits, start, got, n);
+                char msg[80];
+                snprintf(msg, sizeof(msg), "srcBits=%zu srcStartBit=%zu n=%zu", bits, start, n);
+                for (size_t i = 0; i < n; i++) {
+                    /* the reference must itself be clean of the 0xA5 fill */
+                    TEST_ASSERT_TRUE_MESSAGE((uint32_t)ref[i] >> bits == 0u, msg);
+                }
+                TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(ref, got, n, msg);
+            }
+        }
+    }
+}
+
+/* ASYM16 codes >= 0x8000 are the upper half of the unsigned grid, never
+ * negative. */
+void testUnpackZeroExtend16BitHighCodesStayPositive(void) {
+    uint8_t src[8] = {0x00, 0x00, 0xFF, 0x7F, 0x00, 0x80, 0xFF, 0xFF};
+    int32_t got[4];
+    unpackZeroExtend(src, 16, 0, got, 4);
+    int32_t expected[4] = {0, 32767, 32768, 65535};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, 4);
+}
+
+/* srcStartBit 8 starts the codes at byte 1 (odd address on Cortex-M0+). */
+void testUnpackZeroExtend8BitOddByteStart(void) {
+    uint8_t src[5] = {0xEE, 0x00, 0x7F, 0x80, 0xFF};
+    int32_t got[4];
+    unpackZeroExtend(src, 8, 8, got, 4);
+    int32_t expected[4] = {0, 127, 128, 255};
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, 4);
+}
+
+void testUnpackZeroExtendNIsZeroWithNullSrc(void) {
+    int32_t got[2] = {12345, 67890};
+    unpackZeroExtend(NULL, 8, 0, got, 0);
+    unpackZeroExtend(NULL, 16, 0, got, 0);
+    unpackZeroExtend(NULL, 4, 0, got, 0);
     TEST_ASSERT_EQUAL_INT32(12345, got[0]);
     TEST_ASSERT_EQUAL_INT32(67890, got[1]);
 }
@@ -9420,6 +9484,10 @@ int main(void) {
     RUN_TEST(testUnpackSignExtend8And16BitEdgeCodesAreLittleEndianSigned);
     RUN_TEST(testUnpackSignExtend8And16BitExhaustiveCodeDomain);
     RUN_TEST(testUnpackSignExtend8And16BitZeroCountWritesNothing);
+    RUN_TEST(testUnpackZeroExtendMatchesByteConversionAllWidths);
+    RUN_TEST(testUnpackZeroExtend16BitHighCodesStayPositive);
+    RUN_TEST(testUnpackZeroExtend8BitOddByteStart);
+    RUN_TEST(testUnpackZeroExtendNIsZeroWithNullSrc);
     RUN_TEST(testQuantizeFloatToAsymNoOpOnEmptyTensor);
     RUN_TEST(testAccumulateTensorIntoSymRescaleRejectsSelfAliasedIncrement);
 

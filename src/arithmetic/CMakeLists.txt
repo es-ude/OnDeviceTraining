@@ -79,7 +79,6 @@ target_link_libraries(Div PRIVATE
         DyadicScale
         Tensor
         DTypes
-        Arithmetic
         Common
         Rounding
 )

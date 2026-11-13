@@ -181,7 +181,6 @@ add_elastic_ai_unit_test(
         Rounding
         odt_test_scale
         DyadicScale
-        Arithmetic
         Tensor
 )
 

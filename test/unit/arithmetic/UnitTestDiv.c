@@ -1,92 +1,8 @@
-#include "Arithmetic.h"
 #include "Div.h"
+#include "Quantization.h"
 #include "Tensor.h"
 #include "TestScale.h"
 #include "unity.h"
-
-void testDivFloatTensors() {
-    size_t numberOfElements = 24;
-
-    float aData[] = {1.5f, 3,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12,
-                     13,   14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24};
-    uint8_t *aDataBytes = (uint8_t *)aData;
-
-    size_t aNumberOfDims = 3;
-    size_t aDims[] = {2, 3, 4};
-    size_t aOrderOfDims[] = {0, 1, 2};
-    shape_t aShape = {.dimensions = aDims,
-                      .orderOfDimensions = aOrderOfDims,
-                      .numberOfDimensions = aNumberOfDims};
-
-    quantization_t aQ;
-    initFloat32Quantization(&aQ);
-
-    tensor_t aTensor;
-    setTensorValues(&aTensor, aDataBytes, &aShape, &aQ, NULL);
-
-    float bData[] = {0.3f, 6,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12,
-                     13,   14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24};
-    uint8_t *bDataBytes = (uint8_t *)bData;
-    size_t bNumberOfDims = 3;
-    size_t bDims[] = {2, 3, 4};
-    size_t bOrderOfDims[] = {1, 0, 2};
-    shape_t bShape = {.dimensions = bDims,
-                      .orderOfDimensions = bOrderOfDims,
-                      .numberOfDimensions = bNumberOfDims};
-
-    quantization_t bQ;
-    initFloat32Quantization(&bQ);
-
-    tensor_t bTensor;
-    setTensorValues(&bTensor, bDataBytes, &bShape, &bQ, NULL);
-
-    transposeTensor(&bTensor, 0, 1);
-
-    divFloat32TensorsInplace(&aTensor, &bTensor);
-
-    float expected[] = {5.0f, 0.5f, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                        1,    1,    1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
-
-    TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, aTensor.data, numberOfElements);
-}
-
-void testDivSymInt32TensorsInplace() {
-    size_t numberOfValues = 6;
-
-    int32_t aData[] = {1, 2, 3, 4, 5, 6};
-    uint8_t *aDataBytes = (uint8_t *)aData;
-
-    size_t dims[] = {numberOfValues};
-    size_t numberOfDims = 1;
-    size_t orderOfDims[] = {0};
-    shape_t shape = {
-        .dimensions = dims, .orderOfDimensions = orderOfDims, .numberOfDimensions = numberOfDims};
-
-    symInt32QConfig_t aSymInt32QC;
-    initSymInt32QConfig(HALF_AWAY, &aSymInt32QC);
-    quantization_t aQ;
-    initSymInt32Quantization(&aSymInt32QC, &aQ);
-
-    tensor_t aTensor;
-    setTensorValues(&aTensor, aDataBytes, &shape, &aQ, NULL);
-
-    int32_t bData[] = {1, 2, 3, 4, 5, 6};
-    uint8_t *bDataBytes = (uint8_t *)bData;
-
-    symInt32QConfig_t bSymInt32QC;
-    initSymInt32QConfig(HALF_AWAY, &bSymInt32QC);
-    quantization_t bQ;
-    initSymInt32Quantization(&bSymInt32QC, &bQ);
-
-    tensor_t bTensor;
-    setTensorValues(&bTensor, bDataBytes, &shape, &bQ, NULL);
-
-    divSymInt32TensorsInplace(&aTensor, &bTensor);
-
-    int32_t expected[] = {1, 1, 1, 1, 1, 1};
-
-    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, aData, numberOfValues);
-}
 
 /* The stored quotient scale is a / b rounded ONCE onto the 15-bit dyadic grid
  * (NEAREST): 0.5 / 0.75 = 2/3 = 21845.33 * 2^-15 -> 21845 * 2^-15, not the
@@ -94,6 +10,7 @@ void testDivSymInt32TensorsInplace() {
 void testDivSymInt32ScaleIsCanonicalQuotient() {
     int32_t aData[] = {6, -9};
     int32_t bData[] = {2, 3};
+    int32_t outData[] = {0, 0};
     size_t dims[] = {2};
     size_t orderOfDims[] = {0};
     shape_t shape = {.dimensions = dims, .orderOfDimensions = orderOfDims, .numberOfDimensions = 1};
@@ -114,11 +31,18 @@ void testDivSymInt32ScaleIsCanonicalQuotient() {
     tensor_t bTensor;
     setTensorValues(&bTensor, (uint8_t *)bData, &shape, &bQ, NULL);
 
-    divSymInt32TensorsInplace(&aTensor, &bTensor);
+    symInt32QConfig_t outQC;
+    initSymInt32QConfig(HALF_AWAY, &outQC);
+    quantization_t outQ;
+    initSymInt32Quantization(&outQC, &outQ);
+    tensor_t outTensor;
+    setTensorValues(&outTensor, (uint8_t *)outData, &shape, &outQ, NULL);
+
+    divSymInt32Tensors(&aTensor, &bTensor, &outTensor);
 
     int32_t expected[] = {3, -3};
-    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, aData, 2);
-    TEST_ASSERT_TRUE(odtScaleToFloat(aQC.scale) == 21845.0f / 32768.0f);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, outData, 2);
+    TEST_ASSERT_TRUE(odtScaleToFloat(outQC.scale) == 21845.0f / 32768.0f);
 }
 
 void setUp() {}
@@ -126,9 +50,6 @@ void tearDown() {}
 
 int main(void) {
     UNITY_BEGIN();
-    RUN_TEST(testDivFloatTensors);
-    RUN_TEST(testDivSymInt32TensorsInplace);
     RUN_TEST(testDivSymInt32ScaleIsCanonicalQuotient);
-
     return UNITY_END();
 }

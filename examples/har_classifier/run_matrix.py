@@ -139,6 +139,15 @@ CONFIGS: dict[str, tuple[str, dict[str, str]]] = {
                   {"SYM_BITS": "8", "SYM_BWD": "1", "SYM_WIRES": "1", "GROUP_MODE": "size",
                    "GROUP_SIZE": "32"}),
     "asym8": ("train_c_har_classifier_sym", {"SYM_BITS": "8", "WEIGHT_DTYPE": "asym"}),
+    # ASYM@8 weights on the integer backward path: twins of sym8b / sym8bw / sym8bwg
+    # (and of the firmware arms of the same name) with WEIGHT_DTYPE=asym.
+    "asym8b": ("train_c_har_classifier_sym",
+               {"SYM_BITS": "8", "WEIGHT_DTYPE": "asym", "SYM_BWD": "1"}),
+    "asym8bw": ("train_c_har_classifier_sym",
+                {"SYM_BITS": "8", "WEIGHT_DTYPE": "asym", "SYM_BWD": "1", "SYM_WIRES": "1"}),
+    "asym8bwg": ("train_c_har_classifier_sym",
+                 {"SYM_BITS": "8", "WEIGHT_DTYPE": "asym", "SYM_BWD": "1", "SYM_WIRES": "1",
+                  "GROUP_MODE": "channel"}),
     "sym6": ("train_c_har_classifier_sym", {"SYM_BITS": "6"}),
     "sym4": ("train_c_har_classifier_sym", {"SYM_BITS": "4"}),
     "sym8cos": ("train_c_har_classifier_sym", {"SYM_BITS": "8", "LR_SCHEDULE": "cosine"}),

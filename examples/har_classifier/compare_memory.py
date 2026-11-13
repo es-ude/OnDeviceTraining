@@ -58,6 +58,7 @@ CONFIG_ORDER = [
     "sym8cos", "sym4cos", "sym8det", "sym6det", "sym4det",
     # E0 linear-quant baseline arms (sym8b/sym8bw: memory-identical to sym8/sym8w).
     "sym8b", "sym8bw", "sym8bwg", "sym8bwg64", "sym8bwg32", "asym8",
+    "asym8b", "asym8bw", "asym8bwg",
     # #300 granularity axis. The rows above are per-TENSOR; these are the
     # per-channel / fixed-group variants, widest-first and coarsest-to-finest
     # within each width so the metadata surcharge reads monotonically downward.

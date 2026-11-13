@@ -7,41 +7,32 @@
 
 #include "Tensor.h"
 
-typedef int32_t (*int32ElementArithmeticFunc_t)(int32_t a, int32_t b);
 typedef float (*floatElementArithmeticFunc_t)(float a, float b);
 
+/*! True when both tensors have the same rank and the same logical dimensions. */
 bool doDimensionsMatch(tensor_t *a, tensor_t *b);
 
+/*! Writes the tensor's dimensions in logical order (orderOfDimensions applied). */
 void orderDims(tensor_t *tensor, size_t *orderedDims);
 
+/*! Size of logical dimension index. */
 size_t getDimensionsByIndex(tensor_t *tensor, size_t index);
-size_t calcTensorIndexByIndices(size_t numberOfDimensions, size_t *dimensions, size_t *indices);
 
+/*! Splits a row-major flat index over dims into one index per dimension. */
 void calcIndicesByRawIndex(size_t numberOfDims, size_t *dims, size_t rawIndex, size_t *indices);
 
+/*! Storage offset of the logical multi-index indices in a tensor with physical dims and
+ * orderOfDimensions. */
 size_t calcElementIndexByIndices(size_t numberOfDims, size_t *dims, size_t *indices,
                                  size_t *orderOfDimensions);
 
-void int32PointWiseArithmetic(tensor_t *aTensor, tensor_t *bTensor,
-                              int32ElementArithmeticFunc_t arithmeticFunc, tensor_t *outputTensor);
-void floatPointWiseArithmetic(tensor_t *aTensor, tensor_t *bTensor,
-                              floatElementArithmeticFunc_t arithmeticFunc, tensor_t *outputTensor);
-
-void int32PointWiseArithmeticInplace(tensor_t *aTensor, tensor_t *bTensor,
-                                     int32ElementArithmeticFunc_t arithmeticFunc);
+/*! a[i] = f(a[i], b[i]) for float tensors with the same logical shape; either may be
+ * transposed. */
 void floatPointWiseArithmeticInplace(tensor_t *aTensor, tensor_t *bTensor,
                                      floatElementArithmeticFunc_t arithmeticFunc);
 
-void int32ElementWithTensorArithmetic(tensor_t *aTensor, int32_t x,
-                                      int32ElementArithmeticFunc_t arithmeticFunc,
-                                      tensor_t *outputTensor);
-void floatElementWithTensorArithmetic(tensor_t *aTensor, float x,
-                                      floatElementArithmeticFunc_t arithmeticFunc,
-                                      tensor_t *outputTensor);
-
-void int32ElementWithTensorArithmeticInplace(tensor_t *aTensor, int32_t x,
-                                             int32ElementArithmeticFunc_t arithmeticFunc);
-void floatElementWithTensorArithmeticInplace(tensor_t *aTensor, float x,
+/*! t[i] = f(t[i], x) over the float tensor's storage order. */
+void floatElementWithTensorArithmeticInplace(tensor_t *tensor, float x,
                                              floatElementArithmeticFunc_t arithmeticFunc);
 
 #endif // ENV5_RUNTIME_TENSOR_MATH_H

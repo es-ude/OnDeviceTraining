@@ -14,12 +14,6 @@ target_include_directories(Arithmetic PUBLIC include)
 target_link_libraries(Arithmetic PRIVATE
         Tensor
         DTypes
-        Add
-        Div
-        Matmul
-        Mul
-        Square
-        Sub
         Common
         Rounding
 )

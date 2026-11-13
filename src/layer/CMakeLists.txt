@@ -243,6 +243,8 @@ add_library(Linear Linear.c)
 target_include_directories(Linear PUBLIC include)
 target_link_libraries(Linear PRIVATE
         DyadicScale
+        Matmul
+        Add
         SymAccumGuard
         SymGroupedWeight
         LayerExec

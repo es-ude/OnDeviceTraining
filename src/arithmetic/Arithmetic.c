@@ -1,12 +1,10 @@
 #define SOURCE_FILE "ARITHMETIC"
 
-#include <stdio.h>
 #include <stdlib.h>
 
 #include "Arithmetic.h"
 #include "Common.h"
 #include "DTypes.h"
-#include "Matmul.h"
 
 size_t getDimensionsByIndex(tensor_t *tensor, size_t index) {
     size_t numberOfDims = tensor->shape->numberOfDimensions;
@@ -26,43 +24,26 @@ void orderDims(tensor_t *tensor, size_t *orderedDims) {
 }
 
 bool doDimensionsMatch(tensor_t *a, tensor_t *b) {
-    size_t aNumberOfDims = a->shape->numberOfDimensions;
-    size_t bNumberOfDims = b->shape->numberOfDimensions;
-
-    if (aNumberOfDims != bNumberOfDims) {
-        PRINT_ERROR("Rank mismatch: %zu vs %zu", aNumberOfDims, bNumberOfDims);
-        exit(1);
+    size_t numberOfDims = a->shape->numberOfDimensions;
+    if (numberOfDims != b->shape->numberOfDimensions) {
+        return false;
     }
 
-    size_t aOrderedDims[aNumberOfDims];
-    size_t bOrderedDims[bNumberOfDims];
-
+    size_t aOrderedDims[numberOfDims];
+    size_t bOrderedDims[numberOfDims];
     orderDims(a, aOrderedDims);
     orderDims(b, bOrderedDims);
 
-    for (size_t i = 0; i < aNumberOfDims; i++) {
+    for (size_t i = 0; i < numberOfDims; i++) {
         if (aOrderedDims[i] != bOrderedDims[i]) {
-            PRINT_DEBUG("Dim 1: %zu, Dims 2: %zu", aOrderedDims[i], bOrderedDims[i]);
             return false;
         }
     }
     return true;
 }
 
-size_t calcTensorIndexByIndices(size_t numberOfDimensions, size_t *dimensions, size_t *indices) {
-    size_t index = indices[numberOfDimensions - 1];
-    size_t offset = dimensions[numberOfDimensions - 1];
-    for (int i = (int)numberOfDimensions - 2; i >= 0; i--) {
-        index += indices[i] * offset;
-        offset *= dimensions[i];
-    }
-    return index;
-}
-
 void calcIndicesByRawIndex(size_t numberOfDims, size_t *dims, size_t rawIndex, size_t *indices) {
-
     size_t offset = 1;
-    // equal to numberOfElements
     for (size_t i = 0; i < numberOfDims; i++) {
         offset *= dims[i];
     }
@@ -78,16 +59,12 @@ void calcIndicesByRawIndex(size_t numberOfDims, size_t *dims, size_t rawIndex, s
 size_t calcElementIndexByIndices(size_t numberOfDims, size_t *dims, size_t *indices,
                                  size_t *orderOfDimensions) {
     size_t offset = 1;
-    // equal to numberOfElements
     for (size_t i = 0; i < numberOfDims; i++) {
         offset *= dims[i];
     }
 
-    /* #344: invert orderOfDimensions. Physical dim p carries logical dim order[p]
-     * (getDimensionsByIndex), so the physical multi-index is P[p] = indices[order[p]].
-     * The old forward form orderedIndices[order[d]] = indices[d] coincides with this
-     * only for involutions (identity / single-axis swaps) — every permutation the live
-     * Matmul/Reduce/LayerNorm callers pass today, which is why it went unnoticed. */
+    /* Physical dim p carries logical dim order[p], so the physical multi-index is
+     * P[p] = indices[order[p]] (the inverse permutation, not the forward one). */
     size_t orderedIndices[numberOfDims];
     for (size_t d = 0; d < numberOfDims; d++) {
         orderedIndices[d] = indices[orderOfDimensions[d]];
@@ -101,197 +78,19 @@ size_t calcElementIndexByIndices(size_t numberOfDims, size_t *dims, size_t *indi
     return outputIndex;
 }
 
-void int32PointWiseArithmetic(tensor_t *aTensor, tensor_t *bTensor,
-                              int32ElementArithmeticFunc_t arithmeticFunc, tensor_t *outputTensor) {
-    if (!doDimensionsMatch(aTensor, bTensor)) {
-        PRINT_ERROR("Dimensions don't match!");
-        exit(1);
-    }
-
-    size_t numberOfElements = calcNumberOfElementsByTensor(aTensor);
-    size_t bytesPerElement = sizeof(int32_t);
-    size_t numberOfDims = aTensor->shape->numberOfDimensions;
-    size_t *aDims = aTensor->shape->dimensions;
-    size_t *bDims = bTensor->shape->dimensions;
-
-    size_t aOrderedDims[numberOfDims];
-    size_t bOrderedDims[numberOfDims];
-
-    orderDims(aTensor, aOrderedDims);
-    orderDims(bTensor, bOrderedDims);
-
-    for (size_t i = 0; i < numberOfElements; i++) {
-        size_t aIndices[numberOfDims];
-
-        calcIndicesByRawIndex(numberOfDims, aOrderedDims, i, aIndices);
-
-        size_t aElementIndex = calcElementIndexByIndices(numberOfDims, aDims, aIndices,
-                                                         aTensor->shape->orderOfDimensions);
-
-        size_t bIndices[numberOfDims];
-        calcIndicesByRawIndex(numberOfDims, bOrderedDims, i, bIndices);
-        size_t bElementIndex = calcElementIndexByIndices(numberOfDims, bDims, bIndices,
-                                                         bTensor->shape->orderOfDimensions);
-
-        size_t aByteIndex = aElementIndex * bytesPerElement;
-        size_t bByteIndex = bElementIndex * bytesPerElement;
-
-        int32_t aValue = readBytesAsInt32(&aTensor->data[aByteIndex]);
-        int32_t bValue = readBytesAsInt32(&bTensor->data[bByteIndex]);
-
-        int32_t result = arithmeticFunc(aValue, bValue);
-
-        size_t outputByteIndex = i * bytesPerElement;
-
-        writeInt32ToByteArray(result, &outputTensor->data[outputByteIndex]);
-    }
-}
-
-// Important: result will be written into aTensor datafield
-void int32PointWiseArithmeticInplace(tensor_t *aTensor, tensor_t *bTensor,
-                                     int32ElementArithmeticFunc_t arithmeticFunc) {
-    if (!doDimensionsMatch(aTensor, bTensor)) {
-        PRINT_ERROR("Dimensions don't match");
-        exit(1);
-    }
-
-    size_t numberOfElements = calcNumberOfElementsByTensor(aTensor);
-    size_t bytesPerElement = sizeof(int32_t);
-    size_t numberOfDims = aTensor->shape->numberOfDimensions;
-    size_t *aDims = aTensor->shape->dimensions;
-    size_t *bDims = bTensor->shape->dimensions;
-
-    size_t aOrderedDims[numberOfDims];
-    size_t bOrderedDims[numberOfDims];
-
-    orderDims(aTensor, aOrderedDims);
-    orderDims(bTensor, bOrderedDims);
-
-    for (size_t i = 0; i < numberOfElements; i++) {
-        size_t aIndices[numberOfDims];
-        calcIndicesByRawIndex(numberOfDims, aOrderedDims, i, aIndices);
-        size_t aElementIndex = calcElementIndexByIndices(numberOfDims, aDims, aIndices,
-                                                         aTensor->shape->orderOfDimensions);
-
-        size_t bIndices[numberOfDims];
-        calcIndicesByRawIndex(numberOfDims, bOrderedDims, i, bIndices);
-        size_t bElementIndex = calcElementIndexByIndices(numberOfDims, bDims, bIndices,
-                                                         bTensor->shape->orderOfDimensions);
-
-        size_t aByteIndex = aElementIndex * bytesPerElement;
-        size_t bByteIndex = bElementIndex * bytesPerElement;
-
-        int32_t aValue = readBytesAsInt32(&aTensor->data[aByteIndex]);
-        int32_t bValue = readBytesAsInt32(&bTensor->data[bByteIndex]);
-
-        int32_t result = arithmeticFunc(aValue, bValue);
-
-        /* #339: write the result to the physical slot it was read from
-         * (aElementIndex), so a transposed (non-identity order) in-place op scatters
-         * correctly instead of flat. The pointwise map is bijective, so read-slot ==
-         * write-slot is safe. */
-        size_t outputByteIndex = aElementIndex * bytesPerElement;
-
-        writeInt32ToByteArray(result, &aTensor->data[outputByteIndex]);
-    }
-}
-
-void int32ElementWithTensorArithmeticInplace(tensor_t *tensor, int32_t x,
-                                             int32ElementArithmeticFunc_t arithmeticFunc) {
-
-    size_t numberOfElements = calcNumberOfElementsByTensor(tensor);
-    size_t bytesPerElement = sizeof(int32_t);
-
-    for (size_t i = 0; i < numberOfElements; i++) {
-        size_t byteIndex = i * bytesPerElement;
-        int32_t currentElement = readBytesAsInt32(&tensor->data[byteIndex]);
-        int32_t result = arithmeticFunc(currentElement, x);
-
-        writeInt32ToByteArray(result, &tensor->data[byteIndex]);
-    }
-}
-
-void int32ElementWithTensorArithmetic(tensor_t *tensor, int32_t x,
-                                      int32ElementArithmeticFunc_t arithmeticFunc,
-                                      tensor_t *outputTensor) {
-
-    size_t numberOfElements = calcNumberOfElementsByTensor(tensor);
-    size_t bytesPerElement = sizeof(int32_t);
-
-    for (size_t i = 0; i < numberOfElements; i++) {
-        size_t byteIndex = i * bytesPerElement;
-        int32_t currentElement = readBytesAsInt32(&tensor->data[byteIndex]);
-        int32_t result = arithmeticFunc(currentElement, x);
-
-        writeInt32ToByteArray(result, &outputTensor->data[byteIndex]);
-    }
-}
-
-void floatPointWiseArithmetic(tensor_t *aTensor, tensor_t *bTensor,
-                              floatElementArithmeticFunc_t arithmeticFunc, tensor_t *outputTensor) {
-    if (!doDimensionsMatch(aTensor, bTensor)) {
-        PRINT_ERROR("Dimensions don't match");
-        exit(1);
-    }
-
-    size_t numberOfElements = calcNumberOfElementsByTensor(aTensor);
-    size_t bytesPerElement = sizeof(float);
-    size_t numberOfDims = aTensor->shape->numberOfDimensions;
-    size_t *aDims = aTensor->shape->dimensions;
-    size_t *bDims = bTensor->shape->dimensions;
-
-    size_t aOrderedDims[numberOfDims];
-    size_t bOrderedDims[numberOfDims];
-
-    orderDims(aTensor, aOrderedDims);
-    orderDims(bTensor, bOrderedDims);
-
-    for (size_t i = 0; i < numberOfElements; i++) {
-        size_t aIndices[numberOfDims];
-        calcIndicesByRawIndex(numberOfDims, aOrderedDims, i, aIndices);
-        size_t aElementIndex = calcElementIndexByIndices(numberOfDims, aDims, aIndices,
-                                                         aTensor->shape->orderOfDimensions);
-
-        size_t bIndices[numberOfDims];
-        calcIndicesByRawIndex(numberOfDims, bOrderedDims, i, bIndices);
-        size_t bElementIndex = calcElementIndexByIndices(numberOfDims, bDims, bIndices,
-                                                         bTensor->shape->orderOfDimensions);
-
-        size_t aByteIndex = aElementIndex * bytesPerElement;
-        size_t bByteIndex = bElementIndex * bytesPerElement;
-
-        float aValue = readBytesAsFloat(&aTensor->data[aByteIndex]);
-        float bValue = readBytesAsFloat(&bTensor->data[bByteIndex]);
-
-        float result = arithmeticFunc(aValue, bValue);
-
-        size_t outputByteIndex = i * bytesPerElement;
-
-        writeFloatToByteArray(result, &outputTensor->data[outputByteIndex]);
-    }
-}
-
 void floatPointWiseArithmeticInplace(tensor_t *aTensor, tensor_t *bTensor,
                                      floatElementArithmeticFunc_t arithmeticFunc) {
-    if (!doDimensionsMatch(aTensor, bTensor)) {
-        PRINT_ERROR("Dimensions don't match");
-        exit(1);
-    }
-
     size_t numberOfElements = calcNumberOfElementsByTensor(aTensor);
-    size_t bytesPerElement = sizeof(float);
     size_t numberOfDims = aTensor->shape->numberOfDimensions;
     size_t *aDims = aTensor->shape->dimensions;
     size_t *bDims = bTensor->shape->dimensions;
 
     size_t aOrderedDims[numberOfDims];
     size_t bOrderedDims[numberOfDims];
-
     orderDims(aTensor, aOrderedDims);
     orderDims(bTensor, bOrderedDims);
 
     for (size_t i = 0; i < numberOfElements; i++) {
-
         size_t aIndices[numberOfDims];
         calcIndicesByRawIndex(numberOfDims, aOrderedDims, i, aIndices);
         size_t aElementIndex = calcElementIndexByIndices(numberOfDims, aDims, aIndices,
@@ -299,56 +98,25 @@ void floatPointWiseArithmeticInplace(tensor_t *aTensor, tensor_t *bTensor,
 
         size_t bIndices[numberOfDims];
         calcIndicesByRawIndex(numberOfDims, bOrderedDims, i, bIndices);
-
         size_t bElementIndex = calcElementIndexByIndices(numberOfDims, bDims, bIndices,
                                                          bTensor->shape->orderOfDimensions);
 
-        size_t aByteIndex = aElementIndex * bytesPerElement;
-        size_t bByteIndex = bElementIndex * bytesPerElement;
+        float aValue = readBytesAsFloat(&aTensor->data[aElementIndex * sizeof(float)]);
+        float bValue = readBytesAsFloat(&bTensor->data[bElementIndex * sizeof(float)]);
 
-        float aValue = readBytesAsFloat(&aTensor->data[aByteIndex]);
-        float bValue = readBytesAsFloat(&bTensor->data[bByteIndex]);
-
-        float result = arithmeticFunc(aValue, bValue);
-
-        /* #339: write the result to the physical slot it was read from
-         * (aElementIndex), so a transposed (non-identity order) in-place op scatters
-         * correctly instead of flat. The pointwise map is bijective, so read-slot ==
-         * write-slot is safe. */
-        size_t outputByteIndex = aElementIndex * bytesPerElement;
-
-        writeFloatToByteArray(result, &aTensor->data[outputByteIndex]);
-    }
-}
-
-void floatElementWithTensorArithmetic(tensor_t *tensor, float x,
-                                      floatElementArithmeticFunc_t arithmeticFunc,
-                                      tensor_t *outputTensor) {
-
-    size_t numberOfElements = calcNumberOfElementsByTensor(tensor);
-    size_t bytesPerElement = sizeof(float);
-
-    for (size_t i = 0; i < numberOfElements; i++) {
-        size_t byteIndex = i * bytesPerElement;
-        float currentValue = readBytesAsFloat(&tensor->data[byteIndex]);
-        float result = arithmeticFunc(currentValue, x);
-
-        writeFloatToByteArray(result, &outputTensor->data[byteIndex]);
+        /* Written back to the physical slot it was read from, so a transposed aTensor
+         * keeps its layout. */
+        writeFloatToByteArray(arithmeticFunc(aValue, bValue),
+                              &aTensor->data[aElementIndex * sizeof(float)]);
     }
 }
 
 void floatElementWithTensorArithmeticInplace(tensor_t *tensor, float x,
                                              floatElementArithmeticFunc_t arithmeticFunc) {
-
     size_t numberOfElements = calcNumberOfElementsByTensor(tensor);
-    size_t bytesPerElement = sizeof(float);
-
     for (size_t i = 0; i < numberOfElements; i++) {
-        size_t byteIndex = i * bytesPerElement;
+        size_t byteIndex = i * sizeof(float);
         float currentValue = readBytesAsFloat(&tensor->data[byteIndex]);
-
-        float result = arithmeticFunc(currentValue, x);
-
-        writeFloatToByteArray(result, &tensor->data[byteIndex]);
+        writeFloatToByteArray(arithmeticFunc(currentValue, x), &tensor->data[byteIndex]);
     }
 }

@@ -100,6 +100,7 @@ add_elastic_ai_unit_test(
         Arithmetic
         MORE_LIBS
         Rounding
+        Add
         Tensor
         Quantization
         odt_test_assert
@@ -214,6 +215,7 @@ add_elastic_ai_unit_test(
         odt_test_scale
         Arithmetic
         DyadicScale
+        TensorConversion
         SymAccumGuard
         SymGroupedWeight
         Tensor

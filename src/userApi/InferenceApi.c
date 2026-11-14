@@ -9,6 +9,7 @@
 #include "AdaptiveAvgPool1d.h"
 #include "AvgPool1d.h"
 #include "BatchView.h"
+#include "CheckedSize.h"
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
@@ -76,11 +77,8 @@ static void initBufferOutput(tensor_t *buffer, layer_t *currentLayer, size_t lay
         break;
     }
     case BFP: {
-        /* BFP epic PR2 (PR2-Decision 5), the inference-path twin of
-         * rematBfpWireGrouping: widths/rounding/groupSize come from the layer's
-         * declared template, numGroups is DERIVED from this buffer's own
-         * element count. Exponents start at the zero state — the forward's
-         * OUT_WRITE epilogue derives the grid. */
+        /* numGroups derives from this wire's element count; the exponents
+         * start at the zero state. */
         bfpQConfig_t *currentBfpQC = currentQ->qConfig;
         bfpQConfig_t *bfpQC = reserveMemory(sizeof(bfpQConfig_t));
         /* groupSize == wire elements -> per-tensor {1,0}, see rematBfpWireGrouping. */
@@ -143,18 +141,8 @@ static void initBufferInput(tensor_t *input, tensor_t *buffer) {
         q->qConfig = symInt32QC;
         break;
     case BFP: {
-        /* BFP epic PR2: the entry buffer mirrors the INPUT's own config, so
-         * validate the attach-time identity numGroups*groupSize == elements
-         * first — a hand-built input tensor can bypass initTensor's gate, and a
-         * malformed config would otherwise be re-derived into a DIFFERENT
-         * geometry, which the copyTensor below would over- or
-         * under-copy: this validate is the only guard. Geometry then comes from the same
-         * derive-from-element-count rule as initBufferOutput and the training
-         * wires (rematBfpWireGrouping), so all of them agree by construction.
-         * The exponent VALUES are copied because they ARE the input's grid
-         * (mirrors the SYM_INT32 scale copy above); the trailing copyTensor
-         * would carry them too, but the buffer must be a valid BFP tensor on
-         * its own the moment it exists. */
+        /* Validate the input grouping before sizing the copy destination;
+         * preserve its exponent values. */
         bfpQConfig_t *currentBfpQC = currentQ->qConfig;
         validateBfpQConfigShape(currentBfpQC, numValues);
         bfpQConfig_t *bfpQC = reserveMemory(sizeof(bfpQConfig_t));
@@ -288,7 +276,13 @@ tensor_t *inference(const model_t *m, tensor_t *input) {
 
 tensor_t **inferenceBatched(const model_t *m, batch_t *batch) {
     modelRequireValid(m, "inferenceBatched");
-    tensor_t **tensorArr = reserveMemory(batch->size * sizeof(*tensorArr));
+    size_t arrBytes;
+    if (!checkedMulSize(batch->size, sizeof(tensor_t *), &arrBytes)) {
+        PRINT_ERROR("inferenceBatched: batch size %zu overflows the output array size",
+                    batch->size);
+        exit(1);
+    }
+    tensor_t **tensorArr = reserveMemory(arrBytes);
 
     /* batch_t consumer: each sample is natural-shape, both forwards take [B, ...]. */
     if (modelIsChain(m)) {
@@ -315,11 +309,8 @@ tensor_t **inferenceBatched(const model_t *m, batch_t *batch) {
     return tensorArr;
 }
 
-/* Sized from the PRODUCED output, which is what gets copied into it. The loss
- * requires the label to have exactly that shape (#153) and runs first, so a
- * rank-1 [C] label against a [1, C] output -- which once overflowed here when
- * the size came from the label -- now fails fast before this allocation.
- * Mirrors initTrainingStats (CalculateGradsSequential.c). */
+/* Evaluate loss before allocating output statistics; size the retained output
+ * from the produced tensor. */
 static inferenceStats_t *reserveInferenceStats(tensor_t *producedOutput) {
     inferenceStats_t *inferenceStats = reserveMemory(sizeof(inferenceStats_t));
     inferenceStats->output = getTensorLike(producedOutput);
@@ -382,9 +373,6 @@ inferenceStats_t *inferenceWithLoss(const model_t *m, tensor_t *input, tensor_t 
         outputNext = outputCurr;
     }
 
-    /* The loss runs before the stats are allocated, so a label whose shape
-     * differs from the output exits before reserveInferenceStats (#153). The
-     * loss only reads outputNext. */
     lossFunctions_t lossFns = lossFunctions[funcType];
     layerExec_t lossExec;
     float loss = lossFns.forward(&outputNext, label, forwardReduction,

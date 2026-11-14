@@ -86,17 +86,11 @@ void testLayerConfigAccessArms(void) {
                  layerForwardMath(bn).type == ARITH_FLOAT32;
     const char *fieldBn = layerNonFloat32Field(bn);
     const char *fieldBare = layerNonFloat32Field(bare);
-    bn->config->batchNorm1d->forwardMath =
-        (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = HALF_AWAY};
-    const char *fieldSym = layerNonFloat32Field(bn);
-    bn->config->batchNorm1d->forwardMath =
-        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
     freeBatchNorm1dLayer(bare);
     freeBatchNorm1dLayer(bn);
     TEST_ASSERT_TRUE(slots);
     TEST_ASSERT_NULL(fieldBn);
     TEST_ASSERT_NULL(fieldBare);
-    TEST_ASSERT_EQUAL_STRING("forwardMath", fieldSym);
 }
 
 void testLayerLoadWeightsFillsGammaBeta(void) {

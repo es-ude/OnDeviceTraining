@@ -24,32 +24,29 @@ quantization_t *quantizationInitInt32();
  */
 quantization_t *quantizationInitSymInt32(roundingMode_t roundingMode);
 
-/*! SymInt32 with explicit qMaxBits. Plain quantizationInitSymInt32(rm) uses the
- *  int12 operand default (ODT_SYM_OPERAND_QMAXBITS). Widths >16 need scale=1
- *  (raw-int, unvalidated); 32 is rejected (#202): it marks a raw kernel output,
- *  which is requantized into a <= 31-bit tensor before it is cloned or used as
- *  a target (#516). */
+/*! SymInt32 with explicit qMaxBits in [1, 31]. Plain quantizationInitSymInt32(rm)
+ *  uses the int12 operand default (ODT_SYM_OPERAND_QMAXBITS). Widths >16 need
+ *  scale=1 (raw-int, unvalidated); 32 marks a raw kernel output, which is
+ *  requantized into a <= 31-bit tensor before it is cloned or used as a target. */
 quantization_t *quantizationInitSymInt32WithBits(roundingMode_t roundingMode, uint8_t qMaxBits);
 
 /*! Sub-byte symmetric quantization with explicit bit width and rounding. */
 quantization_t *quantizationInitSym(uint8_t qBits, roundingMode_t roundingMode);
 
-/*! Group-quant PR2: sub-byte symmetric quantization with an explicit group
- *  shape (numGroups, groupSize), mirroring quantizationInitSym's per-tensor
- *  {1,0}. Pairs with freeQuantization. See initSymQConfigGrouped for the
- *  shape invariant enforced at construction. */
+/*! Sub-byte symmetric quantization with an explicit group shape (numGroups,
+ *  groupSize); per-tensor is {1,0}. Pairs with freeQuantization. See
+ *  initSymQConfigGrouped for the shape invariant enforced at construction. */
 quantization_t *quantizationInitSymGrouped(uint8_t qBits, roundingMode_t roundingMode,
                                            size_t numGroups, size_t groupSize);
 
-/*! BFP epic PR1: per-tensor block-floating-point quantization with explicit
- *  mantissa/exponent widths and rounding. Pairs with freeQuantization. */
+/*! Per-tensor block-floating-point quantization with explicit mantissa/exponent
+ *  widths and rounding. Pairs with freeQuantization. */
 quantization_t *quantizationInitBfp(uint8_t mantissaBits, uint8_t exponentBits,
                                     roundingMode_t roundingMode);
 
-/*! BFP epic PR1: block-floating-point quantization with an explicit group
- *  shape (numGroups, groupSize), mirroring quantizationInitSymGrouped's
- *  per-tensor {1,0}. Pairs with freeQuantization. See initBfpQConfigGrouped
- *  for the shape invariant enforced at construction. */
+/*! Block-floating-point quantization with an explicit group shape (numGroups,
+ *  groupSize); per-tensor is {1,0}. Pairs with freeQuantization. See
+ *  initBfpQConfigGrouped for the shape invariant enforced at construction. */
 quantization_t *quantizationInitBfpGrouped(uint8_t mantissaBits, uint8_t exponentBits,
                                            roundingMode_t roundingMode, size_t numGroups,
                                            size_t groupSize);
@@ -63,15 +60,13 @@ quantization_t *quantizationInitBfpGrouped(uint8_t mantissaBits, uint8_t exponen
  */
 quantization_t *quantizationInitAsym(uint8_t qBits, roundingMode_t roundingMode);
 
-/*! Group-quant PR4: packed asymmetric quantization with an explicit group
- *  shape (numGroups, groupSize), mirroring quantizationInitSymGrouped. Pairs
- *  with freeQuantization. See initAsymQConfigGrouped for the shape invariant
- *  and the group-quant D6 qBits ceiling enforced at construction. */
+/*! Packed asymmetric quantization with an explicit group shape (numGroups,
+ *  groupSize); per-tensor is {1,0}. Pairs with freeQuantization. See
+ *  initAsymQConfigGrouped for the shape invariant and qBits range enforced at
+ *  construction. */
 quantization_t *quantizationInitAsymGrouped(uint8_t qBits, roundingMode_t rm, size_t numGroups,
                                             size_t groupSize);
 
-/* Note: uses (void) explicitly; siblings use () for historical K&R-style; the
- * _Static_assert in UnitTestTensorApi pattern-matches (*)(void). */
 /*! Initializes bool quantization.
  *
  * \returns Pointer to initialized quantization

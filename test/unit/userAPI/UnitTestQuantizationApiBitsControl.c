@@ -28,6 +28,15 @@ void testQuantizationInitSymInt32WithBitsRejectsMaxBits32(void) {
     ASSERT_EXITS_WITH_FAILURE(quantizationInitSymInt32WithBits(HALF_AWAY, 32));
 }
 
+/* Width 0 has no representable value; width 1 (grid {-1, 0}) stays legal. */
+void testQuantizationInitSymInt32WithBitsRejectsZeroAcceptsOne(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "quantizationInitSymInt32WithBits: qMaxBits 0",
+                             quantizationInitSymInt32WithBits(HALF_AWAY, 0));
+    quantization_t *q = quantizationInitSymInt32WithBits(HALF_AWAY, 1);
+    uint8_t width = ((symInt32QConfig_t *)q->qConfig)->qMaxBits;
+    TEST_ASSERT_EQUAL_UINT8(1, width);
+}
+
 void testQuantizationInitSymInt32WithBitsAcceptsMaxBits31(void) {
     /* 31 is the largest width whose half-range 2^30 fits int32, so its integer grid
      * bounds [-2^30, 2^30 - 1] can be formed (the float image of 2^30 - 1 is NOT
@@ -54,6 +63,7 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testQuantizationInitSymInt32WithBitsSetsBitsAndRoundingMode);
     RUN_TEST(testQuantizationInitSymInt32WithBitsRejectsMaxBits32);
+    RUN_TEST(testQuantizationInitSymInt32WithBitsRejectsZeroAcceptsOne);
     RUN_TEST(testQuantizationInitSymInt32WithBitsAcceptsMaxBits31);
     RUN_TEST(testQuantizationInitSymBuildsQConfigWithSpecifiedBitsAndRounding);
     return UNITY_END();

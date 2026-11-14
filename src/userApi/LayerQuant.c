@@ -1,9 +1,7 @@
 #define SOURCE_FILE "LAYER_QUANT"
 
-#include <stdlib.h>
 #include <string.h>
 
-#include "Common.h"
 #include "LayerQuant.h"
 #include "ScaleCanon.h"
 #include "StorageApi.h"
@@ -62,9 +60,6 @@ quantization_t *deepCopyQuantization(quantization_t *src) {
     case BFP:
         cfgSize = sizeof(bfpQConfig_t);
         break;
-    default:
-        PRINT_ERROR("deepCopyQuantization: unknown quantization type %d", (int)src->type);
-        exit(1);
     }
 
     if (cfgSize == 0) {
@@ -73,11 +68,6 @@ quantization_t *deepCopyQuantization(quantization_t *src) {
         dst->qConfig = reserveMemory(cfgSize);
         memcpy(dst->qConfig, src->qConfig, cfgSize);
         if (src->type == SYM) {
-            /* Group-quant PR1: symQConfig_t carries a heap `scales` pointer --
-             * the memcpy above just copied that POINTER, so dst and src now
-             * alias the same array (double-free / shared-mutation hazard).
-             * Replace it with a genuine deep copy: a fresh array, sized from
-             * src's own numGroups (PR1: always 1), values copied. */
             symQConfig_t *srcQC = src->qConfig;
             symQConfig_t *dstQC = dst->qConfig;
             odtScale_t *scales = reserveMemory(srcQC->numGroups * sizeof(*scales));
@@ -85,8 +75,6 @@ quantization_t *deepCopyQuantization(quantization_t *src) {
             dstQC->scales = scales;
         }
         if (src->type == ASYM) {
-            /* Group-quant PR4: same pointer-alias hazard, two arrays --
-             * fresh owned blocks for scales AND zeroPoints. */
             asymQConfig_t *srcQC = src->qConfig;
             asymQConfig_t *dstQC = dst->qConfig;
             odtScale_t *scales = reserveMemory(srcQC->numGroups * sizeof(*scales));
@@ -97,9 +85,6 @@ quantization_t *deepCopyQuantization(quantization_t *src) {
             dstQC->zeroPoints = zeroPoints;
         }
         if (src->type == BFP) {
-            /* BFP epic PR1 twin of the SYM fix above: bfpQConfig_t carries a
-             * heap `exponents` pointer -- deep-copy the array (not the
-             * pointer) so dst and src own independent memory. */
             bfpQConfig_t *srcQC = src->qConfig;
             bfpQConfig_t *dstQC = dst->qConfig;
             uint8_t *exponents = reserveMemory(srcQC->numGroups * sizeof(uint8_t));

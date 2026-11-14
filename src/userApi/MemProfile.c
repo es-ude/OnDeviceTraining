@@ -24,11 +24,8 @@ static void *stackThunkRunner(void *p) {
 }
 
 size_t measurePeakStackBytes(void (*fn)(void *), void *arg, size_t stackBytes) {
-    /* pthread_attr_setstack's region must be page-aligned in BOTH address and
-     * size: POSIX permits (but does not require) that, and Apple libpthread
-     * enforces it (glibc only checks size). A raw malloc() is not guaranteed
-     * to return a page-aligned address, and stackBytes is caller-chosen, so
-     * both need adjusting before the region reaches pthread_attr_setstack. */
+    /* pthread_attr_setstack needs a page-aligned address and size on some
+     * platforms (Apple libpthread enforces both). */
     long pageSizeRaw = sysconf(_SC_PAGESIZE);
     if (pageSizeRaw <= 0) {
         fprintf(stderr, "MEM_PROFILE: sysconf(_SC_PAGESIZE) failed — failing loud\n");
@@ -36,7 +33,6 @@ size_t measurePeakStackBytes(void (*fn)(void *), void *arg, size_t stackBytes) {
     }
     size_t pageSize = (size_t)pageSizeRaw;
 
-    /* Round stackBytes up to a whole page. */
     size_t remainder = stackBytes % pageSize;
     size_t pad = remainder == 0 ? 0 : pageSize - remainder;
     if (stackBytes > SIZE_MAX - pad) {
@@ -60,10 +56,8 @@ size_t measurePeakStackBytes(void (*fn)(void *), void *arg, size_t stackBytes) {
 
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    /* Fail loud on any pthread error: a rejected stack region (attr_setstack) would run the
-     * workload on the DEFAULT stack, leaving `region` fully painted -> a silent used==0
-     * measurement; a failed create would leave `th` uninitialized -> UB in join. Both are
-     * worse than a crash for a measurement apparatus. */
+    /* A pthread failure invalidates the measurement: a rejected region runs fn
+     * on the default stack (a silent 0), a failed create leaves th unset. */
     int setstackRc = pthread_attr_setstack(&attr, region, roundedBytes);
     if (setstackRc != 0) {
         fprintf(stderr,
@@ -100,12 +94,7 @@ size_t measurePeakStackBytes(void (*fn)(void *), void *arg, size_t stackBytes) {
 size_t memProfileRssPeakKb(void) {
     struct rusage ru;
     if (getrusage(RUSAGE_SELF, &ru) != 0) {
-        /* Soft-fail sentinel (0 = "unavailable"): RSS is a COARSE SECONDARY anchor,
-         * not a primary measurement like the heap counter / stack watermark. A 0
-         * (never a real RSS) is more useful to a consumer than crashing the whole
-         * run; contrast measurePeakStackBytes, which fails loud because a wrong
-         * stack number silently corrupts the primary result. getrusage(RUSAGE_SELF)
-         * essentially never fails in practice. */
+        /* Return 0 when RSS is unavailable. */
         return 0;
     }
     /* ru_maxrss is KiB on Linux, bytes on macOS/Darwin. */

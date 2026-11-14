@@ -1247,6 +1247,16 @@ void testInferenceWithLossRefusesANullLabel(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "inferenceWithLoss: label is NULL", inferF3WithANullLabel());
 }
 
+/* A batch size whose pointer array would wrap size_t exits by name before
+ * any sample is read. */
+void testInferenceBatchedRejectsAnUnrepresentableBatchSize(void) {
+    layer_t flatten = {.type = FLATTEN, .config = NULL};
+    layer_t *model[1] = {&flatten};
+    batch_t batch = {.samples = NULL, .size = SIZE_MAX / sizeof(tensor_t *) + 1u};
+    ASSERT_EXITS_WITH_OUTPUT(1, "inferenceBatched: batch size",
+                             inferenceBatched(&MODEL_CHAIN(model, 1), &batch));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testInferenceLinearReluFloat);
@@ -1271,6 +1281,7 @@ int main(void) {
     RUN_TEST(testInferenceWithLossFactoryMaxPoolGrowsToBatch2);
 
     RUN_TEST(testInferenceBatchedAddsBatchAxisToNaturalSamples);
+    RUN_TEST(testInferenceBatchedRejectsAnUnrepresentableBatchSize);
     RUN_TEST(testInferenceWithLossRunsOnACallersScheduler);
     RUN_TEST(testInferenceWithLossTakesACallWithoutAScheduler);
     RUN_TEST(testInferenceWithLossHandsEachLayerItsLayerKey);

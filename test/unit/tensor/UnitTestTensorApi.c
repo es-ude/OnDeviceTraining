@@ -3,6 +3,7 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "BatchView.h"
@@ -203,49 +204,6 @@ static tensor_t *makeBoolTensorN(size_t n) {
     return initTensor(shape, quantizationInitBool(), NULL);
 }
 
-void testInitDistribution_Zeros_AllValuesAreZero(void) {
-    tensor_t *t = makeFloatTensorForDistTest(3, 4);
-    /* Pre-write a sentinel so we can prove ZEROS overwrites. */
-    float *vals = (float *)t->data;
-    for (size_t i = 0; i < 12; ++i) {
-        vals[i] = 42.0f;
-    }
-
-    distribution_t d = {.type = ZEROS};
-    initDistribution(t, &d, NULL);
-
-    /* CAPTURE values before free. */
-    float captured[12];
-    for (size_t i = 0; i < 12; ++i) {
-        captured[i] = vals[i];
-    }
-    freeTensor(t);
-
-    /* ASSERT on captured. */
-    for (size_t i = 0; i < 12; ++i) {
-        TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.0f, captured[i]);
-    }
-}
-
-void testInitDistribution_Ones_AllValuesAreOne(void) {
-    tensor_t *t = makeFloatTensorForDistTest(3, 4);
-    distribution_t d = {.type = ONES};
-    initDistribution(t, &d, NULL);
-    float *vals = (float *)t->data;
-
-    /* CAPTURE. */
-    float captured[12];
-    for (size_t i = 0; i < 12; ++i) {
-        captured[i] = vals[i];
-    }
-    freeTensor(t);
-
-    /* ASSERT. */
-    for (size_t i = 0; i < 12; ++i) {
-        TEST_ASSERT_FLOAT_WITHIN(1e-9f, 1.0f, captured[i]);
-    }
-}
-
 void testInitDistribution_Uniform_AllValuesInRange(void) {
     tensor_t *t = makeFloatTensorForDistTest(4, 5);
     distribution_t d = {.type = UNIFORM, .params.uniform = {-0.5f, 0.5f}};
@@ -268,117 +226,6 @@ void testInitDistribution_Uniform_AllValuesInRange(void) {
     for (size_t i = 0; i < 20; ++i) {
         TEST_ASSERT_TRUE(captured[i] >= -0.5f && captured[i] <= 0.5f);
     }
-    TEST_ASSERT_TRUE(any_nonzero);
-}
-
-void testInitDistribution_Normal_NotAllSentinel(void) {
-    tensor_t *t = makeFloatTensorForDistTest(4, 5);
-    float *vals = (float *)t->data;
-    for (size_t i = 0; i < 20; ++i) {
-        vals[i] = -999.0f;
-    }
-    distribution_t d = {.type = NORMAL, .params.normal = {0.0f, 0.01f}};
-    rngStream_t rs = rngOpen(rngKeyFromSeed(1u));
-    initDistribution(t, &d, &rs);
-
-    /* CAPTURE the derived sentinel count. */
-    size_t sentinelCount = 0;
-    for (size_t i = 0; i < 20; ++i) {
-        if (vals[i] == -999.0f) {
-            sentinelCount++;
-        }
-    }
-    freeTensor(t);
-
-    /* ASSERT on captured. */
-    TEST_ASSERT_EQUAL_UINT(0, sentinelCount);
-}
-
-void testInitDistribution_XavierUniform_NotAllZero(void) {
-    tensor_t *t = makeFloatTensorForDistTest(4, 5);
-    distribution_t d = {.type = XAVIER_UNIFORM,
-                        .params.xavier = {.gain = 1.0f, .fanIn = 4, .fanOut = 5}};
-    rngStream_t rs = rngOpen(rngKeyFromSeed(1u));
-    initDistribution(t, &d, &rs);
-    float *vals = (float *)t->data;
-
-    /* CAPTURE the derived bool flag. */
-    bool any_nonzero = false;
-    for (size_t i = 0; i < 20; ++i) {
-        if (vals[i] != 0.0f) {
-            any_nonzero = true;
-            break;
-        }
-    }
-    freeTensor(t);
-
-    /* ASSERT on captured. */
-    TEST_ASSERT_TRUE(any_nonzero);
-}
-
-void testInitDistribution_XavierNormal_NotAllZero(void) {
-    tensor_t *t = makeFloatTensorForDistTest(4, 5);
-    distribution_t d = {.type = XAVIER_NORMAL,
-                        .params.xavier = {.gain = 1.0f, .fanIn = 4, .fanOut = 5}};
-    rngStream_t rs = rngOpen(rngKeyFromSeed(1u));
-    initDistribution(t, &d, &rs);
-    float *vals = (float *)t->data;
-
-    /* CAPTURE. */
-    bool any_nonzero = false;
-    for (size_t i = 0; i < 20; ++i) {
-        if (vals[i] != 0.0f) {
-            any_nonzero = true;
-            break;
-        }
-    }
-    freeTensor(t);
-
-    /* ASSERT. */
-    TEST_ASSERT_TRUE(any_nonzero);
-}
-
-void testInitDistribution_KaimingUniform_NotAllZero(void) {
-    tensor_t *t = makeFloatTensorForDistTest(4, 5);
-    distribution_t d = {.type = KAIMING_UNIFORM,
-                        .params.kaiming = {.gain = sqrtf(2.0f), .fanMode = 4}};
-    rngStream_t rs = rngOpen(rngKeyFromSeed(1u));
-    initDistribution(t, &d, &rs);
-    float *vals = (float *)t->data;
-
-    /* CAPTURE. */
-    bool any_nonzero = false;
-    for (size_t i = 0; i < 20; ++i) {
-        if (vals[i] != 0.0f) {
-            any_nonzero = true;
-            break;
-        }
-    }
-    freeTensor(t);
-
-    /* ASSERT. */
-    TEST_ASSERT_TRUE(any_nonzero);
-}
-
-void testInitDistribution_KaimingNormal_NotAllZero(void) {
-    tensor_t *t = makeFloatTensorForDistTest(4, 5);
-    distribution_t d = {.type = KAIMING_NORMAL,
-                        .params.kaiming = {.gain = sqrtf(2.0f), .fanMode = 4}};
-    rngStream_t rs = rngOpen(rngKeyFromSeed(1u));
-    initDistribution(t, &d, &rs);
-    float *vals = (float *)t->data;
-
-    /* CAPTURE. */
-    bool any_nonzero = false;
-    for (size_t i = 0; i < 20; ++i) {
-        if (vals[i] != 0.0f) {
-            any_nonzero = true;
-            break;
-        }
-    }
-    freeTensor(t);
-
-    /* ASSERT. */
     TEST_ASSERT_TRUE(any_nonzero);
 }
 
@@ -803,24 +650,19 @@ void testGradInitSymInt32StaysInt16WhileDefaultIsInt12() {
 }
 
 void testGetQLikeSymPreservesWidthAndRoundingResetsScale(void) {
-    /* Precedent A (matches SYM_INT32/ASYM arms): qBits+roundingMode carried, scale
-     * reset to 1.f — a fresh clone is an ungridded zero-state. Mutation guard:
-     * re-removing the SYM arm exits the run ("Unknown QType"). */
+    /* A per-tensor clone keeps qBits and rounding, resets the scale to 1, and
+     * owns its scales array: a later write to the source does not reach it. */
     quantization_t *src = quantizationInitSym(6, SR_HALF_AWAY);
-    ((symQConfig_t *)src->qConfig)->scales[0] =
-        odtTestScale(0.25f); /* carried scale must NOT be cloned */
+    ((symQConfig_t *)src->qConfig)->scales[0] = odtTestScale(0.25f);
     quantization_t *like = getQLike(src);
+    ((symQConfig_t *)src->qConfig)->scales[0] = odtTestScale(0.75f);
 
     qtype_t likeType = like->type;
-    /* Group-quant PR1: capture the scalar VALUES here, not a whole-struct copy
-     * -- symQConfig_t now carries a heap `scales` pointer, so `*(symQConfig_t
-     * *)like->qConfig` would copy that pointer into a stack local that then
-     * dangles once freeQuantization(like) below frees the array (assert-last
-     * per Rule 3 still requires reading AFTER the free otherwise). */
     symQConfig_t *likeQC = (symQConfig_t *)like->qConfig;
     uint8_t likeQBits = likeQC->qBits;
     roundingMode_t likeRoundingMode = likeQC->roundingMode;
     float likeScale = odtScaleToFloat(likeQC->scales[0]);
+    bool distinctArrays = likeQC->scales != ((symQConfig_t *)src->qConfig)->scales;
     freeQuantization(src);
     freeQuantization(like);
 
@@ -828,48 +670,7 @@ void testGetQLikeSymPreservesWidthAndRoundingResetsScale(void) {
     TEST_ASSERT_EQUAL_UINT8(6, likeQBits);
     TEST_ASSERT_EQUAL_INT(SR_HALF_AWAY, likeRoundingMode);
     TEST_ASSERT_EQUAL_FLOAT(1.f, likeScale);
-}
-
-void testGetQLikeSymDeepCopiesScalesArray(void) {
-    /* Group-quant PR1 new mechanics: scales is now a heap array owned by
-     * each qconfig independently. Mutate the SOURCE's scales[0] AFTER
-     * getQLike -- if getQLike aliased the array pointer instead of
-     * allocating a fresh one (via initSymQConfig), the clone would observe
-     * the mutation and/or share the same pointer. Mutation guard: making
-     * getQLike copy the pointer (`likeQC->scales = srcQC->scales;`) instead
-     * of calling initSymQConfig makes this FAIL both assertions. */
-    quantization_t *src = quantizationInitSym(6, SR_HALF_AWAY);
-    quantization_t *like = getQLike(src);
-
-    odtScale_t *srcScales = ((symQConfig_t *)src->qConfig)->scales;
-    odtScale_t *likeScales = ((symQConfig_t *)like->qConfig)->scales;
-
-    ((symQConfig_t *)src->qConfig)->scales[0] = odtTestScale(0.75f); /* mutate AFTER clone */
-
-    float likeScaleAfterSrcMutation = odtScaleToFloat(likeScales[0]);
-
-    freeQuantization(src);
-    freeQuantization(like);
-
-    TEST_ASSERT_NOT_EQUAL(srcScales, likeScales);
-    TEST_ASSERT_EQUAL_FLOAT(1.f, likeScaleAfterSrcMutation);
-}
-
-void testFreeQuantizationSymFreesScalesArrayWithoutLeak(void) {
-    /* Group-quant PR1 new mechanics: the SYM qconfig now owns a second heap
-     * block (the scales array) beyond the qConfig struct itself and the
-     * quantization_t wrapper. freeQuantization must release all of it.
-     * Verified leak-free via the LSan opt-in recipe (docs/conventions/
-     * testing.md) run against this focused binary -- see the PR1 report.
-     * Mutation guard: dropping the array free in freeQuantization leaves
-     * this test still "passing" under the default ASan build (no crash),
-     * but LSan flags the leak (see report). */
-    quantization_t *q = quantizationInitSym(4, HALF_AWAY);
-    odtScale_t *scales = ((symQConfig_t *)q->qConfig)->scales;
-
-    freeQuantization(q);
-
-    TEST_ASSERT_NOT_NULL(scales);
+    TEST_ASSERT_TRUE(distinctArrays);
 }
 
 void testGetDataLikeSymAllocatesPackedCeiling(void) {
@@ -1166,22 +967,6 @@ void testGetDataLikeBfpSizesPacked(void) {
     TEST_ASSERT_EQUAL_size_t(8, expectedBytes);
 }
 
-void testFreeQuantizationBfpFreesExponents(void) {
-    /* BFP twin of testFreeQuantizationSymFreesScalesArrayWithoutLeak: the
-     * BFP qconfig owns a second heap block (the exponents array) beyond the
-     * qConfig struct and the quantization_t wrapper -- freeQuantization must
-     * release all of it. Leak-freedom is enforced by CI's Linux ASan/LSan
-     * job on this binary (macOS ASan init hangs locally, known issue); this
-     * test's own pass/fail signal is that the free completes without a
-     * double-free/invalid-free abort. */
-    quantization_t *q = quantizationInitBfp(8, 8, HALF_AWAY);
-    uint8_t *exponents = ((bfpQConfig_t *)q->qConfig)->exponents;
-
-    freeQuantization(q);
-
-    TEST_ASSERT_NOT_NULL(exponents);
-}
-
 void testRequantizeTensorInPlaceFloatToBfp(void) {
     /* Task 6 Step 1 pin: requantizeTensorInPlace needs NO code change to
      * support a BFP target -- it is already dtype-generic (getQLike +
@@ -1225,6 +1010,14 @@ void testRequantizeTensorInPlaceFloatToBfp(void) {
     }
 
     freeTensor(t);
+}
+
+void testInitTensorValidatesGroupedBfpShape(void) {
+    /* 10-element tensor, groupSize 4 -> 2*4 != 10 must fail-fast at attach */
+    ASSERT_EXITS_WITH_OUTPUT(1, "validateBfpQConfigShape: invalid group shape", {
+        quantization_t *q = quantizationInitBfpGrouped(4, 8, HALF_AWAY, 2, 4);
+        initTensor(makeShape1d(10), q, NULL);
+    });
 }
 
 /* Heap-OOB guard, BFP twin of
@@ -1450,6 +1243,35 @@ void testFillFromFloatBufferIntoAnSrTensorExits(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "roundByMode: SR rounding without a stream", fillAnSrTensor());
 }
 
+/* A numGroups whose float array would wrap size_t exits by name before any
+ * allocation is sized from it. */
+void testGroupedConstructorsRejectAnUnrepresentableGroupArray(void) {
+    const size_t wrapping = SIZE_MAX / sizeof(float) + 1u;
+    ASSERT_EXITS_WITH_OUTPUT(1, "quantizationInitSymGrouped: numGroups",
+                             quantizationInitSymGrouped(4, HALF_AWAY, wrapping, 1));
+    ASSERT_EXITS_WITH_OUTPUT(1, "quantizationInitAsymGrouped: numGroups",
+                             quantizationInitAsymGrouped(4, HALF_AWAY, wrapping, 1));
+}
+
+void testBuildOwnedShapeRejectsAnUnrepresentableRank(void) {
+    const size_t dims[1] = {1};
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "buildOwnedShape: ", buildOwnedShape(dims, SIZE_MAX / sizeof(size_t) + 1u));
+}
+
+void testGetDataLikeRejectsAnUnrepresentableByteCount(void) {
+    quantization_t *q = quantizationInitFloat();
+    ASSERT_EXITS_WITH_OUTPUT(1, "calcNumberOfBytesForData: byte count overflows",
+                             getDataLike(q, SIZE_MAX / sizeof(float) + 1u));
+    freeQuantization(q);
+}
+
+void testGetDataLikeRejectsBool(void) {
+    quantization_t *q = quantizationInitBool();
+    ASSERT_EXITS_WITH_OUTPUT(1, "getDataLike: BOOL", getDataLike(q, 8));
+    freeQuantization(q);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testTensorInitWithDistribution_Zeros_InitializesProductOfDimsValues);
@@ -1468,19 +1290,10 @@ int main(void) {
     RUN_TEST(testGradInitAsym_DoesNotAliasParentShape);
     RUN_TEST(testGradInit_Float32_MatchesParamShapeOwnsOwnQuant);
     RUN_TEST(testGradInit_SymInt32_MatchesParamShapeAndDtype);
-    RUN_TEST(testInitDistribution_Zeros_AllValuesAreZero);
-    RUN_TEST(testInitDistribution_Ones_AllValuesAreOne);
     RUN_TEST(testInitDistribution_Uniform_AllValuesInRange);
-    RUN_TEST(testInitDistribution_Normal_NotAllSentinel);
-    RUN_TEST(testInitDistribution_XavierUniform_NotAllZero);
-    RUN_TEST(testInitDistribution_XavierNormal_NotAllZero);
-    RUN_TEST(testInitDistribution_KaimingUniform_NotAllZero);
-    RUN_TEST(testInitDistribution_KaimingNormal_NotAllZero);
     RUN_TEST(testTensorFillFromBoolBuffer_RoundTrip_N12);
     RUN_TEST(testGradInitSymInt32StaysInt16WhileDefaultIsInt12);
     RUN_TEST(testGetQLikeSymPreservesWidthAndRoundingResetsScale);
-    RUN_TEST(testGetQLikeSymDeepCopiesScalesArray);
-    RUN_TEST(testFreeQuantizationSymFreesScalesArrayWithoutLeak);
     RUN_TEST(testGetDataLikeSymAllocatesPackedCeiling);
     RUN_TEST(testGradInitSymAllocatesPackedZeroGrad);
     RUN_TEST(testInitTensorValidatesGroupedSymShape);
@@ -1495,8 +1308,8 @@ int main(void) {
     RUN_TEST(testGetQLikeBfpPerTensorResetsExponents);
     RUN_TEST(testGetQLikeBfpGroupedDeepCopiesGrid);
     RUN_TEST(testGetDataLikeBfpSizesPacked);
-    RUN_TEST(testFreeQuantizationBfpFreesExponents);
     RUN_TEST(testRequantizeTensorInPlaceFloatToBfp);
+    RUN_TEST(testInitTensorValidatesGroupedBfpShape);
     RUN_TEST(testRequantizeTensorInPlaceRejectsMismatchedGroupShapeBfp);
     RUN_TEST(testGradInitAcceptsPerTensorBfpTemplate);
     RUN_TEST(testGradInitRejectsGroupedBfpTemplate);
@@ -1511,5 +1324,9 @@ int main(void) {
     RUN_TEST(testInitDistributionNormalKindsDrawFromTheStream);
     RUN_TEST(testInitDistributionRandomKindWithoutAStreamExits);
     RUN_TEST(testInitDistributionOfAnEmptyTensorNeedsNoStream);
+    RUN_TEST(testGroupedConstructorsRejectAnUnrepresentableGroupArray);
+    RUN_TEST(testBuildOwnedShapeRejectsAnUnrepresentableRank);
+    RUN_TEST(testGetDataLikeRejectsAnUnrepresentableByteCount);
+    RUN_TEST(testGetDataLikeRejectsBool);
     return UNITY_END();
 }

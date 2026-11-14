@@ -313,6 +313,11 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
         odtScaleStore(&symIntQC->scale, deserializeScale(f));
         symIntQC->roundingMode = (roundingMode_t)serialReadU8(f);
         symIntQC->qMaxBits = serialReadU8(f);
+        if (symIntQC->qMaxBits == 0) {
+            PRINT_ERROR("deserializeQConfig: SYM_INT32 file qMaxBits 0 has no representable "
+                        "value");
+            exit(1);
+        }
         break;
     }
     case SYM: {

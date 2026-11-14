@@ -6,20 +6,19 @@
 #include "ArithmeticType.h"
 #include "Layer.h"
 
-/* Uniform per-layer-type accessors (arithmetic-type-split
- * D3/D4, docs/conventions/arithmetic-sym.md). The layerType_t switch over a layer's
- * declared wire configs and arithmetic lives here and nowhere else -- every
- * consumer that needs a layer's produced-wire storage config, declared forward
- * arithmetic, its FLOAT32-only status or its backward read-set goes through
- * these functions instead of re-deriving its own switch. */
+/* Uniform per-layer-type accessors (docs/conventions/arithmetic-sym.md). The
+ * layerType_t switch over a layer's declared wire configs and arithmetic lives
+ * here and nowhere else -- every consumer that needs a layer's produced-wire
+ * storage config, declared forward arithmetic, its FLOAT32-only status or its
+ * backward read-set goes through these functions instead of re-deriving its
+ * own switch. Every function expects a factory- or loader-built layer. */
 
 /* Produced forward-wire storage config (dtype + qConfig for the layer's
  * output tensor). NULL for Flatten — it has no per-layer quantization;
- * callers fall back to the upstream tensor's own quantization (passthrough),
- * exactly as the pre-existing FLATTEN handling already did. */
+ * callers fall back to the upstream tensor's own quantization (passthrough). */
 quantization_t *layerOutputQ(layer_t *layer);
 
-/* Producer's declared backward config for the dx wire it emits (#221). NULL
+/* Producer's declared backward config for the dx wire it emits. NULL
  * for Flatten -> passthrough of the upstream dtype (callers fall back to the
  * upstream tensor's quantization, e.g. the remat wire table's inherited GRAD
  * headers). */
@@ -47,18 +46,18 @@ void requireCrossEntropyHead(layer_t *last, const char *what);
  * output's wire, with propLossQ unused, as before the BFP heads existed. */
 bool crossEntropyHeadDeclaresBfp(const layer_t *last);
 
-/* Declared forward compute representation. Flatten and Quantization have no
- * consumed arithmetic (arithmetic-type-split D4 — Quantization is a pure conversion node) ->
- * {ARITH_FLOAT32, HALF_AWAY}, matching arithmeticFromQuantizationOrDefault(NULL). */
+/* Declared forward compute representation. Flatten and Quantization (a pure
+ * conversion node) have no consumed arithmetic -> {ARITH_FLOAT32, HALF_AWAY},
+ * matching arithmeticFromQuantizationOrDefault(NULL). */
 arithmetic_t layerForwardMath(layer_t *layer);
 
-/* FLOAT32-only gate for stacked training (#152 PR3b): true iff
- * every arithmetic the layer declares (forwardMath, propLossMath and, for the
- * GEMM family, weightGradMath/biasGradMath), both wire storage configs
- * (outputQ, propLossQ) and the param + grad storage of every parameter are
- * FLOAT32. NULL wire configs (passthrough), a NULL bias (bias-less) and NULL
- * grads (frozen, #380) count as FLOAT32; Flatten is true, Quantization false.
- * trainingBatchDefault evaluates it over the whole model when m > 1. */
+/* FLOAT32-only gate for stacked training: true iff every arithmetic the layer
+ * declares (forwardMath, propLossMath and, for the GEMM family,
+ * weightGradMath/biasGradMath), both wire storage configs (outputQ, propLossQ)
+ * and the param + grad storage of every parameter are FLOAT32. NULL wire
+ * configs (passthrough), a NULL bias (bias-less) and NULL grads (frozen) count
+ * as FLOAT32; Flatten and BatchNorm1d (FLOAT32-only by construction) are true,
+ * Quantization false. */
 bool layerIsFloat32Only(layer_t *layer);
 
 /* The first non-FLOAT32 field layerIsFloat32Only would reject, as a static
@@ -66,39 +65,38 @@ bool layerIsFloat32Only(layer_t *layer);
  * layer passes -- the "offending field" of the stacked-training error. */
 const char *layerNonFloat32Field(layer_t *layer);
 
-/* Read-set rule (#4, remat): true iff the layer's backward, whenever
+/* Read-set rule (remat): true iff the layer's backward, whenever
  * the driver runs it, reads its forward input's data or data-dependent
  * metadata (SYM scale, BFP exponents). Linear/Conv1d/Conv1dTransposed read it
  * only for the weight grad, so a frozen one does not; the norms read it
  * frozen or not. false: the backward may be handed an input whose data is
- * NULL. An unknown type exits. */
+ * NULL. */
 bool layerBackwardReadsInput(const layer_t *layer);
 
-/* Recompute rule (#4, remat): true iff the layer's training forward updates
+/* Recompute rule (remat): true iff the layer's training forward updates
  * layer state that a second forward on the same input would update again, so
  * a plan must never recompute it. Only a BatchNorm1d that tracks running
  * statistics and is not frozen: every training forward moves its running
  * mean, running variance and batch counter. Dropout's mask and MaxPool's
  * argmax are rewritten with the same values by a forward with the same input
  * and key, so they count as false. Reads the config, never the momentary
- * `training` flag: plans are built outside a training call. An unknown type
- * exits. */
+ * `training` flag: plans are built outside a training call. */
 bool layerForwardUpdatesState(const layer_t *layer);
 
-/* Forward-cost class (#4, remat): an analytic multiply-accumulate count of one
+/* Forward-cost class (remat): an analytic multiply-accumulate count of one
  * forward of the layer on inElements input and outElements output elements
  * (the batch included), the same for every dtype. The remat plan sums it over
  * the forwards and the recomputes of a training call (its report). A GEMM
  * layer counts one per weight an output reads (Conv1dTransposed: an input), a
  * pool its window per output (the adaptive pool its input once), a norm,
  * Softmax, ReLU, Dropout or Quantization one per output, Flatten nothing. A
- * proxy, not a cycle count. An unknown type or a count above SIZE_MAX exits. */
+ * proxy, not a cycle count. A count above SIZE_MAX exits. */
 size_t layerForwardCost(const layer_t *layer, size_t inElements, size_t outElements);
 
-/* Forward-only variant for stacked evaluation (#468): the first
- * non-FLOAT32 among forwardMath, outputQ and every parameter's (and
- * BatchNorm1d's running buffers') storage, or NULL. Backward arithmetic, the
- * prop-loss wire and grad storage are ignored -- evaluation never runs them. */
+/* Forward-only variant for stacked evaluation: the first non-FLOAT32 among
+ * forwardMath, outputQ and every parameter's storage, or NULL. Backward
+ * arithmetic, the prop-loss wire and grad storage are ignored -- evaluation
+ * never runs them. */
 const char *layerForwardNonFloat32Field(layer_t *layer);
 
 /* Setup gate for the scale-transparent layers (Relu, Dropout, Flatten). Their SYM_INT32 paths copy

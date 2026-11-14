@@ -21,16 +21,9 @@
  */
 tensor_t *initTensor(shape_t *shape, quantization_t *quantization, sparsity_t *sparsity);
 
-/*! Populates an already-initialized tensor's data buffer with values drawn
- * from the given distribution. Tensor must be FLOAT32-quantized in this
- * iteration; non-FLOAT32 support is a follow-up.
+/*! Fills a FLOAT32 tensor with values drawn from `distribution`; the
+ * union member matching `distribution->type` supplies the parameters.
  *
- * The tensor must have its data buffer already allocated (via initTensor).
- * The distribution value is read by `distribution->type`; the matching
- * union member supplies the kind-specific parameters.
- *
- * \param tensor: Pre-initialized FLOAT32 tensor.
- * \param distribution: Recipe for value generation. Read-only.
  * \param rs: The stream every random kind (UNIFORM, NORMAL and the XAVIER_* and
  *            KAIMING_* kinds) draws from, element by element; NULL stops the program
  *            for those kinds on a non-empty tensor. ZEROS and ONES draw nothing and
@@ -59,93 +52,38 @@ void tensorFillFromFloatBuffer(tensor_t *tensor, const float *source, size_t cou
  */
 void tensorFillFromBoolBuffer(tensor_t *tensor, const bool *source, size_t count);
 
-/*! Initializes a gradient tensor whose quantization is cloned from `gradQ`
- *  (deep copy via getQLike, so the grad tensor owns its own quantization_t)
- *  and whose shape is cloned from `param->shape`. This is the config-respecting
- *  grad-init: a layer's grad takes the dtype its backwardMath config declares.
- *
- * \param param: Pointer to param tensor (supplies the shape to clone)
- * \param gradQ: Quantization template to clone for the grad tensor
- * \param sparsity: sparsity_t of tensor
- *
- * \returns Pointer to initialized gradient tensor
- */
+/*! Clones param's shape and gradQ's storage config; gradQ must be per-tensor.
+ *  Caller keeps ownership of gradQ. */
 tensor_t *gradInit(tensor_t *param, quantization_t *gradQ, sparsity_t *sparsity);
-/*! Initializes int32 gradient tensor to match given param tensor.
- *
- * \param param: Pointer to param tensor
- * \param sparsity: sparsity_t of tensor
- *
- * \returns Pointer to initialized gradient tensor
- */
+/*! INT32 grad shaped like param. */
 tensor_t *gradInitInt32(tensor_t *param, sparsity_t *sparsity);
-/*! Initializes float gradient tensor to match given param tensor.
- *
- * \param param: Pointer to param tensor
- * \param sparsity: sparsity_t of tensor
- *
- * \returns Pointer to initialized gradient tensor
- */
+/*! FLOAT32 grad shaped like param. */
 tensor_t *gradInitFloat(tensor_t *param, sparsity_t *sparsity);
-/*! Initializes a SYM_INT32 gradient tensor to match the given param tensor,
- *  at the fixed grad-accumulation width ODT_SYM_GRAD_QMAXBITS (16 — an
- *  accumulate-soundness ceiling, not a memory saving: SYM_INT32 stays 4
- *  B/element, #261). Test/research helper — production grad storage defaults
- *  to FLOAT32 via the weightGradStorage/biasGradStorage knob path (gradInit).
- *
- * \param param: Pointer to param tensor
- * \param roundingMode: Rounding mode for the grad's qConfig
- * \param sparsity: sparsity_t of tensor
- *
- * \returns Pointer to initialized gradient tensor
- */
+/*! SYM_INT32 grad shaped like param, at the fixed grad-accumulation width
+ *  ODT_SYM_GRAD_QMAXBITS (16 — an accumulate-soundness ceiling, not a memory
+ *  saving: SYM_INT32 stays 4 B/element). Test/research helper — production
+ *  grad storage defaults to FLOAT32 via the weightGradStorage/biasGradStorage
+ *  knob path (gradInit). */
 tensor_t *gradInitSymInt32(tensor_t *param, roundingMode_t roundingMode, sparsity_t *sparsity);
-/*! Initializes asym gradient tensor to match given param tensor.
- *
- * \param param: Pointer to param tensor
- * \param sparsity: sparsity_t of tensor
- *
- * \returns Pointer to initialized gradient tensor
- */
+/*! Per-tensor ASYM grad shaped like param. */
 tensor_t *gradInitAsym(tensor_t *param, uint8_t qBits, roundingMode_t roundingMode,
                        sparsity_t *sparsity);
-/*! Initializes SYM (packed sub-byte) gradient tensor to match given param
- *  tensor's shape. Use when a layer's grad-storage knob names SYM explicitly
- *  for memory-constrained packed grad storage (#269, PR3); direct
- *  quantizationInitSym, no getQLike detour.
- *
- * \param param: Pointer to param tensor (supplies the shape to clone)
- * \param qBits: Sub-byte width of the packed SYM grad
- * \param roundingMode: Rounding mode for the SYM quantization config
- * \param sparsity: sparsity_t of tensor
- *
- * \returns Pointer to initialized gradient tensor
- */
+/*! Per-tensor packed SYM grad shaped like param, for a layer whose grad-storage
+ *  knob names SYM. */
 tensor_t *gradInitSym(tensor_t *param, uint8_t qBits, roundingMode_t roundingMode,
                       sparsity_t *sparsity);
 
-/*! Initializes parameter with given param and graident tensor.
- *
- * \param param: Pointer to param tensor
- * \param grad: Pointer to gradient tensor
- *
- * \returns Pointer to initialized parameter
- */
+/*! Takes ownership of param and grad (grad may be NULL); freeParameter frees
+ *  both. */
 parameter_t *parameterInit(tensor_t *param, tensor_t *grad);
 
-/*! Gets quantization that matches a given quantization.
- *
- * \param quantization: Pointer to quantization
- *
- * \returns Pointer to quantization with matching type and config
- */
+/*! Fresh clone of a storage config, for a new grad/state tensor. Per-tensor
+ *  SYM/ASYM/BFP clones keep widths and rounding but reset the grid (scale 1,
+ *  zero point 0, exponent bias); grouped clones keep the geometry and copy the
+ *  grid values. Use deepCopyQuantization for a full value copy. BOOL exits. */
 quantization_t *getQLike(quantization_t *quantization);
-/*! Gets tensor that matches a given tensor.
- *
- * \param tensor: Pointer to tensor
- *
- * \returns Pointer to tensor with matching shape, sparsity and quantization
- */
+/*! Fresh tensor with a copy of tensor's shape, a getQLike clone of its
+ *  quantization and zeroed data; the values are not copied. */
 tensor_t *getTensorLike(tensor_t *tensor);
 /*! Heap-allocates a shape with a copy of `dims` and identity order. Ownership passes to the
  *  tensor built on it: freeTensor frees the shape. */
@@ -153,48 +91,24 @@ shape_t *buildOwnedShape(const size_t *dims, size_t numberOfDims);
 /*! buildOwnedShape of `shape`'s physical dims: a transposed view comes back dense, in
  *  storage order. */
 shape_t *getShapeLike(shape_t *shape);
-/*! Gets data array by quantization and number of values.
- *
- * \param quantization: Pointer to quantization
- * \param numberOfValues: Number of values
- *
- * \returns Pointer to data array with matching size
- */
+/*! Zeroed data buffer for numberOfValues elements of quantization's dtype
+ *  (freed with freeReservedMemory). BOOL exits. */
 uint8_t *getDataLike(quantization_t *quantization, size_t numberOfValues);
-/*! Gets sparsity that matches a given sparsity.
- *
- * \param sparsity: Pointer to sparsity
- *
- * \returns Pointer to sparsity
- */
+/*! A fresh, unpopulated sparsity_t when sparsity is non-NULL, else NULL. */
 sparsity_t *getSparsityLike(sparsity_t *sparsity);
 
-// IMPORTANT: these are needed for trainingAPI.c to free gradTensors without freeing the actual
-// Pointer
-/*! Frees data of tensor.
- *
- * \param tensor: Pointer to tensor
- */
+/*! Frees only the data buffer; the tensor keeps its shape and quantization. */
 void freeData(tensor_t *tensor);
-/*! Frees shape of tensor.
- *
- * \param shape: Pointer to shape
- */
 void freeShape(shape_t *shape);
-/*! Frees quantization of tensor.
- *
- * \param quantization: Pointer to quantization
- */
+/*! Frees the qConfig, its owned per-group arrays and the wrapper. */
 void freeQuantization(quantization_t *quantization);
 
 /*! Requantizes `t`'s data + quantization to `targetQ`'s dtype/shape-of-
  * quantization IN PLACE: builds a fresh buffer sized for t's own element
- * count, dynamically quantizes via convertTensor (the same path
- * tensorFillFromFloatBuffer / layerLoadWeights use for non-FLOAT32 targets),
- * then swaps t's data + quantization pointers and frees the old ones. t's
- * shape and sparsity are untouched. `targetQ` is read-only (its dtype/config
- * is cloned via getQLike); caller retains ownership of `targetQ` and must
- * free it separately if heap-allocated.
+ * count, dynamically quantizes via convertTensor, then swaps t's data +
+ * quantization pointers and frees the old ones. t's shape and sparsity are
+ * untouched. `targetQ` is read-only (cloned via getQLike); caller retains
+ * ownership of it. A grouped target must describe exactly t's element count.
  *
  * \param t: Tensor to requantize in place; must already own heap-allocated
  *           data + quantization (e.g. via initTensor).
@@ -203,15 +117,9 @@ void freeQuantization(quantization_t *quantization);
  */
 void requantizeTensorInPlace(tensor_t *t, quantization_t *targetQ);
 
-/*! Frees tensor.
- *
- * \param tensor: Pointer to tensor
- */
+/*! Frees data, shape, quantization and the tensor itself. */
 void freeTensor(tensor_t *tensor);
-/*! Frees parameter.
- *
- * \param parameter: Pointer to parameter
- */
+/*! Frees param, the grad when non-NULL, and the parameter itself. */
 void freeParameter(parameter_t *parameter);
 
 #endif // TENSOR_H

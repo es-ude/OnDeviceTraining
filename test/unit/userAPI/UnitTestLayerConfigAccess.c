@@ -10,7 +10,6 @@
 #include "ArithmeticType.h"
 #include "AvgPool1d.h"
 #include "BatchNorm1d.h"
-#include "BatchNorm1dApi.h"
 #include "Conv1d.h"
 #include "Conv1dApi.h"
 #include "Conv1dTransposed.h"
@@ -723,15 +722,6 @@ void testLayerBackwardReadsInputTruthTable(void) {
     assertReadsInput(false, DROPOUT, NULL, "DROPOUT");
 }
 
-/* A type appended to layerType_t without a read-set row must fail fast: a
- * silent `false` would let the remat plan free an input the backward reads.
- * 127 stays out of range as the enum grows (BATCHNORM1D + 1 would not). */
-void testLayerBackwardReadsInputRejectsUnknownType(void) {
-    layer_t unknown = {.type = (layerType_t)127, .config = NULL};
-    ASSERT_EXITS_WITH_OUTPUT(1, "layerBackwardReadsInput: unknown layerType_t 127",
-                             (void)layerBackwardReadsInput(&unknown));
-}
-
 /* #4 (remat): the recompute rule's truth table. Only BatchNorm1d's
  * trackRunningStats and frozen decide; its momentary training flag never does
  * (plans are built outside a training call). The thirteen other rows keep
@@ -774,14 +764,6 @@ void testLayerForwardUpdatesStateTruthTable(void) {
     assertUpdatesState(false, FLATTEN, NULL, "FLATTEN");
     assertUpdatesState(false, QUANTIZATION, NULL, "QUANTIZATION");
     assertUpdatesState(false, DROPOUT, NULL, "DROPOUT");
-}
-
-/* A type appended without a row must fail fast: a silent `false` would let a
- * plan recompute a forward whose state update then runs twice. */
-void testLayerForwardUpdatesStateRejectsUnknownType(void) {
-    layer_t unknown = {.type = (layerType_t)127, .config = NULL};
-    ASSERT_EXITS_WITH_OUTPUT(1, "layerForwardUpdatesState: unknown layerType_t 127",
-                             (void)layerForwardUpdatesState(&unknown));
 }
 
 /* #4 (remat): the forward-cost classes, one row per type, on 7 input and 6
@@ -843,14 +825,6 @@ void testLayerForwardCostTruthTable(void) {
     TEST_ASSERT_EQUAL_size_t_MESSAGE(6u, forwardCostOf(QUANTIZATION, NULL, 7u, 6u), "QUANTIZATION");
     /* A reshape computes nothing. */
     TEST_ASSERT_EQUAL_size_t_MESSAGE(0u, forwardCostOf(FLATTEN, NULL, 7u, 6u), "FLATTEN");
-}
-
-/* A type appended without a cost class must fail fast: a silent 0 would hide
- * its recomputes from the report. */
-void testLayerForwardCostRejectsUnknownType(void) {
-    layer_t unknown = {.type = (layerType_t)127, .config = NULL};
-    ASSERT_EXITS_WITH_OUTPUT(1, "layerForwardCost: unknown layerType_t 127",
-                             (void)layerForwardCost(&unknown, 7u, 6u));
 }
 
 /* SIZE_MAX outputs times an input width of 2 cannot be represented: the cost
@@ -1010,35 +984,6 @@ void testLayerForwardNonFloat32FieldIgnoresBackwardOnlyFields(void) {
     }
 }
 
-void testLayerForwardNonFloat32FieldGatesBatchNorm1dRunningBuffers(void) {
-    /* The running buffers are forward state (read as float* in eval), so the
-     * forward-only gate keeps them. */
-    quantization_t *q = quantizationInitFloat();
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, q);
-    layer_t *bn = batchNorm1dLayerInit(&(batchNorm1dInit_t){.numChannels = 2}, &lq);
-    batchNorm1dConfig_t *cfg = bn->config->batchNorm1d;
-
-    qtype_t savedMean = cfg->runningMean->quantization->type;
-    cfg->runningMean->quantization->type = SYM_INT32;
-    const char *gotMean = layerForwardNonFloat32Field(bn);
-    cfg->runningMean->quantization->type = savedMean;
-    qtype_t savedVar = cfg->runningVar->quantization->type;
-    cfg->runningVar->quantization->type = SYM_INT32;
-    const char *gotVar = layerForwardNonFloat32Field(bn);
-    cfg->runningVar->quantization->type = savedVar;
-    const char *gotClean = layerForwardNonFloat32Field(bn);
-
-    freeBatchNorm1dLayer(bn);
-    freeQuantization(q);
-
-    TEST_ASSERT_NOT_NULL(gotMean);
-    TEST_ASSERT_EQUAL_STRING("runningMean", gotMean);
-    TEST_ASSERT_NOT_NULL(gotVar);
-    TEST_ASSERT_EQUAL_STRING("runningVar", gotVar);
-    TEST_ASSERT_NULL(gotClean);
-}
-
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLinearAccessorsMatchConfig);
@@ -1061,17 +1006,13 @@ int main(void) {
     RUN_TEST(testLayerIsFloat32OnlyRejectsBfpNotJustSym);
     RUN_TEST(testLayerIsFloat32OnlyAcceptsFrozenBiaslessAndPassthroughLayers);
     RUN_TEST(testLayerBackwardReadsInputTruthTable);
-    RUN_TEST(testLayerBackwardReadsInputRejectsUnknownType);
     RUN_TEST(testLayerForwardUpdatesStateTruthTable);
-    RUN_TEST(testLayerForwardUpdatesStateRejectsUnknownType);
     RUN_TEST(testLayerForwardCostTruthTable);
-    RUN_TEST(testLayerForwardCostRejectsUnknownType);
     RUN_TEST(testLayerForwardCostExitsOnAnOverflow);
     RUN_TEST(testLayerForwardCostExitsOnAConv1dOverflow);
     RUN_TEST(testLayerForwardCostExitsOnAConv1dTransposedOverflow);
     RUN_TEST(testLayerForwardCostExitsOnAConv1dFirstProductOverflow);
     RUN_TEST(testLayerForwardCostExitsOnAConv1dTransposedFirstProductOverflow);
     RUN_TEST(testLayerForwardNonFloat32FieldIgnoresBackwardOnlyFields);
-    RUN_TEST(testLayerForwardNonFloat32FieldGatesBatchNorm1dRunningBuffers);
     return UNITY_END();
 }

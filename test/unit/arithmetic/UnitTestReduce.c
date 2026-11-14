@@ -330,9 +330,11 @@ void testMeanSymInt32RejectsZeroWidthOperand(void) {
     // qMaxBits=0 is a degenerate/invalid SYM operand -- it is also the one value
     // that would make the N-guard's shift amount (32-qMaxBits) hit 32, which is
     // UB for a size_t shift on 32-bit MCU targets. reduceValidateSymOperand must
-    // reject it before the shift is ever computed.
+    // reject it before the shift is ever computed. The constructor rejects
+    // width 0, so the operand is field-assigned.
     size_t inDims[] = {1, 3};
-    tensor_t *in = buildSymInt32TensorNDBits(2, inDims, NULL, 0);
+    tensor_t *in = buildSymInt32TensorNDBits(2, inDims, NULL, 8);
+    ((symInt32QConfig_t *)in->quantization->qConfig)->qMaxBits = 0;
     size_t outDims[] = {1};
     tensor_t *meanOut = buildFloatTensorND(1, outDims, NULL);
 

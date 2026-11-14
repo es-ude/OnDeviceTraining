@@ -22,8 +22,8 @@
 #include "Relu.h"
 #include "Softmax.h"
 
-/* Flatten/Quantization have no consumed arithmetic (arithmetic-type-split D4) — the universal
- * float bridge, matching arithmeticFromQuantizationOrDefault(NULL). */
+/* Flatten/Quantization have no consumed arithmetic -- the universal float
+ * bridge, matching arithmeticFromQuantizationOrDefault(NULL). */
 static const arithmetic_t NO_ARITHMETIC = {.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
 
 quantization_t *layerOutputQ(layer_t *layer) {
@@ -59,9 +59,6 @@ quantization_t *layerOutputQ(layer_t *layer) {
         return layer->config->quantization->outputQ;
     case ADD:
         return layer->config->add->outputQ;
-    default:
-        PRINT_ERROR("Unknown Layer Type!");
-        exit(1);
     }
 }
 
@@ -122,10 +119,10 @@ void requireCrossEntropyHead(layer_t *last, const char *what) {
     }
 }
 
-/* Producer's declared backward config for the dx wire it emits (#221). NULL = no declared config
- * (Flatten) -> passthrough of the upstream dtype. The loss-grad seed takes the last Softmax's
- * propLossQ only under CrossEntropy with a BFP-declaring head (crossEntropyHeadDeclaresBfp, the
- * remat wire table); otherwise it inherits the model output's dtype. */
+/* NULL = no declared config (Flatten) -> passthrough of the upstream dtype. The loss-grad seed
+ * takes the last Softmax's propLossQ only under CrossEntropy with a BFP-declaring head
+ * (crossEntropyHeadDeclaresBfp, the remat wire table); otherwise it inherits the model output's
+ * dtype. */
 quantization_t *backwardWireQ(layer_t *layer) {
     switch (layer->type) {
     case LINEAR:
@@ -158,9 +155,6 @@ quantization_t *backwardWireQ(layer_t *layer) {
         return layer->config->add->propLossQ;
     case FLATTEN:
         return NULL;
-    default:
-        PRINT_ERROR("Unknown Layer Type!");
-        exit(1);
     }
 }
 
@@ -193,25 +187,21 @@ arithmetic_t layerForwardMath(layer_t *layer) {
     case BATCHNORM1D:
         return layer->config->batchNorm1d->forwardMath;
     case QUANTIZATION:
-        // Pure conversion node (arithmetic-type-split D4): no consumed arithmetic.
+        // Pure conversion node: no consumed arithmetic.
         return NO_ARITHMETIC;
     case ADD:
         return layer->config->add->forwardMath;
-    default:
-        PRINT_ERROR("Unknown Layer Type!");
-        exit(1);
     }
 }
 
-/* ---- FLOAT32-only gate (#152 PR3b; forward-only variant #468) ------------
- * Stacked training (microBatchSize > 1) is FLOAT32-only (#152): every declared
+/* ---- FLOAT32-only gate ----------------------------------------------------
+ * Stacked training (microBatchSize > 1) is FLOAT32-only: every declared
  * arithmetic, every storage config and every parameter/grad tensor must be
- * FLOAT32. Stacked evaluation (#468) only runs forwards, so its variant
- * (forwardOnly) skips the backward-only slots: propLossMath, propLossQ, the
- * grad arithmetics and grad storage. NULL means "not declared" and never fails
- * the gate: a NULL wire config is the upstream-dtype passthrough
- * (the remat wire table's Flatten rule), a NULL bias is a bias-less layer, a NULL grad is a
- * frozen layer (#380). */
+ * FLOAT32. Stacked evaluation only runs forwards, so its variant (forwardOnly)
+ * skips the backward-only slots: propLossMath, propLossQ, the grad arithmetics
+ * and grad storage. NULL means "not declared" and never fails the gate: a NULL
+ * wire config is the upstream-dtype passthrough, a NULL bias is a bias-less
+ * layer, a NULL grad is a frozen layer. */
 
 static bool mathIsFloat32(arithmetic_t a) {
     return a.type == ARITH_FLOAT32;
@@ -321,22 +311,8 @@ static const char *nonFloat32Field(layer_t *layer, bool forwardOnly) {
         return normNonFloat32(c->forwardMath, c->propLossMath, c->outputQ, c->propLossQ, c->gamma,
                               c->beta, forwardOnly);
     }
-    case BATCHNORM1D: {
-        /* gamma/beta are NULL without affine (paramNonFloat32 passes NULL);
-         * the running buffers are value state read as float* -- gated too. */
-        const batchNorm1dConfig_t *c = layer->config->batchNorm1d;
-        const char *field = normNonFloat32(c->forwardMath, c->propLossMath, c->outputQ,
-                                           c->propLossQ, c->gamma, c->beta, forwardOnly);
-        if (field == NULL && c->runningMean != NULL &&
-            !storageIsFloat32(c->runningMean->quantization)) {
-            field = "runningMean";
-        }
-        if (field == NULL && c->runningVar != NULL &&
-            !storageIsFloat32(c->runningVar->quantization)) {
-            field = "runningVar";
-        }
-        return field;
-    }
+    case BATCHNORM1D:
+        return NULL; /* the factory and the loader admit only FLOAT32 */
     case RELU: {
         const reluConfig_t *c = layer->config->relu;
         return wireNonFloat32(c->forwardMath, c->propLossMath, c->outputQ, c->propLossQ,
@@ -379,9 +355,6 @@ static const char *nonFloat32Field(layer_t *layer, bool forwardOnly) {
     }
     case QUANTIZATION:
         return "layerType QUANTIZATION (a conversion node)";
-    default:
-        PRINT_ERROR("Unknown Layer Type!");
-        exit(1);
     }
 }
 
@@ -397,14 +370,10 @@ bool layerIsFloat32Only(layer_t *layer) {
     return layerNonFloat32Field(layer) == NULL;
 }
 
-/* The reason per group sits on the opFunctions[] rows (OpTable.c). An
- * unknown type exits rather than defaulting: a wrong `false` lets the remat
- * plan free an input the backward still reads. */
+/* The reason per group sits on the opFunctions[] rows (OpTable.c). A new layer
+ * type needs its own row: a wrong `false` lets the remat plan free an input the
+ * backward still reads. */
 bool layerBackwardReadsInput(const layer_t *layer) {
-    if ((size_t)layer->type >= OP_TABLE_ROWS) {
-        PRINT_ERROR("layerBackwardReadsInput: unknown layerType_t %d", (int)layer->type);
-        exit(1);
-    }
     switch ((opReads_t)opFunctions[layer->type].readsInputs) {
     case OP_READS_ALWAYS:
         return true;
@@ -415,8 +384,8 @@ bool layerBackwardReadsInput(const layer_t *layer) {
     }
 }
 
-/* An unknown type exits rather than defaulting: a wrong `false` lets a plan
- * recompute a forward whose state update then runs twice. */
+/* A new layer type needs its own row: a wrong `false` lets a plan recompute a
+ * forward whose state update then runs twice. */
 bool layerForwardUpdatesState(const layer_t *layer) {
     switch (layer->type) {
     case BATCHNORM1D: {
@@ -438,9 +407,6 @@ bool layerForwardUpdatesState(const layer_t *layer) {
     case DROPOUT:
     case ADD:
         return false;
-    default:
-        PRINT_ERROR("layerForwardUpdatesState: unknown layerType_t %d", (int)layer->type);
-        exit(1);
     }
 }
 
@@ -455,8 +421,8 @@ static size_t forwardCostProduct(const layer_t *layer, size_t a, size_t b) {
     return product;
 }
 
-/* An unknown type exits rather than defaulting: a silent 0 would hide the
- * cost of recomputing it. */
+/* A new layer type needs its own row: a silent 0 would hide the cost of
+ * recomputing it. */
 size_t layerForwardCost(const layer_t *layer, size_t inElements, size_t outElements) {
     switch (layer->type) {
     /* Weights [outF, inF]: inF per output element. */
@@ -496,9 +462,6 @@ size_t layerForwardCost(const layer_t *layer, size_t inElements, size_t outEleme
         return outElements;
     case FLATTEN:
         return 0u;
-    default:
-        PRINT_ERROR("layerForwardCost: unknown layerType_t %d", (int)layer->type);
-        exit(1);
     }
 }
 

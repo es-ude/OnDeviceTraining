@@ -50,23 +50,11 @@ typedef struct layerQuant {
  *  Caller retains ownership of `q`. */
 void layerQuantInitUniform(layerQuant_t *lq, quantization_t *q);
 
-/*! Deep-copy a `quantization_t` and its `qConfig`. Returns NULL if `src` is NULL.
+/*! Copies the config and all owned arrays, preserving grid values. NULL maps
+ *  to NULL. Caller owns the result and frees it with freeQuantization.
  *
- *  Caller owns the returned allocation. Free via:
- *      freeQuantization(result);
- *
- *  NOT the qConfig/wrapper pair-free this used to prescribe: SYM, ASYM and BFP
- *  qConfigs each own further heap blocks (scales / scales+zeroPoints /
- *  exponents) that this function deep-copies into the result, and only
- *  freeQuantization frees them (BFP epic PR2 Task 8 — the pair-free leaked one
- *  block per Owning layer).
- *
- *  The `qConfig` size is dispatched by `src->type`; BOOL/INT32/FLOAT32 have
- *  no qConfig (result->qConfig == NULL). Unknown types fire PRINT_ERROR +
- *  exit(1).
- *
- *  Used by every `*LayerInitOwning` factory to materialize per-layer copies
- *  of the four math quantizations referenced by `layerQuant_t`. */
+ *  Use it for a value copy (the *LayerInitOwning factories' per-layer storage
+ *  configs); use getQLike for a fresh clone, which resets a per-tensor grid. */
 quantization_t *deepCopyQuantization(quantization_t *src);
 
 #endif /* LAYER_QUANT_H */

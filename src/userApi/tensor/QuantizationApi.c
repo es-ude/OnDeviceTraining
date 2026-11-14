@@ -1,8 +1,21 @@
 #define SOURCE_FILE "QUANTIZATION_API"
 
+#include <stdlib.h>
+
+#include "CheckedSize.h"
+#include "Common.h"
 #include "QuantizationApi.h"
-#include "QuantizationApiInternal.h"
 #include "StorageApi.h"
+
+/* The per-group arrays are numGroups floats (and, for ASYM, as many uint16
+ * zero points); bounding the float array bounds both. */
+static void requireRepresentableGroupArrays(size_t numGroups, const char *what) {
+    size_t bytes;
+    if (!checkedMulSize(numGroups, sizeof(float), &bytes)) {
+        PRINT_ERROR("%s: numGroups %zu overflows the per-group array size", what, numGroups);
+        exit(1);
+    }
+}
 
 quantization_t *quantizationInitFloat() {
     quantization_t *q = reserveMemory(sizeof(quantization_t));
@@ -25,6 +38,10 @@ quantization_t *quantizationInitSymInt32(roundingMode_t roundingMode) {
 }
 
 quantization_t *quantizationInitSymInt32WithBits(roundingMode_t roundingMode, uint8_t qMaxBits) {
+    if (qMaxBits == 0) {
+        PRINT_ERROR("quantizationInitSymInt32WithBits: qMaxBits 0 has no representable value");
+        exit(1);
+    }
     quantization_t *q = reserveMemory(sizeof(quantization_t));
     symInt32QConfig_t *qC = reserveMemory(sizeof(symInt32QConfig_t));
     initSymInt32QConfigWithQMaxBits(roundingMode, qC, qMaxBits);
@@ -42,6 +59,7 @@ quantization_t *quantizationInitSym(uint8_t qBits, roundingMode_t roundingMode) 
 
 quantization_t *quantizationInitSymGrouped(uint8_t qBits, roundingMode_t roundingMode,
                                            size_t numGroups, size_t groupSize) {
+    requireRepresentableGroupArrays(numGroups, "quantizationInitSymGrouped");
     quantization_t *q = reserveMemory(sizeof(quantization_t));
     symQConfig_t *qC = reserveMemory(sizeof(symQConfig_t));
     initSymQConfigGrouped(qBits, roundingMode, numGroups, groupSize, qC);
@@ -78,6 +96,7 @@ quantization_t *quantizationInitAsym(uint8_t qBits, roundingMode_t roundingMode)
 
 quantization_t *quantizationInitAsymGrouped(uint8_t qBits, roundingMode_t rm, size_t numGroups,
                                             size_t groupSize) {
+    requireRepresentableGroupArrays(numGroups, "quantizationInitAsymGrouped");
     quantization_t *q = reserveMemory(sizeof(quantization_t));
     asymQConfig_t *qC = reserveMemory(sizeof(asymQConfig_t));
     initAsymQConfigGrouped(qBits, rm, numGroups, groupSize, qC);

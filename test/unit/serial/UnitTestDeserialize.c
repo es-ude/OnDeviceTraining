@@ -347,6 +347,34 @@ void testDeserializeTensorRejectsDtypeMismatch(void) {
     freeTensor(floatTensor);
 }
 
+/* A SYM_INT32 record of width 0 has no representable value; width 1 stays
+ * legal. */
+void testDeserializeTensorRejectsZeroSymInt32Width(void) {
+    tensor_t *written = makeSymInt32Tensor2D(2, 3);
+    ((symInt32QConfig_t *)written->quantization->qConfig)->qMaxBits = 0;
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeTensor(written, f);
+    fclose(f);
+    tensor_t *skeleton = makeSymInt32Tensor2D(2, 3);
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeQConfig: SYM_INT32 file qMaxBits 0",
+                             deserializeTensor(skeleton, f));
+    fclose(f);
+
+    ((symInt32QConfig_t *)written->quantization->qConfig)->qMaxBits = 1;
+    f = fopen(FILE_PATH, "wb");
+    serializeTensor(written, f);
+    fclose(f);
+    f = fopen(FILE_PATH, "rb");
+    deserializeTensor(skeleton, f);
+    fclose(f);
+    uint8_t loadedWidth = ((symInt32QConfig_t *)skeleton->quantization->qConfig)->qMaxBits;
+
+    freeTensor(skeleton);
+    freeTensor(written);
+    TEST_ASSERT_EQUAL_UINT8(1, loadedWidth);
+}
+
 /* #316: a same-dtype record whose element count differs from the skeleton would
  * fread past tensor->data, which initTensor sized from the build-time shape. The
  * payload-size check catches size changes (shape- or packed-qBits-driven) that
@@ -3154,6 +3182,7 @@ int main(void) {
     RUN_TEST(testDeserializeRejectsLayerCountMismatch);
     RUN_TEST(testDeserializeRejectsTagMismatch);
     RUN_TEST(testDeserializeTensorRejectsDtypeMismatch);
+    RUN_TEST(testDeserializeTensorRejectsZeroSymInt32Width);
     RUN_TEST(testDeserializeTensorRejectsPayloadSizeMismatch);
     RUN_TEST(testDeserializeTensorRejectsSymRecordIntoFloatSkeleton);
 #if SIZE_MAX == UINT64_MAX

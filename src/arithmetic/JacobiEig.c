@@ -1,10 +1,7 @@
 #define SOURCE_FILE "JACOBI_EIG"
 
-#include <stdlib.h>
-
-#include "Common.h"
 #include "JacobiEig.h"
-#include "MinMax.h"
+#include "Common.h"
 #include "Reduce.h"
 #include "Tensor.h"
 
@@ -22,22 +19,7 @@ static float offDiagNorm(const float *m, size_t p) {
 
 void jacobiEigSymFloat32(tensor_t *a, tensor_t *eigvalsOut, tensor_t *eigvecsOut, size_t maxSweeps,
                          float tol) {
-    if (a->quantization->type != FLOAT32 || eigvalsOut->quantization->type != FLOAT32 ||
-        eigvecsOut->quantization->type != FLOAT32) {
-        PRINT_ERROR("jacobiEigSymFloat32: FLOAT32 tensors only");
-        exit(1);
-    }
-    if (a->shape->numberOfDimensions != 2 || a->shape->dimensions[0] != a->shape->dimensions[1]) {
-        PRINT_ERROR("jacobiEigSymFloat32: a must be square [p,p]");
-        exit(1);
-    }
     size_t p = a->shape->dimensions[0];
-    if (eigvalsOut->shape->numberOfDimensions != 1 || eigvalsOut->shape->dimensions[0] != p ||
-        eigvecsOut->shape->numberOfDimensions != 2 || eigvecsOut->shape->dimensions[0] != p ||
-        eigvecsOut->shape->dimensions[1] != p) {
-        PRINT_ERROR("jacobiEigSymFloat32: output dims must match p=%zu", p);
-        exit(1);
-    }
 
     float *m = (float *)a->data;
     float *v = (float *)eigvecsOut->data;
@@ -57,7 +39,7 @@ void jacobiEigSymFloat32(tensor_t *a, tensor_t *eigvalsOut, tensor_t *eigvecsOut
         for (size_t i = 0; i + 1 < p; i++) {
             for (size_t j = i + 1; j < p; j++) {
                 float apq = m[i * p + j];
-                if (absFloat32(apq) == 0.0f) {
+                if (apq == 0.0f) {
                     continue;
                 }
                 float app = m[i * p + i];

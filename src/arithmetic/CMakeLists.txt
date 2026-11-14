@@ -81,10 +81,7 @@ target_link_libraries(JacobiEig PRIVATE
         m
         Common
         Tensor
-        DTypes
-        Quantization
         Reduce
-        MinMax
         Rounding
 )
 

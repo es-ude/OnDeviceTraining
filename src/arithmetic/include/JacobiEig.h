@@ -5,23 +5,15 @@
 
 #include "Tensor.h"
 
-/* Symmetric eigendecomposition via cyclic Jacobi rotations (Golub & Van Loan,
- * Matrix Computations, §8.5). FLOAT32-only (#326 v1); integer eigensolvers
- * are literature-first future work — see the ARITH_SYM_INT32 tracking issue.
+/* Symmetric eigendecomposition by cyclic Jacobi rotations (Golub & Van Loan,
+ * Matrix Computations, 8.5). All tensors FLOAT32, identity order.
  *
- * a          symmetric [p,p] FLOAT32 — DESTROYED (in-place workspace; the
- *            off-diagonals are annihilated in place, keeping the module free
- *            of hidden scratch per the allocation-locality rule).
- * eigvalsOut [p] FLOAT32, sorted DESCENDING.
- * eigvecsOut [p,p] FLOAT32, ROW i = unit eigenvector of eigvalsOut[i]
- *            (rows-convention: matches PPCA basis storage; a rotate-back is
- *            then a plain matmul).
- * maxSweeps  hard sweep cap (deterministic termination).
- * tol        stop when off(A) = sqrt(sum of squared off-diagonals) < tol.
- *
- * Rotation math uses plain float expressions (self-contained kernel, the
- * Matmul precedent) — not the scalar wrappers.
- * Fail-fast: non-FLOAT32 operands, non-square a, output dims mismatch. */
+ * a          symmetric [p,p]; destroyed (it is the workspace, so no hidden scratch).
+ * eigvalsOut [p], sorted descending.
+ * eigvecsOut [p,p], row i = unit eigenvector of eigvalsOut[i] (PPCA's row
+ *            convention, so rotating back is a plain matmul).
+ * maxSweeps  hard cap on sweeps (deterministic termination).
+ * tol        stop when sqrt(sum of squared off-diagonals) < tol. */
 void jacobiEigSymFloat32(tensor_t *a, tensor_t *eigvalsOut, tensor_t *eigvecsOut, size_t maxSweeps,
                          float tol);
 

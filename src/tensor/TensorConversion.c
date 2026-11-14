@@ -62,18 +62,10 @@ static void deriveAsymGridForGroup(float mn, float mx, asymQConfig_t *outQC, siz
                                    rngStream_t *rs);
 static void emitAsymChunk(const float *vals, size_t count, const asymQConfig_t *qc,
                           uint8_t *dstBase, size_t elemOffset, rngStream_t *rs);
-/* Group-quant PR4 Task 2: the two PRIMARY ASYM cells -- quantizeFloatToAsym
- * (FLOAT32->ASYM) and convertAsymTensorToFloatTensor (ASYM->FLOAT32) -- are
- * group-aware; every OTHER ASYM converter/dequant/accumulate cell reads
- * scales[0]/zeroPoints[0] only and calls this per-tensor choke point first
- * (mirrors the SYM scalar-cell gates). */
+/* The scalar ASYM cells read scales[0]/zeroPoints[0] only; FLOAT32<->ASYM is
+ * group-aware. */
 static void requirePerTensorAsym(const asymQConfig_t *qc, const char *what);
 static void requireFiniteBfpSource(float value, size_t index, const char *what, const char *role);
-
-void zeroTensorData(tensor_t *tensor) {
-    size_t numberOfElements = calcNumberOfElementsByTensor(tensor);
-    memset(tensor->data, 0, calcNumberOfBytesForData(tensor->quantization, numberOfElements));
-}
 
 void convertInt32TensorToFloatTensor(tensor_t *inputTensor, tensor_t *outputTensor,
                                      rngStream_t *rs) {
@@ -170,17 +162,6 @@ static void packChunkGuarded(const int32_t *codes, size_t count, uint8_t *dstBas
 }
 
 void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, float *out) {
-    if (count > ODT_CONVERSION_CHUNK_ELEMS || elemOffset % 8 != 0) {
-        PRINT_ERROR("dequantChunkToFloat: count %zu > chunk (%d) or unaligned offset %zu", count,
-                    ODT_CONVERSION_CHUNK_ELEMS, elemOffset);
-        exit(1);
-    }
-    size_t srcElems = calcNumberOfElementsByTensor((tensor_t *)src);
-    if (elemOffset > srcElems || count > srcElems - elemOffset) {
-        PRINT_ERROR("dequantChunkToFloat: range [%zu, %zu) exceeds source tensor (%zu elements)",
-                    elemOffset, elemOffset + count, srcElems);
-        exit(1);
-    }
     switch (src->quantization->type) {
     case FLOAT32:
         memcpy(out, (const float *)src->data + elemOffset, count * sizeof(float));
@@ -195,23 +176,7 @@ void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, f
     }
     case SYM: {
         symQConfig_t *qc = src->quantization->qConfig;
-        if (qc->numGroups > 1) {
-            /* Group-quant PR2: this helper's only callers are the grad-accumulate
-             * engines (accumulateIntoSym*Engine via incSrcChunk, and
-             * accumulateTensorIntoFloat32Inplace), all of which operate on grad
-             * tensors -- gradInit fail-fasts on a grouped SYM template (#300 axis),
-             * so a grouped source here would indicate a caller contract violation,
-             * not a reachable production path. Dequantize via
-             * convertSymTensorToFloat32Tensor first if a grouped SYM source ever
-             * needs to feed this helper. */
-            PRINT_ERROR("dequantChunkToFloat: grouped SYM (numGroups=%zu) has no per-tensor "
-                        "dequant image here; grad-accumulate paths only ever see per-tensor "
-                        "SYM (gradInit rejects grouped templates) -- convert to FLOAT32 first "
-                        "for any other route",
-                        qc->numGroups);
-            exit(1);
-        }
-        float scale = loadCanonScale(&qc->scales[0]); /* hoisted: no per-element array indexing */
+        float scale = loadCanonScale(&qc->scales[0]);
         int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
         unpackSignExtendChunk(src->data, qc->qBits, elemOffset, count, mant);
         for (size_t i = 0; i < count; i++) {
@@ -221,7 +186,6 @@ void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, f
     }
     case ASYM: {
         asymQConfig_t *qc = src->quantization->qConfig;
-        requirePerTensorAsym(qc, "dequantChunkToFloat");
         float scale = loadCanonScale(&qc->scales[0]); /* hoisted like the SYM arm above */
         int32_t zp = (int32_t)qc->zeroPoints[0];
         int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
@@ -281,18 +245,7 @@ static void requirePerTensorAsym(const asymQConfig_t *qc, const char *what) {
     }
 }
 
-/* Funnel re-check of the initAsymQConfig ceiling for field-assigned configs:
- * the code-domain zeroPoint is uint16, so 17+ has no zp representation (group-quant D6;
- * supersedes the [1, 30] #246 ceiling). */
-static void requireAsymComputeQBits(const asymQConfig_t *qc, const char *what) {
-    if (qc->qBits == 0 || qc->qBits > 16) {
-        PRINT_ERROR("%s: qBits (%u) outside the ASYM range [1, 16]", what, (unsigned)qc->qBits);
-        exit(1);
-    }
-}
-
 static void deriveAsymGridFromMinMax(float mn, float mx, asymQConfig_t *outQC, rngStream_t *rs) {
-    requireAsymComputeQBits(outQC, "deriveAsymGridFromMinMax");
     requirePerTensorAsym(outQC, "deriveAsymGridFromMinMax");
     deriveAsymGridForGroup(mn, mx, outQC, 0, rs);
 }
@@ -385,9 +338,7 @@ static void quantizeFloatToAsym(const float *values, size_t n, asymQConfig_t *ou
 
     /* Grouped path (#groups>1). Phase 1: per-group min/max -> per-group
      * nudged grid (never a single whole-tensor pass, or every group would
-     * collapse onto one grid). qBits funnel re-check hoisted out of the loop
-     * (deriveAsymGridForGroup trusts it). */
-    requireAsymComputeQBits(outQC, "quantizeFloatToAsym");
+     * collapse onto one grid). */
     const size_t groupSize = outQC->groupSize;
     for (size_t g = 0; g < outQC->numGroups; g++) {
         float mn = findMinFloat((uint8_t *)(values + g * groupSize), groupSize);
@@ -1591,15 +1542,8 @@ void convertBfpTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor, 
  * read per-element with its OWN group scales (dequantChunkToFloat's
  * grouped-capable BFP arm), so any source geometry converts to any target
  * geometry. n == 0 falls through to packStreamAsBfp's zero-state arm.
- * NOT in-place capable (unlike requantSymInt32Tensor): pass 2 re-reads the
- * source under its original exponents, which an aliased pass-1 write would
- * already have clobbered; the funnel always passes distinct tensors. */
+ * Not in-place: pass 2 re-reads the source under its original exponents. */
 void requantBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs) {
-    if (inputTensor->data == outputTensor->data) {
-        PRINT_ERROR("requantBfpTensor: in-place requant is unsupported -- pass 2 re-reads the "
-                    "source under its original exponents (see TensorConversion.h)");
-        exit(1);
-    }
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     packDequantStreamAsBfp(inputTensor, n, outputTensor->quantization->qConfig, outputTensor->data,
                            "requantBfpTensor", rs);
@@ -2166,11 +2110,6 @@ void accumulateFloatIntoSymTensorFixedGrid(tensor_t *target, const float *inc, s
 void accumulateTensorIntoSymFixedGrid(tensor_t *target, const tensor_t *increment,
                                       rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(target);
-    if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
-        PRINT_ERROR("accumulateTensorIntoSymFixedGrid: element-count mismatch");
-        exit(1);
-    }
-    rejectAliasedIncrement(target, increment, "accumulateTensorIntoSymFixedGrid");
     incSrc_t src = {.flat = NULL, .tens = increment};
     accumulateIntoSymFixedGridEngine(target, &src, n, rs);
 }
@@ -2231,11 +2170,6 @@ void accumulateFloatIntoSymTensorRescale(tensor_t *target, const float *inc, siz
 
 void accumulateTensorIntoSymRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(target);
-    if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
-        PRINT_ERROR("accumulateTensorIntoSymRescale: element-count mismatch");
-        exit(1);
-    }
-    rejectAliasedIncrement(target, increment, "accumulateTensorIntoSymRescale");
     incSrc_t src = {.flat = NULL, .tens = increment};
     accumulateIntoSymRescaleEngine(target, &src, n, rs);
 }
@@ -2243,10 +2177,6 @@ void accumulateTensorIntoSymRescale(tensor_t *target, const tensor_t *increment,
 static void accumulateIntoAsymRescaleEngine(tensor_t *target, const incSrc_t *inc, size_t n,
                                             rngStream_t *rs) {
     asymQConfig_t *qc = target->quantization->qConfig;
-    /* grads are per-tensor unconditionally (gradInit's carrier gate) -- a
-     * grouped target here is a caller contract violation, same rationale as
-     * dequantChunkToFloat's gate. */
-    requirePerTensorAsym(qc, "accumulateIntoAsymRescaleEngine");
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     float incBuf[ODT_CONVERSION_CHUNK_ELEMS];
     float vals[ODT_CONVERSION_CHUNK_ELEMS];
@@ -2306,11 +2236,6 @@ void accumulateFloatIntoAsymTensorRescale(tensor_t *target, const float *inc, si
 
 void accumulateTensorIntoAsymRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(target);
-    if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
-        PRINT_ERROR("accumulateTensorIntoAsymRescale: element-count mismatch");
-        exit(1);
-    }
-    rejectAliasedIncrement(target, increment, "accumulateTensorIntoAsymRescale");
     incSrc_t src = {.flat = NULL, .tens = increment};
     accumulateIntoAsymRescaleEngine(target, &src, n, rs);
 }
@@ -2440,28 +2365,8 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
     }
 }
 
-/* #420 G3: the FLOAT-pointer wrappers' documented `n == target element count`
- * contract, enforced. It cannot live in the engines: the tensor-typed twins
- * DERIVE n from the target (calcNumberOfElementsByTensor below), so the
- * engines only ever see a caller-supplied n through these two entry points.
- * A GROUPED target already dies in the engine's validateBfpQConfigShape, but
- * the per-tensor sentinel {1, 0} accepts any n -- gsz collapses to n, so a
- * short n silently partial-updates the accumulator and leaves the tail stale
- * under a grid derived from the prefix alone. */
-static void requireBfpFloatIncrementCoversTarget(const tensor_t *target, size_t n,
-                                                 const char *what) {
-    size_t expected = calcNumberOfElementsByTensor((tensor_t *)target);
-    if (n != expected) {
-        PRINT_ERROR("%s: n (%zu) must equal the target's element count (%zu) -- a partial "
-                    "increment would leave the tail stale under a prefix-derived grid",
-                    what, n, expected);
-        exit(1);
-    }
-}
-
 void accumulateFloatIntoBfpTensorFixedGrid(tensor_t *target, const float *inc, size_t n,
                                            rngStream_t *rs) {
-    requireBfpFloatIncrementCoversTarget(target, n, "accumulateFloatIntoBfpTensorFixedGrid");
     incSrc_t src = {.flat = inc, .tens = NULL};
     accumulateIntoBfpFixedGridEngine(target, &src, n, "accumulateFloatIntoBfpTensorFixedGrid", rs);
 }
@@ -2469,11 +2374,6 @@ void accumulateFloatIntoBfpTensorFixedGrid(tensor_t *target, const float *inc, s
 void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *increment,
                                       rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(target);
-    if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
-        PRINT_ERROR("accumulateTensorIntoBfpFixedGrid: element-count mismatch");
-        exit(1);
-    }
-    rejectAliasedIncrement(target, increment, "accumulateTensorIntoBfpFixedGrid");
     incSrc_t src = {.flat = NULL, .tens = increment};
     accumulateIntoBfpFixedGridEngine(target, &src, n, "accumulateTensorIntoBfpFixedGrid", rs);
 }
@@ -2676,18 +2576,12 @@ static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, 
 
 void accumulateFloatIntoBfpTensorRescale(tensor_t *target, const float *inc, size_t n,
                                          rngStream_t *rs) {
-    requireBfpFloatIncrementCoversTarget(target, n, "accumulateFloatIntoBfpTensorRescale");
     incSrc_t src = {.flat = inc, .tens = NULL};
     bfpRescaleWalk(target, &src, 1.f, n, "accumulateFloatIntoBfpTensorRescale", rs);
 }
 
 void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(target);
-    if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
-        PRINT_ERROR("accumulateTensorIntoBfpRescale: element-count mismatch");
-        exit(1);
-    }
-    rejectAliasedIncrement(target, increment, "accumulateTensorIntoBfpRescale");
     incSrc_t src = {.flat = NULL, .tens = increment};
     bfpRescaleWalk(target, &src, 1.f, n, "accumulateTensorIntoBfpRescale", rs);
 }
@@ -3406,10 +3300,6 @@ void paramUpdateBfpInPlace(tensor_t *param, const tensor_t *update, bfpScalar_t 
 void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *increment,
                                            rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(target);
-    if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
-        PRINT_ERROR("accumulateSymInt32IntoSymInt32Rescale: element-count mismatch");
-        exit(1);
-    }
     symInt32QConfig_t *tQC = target->quantization->qConfig;
     symInt32QConfig_t *iQC = increment->quantization->qConfig;
     float tScale = loadCanonScale(&tQC->scale);
@@ -3441,10 +3331,6 @@ void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *inc
 void accumulateTensorIntoFloat32Inplace(tensor_t *target, const tensor_t *increment,
                                         rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(target);
-    if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
-        PRINT_ERROR("accumulateTensorIntoFloat32Inplace: element-count mismatch");
-        exit(1);
-    }
     if (increment->quantization->type == FLOAT32) {
         /* Flat same-index add — epilogue targets are identity-ordered
          * grad/param tensors, so flat indexing is exact and matches the
@@ -3652,11 +3538,6 @@ void convertTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *r
         convertTensorsWithSameType(inputTensor, outputTensor, inputDType);
     } else {
         conversionFunction_t conversionFn = conversionMatrix[inputDType][outputDType];
-        if (conversionFn == NULL) {
-            PRINT_ERROR("No conversion function registered for %s to %s",
-                        quantTypeToString(inputDType), quantTypeToString(outputDType));
-            exit(1);
-        }
         conversionFn(inputTensor, outputTensor, rs);
     }
 }

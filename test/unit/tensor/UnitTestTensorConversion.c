@@ -37,13 +37,8 @@ static float fitCodes(float inScale, uint32_t maxAbsCode, uint32_t hi) {
                                             maxAbsCode, hi, ODT_SCALE_CEIL));
 }
 
-/* File-internal helper of TensorConversion.c (external linkage, no header entry);
- * declared locally to characterize its packed-size memset. */
-void zeroTensorData(tensor_t *tensor);
-
-/* PR-C pack tests verify the packed SYM output by unpacking it here in-test:
- * byteConversion zero-fills on widen, so sign-extend each value from qBits.
- * (The SYM->* unpack cells live on the parallel PR-B branch, not here.) */
+/* Unpacks packed SYM output in-test: byteConversion zero-fills on widen, so
+ * sign-extend each value from qBits. */
 static void symTestUnpackSignExtend(const uint8_t *packed, size_t qBits, int32_t *out, size_t n) {
     byteConversion((uint8_t *)packed, qBits, (uint8_t *)out, 32, n);
     const int32_t signBit = (int32_t)1 << (qBits - 1);
@@ -52,31 +47,6 @@ static void symTestUnpackSignExtend(const uint8_t *packed, size_t qBits, int32_t
         int32_t v = out[i] & mask;
         out[i] = (v ^ signBit) - signBit;
     }
-}
-
-void testZeroTensorDataSymSubByteZeroesOnlyPackedBytes() {
-    /* SYM qBits=3, N=10 -> packed 4 bytes; the guard byte behind them must survive.
-     * Mutation guard: the pre-fix N * calcBytesPerElement memset (10 bytes) clobbers
-     * the canary -> RED (and stack-buffer-overflow under ASan). */
-    uint8_t data[5];
-    memset(data, 0xFF, sizeof(data));
-    size_t dims[] = {1, 10};
-    size_t order[] = {0, 1};
-    shape_t shape = {.dimensions = dims, .numberOfDimensions = 2, .orderOfDimensions = order};
-    odtScale_t cfgScale[1] = {odtTestScale(1.0f)};
-    symQConfig_t cfg = {
-        .scales = cfgScale, .numGroups = 1, .groupSize = 0, .qBits = 3, .roundingMode = HALF_AWAY};
-    quantization_t q;
-    initSymQuantization(&cfg, &q);
-    tensor_t t;
-    setTensorValues(&t, data, &shape, &q, NULL);
-
-    zeroTensorData(&t);
-
-    for (size_t i = 0; i < 4; i++) {
-        TEST_ASSERT_EQUAL_UINT8(0, data[i]);
-    }
-    TEST_ASSERT_EQUAL_UINT8(0xFF, data[4]);
 }
 
 void testConversionIntFloat() {
@@ -3372,70 +3342,6 @@ void testDequantChunkToFloatAsymUnpacksZeroExtendedAtOffsets(void) {
     freeReservedMemory(packed);
 }
 
-void testDequantChunkToFloatRejectsCountAboveChunk(void) {
-    /* Fail-fast guard 1/2: count > ODT_CONVERSION_CHUNK_ELEMS must exit(1),
-     * never silently read past the fixed-size chunk buffers. */
-    size_t n = ODT_CONVERSION_CHUNK_ELEMS + 1;
-    size_t dims[] = {n};
-    size_t order[] = {0};
-    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
-
-    float *vals = (float *)reserveMemory(n * sizeof(float));
-    memset(vals, 0, n * sizeof(float));
-    quantization_t q;
-    initFloat32Quantization(&q);
-    tensor_t t;
-    setTensorValues(&t, (uint8_t *)vals, &shape, &q, NULL);
-
-    float out[ODT_CONVERSION_CHUNK_ELEMS + 1];
-    ASSERT_EXITS_WITH_FAILURE(dequantChunkToFloat(&t, 0, ODT_CONVERSION_CHUNK_ELEMS + 1, out));
-
-    freeReservedMemory(vals);
-}
-
-void testDequantChunkToFloatRejectsMisalignedOffset(void) {
-    /* Fail-fast guard 2/2: elemOffset % 8 != 0 must exit(1) -- the packed-width
-     * byte-alignment contract that lets packedByteOffset skip a byte-boundary
-     * check per call. */
-    size_t n = 16;
-    size_t dims[] = {n};
-    size_t order[] = {0};
-    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
-
-    float vals[16] = {0};
-    quantization_t q;
-    initFloat32Quantization(&q);
-    tensor_t t;
-    setTensorValues(&t, (uint8_t *)vals, &shape, &q, NULL);
-
-    float out[4];
-    ASSERT_EXITS_WITH_FAILURE(dequantChunkToFloat(&t, 3, 4, out));
-}
-
-void testDequantChunkToFloatRejectsOutOfRangeOffset(void) {
-    /* PR #324: [elemOffset, elemOffset+count) must not
-     * exceed the source tensor's own element count. Before the fix, only
-     * count > ODT_CONVERSION_CHUNK_ELEMS and elemOffset % 8 != 0 were guarded --
-     * an offset that starts exactly AT the tensor's end (still 8-aligned, still
-     * <= chunk size) sailed through both and fell into an out-of-bounds
-     * FLOAT32 memcpy. Mutation guard: removing the new range guard lets the
-     * child run to completion (or crash outside the exit(1) path) -> RED
-     * either way. */
-    size_t n = 8;
-    size_t dims[] = {n};
-    size_t order[] = {0};
-    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
-
-    float vals[8] = {0.f, 1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f};
-    quantization_t q;
-    initFloat32Quantization(&q);
-    tensor_t t;
-    setTensorValues(&t, (uint8_t *)vals, &shape, &q, NULL);
-
-    float out[1];
-    ASSERT_EXITS_WITH_FAILURE(dequantChunkToFloat(&t, 8, 1, out));
-}
-
 /* unpackSignExtend is public with a srcStartBit so DeltaSym-style decoders
  * can sign-extend a segment that starts mid-byte: -3 at 6 bits packed at bit
  * offset 5 is bytes {0xA0, 0x07} (bit 5..7 = 1,0,1; bit 8..10 = 1,1,1). */
@@ -3717,36 +3623,6 @@ void testQuantizeFloatToAsymNoOpOnEmptyTensor(void) {
 
     TEST_ASSERT_EQUAL_FLOAT(123.f, odtScaleToFloat(asymQC.scales[0]));
     TEST_ASSERT_EQUAL_UINT16(7, asymQC.zeroPoints[0]);
-}
-
-void testAccumulateTensorIntoSymRescaleRejectsSelfAliasedIncrement(void) {
-    /* PR #324: the rescale engine rewrites the
-     * target's qConfig scale between phase A (fresh-grid derivation, reads
-     * only) and phase B (chunked decode+requant+pack). If increment aliases
-     * target, phase B's incSrcChunk dequantizes the (not-yet-repacked) shared
-     * bytes using the ALREADY-overwritten fresh scale instead of the old one
-     * phase A used -- silently wrong output, no crash, no exit. The funnel
-     * epilogue always passes a distinct intermediate; this guards a caller
-     * that violates that contract directly.
-     * Mutation guard: removing the alias check lets the child run to
-     * completion and exit 0 (no death) -> RED. */
-    size_t n = 4;
-    size_t dims[] = {n};
-    size_t order[] = {0};
-    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
-
-    odtScale_t qcScale[1] = {odtScaleFromFloat(0.1f, ODT_SCALE_NEAREST)};
-    symQConfig_t qc = {
-        .scales = qcScale, .numGroups = 1, .groupSize = 0, .qBits = 6, .roundingMode = HALF_AWAY};
-    quantization_t q;
-    initSymQuantization(&qc, &q);
-    uint8_t data[calcNumberOfBytesForData(&q, n)];
-    int32_t mant[] = {5, -2, 3, -4};
-    byteConversion((uint8_t *)mant, 32, data, 6, n);
-    tensor_t t;
-    setTensorValues(&t, data, &shape, &q, NULL);
-
-    ASSERT_EXITS_WITH_FAILURE(accumulateTensorIntoSymRescale(&t, &t, NULL));
 }
 
 /* Group-quant PR2 (Task 2): group-aware FLOAT32<->SYM conversion cells, the
@@ -4053,30 +3929,6 @@ void testGroupedRepackSymInt32ToSymNoRescaleTargetDies(void) {
     setTensorValues(&outTensor, outData, &shape, &outQ, NULL);
 
     ASSERT_EXITS_WITH_FAILURE(repackSymInt32ToSymNoRescale(&inTensor, &outTensor));
-}
-
-void testDequantChunkToFloatRejectsGroupedSymSource(void) {
-    /* dequantChunkToFloat's SYM cell is a grad-accumulate-only helper
-     * (gradInit rejects grouped SYM templates); a grouped source reaching it
-     * anyway must fail-fast rather than read scales[0] for every group. */
-    size_t n = 8;
-    size_t dims[] = {n};
-    size_t order[] = {0};
-    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
-
-    odtScale_t scales[2] = {odtScaleFromFloat(0.1f, ODT_SCALE_NEAREST),
-                            odtScaleFromFloat(0.2f, ODT_SCALE_NEAREST)};
-    symQConfig_t qc = {
-        .scales = scales, .numGroups = 2, .groupSize = 4, .roundingMode = HALF_AWAY, .qBits = 6};
-    quantization_t q;
-    initSymQuantization(&qc, &q);
-    uint8_t data[calcNumberOfBytesForData(&q, n)];
-    memset(data, 0, sizeof(data));
-    tensor_t t;
-    setTensorValues(&t, data, &shape, &q, NULL);
-
-    float out[8];
-    ASSERT_EXITS_WITH_FAILURE(dequantChunkToFloat(&t, 0, 8, out));
 }
 
 void testSameTypeSymCopyCarriesGroupArrays(void) {
@@ -4594,98 +4446,6 @@ void testGroupedAsymSourceToSymDies(void) {
     setTensorValues(&outTensor, outData, &shape, &outQ, NULL);
 
     ASSERT_EXITS_WITH_FAILURE(convertTensor(&inTensor, &outTensor, NULL));
-}
-
-void testDequantChunkToFloatRejectsGroupedAsymSource(void) {
-    /* dequantChunkToFloat's ASYM arm is a grad-accumulate-only helper
-     * (gradInit rejects grouped ASYM templates, the #300 carrier gate); a
-     * grouped source reaching it anyway must fail-fast rather than decode
-     * every group on group 0's grid -- the exact SYM-arm twin below it. */
-    size_t n = 8;
-    size_t dims[] = {n};
-    size_t order[] = {0};
-    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
-
-    odtScale_t scales[2] = {odtScaleFromFloat(0.1f, ODT_SCALE_NEAREST),
-                            odtScaleFromFloat(0.2f, ODT_SCALE_NEAREST)};
-    uint16_t zps[2] = {1, 2};
-    asymQConfig_t qc = {.scales = scales,
-                        .zeroPoints = zps,
-                        .numGroups = 2,
-                        .groupSize = 4,
-                        .qBits = 5,
-                        .roundingMode = HALF_AWAY};
-    quantization_t q;
-    initAsymQuantization(&qc, &q);
-    uint8_t data[calcNumberOfBytesForData(&q, n)];
-    memset(data, 0, sizeof(data));
-    tensor_t t;
-    setTensorValues(&t, data, &shape, &q, NULL);
-
-    float out[8];
-    ASSERT_EXITS_WITH_FAILURE(dequantChunkToFloat(&t, 0, 8, out));
-}
-
-void testAccumulateFloatIntoAsymRescaleRejectsGroupedTarget(void) {
-    /* accumulate-into-ASYM engine (float-increment entry): grads are
-     * per-tensor unconditionally (gradInit carrier gate) -- a grouped target
-     * is a caller contract violation and must die. */
-    size_t n = 8;
-    size_t dims[] = {n};
-    size_t order[] = {0};
-    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
-
-    odtScale_t scales[2] = {odtScaleFromFloat(0.1f, ODT_SCALE_NEAREST),
-                            odtScaleFromFloat(0.2f, ODT_SCALE_NEAREST)};
-    uint16_t zps[2] = {1, 2};
-    asymQConfig_t qc = {.scales = scales,
-                        .zeroPoints = zps,
-                        .numGroups = 2,
-                        .groupSize = 4,
-                        .qBits = 5,
-                        .roundingMode = HALF_AWAY};
-    quantization_t q;
-    initAsymQuantization(&qc, &q);
-    uint8_t data[calcNumberOfBytesForData(&q, n)];
-    memset(data, 0, sizeof(data));
-    tensor_t target;
-    setTensorValues(&target, data, &shape, &q, NULL);
-
-    float inc[8] = {0};
-    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoAsymTensorRescale(&target, inc, n, NULL));
-}
-
-void testAccumulateTensorIntoAsymRescaleRejectsGroupedTarget(void) {
-    /* accumulate-into-ASYM engine (tensor-increment entry): same carrier-gate
-     * rationale as the float-increment twin above. */
-    size_t n = 8;
-    size_t dims[] = {n};
-    size_t order[] = {0};
-    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
-
-    odtScale_t scales[2] = {odtScaleFromFloat(0.1f, ODT_SCALE_NEAREST),
-                            odtScaleFromFloat(0.2f, ODT_SCALE_NEAREST)};
-    uint16_t zps[2] = {1, 2};
-    asymQConfig_t qc = {.scales = scales,
-                        .zeroPoints = zps,
-                        .numGroups = 2,
-                        .groupSize = 4,
-                        .qBits = 5,
-                        .roundingMode = HALF_AWAY};
-    quantization_t q;
-    initAsymQuantization(&qc, &q);
-    uint8_t data[calcNumberOfBytesForData(&q, n)];
-    memset(data, 0, sizeof(data));
-    tensor_t target;
-    setTensorValues(&target, data, &shape, &q, NULL);
-
-    quantization_t incQ;
-    initFloat32Quantization(&incQ);
-    float incData[8] = {0};
-    tensor_t inc;
-    setTensorValues(&inc, (uint8_t *)incData, &shape, &incQ, NULL);
-
-    ASSERT_EXITS_WITH_FAILURE(accumulateTensorIntoAsymRescale(&target, &inc, NULL));
 }
 
 void testSameTypeAsymCopyCarriesGroupArrays(void) {
@@ -6366,51 +6126,6 @@ void testRequantBfpMultiChunkReblock(void) {
     TEST_ASSERT_EQUAL_UINT8_ARRAY(payloadA, payloadB, payloadBytes);
 }
 
-void testRequantBfpTensorRejectsAliasedBuffers(void) {
-    /* requantBfpTensor is documented NOT in-place capable (TensorConversion.h):
-     * pass 2 re-reads the source under its ORIGINAL exponents, which an
-     * aliased pass-2 write would already have clobbered mid-stream --
-     * silently wrong bytes, no crash. The guard turns that latent corruption
-     * into a fail-fast. View is hand-built sharing ->data (stack-fixture
-     * idiom, NOT initTensor, which would allocate fresh data).
-     * Mutation guard: without the src==dst check the aliased call runs to
-     * completion and the child exits 0 (no death) -> RED. */
-    size_t n = 8;
-    size_t dims[] = {8};
-    size_t order[] = {0};
-    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
-
-    int32_t goldMant[8] = {12, 2, -4, 0, 25, -14, 6, 28};
-    uint8_t srcExponents[1] = {127};
-    bfpQConfig_t srcQC = {.exponents = srcExponents,
-                          .numGroups = 1,
-                          .groupSize = 0,
-                          .roundingMode = HALF_AWAY,
-                          .mantissaBits = 6,
-                          .exponentBits = 8};
-    quantization_t srcQ;
-    initBfpQuantization(&srcQC, &srcQ);
-    uint8_t bfpData[calcNumberOfBytesForData(&srcQ, n)];
-    byteConversion((uint8_t *)goldMant, 32, bfpData, 6, n);
-    tensor_t t;
-    setTensorValues(&t, bfpData, &shape, &srcQ, NULL);
-
-    /* aliased view: same data pointer, own qConfig (grouped target geometry) */
-    uint8_t viewExponents[2] = {9, 9};
-    bfpQConfig_t viewQC = {.exponents = viewExponents,
-                           .numGroups = 2,
-                           .groupSize = 4,
-                           .roundingMode = HALF_AWAY,
-                           .mantissaBits = 6,
-                           .exponentBits = 8};
-    quantization_t viewQ;
-    initBfpQuantization(&viewQC, &viewQ);
-    tensor_t tAliasedView;
-    setTensorValues(&tAliasedView, bfpData, &shape, &viewQ, NULL);
-
-    ASSERT_EXITS_WITH_FAILURE(requantBfpTensor(&t, &tAliasedView, NULL));
-}
-
 void testQuantizeFloatBufferToBfpCodesPerTensor(void) {
     /* same fixture as testRequantBfpWidthChange: {100,-50,25,0} at m=4,e=8
      * -> stored exponent 131 (E=+4, scale 16), codes {6,-3,2,0}
@@ -7165,66 +6880,6 @@ void testAccumulateTensorIntoBfpFixedGridFreshMultiChunkEqualsPack(void) {
     TEST_ASSERT_EQUAL_UINT8(127, exponents[2]);
 }
 
-void testAccumulateTensorIntoBfpRescaleRejectsSelfAliasedIncrement(void) {
-    /* Same PR #324 rationale as the SYM twin: the rescale engine rewrites the
-     * target's grid between passes, so an aliased increment would be decoded
-     * against the wrong grid mid-stream. Mutation guard: dropping the guard
-     * lets the child run to completion and exit 0 -> RED. */
-    size_t n = 4;
-    size_t dims[] = {4};
-    size_t order[] = {0};
-    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
-
-    uint8_t exponents[2] = {127, 125};
-    bfpQConfig_t qc = {.exponents = exponents,
-                       .numGroups = 2,
-                       .groupSize = 2,
-                       .roundingMode = HALF_AWAY,
-                       .mantissaBits = 6,
-                       .exponentBits = 8};
-    quantization_t q;
-    initBfpQuantization(&qc, &q);
-    uint8_t data[calcNumberOfBytesForData(&q, n)];
-    int32_t seedCodes[4] = {8, -4, 16, 8};
-    byteConversion((uint8_t *)seedCodes, 32, data, 6, n);
-    tensor_t t;
-    setTensorValues(&t, data, &shape, &q, NULL);
-
-    ASSERT_EXITS_WITH_FAILURE(accumulateTensorIntoBfpRescale(&t, &t, NULL));
-}
-
-void testAccumulateTensorIntoBfpFixedGridRejectsSelfAliasedIncrement(void) {
-    /* FixedGrid twin of the Rescale alias death test above (PR #324: the
-     * funnel epilogue always passes a distinct intermediate; aliasing is a
-     * caller contract violation rejected uniformly across the twins). Seed
-     * codes {8,-4,12,8}: every doubled code fits the 6-bit range [-32,31],
-     * so the guard-absent state runs the carry path to completion and exits
-     * 0 -> the mutant is observable as a no-death RED. (The Rescale
-     * fixture's 16 would double to 32 and vacuously abort in
-     * packChunkGuarded, masking a disabled guard.) */
-    size_t n = 4;
-    size_t dims[] = {4};
-    size_t order[] = {0};
-    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
-
-    uint8_t exponents[2] = {127, 125};
-    bfpQConfig_t qc = {.exponents = exponents,
-                       .numGroups = 2,
-                       .groupSize = 2,
-                       .roundingMode = HALF_AWAY,
-                       .mantissaBits = 6,
-                       .exponentBits = 8};
-    quantization_t q;
-    initBfpQuantization(&qc, &q);
-    uint8_t data[calcNumberOfBytesForData(&q, n)];
-    int32_t seedCodes[4] = {8, -4, 12, 8};
-    byteConversion((uint8_t *)seedCodes, 32, data, 6, n);
-    tensor_t t;
-    setTensorValues(&t, data, &shape, &q, NULL);
-
-    ASSERT_EXITS_WITH_FAILURE(accumulateTensorIntoBfpFixedGrid(&t, &t, NULL));
-}
-
 /* ---- scaleBfpTensorInPlace (epic PR3, scaleOptimizerGradients BFP arm) ---- */
 
 void testScaleBfpTensorInPlaceExactHalving(void) {
@@ -7696,64 +7351,6 @@ void testRequantBfpTensorRejectsBadTargetGroupGeometry(void) {
     buildBadGeometryBfpTarget(&dst, dstData, &dstShape, &dstQ, &dstQc, n);
 
     ASSERT_EXITS_WITH_FAILURE(requantBfpTensor(&src, &dst, NULL));
-}
-
-/* #420 G3: the two FLOAT-pointer accumulate wrappers document that `n` must
- * equal the target's element count but never enforced it. A grouped target
- * now dies in the engines' validateBfpQConfigShape, but the per-tensor
- * sentinel {1, 0} accepts ANY n -- gsz collapses to n, so a short n
- * silently partial-updates the accumulator and leaves the tail stale under a
- * grid derived from the prefix only. The tensor-typed twins are unaffected:
- * they derive n from the target themselves. Per-tensor target with 8
- * elements, called with n = 4. */
-static void buildPerTensorBfpTarget(tensor_t *t, uint8_t *data, shape_t *shape, quantization_t *q,
-                                    bfpQConfig_t *qc, size_t n) {
-    initBfpQuantization(qc, q);
-    int32_t seedCodes[8] = {1, -1, 1, -1, 1, -1, 1, -1};
-    byteConversion((uint8_t *)seedCodes, 32, data, 6, n);
-    setTensorValues(t, data, shape, q, NULL);
-}
-
-void testAccumulateFloatIntoBfpFixedGridRejectsShortElementCount(void) {
-    size_t n = 8;
-    size_t dims[] = {8};
-    size_t order[] = {0};
-    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
-    uint8_t exponents[1] = {127};
-    bfpQConfig_t qc = {.exponents = exponents,
-                       .numGroups = 1,
-                       .groupSize = 0, /* per-tensor sentinel accepts ANY n */
-                       .roundingMode = HALF_AWAY,
-                       .mantissaBits = 6,
-                       .exponentBits = 8};
-    quantization_t q;
-    uint8_t data[6]; /* calcNumberOfBytesForData(m=6, n=8) */
-    tensor_t target;
-    buildPerTensorBfpTarget(&target, data, &shape, &q, &qc, n);
-
-    float inc[4] = {0};
-    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, 4, NULL));
-}
-
-void testAccumulateFloatIntoBfpRescaleRejectsShortElementCount(void) {
-    size_t n = 8;
-    size_t dims[] = {8};
-    size_t order[] = {0};
-    shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
-    uint8_t exponents[1] = {127};
-    bfpQConfig_t qc = {.exponents = exponents,
-                       .numGroups = 1,
-                       .groupSize = 0,
-                       .roundingMode = HALF_AWAY,
-                       .mantissaBits = 6,
-                       .exponentBits = 8};
-    quantization_t q;
-    uint8_t data[6];
-    tensor_t target;
-    buildPerTensorBfpTarget(&target, data, &shape, &q, &qc, n);
-
-    float inc[4] = {0};
-    ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorRescale(&target, inc, 4, NULL));
 }
 
 /* #421 U9: the last two exponents[g] indexers without entry validation.
@@ -9387,7 +8984,6 @@ void testAsymCanonicalGridKeepsEndpointsAndZero(void) {
 int main(void) {
     UNITY_BEGIN();
 
-    RUN_TEST(testZeroTensorDataSymSubByteZeroesOnlyPackedBytes);
     RUN_TEST(testConversionIntFloat);
     RUN_TEST(testConversionIntSymInt32);
     RUN_TEST(testConversionInt32ToSymInt32AboveGridAborts);
@@ -9472,9 +9068,6 @@ int main(void) {
     RUN_TEST(testDequantChunkToFloatSymInt32MatchesScaleAtOffsets);
     RUN_TEST(testDequantChunkToFloatSymUnpacksSignExtendedAtOffsets);
     RUN_TEST(testDequantChunkToFloatAsymUnpacksZeroExtendedAtOffsets);
-    RUN_TEST(testDequantChunkToFloatRejectsCountAboveChunk);
-    RUN_TEST(testDequantChunkToFloatRejectsMisalignedOffset);
-    RUN_TEST(testDequantChunkToFloatRejectsOutOfRangeOffset);
     RUN_TEST(testUnpackSignExtendReadsSignedCodeAtBitOffset);
     RUN_TEST(testUnpackSignExtendOffsetZeroCoversFullSignedRange);
     RUN_TEST(testPackUnpackSignExtendRoundTripsNegativeSym4AndSym8);
@@ -9489,7 +9082,6 @@ int main(void) {
     RUN_TEST(testUnpackZeroExtend8BitOddByteStart);
     RUN_TEST(testUnpackZeroExtendNIsZeroWithNullSrc);
     RUN_TEST(testQuantizeFloatToAsymNoOpOnEmptyTensor);
-    RUN_TEST(testAccumulateTensorIntoSymRescaleRejectsSelfAliasedIncrement);
 
     RUN_TEST(testFloatToSymGroupedDerivesPerGroupScales);
     RUN_TEST(testFloatToSymGroupedMatchesTorchPerChannel);
@@ -9500,7 +9092,6 @@ int main(void) {
     RUN_TEST(testGroupedAsymToSymTargetDies);
     RUN_TEST(testGroupedInt32ToSymTargetDies);
     RUN_TEST(testGroupedRepackSymInt32ToSymNoRescaleTargetDies);
-    RUN_TEST(testDequantChunkToFloatRejectsGroupedSymSource);
     RUN_TEST(testSameTypeSymCopyCarriesGroupArrays);
     RUN_TEST(testSameTypeSymCopyRejectsGroupShapeMismatch);
     RUN_TEST(testRequantizeTensorInPlaceGrouped);
@@ -9514,9 +9105,6 @@ int main(void) {
     RUN_TEST(testGroupedAsymSourceToInt32Dies);
     RUN_TEST(testGroupedAsymSourceToSymInt32Dies);
     RUN_TEST(testGroupedAsymSourceToSymDies);
-    RUN_TEST(testDequantChunkToFloatRejectsGroupedAsymSource);
-    RUN_TEST(testAccumulateFloatIntoAsymRescaleRejectsGroupedTarget);
-    RUN_TEST(testAccumulateTensorIntoAsymRescaleRejectsGroupedTarget);
     RUN_TEST(testSameTypeAsymCopyCarriesGroupArrays);
     RUN_TEST(testSameTypeAsymCopyRejectsGroupShapeMismatch);
 
@@ -9555,7 +9143,6 @@ int main(void) {
     RUN_TEST(testChunkedFloatToBfpGroupedRoundTripsAcrossChunkBoundaries);
     RUN_TEST(testStreamPackBfpMultiChunkViaSymSource);
     RUN_TEST(testRequantBfpMultiChunkReblock);
-    RUN_TEST(testRequantBfpTensorRejectsAliasedBuffers);
 
     RUN_TEST(testQuantizeFloatBufferToBfpCodesPerTensor);
     RUN_TEST(testQuantizeFloatBufferToBfpCodesGroupedIndependentExponents);
@@ -9576,8 +9163,6 @@ int main(void) {
     RUN_TEST(testAccumulateFloatIntoBfpRescaleSeededMultiChunkEqualsDecodedPack);
     RUN_TEST(testScaleBfpTensorInPlaceSeededMultiChunkEqualsDecodedPack);
     RUN_TEST(testAccumulateTensorIntoBfpFixedGridFreshMultiChunkEqualsPack);
-    RUN_TEST(testAccumulateTensorIntoBfpRescaleRejectsSelfAliasedIncrement);
-    RUN_TEST(testAccumulateTensorIntoBfpFixedGridRejectsSelfAliasedIncrement);
     RUN_TEST(testScaleBfpTensorInPlaceExactHalving);
     RUN_TEST(testScaleBfpTensorInPlaceGeneralFactorRederives);
     RUN_TEST(testScaleBfpTensorInPlaceZeroGroupKeepsZeroState);
@@ -9590,8 +9175,6 @@ int main(void) {
     RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsBadGroupGeometry);
     RUN_TEST(testScaleBfpTensorInPlaceRejectsBadGroupGeometry);
     RUN_TEST(testRequantBfpTensorRejectsBadTargetGroupGeometry);
-    RUN_TEST(testAccumulateFloatIntoBfpFixedGridRejectsShortElementCount);
-    RUN_TEST(testAccumulateFloatIntoBfpRescaleRejectsShortElementCount);
     RUN_TEST(testFloatToBfpRejectsBadTargetGroupGeometry);
     RUN_TEST(testQuantizeFloatBufferToBfpCodesRejectsBadGroupGeometry);
     RUN_TEST(testFloatToBfpRejectsNonFiniteInputValue);

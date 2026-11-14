@@ -80,7 +80,8 @@ void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor,
  * source geometry -> any target geometry). n == 0 writes zero-state
  * exponents (= bias) and no payload.
  *
- * NOT in-place capable (unlike requantSymInt32Tensor): pass 2 re-reads the
+ * Not in-place (unlike requantSymInt32Tensor): the caller passes distinct
+ * tensors, because pass 2 re-reads the
  * source under its original exponents. Flat storage order; orderOfDimensions
  * is ignored; shape/sparsity are not touched. Wired into
  * conversionMatrix[BFP][BFP]; convertTensor's same-type branch (verbatim
@@ -148,11 +149,12 @@ void unpackSignExtend(const uint8_t *src, size_t srcBits, size_t srcStartBit, in
 void unpackZeroExtend(const uint8_t *src, size_t srcBits, size_t srcStartBit, int32_t *dst,
                       size_t n);
 
-/* Grad-accumulate primitives (PR3, #261). Direct-call only — not conversionMatrix
- * cells. FixedGrid = fit-preserving: carries the target's scale (first store after
- * a zero-fill derives it from the increment) and ABORTS on grid overflow (#227
- * discipline, no clamp). Rescale = requant: fresh absmax (SYM) / fresh affine grid
- * (ASYM) on every store. n must equal the target's element count. */
+/* Grad-accumulate primitives, called directly by executeOp's accumulateOut (not
+ * conversionMatrix cells). Callers guarantee: n (or the increment's element
+ * count) equals the target's, the increment does not share the target's data,
+ * and the target is per-tensor. FixedGrid keeps the target's scale (a fresh
+ * all-zero target derives it from the increment) and aborts on grid overflow;
+ * Rescale derives a fresh absmax (SYM) or affine grid (ASYM) on every store. */
 void accumulateFloatIntoSymTensorFixedGrid(tensor_t *target, const float *inc, size_t n,
                                            rngStream_t *rs);
 void accumulateFloatIntoSymTensorRescale(tensor_t *target, const float *inc, size_t n,
@@ -160,15 +162,10 @@ void accumulateFloatIntoSymTensorRescale(tensor_t *target, const float *inc, siz
 void accumulateFloatIntoAsymTensorRescale(tensor_t *target, const float *inc, size_t n,
                                           rngStream_t *rs);
 
-/* Tensor-typed accumulate entry points (#296 Stage 2) — stream the increment
- * chunk-wise via dequantChunkToFloat; float* variants keep their signatures.
- * accumulateSymInt32IntoSymInt32Rescale reproduces addSymInt32TensorsInplace's
- * Strategy-A semantics (dequant both -> float add -> fresh-absmax requant with
- * the TARGET's roundingMode) in O(chunk); Add.c stays untouched.
- * accumulateTensorIntoSymFixedGrid/accumulateTensorIntoSymRescale/
- * accumulateTensorIntoAsymRescale reject a self-aliased increment (increment
- * and target sharing the same data pointer) with exit(1) — the funnel
- * epilogue always passes a distinct intermediate (release-review, PR #324). */
+/* Tensor-typed twins: stream the increment chunk-wise through
+ * dequantChunkToFloat, so no O(n) scratch. accumulateSymInt32IntoSymInt32Rescale
+ * dequantizes both sides, adds in float and requantizes with a fresh absmax in
+ * the target's rounding mode. */
 void accumulateTensorIntoSymFixedGrid(tensor_t *target, const tensor_t *increment, rngStream_t *rs);
 void accumulateTensorIntoSymRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs);
 void accumulateTensorIntoAsymRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs);
@@ -183,13 +180,8 @@ void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *inc
  * overflow (#227 code-domain discipline, no clamp). Rescale = requant:
  * re-derives every group's exponent from the decoded-plus-increment absmax
  * (value-domain, saturates — BFP D6; since #421 this is the same walker
- * scaleBfpTensorInPlace runs, with factor = 1.f). n must equal the target's
- * element count and is ENFORCED in the two float* wrappers (#420 G3 — a
- * grouped target dies in the engines' shape check, but the per-tensor {1,0}
- * sentinel would otherwise accept a short n and silently partial-update);
- * the tensor-typed twins stream any dequantChunkToFloat-supported increment
- * and reject a self-aliased one (shared data pointer) with exit(1), like
- * their SYM/ASYM siblings.
+ * scaleBfpTensorInPlace runs, with factor = 1.f).
+ * Same caller guarantees as the SYM/ASYM primitives.
  * Both modes REJECT a non-finite value in the increment (PRINT_ERROR +
  * exit(1), #421 ruling R6): a BFP grid has no NaN/inf code, so dropping the
  * value or saturating it would either lose or invent data -- unlike the

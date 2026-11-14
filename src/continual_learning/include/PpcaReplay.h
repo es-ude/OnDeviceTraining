@@ -9,12 +9,9 @@
 #include "RNG.h"
 #include "Tensor.h"
 
-/* Per-class PPCA generator (#326; overview in docs/CONTINUAL_LEARNING.md).
- * State tensors accept FLOAT32/SYM/ASYM
- * storage; SYM_INT32 (#261), INT32 (silent value-cast) and BOOL (no
- * conversion cell) are rejected at create. v1 arithmetic: ARITH_FLOAT32
- * only (integer arms are the tracking-issue follow-up; no-int64 rule and
- * the d > 511 Gram bound are the quantified blockers). */
+/* Per-class PPCA generator (overview in docs/CONTINUAL_LEARNING.md). State
+ * storage supports FLOAT32/SYM/ASYM/BFP; BFP templates are per-tensor.
+ * Arithmetic must be ARITH_FLOAT32; ppcaReplayCreate checks both. */
 typedef struct {
     size_t dim, rank;       /* d, k */
     tensor_t *mean;         /* [d] */
@@ -34,10 +31,8 @@ typedef struct {
     float shrinkageGamma; /* lambda_i <- (1-g)*lambda_i + g*mean(top-kept lambda); 0 = off */
 } ppcaReplayConfig_t;
 
-/* Merge/streaming workspace: reserveMemory-backed flat float buffers,
- * created once (ppcaWorkspaceCreate), reused across updates and classes.
- * p_max = rank + maxSessionSamples + 1. ppcaWorkspaceBytes returns EXACTLY
- * the sum of the buffers below. */
+/* Reusable workspace shared across updates/classes; byte estimate excludes
+ * the workspace struct. p_max = rank + maxSessionSamples + 1. */
 typedef struct {
     size_t dim, rank, maxSessionSamples;
     float *bT;        /* [(p_max) * dim]  augmented matrix, stored transposed */
@@ -68,12 +63,20 @@ void ppcaReplayUpdateStreaming(ppcaReplay_t *g, const tensor_t *x, ppcaWorkspace
 void ppcaReplaySample(const ppcaReplay_t *g, const rngKey_t *slotKey, tensor_t *out);
 void ppcaReplayMean(const ppcaReplay_t *g, tensor_t *out);
 
+/* Buffer sizes of a ppcaWorkspace_t, in floats; bytes is the sum of all
+ * buffers. Exits when any size overflows size_t, so every size it returns is
+ * safe to allocate. Shared by ppcaWorkspaceBytes and ppcaWorkspaceCreate. */
+typedef struct {
+    size_t rows;       /* p_max */
+    size_t bTFloats;   /* p_max * dim */
+    size_t gramFloats; /* p_max * p_max (gram, eigvecs) */
+    size_t bytes;
+} ppcaWorkspaceLayout_t;
+
+ppcaWorkspaceLayout_t ppcaWorkspaceLayout(size_t dim, size_t rank, size_t maxSessionSamples);
+
 size_t ppcaReplayBytes(const ppcaReplay_t *g);
 size_t ppcaWorkspaceBytes(size_t dim, size_t rank, size_t maxSessionSamples);
 size_t ppcaReplayIsoExemplarCount(const ppcaReplay_t *g, size_t bytesPerExemplar);
-
-/* Shared v1 fail-fast: PPCA math knobs accept only ARITH_FLOAT32 (#310
- * pattern). Called at create AND at every step entry. */
-void ppcaValidateFloatArith(arithmetic_t math, const char *context);
 
 #endif // ODT_PPCA_REPLAY_H

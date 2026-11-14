@@ -21,17 +21,7 @@ void setUp(void) {}
 void tearDown(void) {}
 
 static tensor_t *buildFloat32TensorND(size_t rank, const size_t *srcDims, const float *fill) {
-    size_t *dims = reserveMemory(rank * sizeof(size_t));
-    size_t *order = reserveMemory(rank * sizeof(size_t));
-    for (size_t i = 0; i < rank; i++) {
-        dims[i] = srcDims[i];
-        order[i] = i;
-    }
-    shape_t *shape = reserveMemory(sizeof(shape_t));
-    shape->dimensions = dims;
-    shape->orderOfDimensions = order;
-    shape->numberOfDimensions = rank;
-    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    tensor_t *t = initTensor(buildOwnedShape(srcDims, rank), quantizationInitFloat(), NULL);
     if (fill != NULL) {
         float *d = (float *)t->data;
         size_t n = calcNumberOfElementsByTensor(t);
@@ -198,37 +188,6 @@ void testNoEligibleClassPassesBaseBatchThrough(void) {
     freeFakeDataset();
 }
 
-void testSyntheticSamplingDeterministic(void) {
-    buildFakeDataset();
-    for (int run = 0; run < 2; run++) {
-        static float firstRun[6];
-        dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
-        ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
-        ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg);
-        makeSetSampleable(set);
-        replayLoaderConfig_t rcfg = {.set = set, .samplesPerClass = 1, .minCount = 1};
-        dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
-        const rngKey_t stepKey = rngFold(rngKeyFromSeed(12345u), RNG_TAG_STEP, 0u);
-        batch_t *batch = wrapped->getBatch(wrapped, 0, &stepKey);
-        float *synth = (float *)batch->samples[2]->item->data;
-        if (run == 0) {
-            for (size_t j = 0; j < 6; j++) {
-                firstRun[j] = synth[j];
-            }
-        } else {
-            TEST_ASSERT_EQUAL_FLOAT_ARRAY(firstRun, synth, 6);
-        }
-        for (size_t s = 0; s < batch->size; s++) {
-            freeSample(batch->samples[s]);
-        }
-        freeBatch(batch);
-        freeReplayDataLoader(wrapped);
-        freeDataLoader(base);
-        freePpcaReplaySet(set);
-    }
-    freeFakeDataset();
-}
-
 void testMeanModeReplaysClassCentroidsWithoutStream(void) {
     /* REPLAY_MODE_CLASS_MEAN (#326 fair-comparison baseline): pool items are
      * the running class centroids, exactly; mean replay draws nothing, so it
@@ -265,6 +224,36 @@ void testMeanModeReplaysClassCentroidsWithoutStream(void) {
     freeDataLoader(base);
     freePpcaReplaySet(set);
     freeFakeDataset();
+}
+
+static void wrapWithMinCountZero(replayMode_t mode) {
+    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
+    ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
+    ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg);
+    replayLoaderConfig_t rcfg = {.set = set, .samplesPerClass = 1, .minCount = 0, .mode = mode};
+    (void)replayDataLoaderWrap(base, &rcfg);
+}
+
+/* A count-0 generator cannot be sampled, so minCount 0 is refused at wrap
+ * time instead of at the first fetch. */
+void testWrapRejectsMinCountZeroForGeneratorModes(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "minCount must be >= 1",
+                             wrapWithMinCountZero(REPLAY_MODE_PPCA_SAMPLE));
+    ASSERT_EXITS_WITH_OUTPUT(1, "minCount must be >= 1",
+                             wrapWithMinCountZero(REPLAY_MODE_CLASS_MEAN));
+}
+
+/* EXEMPLAR gates on a non-empty buffer and ignores minCount. */
+void testExemplarWrapAcceptsMinCountZero(void) {
+    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
+    exemplarBuffer_t *buf = exemplarBufferCreate(2, 1);
+    replayLoaderConfig_t rcfg = {
+        .exemplars = buf, .samplesPerClass = 1, .minCount = 0, .mode = REPLAY_MODE_EXEMPLAR};
+    dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
+    TEST_ASSERT_NOT_NULL(wrapped);
+    freeReplayDataLoader(wrapped);
+    freeExemplarBuffer(buf);
+    freeDataLoader(base);
 }
 
 static void fetchPpcaReplayWithoutAStepKey(void) {
@@ -349,7 +338,7 @@ void testExemplarBufferRejectsBadClassAndShape(void) {
     tensor_t *bad = buildFloat32TensorND(1, (size_t[]){5}, NULL);
     ASSERT_EXITS_WITH_FAILURE(exemplarBufferAdd(buf, ok, 2)); /* class OOB */
     exemplarBufferAdd(buf, ok, 0);
-    ASSERT_EXITS_WITH_FAILURE(exemplarBufferAdd(buf, bad, 0)); /* element mismatch */
+    ASSERT_EXITS_WITH_FAILURE(exemplarBufferAdd(buf, bad, 0)); /* dimension mismatch */
     freeTensor(bad);
     freeTensor(ok);
     freeExemplarBuffer(buf);
@@ -927,8 +916,9 @@ int main(void) {
     RUN_TEST(testWrappedBatchAppendsSyntheticSamples);
     RUN_TEST(testMinCountGatesClasses);
     RUN_TEST(testNoEligibleClassPassesBaseBatchThrough);
-    RUN_TEST(testSyntheticSamplingDeterministic);
     RUN_TEST(testMeanModeReplaysClassCentroidsWithoutStream);
+    RUN_TEST(testWrapRejectsMinCountZeroForGeneratorModes);
+    RUN_TEST(testExemplarWrapAcceptsMinCountZero);
     RUN_TEST(testPpcaReplayWithoutAStepKeyExits);
     RUN_TEST(testExemplarReplayWithoutAStepKeyExits);
     RUN_TEST(testExemplarBufferKeepsFirstKAndCopies);

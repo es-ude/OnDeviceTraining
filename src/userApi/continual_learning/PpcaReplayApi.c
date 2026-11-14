@@ -9,30 +9,29 @@
 #include "StorageApi.h"
 #include "TensorApi.h"
 
+static void validateFloatArith(arithmetic_t math, const char *field) {
+    if (math.type != ARITH_FLOAT32) {
+        PRINT_ERROR("ppcaReplayCreate: %s: only ARITH_FLOAT32 is implemented", field);
+        exit(1);
+    }
+}
+
 static void validateStateStorage(const quantization_t *q, const char *field) {
     if (q == NULL) {
         PRINT_ERROR("ppcaReplayCreate: %s storage config is NULL", field);
         exit(1);
     }
     if (q->type != FLOAT32 && q->type != SYM && q->type != ASYM && q->type != BFP) {
-        /* SYM_INT32 is compute-format-not-storage (#261); INT32 would be a
-         * silent value-cast through the conversion matrix; BOOL has no cell.
-         * BFP epic PR3 Task 6: BFP joins the whitelist -- the gate lift
-         * gradInit/optimizer-state already went through. Every still-
-         * unsupported dtype is rejected HERE, never left to the matrix. */
+        /* SYM_INT32 is a compute format; INT32 casts values; BOOL lacks conversion support. */
         PRINT_ERROR("ppcaReplayCreate: %s storage must be FLOAT32/SYM/ASYM/BFP", field);
         exit(1);
     }
-    /* BFP epic PR3 Task 7: BFP state storage is per-tensor-only, mirroring
-     * the optimizer-state gates (SgdApi/AdamWApi) -- a grouped template
-     * would flow through getQLike into a grouped BFP state tensor with no
-     * spec mandate (#300 axis). SYM/ASYM templates share this gap but are
-     * deliberately left as-is here (pre-existing behavior, out of scope). */
+    /* BFP state templates must be per-tensor. */
     if (q->type == BFP) {
         const bfpQConfig_t *bfpQC = q->qConfig;
         if (bfpQC->numGroups > 1) {
             PRINT_ERROR("ppcaReplayCreate: %s grouped BFP state templates are unsupported -- "
-                        "per-tensor only (#300 axis)",
+                        "per-tensor only",
                         field);
             exit(1);
         }
@@ -45,10 +44,7 @@ ppcaReplay_t *ppcaReplayCreate(const ppcaReplayConfig_t *cfg) {
                     cfg->rank);
         exit(1);
     }
-    /* NaN-robust (adamWInit betas idiom): sigma2Floor seeds sigma2 AND floors
-     * every merge -- a NaN or non-positive floor silently collapses generated
-     * samples toward the class mean (the sigma-noise term dies), poisoning
-     * replay results with no crash. */
+    /* The floor seeds the initial variance and must reject NaN. */
     if (!(cfg->sigma2Floor > 0.0f)) {
         PRINT_ERROR("ppcaReplayCreate: sigma2Floor must be > 0 (got %g)", (double)cfg->sigma2Floor);
         exit(1);
@@ -56,9 +52,9 @@ ppcaReplay_t *ppcaReplayCreate(const ppcaReplayConfig_t *cfg) {
     validateStateStorage(cfg->meanQ, "meanQ");
     validateStateStorage(cfg->basisQ, "basisQ");
     validateStateStorage(cfg->eigvalsQ, "eigvalsQ");
-    ppcaValidateFloatArith(cfg->mergeMath, "ppcaReplayCreate mergeMath");
-    ppcaValidateFloatArith(cfg->streamMath, "ppcaReplayCreate streamMath");
-    ppcaValidateFloatArith(cfg->sampleMath, "ppcaReplayCreate sampleMath");
+    validateFloatArith(cfg->mergeMath, "mergeMath");
+    validateFloatArith(cfg->streamMath, "streamMath");
+    validateFloatArith(cfg->sampleMath, "sampleMath");
 
     ppcaReplay_t *g = reserveMemory(sizeof(ppcaReplay_t));
     g->dim = cfg->dim;
@@ -94,17 +90,17 @@ ppcaWorkspace_t *ppcaWorkspaceCreate(size_t dim, size_t rank, size_t maxSessionS
         PRINT_ERROR("ppcaWorkspaceCreate: dim/rank/maxSessionSamples must be > 0");
         exit(1);
     }
-    size_t p = rank + maxSessionSamples + 1;
+    ppcaWorkspaceLayout_t l = ppcaWorkspaceLayout(dim, rank, maxSessionSamples);
     ppcaWorkspace_t *ws = reserveMemory(sizeof(ppcaWorkspace_t));
     ws->dim = dim;
     ws->rank = rank;
     ws->maxSessionSamples = maxSessionSamples;
-    ws->bT = reserveMemory(p * dim * sizeof(float));
-    ws->gram = reserveMemory(p * p * sizeof(float));
-    ws->eigvecs = reserveMemory(p * p * sizeof(float));
-    ws->theta = reserveMemory(p * sizeof(float));
+    ws->bT = reserveMemory(l.bTFloats * sizeof(float));
+    ws->gram = reserveMemory(l.gramFloats * sizeof(float));
+    ws->eigvecs = reserveMemory(l.gramFloats * sizeof(float));
+    ws->theta = reserveMemory(l.rows * sizeof(float));
     ws->lambdaOut = reserveMemory(rank * sizeof(float));
-    ws->rowScales = reserveMemory(p * sizeof(float));
+    ws->rowScales = reserveMemory(l.rows * sizeof(float));
     ws->meanBatch = reserveMemory(dim * sizeof(float));
     ws->muOld = reserveMemory(dim * sizeof(float));
     ws->u = reserveMemory(dim * sizeof(float));

@@ -6,12 +6,10 @@
 
 #include "Tensor.h"
 
-/* Raw-rehearsal baseline (#326 fair comparison): per class, the FIRST
- * `capacity` samples ever offered are stored (adds beyond capacity are
- * dropped — first-K policy, no reservoir). Stored exemplars are COPIES
- * (executeConvert into cloned storage: any item dtype, mirroring the
- * loader-pool contract); the replay loader hands out POINTERS into the
- * buffer, so stored tensors must outlive the wrapped loader. Every item
+/* Raw-rehearsal buffer: per class, the FIRST `capacity` samples ever offered
+ * are stored (later adds are dropped — first-K, no reservoir). Stored
+ * exemplars are copies in the item's own storage; the replay loader lends
+ * pointers into the buffer, so it must outlive the wrapped loader. Every item
  * offered must be in identity dimension order (no transposed views) and have
  * the first stored exemplar's rank and dimensions, across all classes; a
  * mismatch exits. */

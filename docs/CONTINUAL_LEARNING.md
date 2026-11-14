@@ -170,7 +170,7 @@ approximation — call:
 one-time allocation — reused across every update call and every class, never
 per-class or per-domain. `ppcaWorkspaceBytes(dim, rank, maxSessionSamples)`
 returns the exact sum of this inventory (all float32, `p = rank +
-maxSessionSamples + 1`):
+maxSessionSamples + 1`) and exits if that sum overflows `size_t`:
 
 | Buffer | Elements |
 |---|---|
@@ -206,12 +206,10 @@ for realistic `dim`/`maxSessionSamples` — it is `reserveMemory`-backed
 - **`minCount`** (gates immature generators out of replay: a class is
   eligible once its generator's `count >= minCount`) — start at **`>= 2k`**
   as a rule of thumb (enough absorbed samples for the merge's
-  numerical-rank guard to trust `k` components). **Always keep `minCount >=
-  1`.** `minCount == 0` makes a completely untouched generator
-  (`count == 0`) eligible for replay — the loader will then try to sample
-  it, and `ppcaReplaySample` fail-fasts (`PRINT_ERROR + exit(1)`, "generator
-  has absorbed no data") at the very first batch that reaches it, since no
-  domain has been absorbed into that generator yet.
+  numerical-rank guard to trust `k` components). `minCount` must be `>= 1`
+  in PPCA and class-mean modes: `minCount == 0` would make an untouched
+  generator (`count == 0`) eligible, so `replayDataLoaderWrap` rejects it
+  (`PRINT_ERROR + exit(1)`). EXEMPLAR mode ignores `minCount`.
 - **`maxSessionSamples`** — sizes the shared merge workspace (passed to
   `ppcaWorkspaceCreate`/`ppcaReplaySetCreate` via `ppcaReplayConfig_t`). A
   single `ppcaReplayUpdate` call with more than `maxSessionSamples` rows
@@ -424,9 +422,8 @@ targets are little-endian (pinned at compile time in `SerialWire.h`).
 - **v1 is `ARITH_FLOAT32` compute only.** `mergeMath`/`streamMath`/
   `sampleMath` are declared per-op (`arithmetic_t`, the same by-value knob
   every layer uses), but only `ARITH_FLOAT32` is implemented —
-  `ppcaValidateFloatArith` fail-fasts (at `ppcaReplayCreate` **and** at
-  every update/sample call) if any is set to anything else (`ARITH_SYM_INT32`,
-  `ARITH_BFP`). An integer
+  `ppcaReplayCreate` fail-fasts if any is set to anything else
+  (`ARITH_SYM_INT32`, `ARITH_BFP`). An integer
   PPCA arithmetic path (which needs, among other things, an integer
   eigensolver) is literature-first future work, to be filed as a tracking
   issue rather than home-grown. State *storage* is independent of this and

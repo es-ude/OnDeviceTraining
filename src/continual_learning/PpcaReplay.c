@@ -1,8 +1,10 @@
 #define SOURCE_FILE "PPCA_REPLAY"
 
+#include <stdbool.h>
 #include <stdlib.h>
 
 #include "Axpby.h"
+#include "CheckedSize.h"
 #include "Common.h"
 #include "Distributions.h"
 #include "ExecuteOp.h"
@@ -16,29 +18,28 @@
 #include "Tensor.h"
 #include "TensorConversion.h"
 
-/* Shared v1 arithmetic guard (Sgd.c/#310 wording pattern; re-checked at
- * every step because the kernels raw-cast operand data to float*). */
-void ppcaValidateFloatArith(arithmetic_t math, const char *context) {
-    if (math.type != ARITH_FLOAT32) {
-        PRINT_ERROR("%s: only ARITH_FLOAT32 is implemented (integer-arithmetic PPCA "
-                    "numerics are literature-first future work, see #326 tracking issue)",
-                    context);
+ppcaWorkspaceLayout_t ppcaWorkspaceLayout(size_t dim, size_t rank, size_t maxSessionSamples) {
+    ppcaWorkspaceLayout_t l = {.rows = 0};
+    bool ok = checkedAddSize(rank, maxSessionSamples, &l.rows) &&
+              checkedAddSize(l.rows, 1, &l.rows) && checkedMulSize(l.rows, dim, &l.bTFloats) &&
+              checkedMulSize(l.rows, l.rows, &l.gramFloats);
+    /* bT, gram, eigvecs, theta, lambdaOut, rowScales, meanBatch, muOld, u */
+    const size_t floatsPerBuffer[] = {l.bTFloats, l.gramFloats, l.gramFloats, l.rows, rank,
+                                      l.rows,     dim,          dim,          dim};
+    size_t floats = 0;
+    for (size_t i = 0; ok && i < sizeof(floatsPerBuffer) / sizeof(floatsPerBuffer[0]); i++) {
+        ok = checkedAddSize(floats, floatsPerBuffer[i], &floats);
+    }
+    if (!ok || !checkedMulSize(floats, sizeof(float), &l.bytes)) {
+        PRINT_ERROR("ppcaWorkspace: dim %zu, rank %zu, maxSessionSamples %zu overflow size_t", dim,
+                    rank, maxSessionSamples);
         exit(1);
     }
+    return l;
 }
 
 size_t ppcaWorkspaceBytes(size_t dim, size_t rank, size_t maxSessionSamples) {
-    size_t p = rank + maxSessionSamples + 1;
-    size_t floats = p * dim /* bT */
-                    + p * p /* gram */
-                    + p * p /* eigvecs */
-                    + p     /* theta */
-                    + rank  /* lambdaOut */
-                    + p     /* rowScales */
-                    + dim   /* meanBatch */
-                    + dim   /* muOld */
-                    + dim;  /* u */
-    return floats * sizeof(float);
+    return ppcaWorkspaceLayout(dim, rank, maxSessionSamples).bytes;
 }
 
 size_t ppcaReplayBytes(const ppcaReplay_t *g) {
@@ -98,7 +99,6 @@ static void ppcaSampleKernelFloat(tensor_t **op, size_t n, tensor_t *rawOut, ten
 }
 
 void ppcaReplaySample(const ppcaReplay_t *g, const rngKey_t *slotKey, tensor_t *out) {
-    ppcaValidateFloatArith(g->sampleMath, "ppcaReplaySample sampleMath");
     if (slotKey == NULL) {
         PRINT_ERROR("ppcaReplaySample: sampling without a slot key");
         exit(1);
@@ -125,11 +125,7 @@ void ppcaReplaySample(const ppcaReplay_t *g, const rngKey_t *slotKey, tensor_t *
         &(opSpec_t){
             .kernel = ppcaSampleKernelFloat,
             .ctx = &ctx,
-            /* funnel's sources-never-mutated contract: executeOp treats
-             * `inputs` as read-only despite the non-const tensor_t** param,
-             * so stripping g's const here is safe. */
-            .inputs =
-                (tensor_t *[]){(tensor_t *)g->mean, (tensor_t *)g->basis, (tensor_t *)g->eigvals},
+            .inputs = (tensor_t *[]){g->mean, g->basis, g->eigvals},
             .nInputs = 3,
             .arithmetic = g->sampleMath,
             .mode = OUT_WRITE,
@@ -140,11 +136,8 @@ void ppcaReplaySample(const ppcaReplay_t *g, const rngKey_t *slotKey, tensor_t *
         out);
 }
 
-/* Mean-replay baseline (#326 fair comparison): out <- mu. A pure storage
- * conversion through the conversionMatrix — no RNG, no arithmetic, so
- * sampleMath is deliberately NOT consulted (centroid replay stays available
- * where an arithmetic arm would be rejected). Same out contract as
- * ppcaReplaySample: any element-count-dim FLOAT32/SYM/ASYM tensor. */
+/* Centroid replay converts storage without RNG or arithmetic; requires a
+ * populated generator and dim-element FLOAT32/SYM/ASYM output. */
 void ppcaReplayMean(const ppcaReplay_t *g, tensor_t *out) {
     if (g->count == 0) {
         PRINT_ERROR("ppcaReplayMean: generator has absorbed no data (count == 0)");
@@ -335,7 +328,6 @@ static void ppcaMergeKernelFloat(tensor_t **op, size_t nOps, tensor_t *rawOut, t
 }
 
 void ppcaReplayUpdate(ppcaReplay_t *g, const tensor_t *samples, ppcaWorkspace_t *ws) {
-    ppcaValidateFloatArith(g->mergeMath, "ppcaReplayUpdate mergeMath");
     if (ws->dim != g->dim || ws->rank != g->rank) {
         PRINT_ERROR("ppcaReplayUpdate: workspace built for dim=%zu rank=%zu", ws->dim, ws->rank);
         exit(1);
@@ -359,9 +351,7 @@ void ppcaReplayUpdate(ppcaReplay_t *g, const tensor_t *samples, ppcaWorkspace_t 
     size_t k = g->rank;
     ppcaFloatView_t vIngest, vTrans, vMean, vMuOld, vLambda;
 
-    /* Step 0 — ingest (any dtype except BOOL) into the bT session region:
-     * executeConvert = the funnel's kernel-less form; heap target, zero
-     * stack. Sources are never mutated. */
+    /* Step 0 — ingest without modifying the source. */
     tensor_t *sampleRegion = bindFloatView(&vIngest, ws->bT + k * d, 2, m, d);
     executeConvert((tensor_t *)samples, sampleRegion, NULL);
 
@@ -399,8 +389,7 @@ void ppcaReplayUpdate(ppcaReplay_t *g, const tensor_t *samples, ppcaWorkspace_t 
         },
         g->basis);
 
-    /* Step 4 — eigvals via identity kernel (NOT auxOut: auxOut is never
-     * funnel-converted and would pin eigvals storage to FLOAT32). */
+    /* Step 4 — eigvals via an ordinary output: auxOut bypasses storage conversion. */
     tensor_t *lambdaView = bindFloatView(&vLambda, ws->lambdaOut, 1, k, 0);
     executeOp(
         &(opSpec_t){
@@ -545,7 +534,6 @@ static void ppcaCcipcaStepKernelFloat(tensor_t **op, size_t nOps, tensor_t *rawO
 }
 
 void ppcaReplayUpdateStreaming(ppcaReplay_t *g, const tensor_t *x, ppcaWorkspace_t *ws) {
-    ppcaValidateFloatArith(g->streamMath, "ppcaReplayUpdateStreaming streamMath");
     if (ws->dim != g->dim || ws->rank != g->rank) {
         PRINT_ERROR("ppcaReplayUpdateStreaming: workspace built for dim=%zu rank=%zu", ws->dim,
                     ws->rank);
@@ -581,7 +569,7 @@ void ppcaReplayUpdateStreaming(ppcaReplay_t *g, const tensor_t *x, ppcaWorkspace
             .arithmetic = g->streamMath,
             .mode = OUT_WRITE,
             .auxOut = NULL,
-            .writesInPlaceSafe = false, /* v1 conservative */
+            .writesInPlaceSafe = false,
         },
         g->basis);
 

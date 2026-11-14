@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 #include "DeathTest.h"
@@ -20,17 +21,7 @@ void setUp(void) {}
 void tearDown(void) {}
 
 static tensor_t *buildFloat32TensorND(size_t rank, const size_t *srcDims, const float *fill) {
-    size_t *dims = reserveMemory(rank * sizeof(size_t));
-    size_t *order = reserveMemory(rank * sizeof(size_t));
-    for (size_t i = 0; i < rank; i++) {
-        dims[i] = srcDims[i];
-        order[i] = i;
-    }
-    shape_t *shape = reserveMemory(sizeof(shape_t));
-    shape->dimensions = dims;
-    shape->orderOfDimensions = order;
-    shape->numberOfDimensions = rank;
-    tensor_t *t = initTensor(shape, quantizationInitFloat(), NULL);
+    tensor_t *t = initTensor(buildOwnedShape(srcDims, rank), quantizationInitFloat(), NULL);
     if (fill != NULL) {
         float *d = (float *)t->data;
         size_t n = calcNumberOfElementsByTensor(t);
@@ -78,38 +69,40 @@ void testCreateInitializesState(void) {
     freePpcaReplay(g);
 }
 
-void testWorkspaceBytesFormula(void) {
-    /* p = k+m+1. Inventory (floats): bT p*d + gram p^2 + eigvecs p^2 +
-     * theta p + lambdaOut k + rowScales p + meanBatch d + muOld d + u d. */
-    size_t d = 16, k = 4, m = 32, p = k + m + 1;
-    size_t floats = p * d + p * p + p * p + p + k + p + d + d + d;
-    TEST_ASSERT_EQUAL_size_t(floats * sizeof(float), ppcaWorkspaceBytes(d, k, m));
-}
-
-void testWorkspaceCreateMatchesBytes(void) {
+/* d=16, k=4, m=32 (p=37): 3456 floats. The profiled build also pins that
+ * create reserves exactly that plus the workspace struct. */
+void testWorkspaceBytesMatchCreateFootprint(void) {
+    TEST_ASSERT_EQUAL_size_t(13824, ppcaWorkspaceBytes(16, 4, 32));
+#ifdef ODT_MEM_PROFILE
+    size_t before = memProfileMark();
     ppcaWorkspace_t *ws = ppcaWorkspaceCreate(16, 4, 32);
-    TEST_ASSERT_NOT_NULL(ws);
-    TEST_ASSERT_EQUAL_size_t(16, ws->dim);
-    TEST_ASSERT_NOT_NULL(ws->bT);
-    TEST_ASSERT_NOT_NULL(ws->u);
+    TEST_ASSERT_EQUAL_size_t(13824 + sizeof(ppcaWorkspace_t), memProfileMark() - before);
     freePpcaWorkspace(ws);
+#endif
 }
 
-void testReplayBytesFloat32(void) {
+/* rank = m = 1 gives 3 rows and 6 * dim + 25 floats: SIZE_MAX / 2 wraps the
+ * bT product, SIZE_MAX / 5 only the float sum, SIZE_MAX / 8 only the bytes. */
+void testWorkspaceBytesRejectsSizeOverflow(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "overflow size_t", ppcaWorkspaceBytes(SIZE_MAX / 2u, 1, 1));
+    ASSERT_EXITS_WITH_OUTPUT(1, "overflow size_t", ppcaWorkspaceBytes(SIZE_MAX / 5u, 1, 1));
+    ASSERT_EXITS_WITH_OUTPUT(1, "overflow size_t", ppcaWorkspaceBytes(SIZE_MAX / 8u, 1, 1));
+}
+
+void testWorkspaceCreateRejectsSizeOverflow(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "overflow size_t", ppcaWorkspaceCreate(SIZE_MAX / 2u, 1, 1));
+}
+
+void testReplayBytesAndIsoExemplarCountFloat32(void) {
     ppcaReplayConfig_t cfg = floatConfig(16, 4, 32);
     ppcaReplay_t *g = ppcaReplayCreate(&cfg);
     /* FLOAT32: (d + k*d + k) * 4 + struct overhead. */
     size_t expected = (16 + 4 * 16 + 4) * sizeof(float) + sizeof(ppcaReplay_t);
     TEST_ASSERT_EQUAL_size_t(expected, ppcaReplayBytes(g));
-    freePpcaReplay(g);
-}
-
-void testIsoExemplarCount(void) {
-    ppcaReplayConfig_t cfg = floatConfig(16, 4, 32);
-    ppcaReplay_t *g = ppcaReplayCreate(&cfg);
-    size_t bytes = ppcaReplayBytes(g);
-    TEST_ASSERT_EQUAL_size_t(bytes / (16 * sizeof(float)),
-                             ppcaReplayIsoExemplarCount(g, 16 * sizeof(float)));
+    /* the count rounds down: one byte less per exemplar still fits only one */
+    TEST_ASSERT_EQUAL_size_t(1, ppcaReplayIsoExemplarCount(g, expected));
+    TEST_ASSERT_EQUAL_size_t(1, ppcaReplayIsoExemplarCount(g, expected - 1));
+    TEST_ASSERT_EQUAL_size_t(0, ppcaReplayIsoExemplarCount(g, expected + 1));
     freePpcaReplay(g);
 }
 
@@ -133,11 +126,7 @@ void testCreateRejectsRankGeDim(void) {
 }
 
 void testCreateRejectsNanSigma2Floor(void) {
-    /* PR #366 hardening: sigma2Floor seeds sigma2 AND floors every merge --
-     * a NaN (or non-positive) floor silently collapses generated samples
-     * toward the class mean (sigma-noise term dies), poisoning replay
-     * research results with no crash. Fail fast at create, NaN-robust
-     * (adamWInit betas idiom). */
+    /* The initial variance floor must reject NaN. */
     ppcaReplayConfig_t cfg = floatConfig(8, 2, 16);
     cfg.sigma2Floor = NAN;
     ASSERT_EXITS_WITH_FAILURE(ppcaReplayCreate(&cfg));
@@ -176,10 +165,6 @@ void testCreateRejectsBoolStorage(void) {
 }
 
 void testCreateAcceptsBfpStorage(void) {
-    /* BFP epic PR3 Task 6: the whitelist gains per-tensor BFP -- the
-     * "arrives with BFP epic PR3" promise in validateStateStorage's comment
-     * has now landed. getQLike (already BFP-aware since Task 1/5) clones the
-     * template into each state tensor's own quantization. */
     ppcaReplayConfig_t cfg = floatConfig(8, 2, 16);
     quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
     cfg.basisQ = bfpQ;
@@ -192,16 +177,8 @@ void testCreateAcceptsBfpStorage(void) {
 }
 
 void testCreateRejectsGroupedBfpStorage(void) {
-    /* BFP epic PR3 Task 7 (controller extension, T6 review minor 1): the
-     * whitelist admits BFP but must stay PER-TENSOR-only -- a grouped basisQ
-     * would flow through getQLike into a grouped BFP state tensor,
-     * contradicting the per-tensor-only rule the optimizer-state gates
-     * enforce (#300 axis). Shape-coincidence discipline (the SGD/AdamW
-     * grouped-reject twins' reasoning): the basis is rank*dim = 2*8 = 16
-     * elements and the template's numGroups*groupSize = 2*8 = 16 MATCHES, so
-     * without the gate ppcaReplayCreate would succeed (initTensor's
-     * validateBfpQConfigShape passes) -- the death can only come from the
-     * new gate, never from an incidental shape mismatch. */
+    /* Group geometry matches the basis, so rejection must come from the
+     * per-tensor BFP policy. */
     ppcaReplayConfig_t cfg = floatConfig(8, 2, 16);
     quantization_t *groupedBfpQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 8);
     cfg.basisQ = groupedBfpQ;
@@ -209,10 +186,18 @@ void testCreateRejectsGroupedBfpStorage(void) {
     freeQuantization(groupedBfpQ);
 }
 
-void testCreateRejectsSymInt32Arithmetic(void) {
-    ppcaReplayConfig_t cfg = floatConfig(8, 2, 16);
-    cfg.mergeMath = (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = HALF_AWAY};
-    ASSERT_EXITS_WITH_FAILURE(ppcaReplayCreate(&cfg));
+/* Create is the only arithmetic check: the kernels read every operand as float. */
+void testCreateRejectsSymInt32ArithmeticOnEveryKnob(void) {
+    const arithmetic_t sym = {.type = ARITH_SYM_INT32, .roundingMode = HALF_AWAY};
+    ppcaReplayConfig_t merge = floatConfig(8, 2, 16);
+    merge.mergeMath = sym;
+    ASSERT_EXITS_WITH_OUTPUT(1, "mergeMath: only ARITH_FLOAT32", ppcaReplayCreate(&merge));
+    ppcaReplayConfig_t stream = floatConfig(8, 2, 16);
+    stream.streamMath = sym;
+    ASSERT_EXITS_WITH_OUTPUT(1, "streamMath: only ARITH_FLOAT32", ppcaReplayCreate(&stream));
+    ppcaReplayConfig_t sample = floatConfig(8, 2, 16);
+    sample.sampleMath = sym;
+    ASSERT_EXITS_WITH_OUTPUT(1, "sampleMath: only ARITH_FLOAT32", ppcaReplayCreate(&sample));
 }
 
 void testWorkspaceCreateRejectsZeroSessionBound(void) {
@@ -367,10 +352,10 @@ void testSampleCountOneIsMeanPlusNoise(void) {
     freePpcaReplay(g);
 }
 
-void testSampleZeroSteadyStateAllocation(void) {
-    /* T6: no reserveMemory growth across repeated samples. Under builds
-     * without ODT_MEM_PROFILE the counters are no-op zeros (vacuously
-     * passing); the memprofile examples preset makes it a real assertion. */
+#ifdef ODT_MEM_PROFILE
+/* No net heap growth across repeated samples (temporary allocate/free pairs
+ * would still pass). */
+void testSampleHasNoNetHeapGrowth(void) {
     ppcaReplay_t *g = buildKnownGenerator();
     tensor_t *out = buildFloat32TensorND(1, (size_t[]){6}, NULL);
     const rngKey_t slot = rngFold(rngKeyFromSeed(13u), RNG_TAG_SLOT, 0u);
@@ -383,6 +368,7 @@ void testSampleZeroSteadyStateAllocation(void) {
     freeTensor(out);
     freePpcaReplay(g);
 }
+#endif
 
 void testSampleRejectsCountZero(void) {
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
@@ -768,16 +754,7 @@ void testUpdateRejectsBoolSamples(void) {
     ppcaReplayConfig_t cfg = floatConfig(8, 2, 16);
     ppcaReplay_t *g = ppcaReplayCreate(&cfg);
     ppcaWorkspace_t *ws = ppcaWorkspaceCreate(8, 2, 16);
-    size_t *dims = reserveMemory(2 * sizeof(size_t));
-    size_t *order = reserveMemory(2 * sizeof(size_t));
-    dims[0] = 2;
-    dims[1] = 8;
-    order[0] = 0;
-    order[1] = 1;
-    shape_t *shape = reserveMemory(sizeof(shape_t));
-    shape->dimensions = dims;
-    shape->orderOfDimensions = order;
-    shape->numberOfDimensions = 2;
+    shape_t *shape = buildOwnedShape((size_t[]){2, 8}, 2);
     quantization_t *q = reserveMemory(sizeof(quantization_t));
     initBoolQuantization(q);
     tensor_t *samples = initTensor(shape, q, NULL);
@@ -854,14 +831,7 @@ void testStreamingRejectsBoolInput(void) {
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
     ppcaReplay_t *g = ppcaReplayCreate(&cfg);
     ppcaWorkspace_t *ws = ppcaWorkspaceCreate(6, 2, 8);
-    size_t *dims = reserveMemory(sizeof(size_t));
-    size_t *order = reserveMemory(sizeof(size_t));
-    dims[0] = 6;
-    order[0] = 0;
-    shape_t *shape = reserveMemory(sizeof(shape_t));
-    shape->dimensions = dims;
-    shape->orderOfDimensions = order;
-    shape->numberOfDimensions = 1;
+    shape_t *shape = buildOwnedShape((size_t[]){6}, 1);
     quantization_t *q = reserveMemory(sizeof(quantization_t));
     initBoolQuantization(q);
     tensor_t *x = initTensor(shape, q, NULL);
@@ -1006,16 +976,7 @@ void testUpdateIngestsInt32Samples(void) {
     ppcaReplay_t *gJ = ppcaReplayCreate(&cfg);
     ppcaWorkspace_t *ws = ppcaWorkspaceCreate(6, 2, 16);
 
-    size_t *dims = reserveMemory(2 * sizeof(size_t));
-    size_t *order = reserveMemory(2 * sizeof(size_t));
-    dims[0] = 4;
-    dims[1] = 6;
-    order[0] = 0;
-    order[1] = 1;
-    shape_t *shape = reserveMemory(sizeof(shape_t));
-    shape->dimensions = dims;
-    shape->orderOfDimensions = order;
-    shape->numberOfDimensions = 2;
+    shape_t *shape = buildOwnedShape((size_t[]){4, 6}, 2);
     quantization_t *q = reserveMemory(sizeof(quantization_t));
     initInt32Quantization(q);
     tensor_t *intSamples = initTensor(shape, q, NULL);
@@ -1042,10 +1003,10 @@ void testUpdateIngestsInt32Samples(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testCreateInitializesState);
-    RUN_TEST(testWorkspaceBytesFormula);
-    RUN_TEST(testWorkspaceCreateMatchesBytes);
-    RUN_TEST(testReplayBytesFloat32);
-    RUN_TEST(testIsoExemplarCount);
+    RUN_TEST(testWorkspaceBytesMatchCreateFootprint);
+    RUN_TEST(testWorkspaceBytesRejectsSizeOverflow);
+    RUN_TEST(testWorkspaceCreateRejectsSizeOverflow);
+    RUN_TEST(testReplayBytesAndIsoExemplarCountFloat32);
     RUN_TEST(testSetCreate);
     RUN_TEST(testCreateRejectsZeroDim);
     RUN_TEST(testCreateRejectsRankGeDim);
@@ -1056,14 +1017,16 @@ int main(void) {
     RUN_TEST(testCreateRejectsBoolStorage);
     RUN_TEST(testCreateAcceptsBfpStorage);
     RUN_TEST(testCreateRejectsGroupedBfpStorage);
-    RUN_TEST(testCreateRejectsSymInt32Arithmetic);
+    RUN_TEST(testCreateRejectsSymInt32ArithmeticOnEveryKnob);
     RUN_TEST(testWorkspaceCreateRejectsZeroSessionBound);
     RUN_TEST(testSampleUnderOneSlotKeyIsDeterministic);
     RUN_TEST(testSampleGoldenConstants);
     RUN_TEST(testSampleCovarianceMatchesModel);
     RUN_TEST(testSampleNoiseIndependentOfKeff);
     RUN_TEST(testSampleCountOneIsMeanPlusNoise);
-    RUN_TEST(testSampleZeroSteadyStateAllocation);
+#ifdef ODT_MEM_PROFILE
+    RUN_TEST(testSampleHasNoNetHeapGrowth);
+#endif
     RUN_TEST(testSampleRejectsCountZero);
     RUN_TEST(testSampleRejectsElementCountMismatch);
     RUN_TEST(testSampleWithoutASlotKeyExits);

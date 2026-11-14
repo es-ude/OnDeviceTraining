@@ -50,13 +50,6 @@ exemplarBuffer_t *exemplarBufferCreate(size_t numClasses, size_t capacity) {
 }
 
 static void requireStoredShape(const tensor_t *item, const tensor_t *stored) {
-    size_t itemCount = calcNumberOfElementsByTensor((tensor_t *)item);
-    size_t storedCount = calcNumberOfElementsByTensor((tensor_t *)stored);
-    if (itemCount != storedCount) {
-        PRINT_ERROR("exemplarBufferAdd: item element count %zu != stored %zu", itemCount,
-                    storedCount);
-        exit(1);
-    }
     const shape_t *is = item->shape;
     const shape_t *ss = stored->shape;
     if (is->numberOfDimensions != ss->numberOfDimensions) {

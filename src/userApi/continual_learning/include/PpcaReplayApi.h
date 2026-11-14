@@ -16,10 +16,8 @@ void freePpcaReplaySet(ppcaReplaySet_t *set);
 
 typedef enum {
     REPLAY_MODE_PPCA_SAMPLE = 0, /* draw from the generative model (default) */
-    REPLAY_MODE_CLASS_MEAN,      /* replay the running class centroid — the
-                                    one-vector-per-class baseline (#326) */
-    REPLAY_MODE_EXEMPLAR,        /* replay stored raw samples — first-K
-                                    exemplar-buffer baseline (#326); slots are
+    REPLAY_MODE_CLASS_MEAN,      /* replay the running class centroid */
+    REPLAY_MODE_EXEMPLAR,        /* replay stored raw samples; slots are
                                     uniform draws (with replacement) from the
                                     class's buffer, handed out ZERO-COPY */
 } replayMode_t;
@@ -31,33 +29,23 @@ typedef struct {
     size_t samplesPerClass;      /* r; CLASS_MEAN appends r IDENTICAL centroid
                                     copies so batch composition and the MEAN-loss
                                     weighting stay comparable across modes */
-    uint32_t minCount;           /* class eligible once generator count >= minCount
-                                    (PPCA_SAMPLE/CLASS_MEAN; EXEMPLAR gates on a
-                                    non-empty class buffer instead) */
+    uint32_t minCount;           /* class eligible once generator count >= minCount;
+                                    must be >= 1 for PPCA_SAMPLE/CLASS_MEAN.
+                                    Ignored by EXEMPLAR, which gates on a
+                                    non-empty class buffer */
     replayMode_t mode;           /* zero-init = PPCA sampling */
 } replayLoaderConfig_t;
 
-/* Wraps base: getBatch appends r synthetic samples per eligible class
- * AFTER the real samples (sample 0 stays real -> labelRef/meanScale
- * contracts hold; the optimizer's MEAN divisor uses batch->size and thus
- * scales automatically — the replay layer adds NO second divisor).
- * Pools are lazily initialized from the first real batch (item + label
- * shape/dtype/qconfig mirrored via getShapeLike/getQLike, labels must be
- * FLOAT32 one-hot [numClasses]). The wrapper BORROWS base's fields; free
- * it ONLY with freeReplayDataLoader (freeDataLoader on the wrapper would
- * free base's indices). Base stays owned by the caller.
- * Known limitation (#152): at microBatchSize m > 1 the replayed batch size
- * base + eligible * r must stay divisible by m. trainingRun and
- * trainingEpochDefault check only the loader's batchSize, so an indivisible
- * replayed batch makes trainingBatchDefault fail fast mid-epoch.
- * Draws: slot i of class c in the batch of update u draws under
- * STEP(u)/(CL_REPLAY, 0)/(CLASS, c)/(SLOT, i), STEP(u) being the step key the
- * fetch is handed -- a PPCA sample from that key's KERNEL stream, an exemplar
- * pick by one bounded draw on the key's own stream -- so a replayed sample
- * depends on (update, class, slot) alone. A drawing mode fetched without a
- * step key stops; evaluation fetches pass none, so the wrapper is a training
- * loader. CLASS_MEAN and a batch with no eligible class draw nothing and need
- * no key. samplesPerClass must fit 32 bits. */
+/* Training wrapper; appends r replayed samples per eligible class after the
+ * real samples and borrows base's fields and the replay source. Free it only
+ * with freeReplayDataLoader; base stays caller-owned. Pools inherit the first
+ * real sample's shape/storage; labels must be FLOAT32 with numClasses
+ * elements. Drawing modes (PPCA_SAMPLE, EXEMPLAR) need a step key whenever a
+ * class is eligible; slot i of class c in update u draws under
+ * STEP(u)/(CL_REPLAY, 0)/(CLASS, c)/(SLOT, i), so a replayed sample depends on
+ * (update, class, slot) alone. Each resulting batch size must stay divisible
+ * by the training microbatch size, which training checks only per batch.
+ * samplesPerClass must fit uint32_t. */
 dataLoader_t *replayDataLoaderWrap(dataLoader_t *base, const replayLoaderConfig_t *cfg);
 void freeReplayDataLoader(dataLoader_t *wrapped);
 

@@ -380,36 +380,17 @@ void testRoundTripPackedGroupedAsym(void) {
     TEST_ASSERT_EQUAL_UINT32(9, capturedCount);
 }
 
-/*! BFP epic PR1 (Task 7, #400): ppcaReplayCreate's validateStateStorage
- *  (PpcaReplayApi.c) does not yet allow BFP as PPCA state storage -- this
- *  test hand-assembles the ppcaReplaySet_t/ppcaReplay_t structs directly
- *  (both are public structs; same bypass-the-factory idiom
- *  test/unit/serial/UnitTestDeserialize.c uses for parameter_t) so the
- *  peek parser's new BFP case (skip arithmetic: 4 + numGroups + 3 bytes)
- *  gets real mutation-catching coverage even before any producer can build
- *  this shape through the public API. Basis is grouped (numGroups=2,
- *  groupSize=6, matching rank=2/dim=6 row-grouping); mean/eigvals stay
- *  FLOAT32, mirroring every packedConfig-based test above (eigvalsQ is
- *  never varied from float there either). */
+/*! Hand-build grouped BFP state to exercise checkpoint loading; the PPCA
+ *  factory accepts only per-tensor BFP templates. Basis is grouped
+ *  (numGroups=2, groupSize=6: one group per row); mean/eigvals stay FLOAT32. */
 void testRoundTripPackedBfp(void) {
     size_t dim = 6, rank = 2;
 
-    size_t *meanDims = reserveMemory(sizeof(size_t));
-    meanDims[0] = dim;
-    size_t *meanOrder = reserveMemory(sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, meanOrder);
-    shape_t *meanShape = reserveMemory(sizeof(shape_t));
-    setShape(meanShape, meanDims, 1, meanOrder);
+    shape_t *meanShape = buildOwnedShape((size_t[]){dim}, 1);
     tensor_t *serialMean = initTensor(meanShape, quantizationInitFloat(), NULL);
     tensorFillFromFloatBuffer(serialMean, (float[]){0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f}, dim);
 
-    size_t *basisDims = reserveMemory(2 * sizeof(size_t));
-    basisDims[0] = rank;
-    basisDims[1] = dim;
-    size_t *basisOrder = reserveMemory(2 * sizeof(size_t));
-    setOrderOfDimsForNewTensor(2, basisOrder);
-    shape_t *basisShape = reserveMemory(sizeof(shape_t));
-    setShape(basisShape, basisDims, 2, basisOrder);
+    shape_t *basisShape = buildOwnedShape((size_t[]){rank, dim}, 2);
     tensor_t *serialBasis =
         initTensor(basisShape, quantizationInitBfpGrouped(4, 8, HALF_AWAY, 2, 6), NULL);
     bfpQConfig_t *serialBasisQc = serialBasis->quantization->qConfig;
@@ -418,12 +399,7 @@ void testRoundTripPackedBfp(void) {
     int32_t basisCodes[] = {1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6};
     byteConversion((uint8_t *)basisCodes, 32, serialBasis->data, 4, rank * dim);
 
-    size_t *eigvalsDims = reserveMemory(sizeof(size_t));
-    eigvalsDims[0] = rank;
-    size_t *eigvalsOrder = reserveMemory(sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, eigvalsOrder);
-    shape_t *eigvalsShape = reserveMemory(sizeof(shape_t));
-    setShape(eigvalsShape, eigvalsDims, 1, eigvalsOrder);
+    shape_t *eigvalsShape = buildOwnedShape((size_t[]){rank}, 1);
     tensor_t *serialEigvals = initTensor(eigvalsShape, quantizationInitFloat(), NULL);
     tensorFillFromFloatBuffer(serialEigvals, (float[]){3.0f, 2.0f}, rank);
 
@@ -445,30 +421,14 @@ void testRoundTripPackedBfp(void) {
     fclose(f);
 
     /* Deserial skeleton: same shapes/configs, fresh (zeroed) tensors. */
-    size_t *dMeanDims = reserveMemory(sizeof(size_t));
-    dMeanDims[0] = dim;
-    size_t *dMeanOrder = reserveMemory(sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, dMeanOrder);
-    shape_t *dMeanShape = reserveMemory(sizeof(shape_t));
-    setShape(dMeanShape, dMeanDims, 1, dMeanOrder);
+    shape_t *dMeanShape = buildOwnedShape((size_t[]){dim}, 1);
     tensor_t *deserialMean = initTensor(dMeanShape, quantizationInitFloat(), NULL);
 
-    size_t *dBasisDims = reserveMemory(2 * sizeof(size_t));
-    dBasisDims[0] = rank;
-    dBasisDims[1] = dim;
-    size_t *dBasisOrder = reserveMemory(2 * sizeof(size_t));
-    setOrderOfDimsForNewTensor(2, dBasisOrder);
-    shape_t *dBasisShape = reserveMemory(sizeof(shape_t));
-    setShape(dBasisShape, dBasisDims, 2, dBasisOrder);
+    shape_t *dBasisShape = buildOwnedShape((size_t[]){rank, dim}, 2);
     tensor_t *deserialBasis =
         initTensor(dBasisShape, quantizationInitBfpGrouped(4, 8, HALF_AWAY, 2, 6), NULL);
 
-    size_t *dEigvalsDims = reserveMemory(sizeof(size_t));
-    dEigvalsDims[0] = rank;
-    size_t *dEigvalsOrder = reserveMemory(sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, dEigvalsOrder);
-    shape_t *dEigvalsShape = reserveMemory(sizeof(shape_t));
-    setShape(dEigvalsShape, dEigvalsDims, 1, dEigvalsOrder);
+    shape_t *dEigvalsShape = buildOwnedShape((size_t[]){rank}, 1);
     tensor_t *deserialEigvals = initTensor(dEigvalsShape, quantizationInitFloat(), NULL);
 
     ppcaReplay_t deserialGen = {0};
@@ -524,50 +484,22 @@ void testRoundTripPackedBfp(void) {
     TEST_ASSERT_EQUAL_FLOAT(12.5f, capturedTotalVar);
 }
 
-/*! BFP epic PR1 (#316 class parity): SAME dtype (BFP) but
- *  mismatched mantissaBits must still be rejected by the peek arm directly.
- *  dim=3/rank=1 (basis = 3 elements) with mantissaBits 3 (file) vs 5
- *  (skeleton) is a DELIBERATE #316 collision: calcNumberOfBytesForData
- *  ceils (3*3+7)/8 == (5*3+7)/8 == 2 bytes for BOTH widths, so neither the
- *  peek's own post-read length check nor deserializeTensor's generic
- *  pre/post-overwrite dataBytes comparison can tell them apart (verified
- *  empirically: with the width guard disabled, this fixture round-trips
- *  with NO error of any kind — silently decoding the file's 3-bit codes as
- *  5-bit ones — exactly the silent-misparse case #316/this guard exists
- *  to foreclose, and the reason a wider/mismatched-N fixture would have
- *  been an over-determined, non-isolating test here). Hand-assembled on
- *  both sides, mirroring testRoundTripPackedBfp (ppcaReplayCreate's
- *  validateStateStorage does not allow BFP yet). */
+/*! Three elements at 3-bit and 5-bit widths both occupy two bytes. This
+ *  isolates width validation from payload-size validation. */
 void testDeserializeRejectsBfpWidthMismatch(void) {
     size_t dim = 3, rank = 1;
 
-    size_t *basisDims = reserveMemory(2 * sizeof(size_t));
-    basisDims[0] = rank;
-    basisDims[1] = dim;
-    size_t *basisOrder = reserveMemory(2 * sizeof(size_t));
-    setOrderOfDimsForNewTensor(2, basisOrder);
-    shape_t *basisShape = reserveMemory(sizeof(shape_t));
-    setShape(basisShape, basisDims, 2, basisOrder);
+    shape_t *basisShape = buildOwnedShape((size_t[]){rank, dim}, 2);
     /* mantissaBits=3: codes must fit [-4, 3]. */
     tensor_t *serialBasis = initTensor(basisShape, quantizationInitBfp(3, 8, HALF_AWAY), NULL);
     int32_t basisCodes[] = {1, -2, 3};
     byteConversion((uint8_t *)basisCodes, 32, serialBasis->data, 3, rank * dim);
 
-    size_t *meanDims = reserveMemory(sizeof(size_t));
-    meanDims[0] = dim;
-    size_t *meanOrder = reserveMemory(sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, meanOrder);
-    shape_t *meanShape = reserveMemory(sizeof(shape_t));
-    setShape(meanShape, meanDims, 1, meanOrder);
+    shape_t *meanShape = buildOwnedShape((size_t[]){dim}, 1);
     tensor_t *serialMean = initTensor(meanShape, quantizationInitFloat(), NULL);
     tensorFillFromFloatBuffer(serialMean, (float[]){0.1f, 0.2f, 0.3f}, dim);
 
-    size_t *eigvalsDims = reserveMemory(sizeof(size_t));
-    eigvalsDims[0] = rank;
-    size_t *eigvalsOrder = reserveMemory(sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, eigvalsOrder);
-    shape_t *eigvalsShape = reserveMemory(sizeof(shape_t));
-    setShape(eigvalsShape, eigvalsDims, 1, eigvalsOrder);
+    shape_t *eigvalsShape = buildOwnedShape((size_t[]){rank}, 1);
     tensor_t *serialEigvals = initTensor(eigvalsShape, quantizationInitFloat(), NULL);
     tensorFillFromFloatBuffer(serialEigvals, (float[]){3.0f}, rank);
 
@@ -589,31 +521,14 @@ void testDeserializeRejectsBfpWidthMismatch(void) {
     fclose(f);
 
     /* Skeleton: BFP m=5/e=8 -- mantissaBits mismatch (file is m=3 above),
-     * same per-tensor shape otherwise; see the #316-collision note above
-     * for why m=5 (not e.g. m=4) is the isolating choice at N=3. */
-    size_t *dBasisDims = reserveMemory(2 * sizeof(size_t));
-    dBasisDims[0] = rank;
-    dBasisDims[1] = dim;
-    size_t *dBasisOrder = reserveMemory(2 * sizeof(size_t));
-    setOrderOfDimsForNewTensor(2, dBasisOrder);
-    shape_t *dBasisShape = reserveMemory(sizeof(shape_t));
-    setShape(dBasisShape, dBasisDims, 2, dBasisOrder);
+     * same per-tensor shape otherwise. */
+    shape_t *dBasisShape = buildOwnedShape((size_t[]){rank, dim}, 2);
     tensor_t *deserialBasis = initTensor(dBasisShape, quantizationInitBfp(5, 8, HALF_AWAY), NULL);
 
-    size_t *dMeanDims = reserveMemory(sizeof(size_t));
-    dMeanDims[0] = dim;
-    size_t *dMeanOrder = reserveMemory(sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, dMeanOrder);
-    shape_t *dMeanShape = reserveMemory(sizeof(shape_t));
-    setShape(dMeanShape, dMeanDims, 1, dMeanOrder);
+    shape_t *dMeanShape = buildOwnedShape((size_t[]){dim}, 1);
     tensor_t *deserialMean = initTensor(dMeanShape, quantizationInitFloat(), NULL);
 
-    size_t *dEigvalsDims = reserveMemory(sizeof(size_t));
-    dEigvalsDims[0] = rank;
-    size_t *dEigvalsOrder = reserveMemory(sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, dEigvalsOrder);
-    shape_t *dEigvalsShape = reserveMemory(sizeof(shape_t));
-    setShape(dEigvalsShape, dEigvalsDims, 1, dEigvalsOrder);
+    shape_t *dEigvalsShape = buildOwnedShape((size_t[]){rank}, 1);
     tensor_t *deserialEigvals = initTensor(dEigvalsShape, quantizationInitFloat(), NULL);
 
     ppcaReplay_t deserialGen = {0};
@@ -789,9 +704,8 @@ void testDeserializeRejectsBadMagicAndTruncation(void) {
 
 void testDeserializeRejectsPayloadTruncation(void) {
     /* Cut INSIDE the last tensor's payload region (full-2 bytes): every
-     * header/scalar read and the peek still succeed; since #370 the payload
-     * read itself fails fast (the post-read record-length check remains as
-     * the wire-drift alarm). */
+     * header/scalar read and the peek still succeed; the payload read itself
+     * fails. */
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
     ppcaReplaySet_t *skeleton = ppcaReplaySetCreate(1, &cfg);
     ppcaReplaySet_t *serial = ppcaReplaySetCreate(1, &cfg);

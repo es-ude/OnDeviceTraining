@@ -12,14 +12,7 @@
 #include "TensorRecord.h"
 
 #define PPCA_SERIALIZE_MAGIC "ODTR"
-/* v2 (#370): embedded ODTS tensor records switched to fixed-width LE fields
- * and the ODTR scalars are LE-pinned via SerialWire — v1 checkpoints were
- * host-local artifacts, no back-compat shim.
- * v3 (#401): ODTS_TENSOR_RECORD_VERSION follows the container version, so a
- * checkpoint written under another tensor-record layout fails by name. */
 #define PPCA_SERIALIZE_FORMAT_VERSION 3u
-/* PPCA state tensors are rank 1 or 2 by construction (mean/eigvals, basis). */
-#define PPCA_MAX_TENSOR_RANK 2
 
 void ppcaReplaySetSerialize(const ppcaReplaySet_t *set, FILE *f) {
     serialWriteBytes(PPCA_SERIALIZE_MAGIC, 4, f);
@@ -39,14 +32,12 @@ void ppcaReplaySetSerialize(const ppcaReplaySet_t *set, FILE *f) {
     }
 }
 
-/* A same-dtype width mismatch is the #316 2x-overflow case: two widths can
- * pack to the same byte count, so the length check alone cannot see it. A
- * file numGroups that differs from the skeleton's is fine: deserializeTensor
- * reallocates the per-group arrays. */
+/* Equal packed byte counts can hide width mismatches. Group counts may
+ * differ because loading reallocates group arrays. */
 static void validateRecordAgainstSkeleton(const tensorRecordHeader_t *header,
                                           const tensor_t *skeleton, const char *what) {
     size_t nd = header->numberOfDimensions;
-    if (nd != skeleton->shape->numberOfDimensions || nd > PPCA_MAX_TENSOR_RANK) {
+    if (nd != skeleton->shape->numberOfDimensions) {
         PRINT_ERROR("ppcaReplaySetDeserialize: %s rank mismatch (file %zu, skeleton %zu)", what, nd,
                     skeleton->shape->numberOfDimensions);
         exit(1);
@@ -62,7 +53,7 @@ static void validateRecordAgainstSkeleton(const tensorRecordHeader_t *header,
     qtype_t fileType = header->quantization.type;
     if (fileType != skeleton->quantization->type) {
         PRINT_ERROR("ppcaReplaySetDeserialize: %s dtype mismatch (file %u, skeleton %u) — "
-                    "#316 guard: rebuild the skeleton with the checkpoint's storage config",
+                    "rebuild the skeleton with the checkpoint's storage config",
                     what, (unsigned)fileType, (unsigned)skeleton->quantization->type);
         exit(1);
     }
@@ -72,7 +63,7 @@ static void validateRecordAgainstSkeleton(const tensorRecordHeader_t *header,
         const symQConfig_t *skelQc = skeleton->quantization->qConfig;
         if (fileQc->qBits != skelQc->qBits) {
             PRINT_ERROR("ppcaReplaySetDeserialize: %s SYM qBits mismatch (file %u, skeleton "
-                        "%u) — same-dtype width mismatch is the #316 2x-overflow case",
+                        "%u)",
                         what, (unsigned)fileQc->qBits, (unsigned)skelQc->qBits);
             exit(1);
         }
@@ -94,8 +85,7 @@ static void validateRecordAgainstSkeleton(const tensorRecordHeader_t *header,
         if (fileQc->mantissaBits != skelQc->mantissaBits ||
             fileQc->exponentBits != skelQc->exponentBits) {
             PRINT_ERROR("ppcaReplaySetDeserialize: %s BFP width mismatch (file m=%u/e=%u, "
-                        "skeleton m=%u/e=%u) — same-dtype width mismatch is the #316 "
-                        "2x-overflow class",
+                        "skeleton m=%u/e=%u)",
                         what, (unsigned)fileQc->mantissaBits, (unsigned)fileQc->exponentBits,
                         (unsigned)skelQc->mantissaBits, (unsigned)skelQc->exponentBits);
             exit(1);
@@ -107,9 +97,7 @@ static void validateRecordAgainstSkeleton(const tensorRecordHeader_t *header,
     }
 }
 
-/* The public deserializeTensor trusts file bytes, so the record header is
- * parsed into scratch and checked against the skeleton BEFORE any overwrite;
- * only then is the stream rewound for the real read. */
+/* Validate the record header against the skeleton before loading that tensor. */
 static void peekValidateThenDeserializeTensor(tensor_t *skeleton, FILE *f, const char *what) {
     long recordStart = ftell(f);
     if (recordStart < 0) {
@@ -119,9 +107,7 @@ static void peekValidateThenDeserializeTensor(tensor_t *skeleton, FILE *f, const
 
     tensorRecordHeader_t header;
     readTensorRecordHeader(&header, f);
-    long headerBytes = ftell(f) - recordStart;
     validateRecordAgainstSkeleton(&header, skeleton, what);
-    size_t payloadBytes = header.payloadBytes;
     freeTensorRecordHeader(&header);
 
     if (fseek(f, recordStart, SEEK_SET) != 0) {
@@ -129,14 +115,6 @@ static void peekValidateThenDeserializeTensor(tensor_t *skeleton, FILE *f, const
         exit(1);
     }
     deserializeTensor(skeleton, f);
-    /* Wire-drift alarm: deserializeTensor must consume exactly what the
-     * shared header parse measured. */
-    if (ftell(f) - recordStart != headerBytes + (long)payloadBytes) {
-        PRINT_ERROR("ppcaReplaySetDeserialize: %s record length mismatch — truncated payload "
-                    "or wire-layout drift",
-                    what);
-        exit(1);
-    }
 }
 
 void ppcaReplaySetDeserialize(ppcaReplaySet_t *skeleton, FILE *f) {

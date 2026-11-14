@@ -544,7 +544,7 @@ checkpointing, limitations, literature).
 - **Storage vs. arithmetic** — same split as layers: `meanQ`/`basisQ`/
   `eigvalsQ` (FLOAT32/SYM/ASYM/per-tensor BFP) are independent per-tensor storage
   configs; compute (`mergeMath`/`streamMath`/`sampleMath`) is v1 `ARITH_FLOAT32`
-  only (`ppcaValidateFloatArith` fail-fasts on every other arithmetic, incl.
+  only (`ppcaReplayCreate` fail-fasts on every other arithmetic, incl.
   `ARITH_SYM_INT32` and `ARITH_BFP`); the eigendecomposition is the float Jacobi
   solver `jacobiEigSymFloat32` (`src/arithmetic/JacobiEig.c`).
   FLOAT32-active/packed-at-rest (SYM/ASYM@8 via `executeConvert`) is the

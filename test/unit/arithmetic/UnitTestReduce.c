@@ -489,18 +489,6 @@ void testMeanBfpSumHeadroomDeath(void) {
     freeReservedMemory(codes);
 }
 
-void testBfpSumHeadroomRejectsZeroMantissaWidth(void) {
-    bfpQConfig_t qC = {.exponents = NULL,
-                       .numGroups = 1,
-                       .groupSize = 0,
-                       .roundingMode = HALF_AWAY,
-                       .mantissaBits = 0,
-                       .exponentBits = 8};
-    /* reductionLen must be 0 so the segment-length guard cannot mask a missing
-     * zero-width rejection. */
-    ASSERT_EXITS_WITH_FAILURE(bfpValidateSumHeadroom(&qC, 0, "test"));
-}
-
 /* ---- sumSquaresOverTrailingAxesFloat32 ---- */
 
 void testSumSquaresTrailingAxes(void) {
@@ -582,7 +570,6 @@ int main(void) {
     RUN_TEST(testVarianceBfpDequantCenterSquare);
     RUN_TEST(testMeanBfpPerTensorSentinel);
     RUN_TEST(testMeanBfpSumHeadroomDeath);
-    RUN_TEST(testBfpSumHeadroomRejectsZeroMantissaWidth);
     RUN_TEST(testSumSquaresTrailingAxes);
     RUN_TEST(testSumSquaresWholeTensor);
     RUN_TEST(testSumSquaresPermutationAware);

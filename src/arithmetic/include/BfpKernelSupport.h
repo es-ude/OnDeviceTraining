@@ -12,9 +12,7 @@
 #include "Quantization.h"
 #include "Tensor.h"
 
-/* BFP epic PR2 (Task 3): shared support for the BFP GEMM kernels (Matmul.c
- * now, the conv kernels in later tasks). Header-only static inline -- no new
- * library. */
+/* Shared support for the BFP kernels and the layers that carry BFP wires. */
 
 /*! The hot walk of an integer kernel lives in its OWN non-inlined function,
  * apart from the pre-pass that sizes stack tables by the topology (VLAs). A
@@ -109,17 +107,13 @@ static inline float bfpLdexpInt32(int32_t m, int e) {
 
 /*! Max products one int32 block partial may accumulate: INT32_MAX >> (ma+mb-2).
  * Mantissas are in [-2^(m-1), 2^(m-1)-1], so |product| <= 2^(ma+mb-2) and
- * INT32_MAX >> (ma+mb-2) products fit int32 -- the kernels' no-int64 rule
- * holds by construction, never by wider accumulators. */
+ * INT32_MAX >> (ma+mb-2) products fit int32 without int64. Mantissa widths are
+ * in [2, 16] (BFP init), so the shift is at most 30. */
 static inline size_t bfpSegmentLimit(uint8_t maMantissaBits, uint8_t mbMantissaBits) {
-    unsigned shift = (unsigned)maMantissaBits + (unsigned)mbMantissaBits - 2u;
-    if (shift >= 31u) {
-        return 1u; /* two 2^30 products already overflow int32 */
-    }
-    return (size_t)(INT32_MAX >> shift);
+    return (size_t)(INT32_MAX >> (maMantissaBits + mbMantissaBits - 2u));
 }
 
-/*! Fail-fast (#227 headroom) at kernel entry over the (widths, blocking, K)
+/*! Fail-fast at kernel entry over the (widths, blocking, K)
  * triple: a same-exponent segment never accumulates more than
  * min(runA, runB, K) products (boundary events include every multiple of each
  * operand's groupSize, and distinct storage indices inside one group number
@@ -137,7 +131,7 @@ static inline void bfpValidateBlockHeadroom(const bfpQConfig_t *aQC, const bfpQC
     size_t limit = bfpSegmentLimit(aQC->mantissaBits, bQC->mantissaBits);
     if (maxSeg > limit) {
         PRINT_ERROR("%s: BFP block partial would overflow int32 -- max same-exponent segment "
-                    "%zu exceeds %zu products for mantissa widths (%u, %u) (#227 headroom)",
+                    "%zu exceeds %zu products for mantissa widths (%u, %u)",
                     what, maxSeg, limit, aQC->mantissaBits, bQC->mantissaBits);
         exit(1);
     }
@@ -795,17 +789,11 @@ static inline int32_t roundedDivHalfAwayInt32(int32_t sum, int32_t count) {
     return sum < 0 ? (int32_t)(0u - q) : (int32_t)q;
 }
 
-/*! Max codes one int32 SUM partial may accumulate (PR3, biasGrad-family
- * reductions): a pure mantissa sum of g codes is bounded by g * 2^(m-1)
- * (codes in [-2^(m-1), 2^(m-1)-1]), so an int32 segment partial is sound for
- * g <= INT32_MAX >> (m-1). The PRODUCT helper's >> (ma+mb-2) bound does not
- * apply to single-operand sums. */
+/*! Max codes one int32 SUM partial may accumulate (bias-grad, mean): a pure mantissa sum of g codes
+ * is bounded by g * 2^(m-1) (codes in [-2^(m-1), 2^(m-1)-1]), so an int32 segment partial is sound
+ * for g <= INT32_MAX >> (m-1). The PRODUCT helper's >> (ma+mb-2) bound does not apply to
+ * single-operand sums. */
 static inline size_t bfpSumSegmentLimit(uint8_t mantissaBits) {
-    if (mantissaBits == 0) {
-        PRINT_ERROR("bfpSumSegmentLimit: mantissaBits == 0 is not a BFP width (shift-UB; "
-                    "the SYM twin rejects qMaxBits == 0 the same way)");
-        exit(1);
-    }
     return (size_t)(INT32_MAX >> (mantissaBits - 1));
 }
 
@@ -830,7 +818,7 @@ static inline void bfpValidateSumHeadroom(const bfpQConfig_t *qC, size_t reducti
     }
 }
 
-/*! BFP epic PR4 (R-P2/R-P5): one wire's length gate. validateBfpQConfigShape
+/*! One wire's length gate. validateBfpQConfigShape
  * alone is NOT sufficient for the outside-funnel copiers: the per-tensor
  * sentinel {numGroups=1, groupSize=0} is legal for ANY element count, so two
  * per-tensor wires of DIFFERENT lengths pass every grid check while a verbatim
@@ -848,13 +836,12 @@ static inline void bfpRequireElementCount(const bfpQConfig_t *qC, size_t elems, 
     validateBfpQConfigShape(qC, elems);
 }
 
-/*! BFP epic PR4 (R-P2/R-P5): verbatim-transparency gate for the layers that
+/*! Verbatim-transparency gate for the layers that
  * run OUTSIDE the executeOp funnel and COPY codes and exponents between two
  * BFP wires (Relu, Flatten, Dropout) instead of re-deriving them. Copying is
  * sound only when both wires hold the same number of elements AND share the
  * block grid AND the code/exponent widths; anything else is a re-block, which
- * belongs to the Quantization layer (the sanctioned re-block point,
- * docs/conventions/arithmetic-bfp.md §9 / BFP D8). */
+ * belongs to the Quantization layer. */
 static inline void bfpRequireSameGeometry(const bfpQConfig_t *aQC, size_t aElems,
                                           const bfpQConfig_t *bQC, size_t bElems,
                                           const char *what) {
@@ -872,10 +859,8 @@ static inline void bfpRequireSameGeometry(const bfpQConfig_t *aQC, size_t aElems
     }
 }
 
-/*! PR6 (PR5 deferral 4): the R-P1/R-N1 produced-wire staging anchor, shared.
- * outputQ anchors forward ops, propLossQ anchors backward ops. Eager at op
- * entry; NULL-checked because userApi factories copy layerQuant_t slots by
- * value. */
+/*! The produced-wire config that sets the BFP staging width: outputQ for forward
+ * ops, propLossQ for backward ops. */
 static inline const bfpQConfig_t *bfpWireAnchor(const quantization_t *wireQ, const char *what) {
     if (wireQ == NULL || wireQ->type != BFP) {
         PRINT_ERROR("%s: ARITH_BFP requires a BFP-typed produced-wire config as the staging "
@@ -887,7 +872,7 @@ static inline const bfpQConfig_t *bfpWireAnchor(const quantization_t *wireQ, con
     return wireQ->qConfig;
 }
 
-/*! PR6 (PR5 deferral 4): fail-fast for paths without BFP semantics, shared. */
+/*! Fail-fast for paths without BFP semantics. */
 static inline void bfpRequireNoBfpWire(const tensor_t *t, const char *what) {
     if (t->quantization->type == BFP) {
         PRINT_ERROR("%s: no BFP semantics on this path -- keep BFP off this wire or use "

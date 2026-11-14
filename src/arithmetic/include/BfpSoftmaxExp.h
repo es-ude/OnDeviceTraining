@@ -3,9 +3,8 @@
 #include <stdint.h>
 
 /* Integer i-exp core for the BFP softmax (I-BERT Algorithm 3, Kim et al.
- * 2021, on a FIXED dyadic work grid 2^-F) plus the 3-mode integer
- * shift-rounding helper the kernels share. Pipeline contract:
- * docs/conventions/arithmetic-bfp.md §5.9 (R-S2).
+ * 2021, on a fixed dyadic work grid 2^-F) plus the 3-mode integer
+ * shift-rounding helper the kernels share.
  *
  * Headroom proof (why F = 14 and why no int64 is needed anywhere):
  * q_p ∈ (−QLN2, 0] so |q_p + q_b| ≤ q_b = 22167; the I-POLY square is
@@ -33,17 +32,14 @@ typedef enum bfpShiftRounding {
     BFP_SHIFT_SR,        /* floor + Bernoulli(remainder / 2^k), one draw from the stream      */
 } bfpShiftRounding_t;
 
-/* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
- * repetition), so this header needs no RNG include path. */
 typedef struct rngStream rngStream_t;
 
 /*! @brief Rounded arithmetic right shift v / 2^k in one of three modes.
  *
  * k == 0 returns v unchanged (no draw). k >= 31 is clamped to 31
  * (documented; only reachable via extreme exponent spreads whose true
- * results round to 0 or ±1). SR draws exactly ONE rngNextU32 from `rs` per
- * call with k > 0 (lift iff its top k bits < the k dropped bits) and stops
- * with a named error when `rs` is NULL; a zero
+ * results round to 0 or ±1). SR draws exactly ONE rngNextU32 from `rs` (non-NULL) per
+ * call with k > 0 (lift iff its top k bits < the k dropped bits); a zero
  * remainder never increments (exact shifts stay exact under SR). TRUNC and
  * HALF_AWAY never draw and take NULL. HALF_AWAY requires |v| ≤ 2^30 (holds
  * at every call site) so the magnitude add cannot overflow. */

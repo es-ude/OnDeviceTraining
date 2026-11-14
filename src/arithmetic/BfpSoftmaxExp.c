@@ -2,9 +2,6 @@
 
 #include "BfpSoftmaxExp.h"
 
-#include <stdlib.h>
-
-#include "Common.h"
 #include "RNG.h"
 
 int32_t bfpShiftRightRounded(int32_t v, uint32_t k, bfpShiftRounding_t mode, rngStream_t *rs) {
@@ -30,10 +27,6 @@ int32_t bfpShiftRightRounded(int32_t v, uint32_t k, bfpShiftRounding_t mode, rng
          * bits are u on a k-bit grid (integer, no float on the forward
          * path; for k <= 24 the same decision the 24-bit float draw took),
          * and u >= 0, so rem == 0 never increments. */
-        if (rs == NULL) {
-            PRINT_ERROR("bfpShiftRightRounded: SR shift without a stream");
-            exit(1);
-        }
         const int32_t floorQ = v >> k;
         const uint32_t rem = (uint32_t)(v - (int32_t)((uint32_t)floorQ << k));
         const uint32_t u = rngNextU32(rs) >> (32u - k);

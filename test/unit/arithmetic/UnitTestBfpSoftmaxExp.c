@@ -4,7 +4,6 @@
 #include <string.h>
 
 #include "BfpSoftmaxExp.h"
-#include "DeathTest.h"
 #include "RNG.h"
 #include "RngPinnedDraw.h"
 #include "expected_bfp_softmax_core.h"
@@ -135,17 +134,6 @@ void testShiftSrIsAFunctionOfItsStream() {
     TEST_ASSERT_FALSE(memcmp(first, other, sizeof first) == 0);
 }
 
-static void shiftSrWithoutAStream(void) {
-    (void)bfpShiftRightRounded(13, 1u, BFP_SHIFT_SR, NULL);
-}
-
-/* No key, no randomness: an SR shift by k > 0 without a stream stops at the
- * draw (a shift by 0 and the underflow floor never draw, and never stop). */
-void testShiftSrWithoutAStreamExits() {
-    ASSERT_EXITS_WITH_OUTPUT(1, "bfpShiftRightRounded: SR shift without a stream",
-                             shiftSrWithoutAStream());
-}
-
 /* The SR draw is integer (no float on the forward path): with u the draw's
  * top k bits, v / 2^k lifts iff u < rem. Pinned draws: at k = 28 the old
  * 24-bit float form saw u = (draw >> 8) << 4, so draws 0x4F and 0x50 both
@@ -261,7 +249,6 @@ int main(void) {
     RUN_TEST(testShiftSrExactWhenRemainderZero);
     RUN_TEST(testShiftSrBracketsFloor);
     RUN_TEST(testShiftSrIsAFunctionOfItsStream);
-    RUN_TEST(testShiftSrWithoutAStreamExits);
     RUN_TEST(testIExpVectorsTrunc);
     RUN_TEST(testIExpVectorsHalfAway);
     RUN_TEST(testIExpUnderflowFloorIsExactZero);

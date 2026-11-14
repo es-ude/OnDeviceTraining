@@ -9,14 +9,12 @@
 #include "Common.h"
 #include "Tensor.h"
 
-/* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
- * repetition), so this header needs no RNG include path. */
 typedef struct rngStream rngStream_t;
 typedef struct rngKey rngKey_t;
 
 /* Which ops emit the integer raw (BFP_RAW: int32 mantissas + one UNBIASED
  * int16 exponent per TARGET group, bfpRawQConfig_t; the kernel MUST write
- * every group's exponent) instead of BFP D7's FLOAT32 raw. Each value is an
+ * every group's exponent) instead of the FLOAT32 raw. Each value is an
  * explicit per-op opt-in, so an op never switches raw format by accident
  * (each layer's backward sets its own value). Every value is ARITH_BFP
  * only. Raw geometry: a BFP target's {numGroups, groupSize}; a FLOAT32
@@ -32,7 +30,7 @@ typedef struct rngKey rngKey_t;
  *                        FLOAT32-stored operands keep staging, as in every
  *                        backward op.
  *   Both: OUT_WRITE only. The epilogue is the integer re-block
- *   (conversionMatrix[BFP_RAW][BFP], under the #282 op-rounding swap, so the
+ *   (conversionMatrix[BFP_RAW][BFP], under the op-rounding swap, so the
  *   wire rounds by the OP's mode) or, for a FLOAT32 target, the dequant
  *   ([BFP_RAW][FLOAT32]); any other target dtype fails fast.
  *   BFP_RAW_BACKWARD_ACC a grad op accumulating into BFP grad STORAGE
@@ -53,11 +51,12 @@ typedef enum bfpRawContract {
     BFP_RAW_BACKWARD_ACC,
 } bfpRawContract_t;
 
-/* The one conversion funnel (PR1b.2 D1, docs/conventions/arithmetic-sym.md). Every op runs:
+/* The one conversion funnel. Every op runs:
  *   prologue   — operands whose dtype != arithmetic are converted into
  *                transient stack scratch (sources are never mutated)
  *   kernel     — pure computation: operands (in arithmetic representation)
- *                -> raw intermediate (SYM kernels emit raw int32 mantissas);
+ *                -> raw intermediate (SYM kernels emit raw int32 mantissas,
+ *                BFP kernels emit FLOAT32);
  *                also given auxOut (kernel-written verbatim, e.g. MaxPool's
  *                argmax indices) and ctx (kernel geometry/config), neither of
  *                which the funnel touches
@@ -65,9 +64,8 @@ typedef enum bfpRawContract {
  *                in the TARGET's own dtype. Persistent buffers are never
  *                pulled through the arithmetic. auxOut is NEVER funnel-
  *                converted — the kernel writes it in its own storage format.
- *                Rounding ownership (#282): the OUT_WRITE requant rounds by
- *                the OP's arithmetic.roundingMode; the ACC epilogues round by
- *                the accumulator's own storage qConfig (grid discipline, PR1b.2 D4).
+ *                The OUT_WRITE requant rounds by the op's
+ *                arithmetic.roundingMode; the ACC epilogues by the target's own.
  * Escape hatch policy: the prologue/epilogue helpers stay static in
  * ExecuteOp.c. Opening one for an op that does not fit the n-inputs/1-output
  * shape requires a documented exception here. */
@@ -77,9 +75,8 @@ typedef enum bfpRawContract {
 typedef void (*opKernelFn_t)(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
                              tensor_t *auxOut, const void *ctx, rngStream_t *rs);
 
-/* Maximum operands any in-tree op passes (Linear/LayerNorm forward: input +
- * weights/gamma + bias/beta = 3). Bump deliberately. Public since BFP epic
- * PR2: opSpec_t.bfpStage is sized by it. */
+/* Caller guarantees nInputs <= this. Bump deliberately; opSpec_t.bfpStage is
+ * sized by it. */
 #define EXECUTE_OP_MAX_INPUTS 3
 
 typedef enum {
@@ -94,14 +91,14 @@ typedef enum {
                               * add, no clamp (SYM targets); exact add (FLOAT32) */
 } outputMode_t;
 
-/*! @brief Descriptor for a funnel op invocation (PR1b.2 D1).
+/*! @brief Descriptor for a funnel op invocation.
  * ctx: kernel geometry/config, opaque to the funnel, passed straight through
  *      to the kernel; NULL for config-free kernels.
  * auxOut: kernel-written verbatim, in ITS OWN storage format — never funnel-
  *         converted; NULL for single-output ops (e.g. MaxPool1d's argmax
  *         indices live here). */
 typedef struct opSpec {
-    opKernelFn_t kernel; // has nothing to do with convolution
+    opKernelFn_t kernel;
     const void *ctx;
     tensor_t **inputs;
     size_t nInputs;
@@ -113,7 +110,7 @@ typedef struct opSpec {
     const rngKey_t *key;
     outputMode_t mode;
     tensor_t *auxOut;
-    /* #296 Stage 1: opt-in for OUT_WRITE aliasing when the target is also an
+    /* Opt-in for OUT_WRITE aliasing when the target is also an
      * input. true == the kernel reads element i of every input before writing
      * element i of the output (elementwise), so writing the target's storage
      * directly is safe. Zero-init (false) = conservative staging. Aliasing
@@ -123,53 +120,22 @@ typedef struct opSpec {
      * pointer equality; overlapping sub-views (raw-pointer tensor wiring) are
      * outside the contract. */
     bool writesInPlaceSafe;
-    /* Group-quant PR2 (Task 3) + PR4 (Task 3):
-     * per-OPERAND opt-in for a grouped input — SYM OR ASYM (symQConfig_t /
-     * asymQConfig_t numGroups > 1; the two grouped carrier dtypes share the
-     * shape grammar, group-quant D6) — under EITHER arithmetic type. 0 = no grouped
-     * operand allowed anywhere (zero-init safe — every existing opSpec
-     * compound literal that never heard of grouped operands still denies
-     * them); i+1 = inputs[i] (and ONLY inputs[i]) may be grouped. A grouped
-     * input reaching the prologue at any OTHER position, or at all when this
-     * is 0, fail-fasts. Declaring ops as of group-quant PR3/PR4: the
-     * GEMM-family forward AND dx weights (Linear/Conv1d/ConvT1d, both
-     * directions) and the optimizer param-update ops (SGD
-     * stateless/mState/mParam, AdamW param). Every other op is a non-carrier
-     * (grads, bias, gamma/beta, wires, momentum stay per-tensor) —
-     * this funnel-wide seam enforces that, on BOTH the ARITH_SYM_INT32 and
-     * ARITH_FLOAT32 prologue arms.
+    /* 0 = no grouped SYM/ASYM operand allowed; i+1 = inputs[i] (and only it) may
+     * be grouped. Any other grouped operand fail-fasts. Declared by the GEMM-family
+     * forward and dx weights and the optimizer param updates; grads, bias,
+     * gamma/beta, wires and momentum stay per-tensor.
      *
-     * ARITH_SYM_INT32: the prologue unpacks the declared operand's mantissas
-     * into scratch — grouped SYM via unpackSignExtend (sign-extended raw
-     * int32), grouped ASYM via a zero-extend + per-element `code - zp[g]`
-     * shift (PR4: after the shift both dtypes present the IDENTICAL
-     * signed-mantissa image, group-quant D5) — and POISONS the scratch
-     * symInt32QConfig_t's scale to 1.0f and qMaxBits to the source's qBits: a
-     * grouped operand has no single scalar scale, so any kernel reading
-     * scratch->quantization->scale here is a bug — group-aware kernels MUST
-     * take per-group scales from their own ctx (the layer's
-     * symGroupedWeight_t, SymGroupedWeight.h: the group config, for ASYM
-     * weights a symQConfig-shaped VIEW of the asym config, plus the weight's
-     * code domain -- the ASYM image spans +-(2^qBits - 1), one code wider
-     * than that qMaxBits reads, so the kernels take the weight's operand
-     * range from the ctx as well), never this field. Set together with a
-     * ctx that actually carries the group shape (Linear.c: both or neither).
-     *
-     * ARITH_FLOAT32: no poisoning/unpack mechanics — the declared operand
-     * proceeds through the EXISTING group-aware convertTensor dequant
-     * (convertSymTensorToFloat32Tensor / convertAsymTensorToFloatTensor,
-     * group-aware since PR2/PR4 Task 2); this field is purely a gate on that
-     * path, not a different mechanism.
-     *
-     * BFP epic PR2 (Task 6): BFP-stored operands never use this gate —
-     * grouped BFP blocking is per-operand-legal under ARITH_BFP (the
-     * prologue hands every operand to the kernel with its live bfpQConfig_t,
-     * so there is no scalar collapse to guard against). */
+     * ARITH_SYM_INT32: the declared operand is unpacked to signed mantissas (ASYM:
+     * code - zp[g], the same image as SYM) and the scratch scale is poisoned to
+     * 1.0f. Kernels must read per-group scales and the operand range from their
+     * ctx (symGroupedWeight_t), never the scratch config. ARITH_FLOAT32: the
+     * operand goes through the group-aware dequant; this field only gates it.
+     * BFP-stored operands never use this field. */
     size_t groupedSymOperandPos;
-    /* BFP epic PR2 (Task 6), ARITH_BFP only: per-operand staging geometry
-     * for FLOAT32-stored operands. Entries are geometry TEMPLATES ({1,0}
-     * per-tensor or {numGroups>1, groupSize>0} with numGroups*groupSize ==
-     * the operand's element count, plus mantissa/exponent widths); the
+    /* ARITH_BFP only: staging geometry for FLOAT32-stored operands, required for
+     * each of them (caller guarantees). Entries are templates ({1,0} per-tensor
+     * or {numGroups>1, groupSize>0} with numGroups*groupSize == the operand's
+     * element count, plus mantissa/exponent widths); the
      * template's exponents pointer and roundingMode are IGNORED — the funnel
      * owns transient scratch exponent backing and stages with the OP's
      * arithmetic.roundingMode. NULL entry (zero-init) = the operand must
@@ -185,37 +151,26 @@ typedef struct opSpec {
      * staged configs carry the OP's arithmetic.roundingMode. */
     const bfpQConfig_t *bfpStage[EXECUTE_OP_MAX_INPUTS];
     /* ARITH_BFP only: the raw-format contract of the op (bfpRawContract_t
-     * above). Zero-init (BFP_RAW_NONE) keeps BFP D7's FLOAT32 raw. */
+     * above). Zero-init (BFP_RAW_NONE) keeps the FLOAT32 raw. */
     bfpRawContract_t bfpRawOut;
 } opSpec_t;
 
 void executeOp(const opSpec_t *spec, tensor_t *target);
 
-/* Fail-fast guard for the OUT_WRITE==0 hazard (packed-grad D1, per-layer
- * accumulate-mode knob): weightGradAccMode/biasGradAccMode are by-value
- * layerQuant_t/config fields with no "unset" sentinel of their own, and
- * OUT_WRITE happens to be the zero-init value -- a hand-wired config that
- * forgets to set them would otherwise silently pass OUT_WRITE into a grad
- * accumulate call. Call at each grad executeOp call site, right before
- * reading the mode; `context` names the layer and field for the message
- * (e.g. "Linear weightGradAccMode"). Shared here (not duplicated per layer
- * file) since every grad-accumulating layer already depends on ExecuteOp for
- * the funnel call itself -- no new library dependency. */
+/* weightGradAccMode/biasGradAccMode have no "unset" value and OUT_WRITE is the
+ * zero-init, so a config that forgot them would silently overwrite a grad. Call
+ * at each grad executeOp site; `context` names the layer and field. */
 static inline void executeOpValidateAccMode(outputMode_t mode, const char *context) {
     if (mode != OUT_ACC_DYNAMIC_RESCALE && mode != OUT_ACC_FIXED_SCALE) {
-        PRINT_ERROR("%s: not a valid grad accumulate mode (got %d) -- config field never set? "
-                    "(#269, #261)",
+        PRINT_ERROR("%s: not a valid grad accumulate mode (got %d) -- config field never set?",
                     context, (int)mode);
         exit(1);
     }
 }
 
-/* Copies operand 0 into rawOut (data + SYM scale if applicable). For ops whose
- * increment is produced inline (LayerNorm dgamma/dbeta only — the Quantization
- * layer is a pure conversion node routed through executeConvert instead).
- * Ignores auxOut/ctx. Incompatible with the unpacked-BFP scratch form (its
- * byte-count-based copy reads packed-storage sizes) — never pair with
- * ARITH_BFP. */
+/* Copies operand 0 into rawOut (data + SYM scale if applicable), for an
+ * already-computed increment. Ignores auxOut/ctx. Incompatible with the unpacked-BFP scratch form
+ * (its byte-count-based copy reads packed-storage sizes) — never pair with ARITH_BFP. */
 void executeOpIdentityKernel(tensor_t **operands, size_t nOperands, tensor_t *rawOut,
                              tensor_t *auxOut, const void *ctx, rngStream_t *rs);
 
@@ -224,7 +179,7 @@ void executeOpIdentityKernel(tensor_t **operands, size_t nOperands, tensor_t *ra
  * diagonal (requant), never the same-type memmove. Supports every
  * populated conversionMatrix cell. Unlike executeOp's OUT_WRITE epilogue,
  * a bare conversion IS a storage encode: it rounds by the target's own
- * qConfig roundingMode (#282). rs is handed to the cell's rounding calls. */
+ * qConfig roundingMode. rs is handed to the cell's rounding calls. */
 void executeConvert(tensor_t *input, tensor_t *target, rngStream_t *rs);
 
 #endif // ENV5_RUNTIME_EXECUTE_OP_H

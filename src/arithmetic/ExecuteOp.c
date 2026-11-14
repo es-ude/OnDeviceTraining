@@ -29,14 +29,9 @@ void executeOpIdentityKernel(tensor_t **operands, size_t nOperands, tensor_t *ra
     }
 }
 
-/* Raw int32 codes are copied unclamped: the scratch spans [-2^31, 2^31 - 1],
- * 32 bits, and declares that width (set first) -- the same declaration a raw
- * SYM kernel output carries when its static bound exceeds int32 (#516). A
- * 32-wide tensor is an operand or a requant SOURCE only: a requant-target /
- * clone grid never exceeds 31 (symGridBoundsOrExit at every SYM target site,
- * initSymInt32QConfigWithQMaxBits under getQLike), and the public INT32 ->
- * SYM_INT32 cell validates its destination against [1, 31]. The accumulator
- * guard sizes its proof from this width. */
+/* Raw INT32 codes are kept at scale 1 and declared 32 bits wide, so the
+ * accumulator guard's proof covers the full int32 range. This scratch is an
+ * operand or a requant source, never a requant target. */
 static void stageInt32Raw(const tensor_t *src, tensor_t *scratch, symInt32QConfig_t *scratchQC) {
     scratchQC->qMaxBits = 32;
     storeCanonScale(&scratchQC->scale, 1.0f); /* raw-int: exactly scale one */
@@ -57,8 +52,7 @@ static rngStream_t *openPhaseStream(const rngKey_t *key, uint32_t tag, uint32_t 
 
 /* Phase 4, OUT_WRITE: intermediate -> target in the target's dtype. Same-dtype
  * SYM->SYM must REQUANT via the conversionMatrix diagonal — convertTensor's
- * same-type branch is a memmove that would pass raw mantissas through
- * unrestored (the QuantizationLayer.c trap). */
+ * same-type branch is a memmove that would pass raw mantissas through unrestored. */
 static void writeOutConversion(tensor_t *intermediate, tensor_t *target, rngStream_t *rs) {
     if (intermediate->quantization->type == SYM_INT32 && target->quantization->type == SYM_INT32) {
         conversionMatrix[SYM_INT32][SYM_INT32](intermediate, target, rs);
@@ -74,7 +68,7 @@ static void writeOutConversion(tensor_t *intermediate, tensor_t *target, rngStre
     convertTensor(intermediate, target, rs);
 }
 
-/* #282 seam: where a quantized tensor keeps its storage-requant rounding
+/* Where a quantized tensor keeps its storage-requant rounding
  * mode. NULL for dtypes without one (FLOAT32/INT32/BOOL). */
 static roundingMode_t *storageRoundingSlot(tensor_t *tensor) {
     switch (tensor->quantization->type) {
@@ -91,14 +85,10 @@ static roundingMode_t *storageRoundingSlot(tensor_t *tensor) {
     }
 }
 
-/* OUT_WRITE epilogue (#282): the requant into a quantized target rounds by
- * the OPERATION's mode, injected by transiently swapping the target's storage
- * rounding slot around the conversion — the conversionMatrix signatures stay
- * untouched and the swap is restored before returning (the qConfig is
- * serialized into checkpoints and stays authoritative for storage/inference
- * encodes). The ACC epilogues (accumulateOut) deliberately keep the TARGET's
- * mode: accumulate is a read-modify-write under the accumulator's own storage
- * grid, whose rounding is part of the grid discipline like scale (PR1b.2 D4). */
+/* OUT_WRITE rounds by the operation's mode, swapped into the target's storage
+ * rounding slot for the conversion and restored afterwards: the qConfig is
+ * serialized into checkpoints and stays authoritative for storage encodes. The ACC
+ * epilogues keep the target's own mode, as part of its grid like the scale. */
 static void writeOut(tensor_t *intermediate, tensor_t *target, roundingMode_t opRounding,
                      rngStream_t *rs) {
     roundingMode_t *slot = storageRoundingSlot(target);
@@ -113,25 +103,15 @@ static void writeOut(tensor_t *intermediate, tensor_t *target, roundingMode_t op
 }
 
 void executeConvert(tensor_t *input, tensor_t *target, rngStream_t *rs) {
-    /* Bare storage-to-storage conversion: a conversion node's rounding IS a
-     * storage encode, so the target's own qConfig roundingMode applies here —
-     * unlike the OUT_WRITE epilogue, which rounds by the operation (#282). */
+    /* A bare conversion is a storage encode: the target's own rounding applies. */
     writeOutConversion(input, target, rs);
 }
 
-/* Phase 4, ACC modes. The SYM_INT32->SYM_INT32 add is Strategy A via
- * accumulateSymInt32IntoSymInt32Rescale (bit-identical to Linear.c's
- * weight-grad accumulate); the FLOAT32-intermediate -> SYM_INT32 arm first
- * quantizes the increment to operand width with the TARGET's roundingMode
- * (reproduces the former LayerNorm helper layerNormAccumulateGradSymInt32,
- * deleted in PR1b; semantics live here now). Fixed-scale reproduces the
- * former linearCalcBiasGradsSymInt32 behavior: rescale into the target's
- * EXISTING scale via rescaleIntoAccumulatorScale (PR1b.2 D4 — honors the
- * TARGET's roundingMode; Conv1d.c:288 precedent), no clamp, scale never
- * re-derived. The packed SYM/ASYM arms stream the increment
- * chunk-wise via the tensor-typed accumulate*Into* entry points (#296 Stage
- * 2) instead of staging a whole-tensor float view; a FLOAT32 intermediate is
- * passed as a direct pointer (no view/VLA at all). */
+/* Phase 4, ACC modes. Accumulation rounds on the target grid with the target's
+ * mode. Dynamic rescale derives a fresh grid; fixed scale keeps the established
+ * one (no clamp, scale never re-derived). A FLOAT32 increment into SYM_INT32 is
+ * quantized to operand width before the add. Packed SYM/ASYM/BFP targets stream
+ * the increment chunk-wise. */
 static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t mode,
                           const rngKey_t *key) {
     size_t n = calcNumberOfElementsByTensor(target);
@@ -172,16 +152,8 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
             accumulateSymInt32IntoSymInt32Rescale(target, intermediate, acc0);
             return;
         }
-        /* #296 residual: this arm quantizes the whole increment
-         * before the add — two sequential rounding blocks, each on its own
-         * ACC stream (ACC 0 for the quantize, ACC 1 for the add). A
-         * sequential chunked rewrite would draw each stream in element order
-         * exactly as this whole-tensor staging does, so it is no longer
-         * blocked on the RNG; out-of-order or parallel chunks would need
-         * per-chunk keys. Reached only by SYM_INT32-STORED grads, which #261
-         * already discourages. */
-        /* FLOAT32 intermediate: quantize to operand width first, roundingMode
-         * from the TARGET's qConfig (LayerNorm.c:446-463 reproduction). */
+        /* FLOAT32 intermediate: quantize with ACC 0, then add/requantize with ACC 1;
+         * each pass draws its stream in element order. */
         symInt32QConfig_t incQC;
         initSymInt32QConfig(targetQC->roundingMode, &incQC);
         quantization_t incQ;
@@ -220,15 +192,9 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
         return;
     }
     case ASYM: {
-        asymQConfig_t *targetQC = target->quantization->qConfig;
-        if (targetQC->qBits > ODT_SYM_GRAD_QMAXBITS) {
-            PRINT_ERROR("executeOp: ASYM grad target qBits (%u) exceeds grad contract (%u)",
-                        (unsigned)targetQC->qBits, (unsigned)ODT_SYM_GRAD_QMAXBITS);
-            exit(1);
-        }
         if (mode == OUT_ACC_FIXED_SCALE) {
             PRINT_ERROR("executeOp: no fit-preserving ASYM pack — ASYM grad targets "
-                        "accumulate under OUT_ACC_DYNAMIC_RESCALE only (#269, #261)");
+                        "accumulate under OUT_ACC_DYNAMIC_RESCALE only");
             exit(1);
         }
         if (intermediate->quantization->type == FLOAT32) {
@@ -240,10 +206,7 @@ static void accumulateOut(tensor_t *intermediate, tensor_t *target, outputMode_t
         return;
     }
     case BFP: {
-        /* No ODT_SYM_GRAD_QMAXBITS-style width guard here (unlike the three
-         * sibling arms above): BFP mantissaBits is capped to [2,16] at
-         * construction (initBfpQConfigGrouped), so a re-check would be dead
-         * code. FIXED_SCALE carries the per-group exponents and aborts on
+        /* FIXED_SCALE carries the per-group exponents and aborts on
          * mantissa overflow; DYNAMIC_RESCALE re-derives them per store. */
         if (intermediate->quantization->type == BFP_RAW) {
             /* BFP_RAW_BACKWARD_ACC (validated DYNAMIC_RESCALE before the
@@ -282,14 +245,8 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
     size_t nInputs = spec->nInputs;
     arithmetic_t arithmetic = spec->arithmetic;
 
-    if (nInputs > EXECUTE_OP_MAX_INPUTS) {
-        PRINT_ERROR("executeOp: %u inputs exceeds EXECUTE_OP_MAX_INPUTS (%u)", (unsigned)nInputs,
-                    (unsigned)EXECUTE_OP_MAX_INPUTS);
-        exit(1);
-    }
-
     /* Phase 1 — prologue: convert mismatched operands into stack scratch,
-     * sized per actually-converted operand (#296 Stage 1). All-matching ops
+     * sized per actually-converted operand. All-matching ops
      * (the whole FLOAT32 training path) allocate nothing. */
     size_t rowBytes[EXECUTE_OP_MAX_INPUTS] = {0};
     size_t totalScratchBytes = 0;
@@ -304,9 +261,8 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             matches = inputs[i]->quantization->type == SYM_INT32;
             break;
         case ARITH_BFP:
-            /* Packed BFP storage is never kernel-usable in place — every
-             * operand is unpacked/staged into int32 scratch (Task 3-5 kernels
-             * consume the unpacked-BFP scratch form only). */
+            /* Packed BFP is never kernel-usable in place: every operand is unpacked
+             * or staged into int32 scratch. */
             matches = false;
             /* The integer forward into a BFP wire is float-free after the
              * model's input quantization layer: a FLOAT32 operand here is a
@@ -322,20 +278,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
                 exit(1);
             }
             if (inputs[i]->quantization->type == FLOAT32 && spec->bfpStage[i] != NULL) {
-                const bfpQConfig_t *stage = spec->bfpStage[i];
-                size_t n = calcNumberOfElementsByTensor(inputs[i]);
-                bool stagePerTensor = stage->numGroups == 1 && stage->groupSize == 0;
-                bool stageGrouped = stage->numGroups > 1 && stage->groupSize > 0 &&
-                                    stage->numGroups * stage->groupSize == n;
-                if (!stagePerTensor && !stageGrouped) {
-                    PRINT_ERROR("executeOp: bfpStage[%zu] template shape {numGroups=%zu, "
-                                "groupSize=%zu} is invalid for %zu elements — valid shapes "
-                                "are {1,0} (per-tensor) or {>1,>0} with "
-                                "numGroups*groupSize == n",
-                                i, stage->numGroups, stage->groupSize, n);
-                    exit(1);
-                }
-                totalStageExponents += stage->numGroups;
+                totalStageExponents += spec->bfpStage[i]->numGroups;
             }
             break;
         default:
@@ -371,19 +314,8 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
         rngStream_t *stageStream =
             openPhaseStream(spec->key, RNG_TAG_STAGE, (uint32_t)i, &stageStreamStorage);
 
-        /* Group-quant PR2 (Task 3) + PR4 (Task 3): a
-         * grouped operand (numGroups > 1) -- SYM or ASYM, the two grouped
-         * carrier dtypes share the {numGroups, groupSize} shape grammar (group-quant D6)
-         * -- has no scalar compute image under EITHER arithmetic type: the
-         * SYM->SYM_INT32 and ASYM->SYM_INT32 conversionMatrix cells
-         * fail-fast on grouped sources (PR2 Task 2 / PR4 Task 1), and the
-         * group-aware SYM->FLOAT32 / ASYM->FLOAT32 cells are only meant to
-         * be reachable from declared carrier positions (GEMM-family
-         * forward/dx weights, optimizer param updates), not e.g. an
-         * arbitrary non-carrier operand slot. Gate BOTH arms here, before
-         * either arm's convertTensor call, on the declared position alone --
-         * a grouped operand at any other position (or when nothing is
-         * declared, groupedSymOperandPos == 0) fail-fasts. */
+        /* A grouped SYM/ASYM operand has no scalar compute image, so it is legal
+         * only at the position the op declares (groupedSymOperandPos). */
         symQConfig_t *symQC = (inputs[i]->quantization->type == SYM)
                                   ? (symQConfig_t *)inputs[i]->quantization->qConfig
                                   : NULL;
@@ -398,7 +330,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
                 "executeOp: grouped %s operand (numGroups=%zu) at inputs[%zu] reached an op "
                 "without a matching groupedSymOperandPos declaration — grouped tensors are "
                 "legal only where an op declares them (GEMM-family forward/dx weights, "
-                "optimizer param updates); everything else is a non-carrier (#300)",
+                "optimizer param updates)",
                 symQC != NULL ? "SYM" : "ASYM", operandNumGroups, i);
             exit(1);
         }
@@ -411,9 +343,8 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             convertTensor(inputs[i], &scratchTensors[i], stageStream);
             break;
         case ARITH_SYM_INT32: {
-            /* PR2-Decision 11 (BFP epic PR2): deny BEFORE the convertTensor route
-             * — the [BFP][SYM_INT32] cell would silently collapse the
-             * operand's group structure to a single scalar grid. */
+            /* The [BFP][SYM_INT32] cell would collapse the group structure to one
+             * scalar grid, so refuse before converting. */
             if (inputs[i]->quantization->type == BFP) {
                 PRINT_ERROR("executeOp: BFP-stored operand %zu under ARITH_SYM_INT32 would "
                             "silently collapse its group structure to a scalar grid — use "
@@ -434,20 +365,10 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
                                      (int32_t *)scratchTensors[i].data, n);
                     scratchQC[i].qMaxBits = symQC->qBits;
                 } else {
-                    /* PR4 (Task 3), grouped ASYM: zero-extend the packed
-                     * codes (unpackZeroExtend -- ASYM codes carry no
-                     * sign bit), then shift each element into the
-                     * signed-mantissa domain by ITS group's code-domain
-                     * zeroPoint: mantissa = code - zp[g], g = i/groupSize
-                     * (exact int32 subtract, both operands <= 2^16-1, group-quant D6).
-                     * After the shift the scratch is the SAME mantissa image
-                     * the SYM arm produces -- the group-aware kernel then
-                     * applies per-group scales from its own ctx identically
-                     * for both dtypes (group-quant D5: the grouped ASYM compute path IS
-                     * the grouped SYM path on shifted mantissas). The zp is
-                     * hoisted per run (one i/groupSize division per group,
-                     * never per element); numGroups*groupSize == n by the
-                     * attach-time shape validation. */
+                    /* Grouped ASYM: zero-extend the codes, then subtract each
+                     * group's zero point, giving the same signed-mantissa image the
+                     * SYM arm produces; the kernel applies per-group scales from its
+                     * ctx. numGroups*groupSize == n by attach-time validation. */
                     int32_t *mant = (int32_t *)scratchTensors[i].data;
                     unpackZeroExtend(inputs[i]->data, asymQC->qBits, 0, mant, n);
                     size_t idx = 0;
@@ -488,22 +409,10 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
                 unpackSignExtend(inputs[i]->data, srcQC->mantissaBits, 0,
                                  (int32_t *)scratchTensors[i].data, n);
             } else if (stored == FLOAT32) {
+                /* Geometry/widths from the caller's stage template (required for
+                 * every FLOAT32 operand); exponent backing is the funnel's slice
+                 * and staging rounds by the operation, never the template. */
                 const bfpQConfig_t *stage = spec->bfpStage[i];
-                if (stage == NULL) {
-                    /* Since epic PR3, every ARITH_BFP math slot -- forward or
-                     * backward -- stages its FLOAT32-stored operands; a NULL
-                     * template here always means the layer arm forgot to wire
-                     * one. */
-                    PRINT_ERROR("executeOp: FLOAT32-stored operand %zu under ARITH_BFP needs "
-                                "a bfpStage geometry template -- the layer arm forgot to wire "
-                                "one (layer bug; see docs/conventions/arithmetic-bfp.md)",
-                                i);
-                    exit(1);
-                }
-                /* Geometry/widths from the template; exponent backing is the
-                 * funnel's transient slice and the roundingMode is the OP's —
-                 * staging rounds by the operation (#282 discipline), never by
-                 * the template. */
                 scratchBfpQC[i] = (bfpQConfig_t){.exponents = &stageExponents[stageOffset],
                                                  .numGroups = stage->numGroups,
                                                  .groupSize = stage->groupSize,
@@ -518,7 +427,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
                                               (int32_t *)scratchTensors[i].data, stageStream);
             } else {
                 PRINT_ERROR("executeOp: operand %zu storage dtype %d unsupported under "
-                            "ARITH_BFP (v1 accepts FLOAT32 or BFP; convert explicitly via a "
+                            "ARITH_BFP (accepts FLOAT32 or BFP; convert explicitly via a "
                             "Quantization layer)",
                             i, (int)stored);
                 exit(1);
@@ -533,8 +442,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
     /* Phase 2 — intermediate in the arithmetic representation, target shape.
      * FLOAT32->FLOAT32 OUT_WRITE needs no epilogue conversion, so the kernel
      * may emit straight into the target ("aliasing") unless the target is
-     * also a live operand and the kernel did not declare elementwise safety
-     * (#296 Stage 1). */
+     * also a live operand and the kernel did not declare elementwise safety. */
     size_t outElems = calcNumberOfElementsByTensor(target);
     bool aliasOut = spec->mode == OUT_WRITE && arithmetic.type == ARITH_FLOAT32 &&
                     target->quantization->type == FLOAT32;
@@ -604,9 +512,7 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
         }
     }
     int16_t rawExponents[rawBfpQC.numGroups > 0 ? rawBfpQC.numGroups : 1];
-    /* outElems == 0 with aliasing: raw.data may be NULL for N=0 tensors
-     * (target->data straight from a calloc(1,0), #160) — safe because the
-     * kernel below iterates 0 elements. */
+    /* An empty aliased target may have NULL data; the kernel iterates 0 elements. */
     uint8_t rawData[(aliasOut || outElems == 0 ? 1 : outElems) * sizeof(int32_t)];
     tensor_t raw;
     quantization_t rawQ;
@@ -632,10 +538,8 @@ void executeOp(const opSpec_t *spec, tensor_t *target) {
             initBfpRawQuantization(&rawBfpQC, &rawQ);
             break;
         }
-        /* BFP D7 as amended (docs/conventions/arithmetic-bfp.md §13): without
-         * the opt-in, BFP kernels fold same-exponent segments into a float
-         * accumulator (ldexpf) and never round — the raw intermediate stays
-         * FLOAT32; any width-restore/pack is the OUT_WRITE epilogue's job. */
+        /* Without the raw opt-in, BFP kernels accumulate in float and never round:
+         * the raw intermediate is FLOAT32 and the epilogue packs. */
         initFloat32Quantization(&rawQ);
         break;
     default:

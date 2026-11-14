@@ -67,7 +67,7 @@ static tensor_t *buildSymInt32Tensor1dFromFloats(size_t n, const float *values) 
     return t;
 }
 
-/* Packed sub-byte SYM tensor (PR3 targets), distinct from buildSym's
+/* Packed sub-byte SYM tensor, distinct from buildSym's
  * SYM_INT32 compute format above. Mantissas are packed verbatim via
  * byteConversion (the same seeding idiom UnitTestTensorConversion.c uses for
  * the primitives this task wires up); all-zero mantissas reproduce the
@@ -86,9 +86,9 @@ static tensor_t *buildPackedSym(size_t n, const int32_t *mantissas, uint8_t qBit
     return t;
 }
 
-/* Packed ASYM tensor (PR3 targets); codes are non-negative, no sign-extend
+/* Packed ASYM tensor; codes are non-negative, no sign-extend
  * needed on the seeding side (byteConversion narrows verbatim). zeroPoint is
- * the CODE-domain uint16 (group-quant PR4, D6): dequant = (code - zeroPoint)*scale. */
+ * the CODE-domain uint16: dequant = (code - zeroPoint)*scale. */
 static tensor_t *buildAsymPacked(size_t n, const int32_t *codes, uint8_t qBits, float scale,
                                  uint16_t zeroPoint) {
     size_t *dims = reserveMemory(sizeof(size_t));
@@ -455,7 +455,7 @@ void testAccDynamicFloatIncIntoSymTargetMatchesLayerNormReference(void) {
 /* Fixed-scale SYM+SYM reproduces linearCalcBiasGradsSymInt32's semantics via
  * rescaleIntoAccumulatorScale(interm[i], intermScale, targetScale, HALF_AWAY),
  * NO clamp; the target's roundingMode here is HALF_AWAY (default of buildSym),
- * so this pins the PR1b.2 D4 bit-identical-to-old-behavior case (roundHalfAway ==
+ * so this pins the bit-identical case (roundHalfAway ==
  * the pre-migration bare roundf for these inputs). Hand-computed: interm
  * {700, -300} @ 2^-7 into target {5, -5} @ 2^-6: 700*2^-7/2^-6 = 350 (exact)
  * -> 355; -300*2^-7/2^-6 = -150 (exact) -> -155. Target scale must stay
@@ -488,24 +488,10 @@ void testAccFixedSymIntoSymRescalesIntoExistingScale(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.015625f, gScale);
 }
 
-/* CONTRACT FLIP (PR3 Task 3, #261): this test previously pinned "packed
- * sub-byte (SYM) targets abort under accumulate" -- that restriction is
- * lifted by this task's new `case SYM:` arm in accumulateOut. Flipped into
- * the OUT_ACC_FIXED_SCALE happy path: a fresh (post-initTensor all-zero)
- * SYM@8 target derives its grid from the first increment, then a second
- * accumulate carries that grid verbatim (fit-preserving, packed-grad D1/D2). One of
- * exactly two sanctioned contract-flip test edits in this PR (the other is UnitTestSgd's admission
- * flip — the PR2 ASYM-zero test's config-reset extension is additive, not a flip). Parity oracle: a
- * twin target driven directly through accumulateFloatIntoSymTensorFixedGrid must end up
- * bit-identical to the executeOp-driven target. inc2 deliberately SHRINKS the element that hit the
- * grid boundary on call 1 (index 0, derived to exactly +127) while nudging
- * the others -- carrying the grid keeps scale unchanged, but a mutant that
- * swaps in the DYNAMIC_RESCALE primitive for FIXED_SCALE would re-derive from
- * the new (smaller) absmax and land on a visibly different, smaller scale;
- * this is what makes the "swap FIXED/DYNAMIC primitive calls" mutation
- * (Step 5) observable here (an unperturbed already-maxed element would let a
- * fresh re-derivation reproduce the same tight grid by coincidence -- the
- * Task-2-report lesson on vacuous carried-grid fixtures). */
+/* The first fixed-grid accumulate derives the grid of a fresh SYM@8 target; the
+ * second carries it. inc2 shrinks the element that set the grid, so a mutant that
+ * re-derives dynamically lands on a visibly smaller scale. Oracle: a twin driven
+ * directly through accumulateFloatIntoSymTensorFixedGrid, bit-identical. */
 void testAccFixedIntoPackedSymDerivesThenCarriesGrid(void) {
     size_t n = 3;
     tensor_t *target = buildPackedSym(n, (int32_t[]){0, 0, 0}, 8, 1.0f);
@@ -720,11 +706,11 @@ void testAccDynamicSymPackedAcceptsSymInt32IntermediateBitIdenticalToFloatBridge
     TEST_ASSERT_EQUAL_FLOAT(scaleFloat, scaleSymInt32);
 }
 
-/* ASYM DYNAMIC_RESCALE happy path (packed-grad D4: the only supported ASYM accumulate
+/* ASYM DYNAMIC_RESCALE happy path (the only supported ASYM accumulate
  * mode) must match accumulateFloatIntoAsymTensorRescale exactly (fresh
- * affine grid every store). Fixture matches Task 2's own ASYM-rescale
+ * affine grid every store). Fixture matches the ASYM-rescale
  * fixture: ASYM@5 codes {12,16,20,24} @
- * scale=0.25/zeroPoint=+4 (code-domain, PR4) dequant to {2,3,4,5}. */
+ * scale=0.25/zeroPoint=+4 (code-domain) dequant to {2,3,4,5}. */
 void testAccDynamicAsymPackedMatchesRescalePrimitive(void) {
     size_t n = 4;
     int32_t seedCodes[] = {12, 16, 20, 24};
@@ -873,7 +859,7 @@ void testAccIntoTooWidePackedSymTargetAborts(void) {
     freeTensor(inc);
 }
 
-/* packed-grad D4: no fit-preserving ASYM pack exists, so OUT_ACC_FIXED_SCALE on an ASYM
+/* no fit-preserving ASYM pack exists, so OUT_ACC_FIXED_SCALE on an ASYM
  * target must abort rather than silently behave like DYNAMIC_RESCALE.
  * Mutation guard: dropping this guard (falling through to the rescale path)
  * lets the child exit 0 -- RED. */
@@ -898,7 +884,7 @@ void testAccFixedScaleOnAsymTargetAborts(void) {
     freeTensor(inc);
 }
 
-/* Stack BFP target for the accumulateOut arm (epic PR3): codes packed
+/* Stack BFP target for the accumulateOut arm: codes packed
  * verbatim at mantissaBits, exponents/geometry field-assigned -- the seeding
  * idiom of the BFP operand tests below and UnitTestTensorConversion.c. */
 static void buildBfpTarget(tensor_t *t, uint8_t *data, shape_t *shape, quantization_t *q,
@@ -1182,7 +1168,7 @@ void testAccFixedSymInt32IntermediateIntoBfpTargetCarriesGrid(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, n);
 }
 
-/* ---- opSpec_t: ctx / auxOut / FIXED_SCALE roundingMode (PR1b.2 D1+D4) --- */
+/* ---- opSpec_t: ctx / auxOut / FIXED_SCALE roundingMode --- */
 
 typedef struct {
     float addend;
@@ -1288,7 +1274,7 @@ void testAuxOutIsKernelWrittenVerbatimAndNeverFunnelConverted(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-9f, AUX_SENTINEL_SCALE, auxScale); /* sentinel scale untouched */
 }
 
-/* OUT_ACC_FIXED_SCALE must consult the TARGET's roundingMode (PR1b.2 D4) via
+/* OUT_ACC_FIXED_SCALE must consult the TARGET's roundingMode via
  * rescaleIntoAccumulatorScale, not a bare roundf (which is HALF_AWAY-only and
  * ignores SR jitter entirely). Values are chosen so the pre-rescale ratio
  * lands exactly on a HALF_AWAY tie (705*2^-7/2^-6 = 352.5, -705*... = -352.5).
@@ -1310,7 +1296,7 @@ void testAuxOutIsKernelWrittenVerbatimAndNeverFunnelConverted(void) {
  *                 -352.5: t = -352, frac -0.5, j1 = 0.794 >= 0.5 -> no
  *                         lower -> -352
  * Target scale must stay EXACTLY 2^-6 (never re-derived), matching
- * testAccFixedSymIntoSymRescalesIntoExistingScale's HALF_AWAY pin (PR1b.2 D4's
+ * testAccFixedSymIntoSymRescalesIntoExistingScale's HALF_AWAY pin (the
  * "bit-identical for HALF_AWAY" case). */
 #define SR_GOLD_KEY_SEED 31u
 
@@ -1323,7 +1309,7 @@ void testAccFixedScaleHonorsTargetSrRoundingMode(void) {
     initSymInt32QConfig(HALF_AWAY, &arithQC); /* arithmetic's own roundingMode is
                                                * irrelevant to FIXED_SCALE's
                                                * epilogue rescale (target's is
-                                               * what counts, per PR1b.2 D4) */
+                                               * what counts) */
     initSymInt32Quantization(&arithQC, &arith);
     const rngKey_t key = rngKeyFromSeed(SR_GOLD_KEY_SEED);
 
@@ -1348,7 +1334,7 @@ void testAccFixedScaleHonorsTargetSrRoundingMode(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.015625f, gScale);
 }
 
-/* ---- #296 Stage 1: writesInPlaceSafe / rawData aliasing (OUT_WRITE only,
+/* ---- writesInPlaceSafe / rawData aliasing (OUT_WRITE only,
  * FLOAT32 arithmetic + FLOAT32 target) ------------------------------------ */
 
 /* probeAddOneKernel is elementwise (reads in[i] before writing out[i]). */
@@ -1448,7 +1434,7 @@ void testExecuteOpNeverAliasesSymTarget(void) {
     freeTensor(out);
 }
 
-/* ---- #282: OUT_WRITE epilogue rounding is operation-owned ------------- */
+/* ---- OUT_WRITE epilogue rounding is operation-owned ------------- */
 
 /* The OUT_WRITE requant into a quantized target must round by the OP's
  * arithmetic.roundingMode, NOT the target's storage qConfig (which stays
@@ -1491,18 +1477,18 @@ void testOutWriteEpilogueRoundsByArithmeticNotTargetQConfig(void) {
     freeTensor(out);
     freeTensor(in);
     TEST_ASSERT_EQUAL_INT_MESSAGE(353, got0,
-                                  "#282: OUT_WRITE must round by the op's SR mode, "
+                                  "OUT_WRITE must round by the op's SR mode, "
                                   "not the target's HALF_AWAY storage config");
     TEST_ASSERT_EQUAL_INT(-2047, got1);
     TEST_ASSERT_EQUAL_FLOAT(1.0f, gotScale);
     TEST_ASSERT_EQUAL_INT_MESSAGE(HALF_AWAY, storageModeAfter,
-                                  "#282: the target's storage roundingMode must be restored "
+                                  "the target's storage roundingMode must be restored "
                                   "(it is serialized into checkpoints)");
 }
 
 /* Inverse direction: a deterministic op must stay deterministic even when the
  * target's storage config says SR — the storage mode never leaks into the op
- * (the #279 both-directions pin, now at the funnel level). Fixture: the 352.5
+ * (the both-directions pin at the funnel level). Fixture: the 352.5
  * tie (HALF_AWAY 353, deterministic by construction); with
  * the target's SR config in charge (the OLD semantics) element 0 would round
  * stochastically, and without a key it would stop with the named error: the
@@ -1529,7 +1515,7 @@ void testOutWriteDetArithmeticOverridesSrTargetQConfig(void) {
     freeTensor(out);
     freeTensor(in);
     TEST_ASSERT_EQUAL_INT_MESSAGE(353, got0,
-                                  "#282: a HALF_AWAY op must not pick up the "
+                                  "a HALF_AWAY op must not pick up the "
                                   "target's SR storage config");
     TEST_ASSERT_EQUAL_INT(-2047, got1);
     TEST_ASSERT_EQUAL_INT(SR_HALF_AWAY, storageModeAfter); /* restored */
@@ -1566,14 +1552,14 @@ void testOutWriteSymDiagonalRoundsByArithmetic(void) {
     freeTensor(out);
     freeTensor(in);
     TEST_ASSERT_EQUAL_INT_MESSAGE(353, got0,
-                                  "#282: the SYM->SYM diagonal requant must round "
+                                  "the SYM->SYM diagonal requant must round "
                                   "by the op's SR mode too");
     TEST_ASSERT_EQUAL_INT(2047, got1);
     TEST_ASSERT_EQUAL_FLOAT(1.0f, gotScale);
     TEST_ASSERT_EQUAL_INT(HALF_AWAY, storageModeAfter); /* restored */
 }
 
-/* BFP epic PR1 (Task 8): the #282 swap must also reach a BFP target's
+/* The rounding swap must also reach a BFP target's
  * storage slot, or the optimizer's writeBackRounding (and any other
  * OUT_WRITE op rounding) silently drops onto the target's OWN storage
  * roundingMode instead. Fixture: intermediate floats {3.5, 7.0} into a
@@ -1625,7 +1611,7 @@ void testOutWriteBfpTargetUsesOpRoundingAndRestoresSlot(void) {
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(127, exponentAfter,
                                     "exponent derived fresh from absMax 7 -> qMax 7 -> E=0");
     TEST_ASSERT_EQUAL_INT_MESSAGE(SR_HALF_AWAY, storageModeAfter,
-                                  "#282: the target's storage roundingMode must be restored "
+                                  "the target's storage roundingMode must be restored "
                                   "(it is serialized into checkpoints)");
 }
 
@@ -1651,7 +1637,7 @@ void testExecuteConvertKeepsTargetStorageRounding(void) {
     freeTensor(out);
     freeTensor(in);
     TEST_ASSERT_EQUAL_INT_MESSAGE(353, got0,
-                                  "#282: bare conversion keeps storage-owned "
+                                  "bare conversion keeps storage-owned "
                                   "rounding (the target's SR mode applies)");
     TEST_ASSERT_EQUAL_INT(-2047, got1);
 }
@@ -1716,7 +1702,7 @@ void testExecuteConvertFloatToSymMatchesConvertTensor(void) {
  * stored 126; the diagonal instead derives BOTH target exponents FRESH from
  * the source VALUES on the TARGET's geometry (testRequantBfpReblocksToTarget-
  * Geometry's hand-derived gold: {127, 129}, mantissas {6,1,-2,0,7,-2,1,4}).
- * Stack fixtures (Task 2-4 idiom), NOT because a heap tensor would leak --
+ * Stack fixtures, NOT because a heap tensor would leak --
  * freeQuantization's BFP arm (TensorApi.c) already frees exponents[] cleanly
  * through freeTensor/freeQuantization, same as SYM. The actual reason:
  * executeConvert operates on tensor_t values directly, no layer/wire
@@ -1769,10 +1755,10 @@ void testExecuteConvertBfpToBfpRoutesDiagonal(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, mant, 8);
 }
 
-/* ---- Group-quant PR2 (Task 3): funnel grouped-operand gate ------------- */
+/* ---- funnel grouped-operand gate ------------- */
 
 /* Packed grouped SYM tensor: mantissas packed verbatim (byteConversion),
- * per-group scales written directly (Task 1's quantizationInitSymGrouped
+ * per-group scales written directly (quantizationInitSymGrouped
  * allocates scales[numGroups], initialized to 1.f each — overwritten here). */
 static tensor_t *buildPackedSymGrouped(size_t n, const int32_t *mantissas, uint8_t qBits,
                                        size_t numGroups, size_t groupSize, const float *scales) {
@@ -1795,7 +1781,7 @@ static tensor_t *buildPackedSymGrouped(size_t n, const int32_t *mantissas, uint8
 /* Default-deny death test: a grouped SYM input (numGroups=2) reaching an
  * ARITH_SYM_INT32 op WITHOUT a matching groupedSymOperandPos must fail-fast,
  * not silently misinterpret the operand via the SYM->SYM_INT32
- * conversionMatrix cell (which itself fail-fasts on grouped sources, Task 2)
+ * conversionMatrix cell (which itself fail-fasts on grouped sources)
  * or any other path. */
 void testExecuteOpRejectsGroupedSymOperandByDefault(void) {
     ASSERT_EXITS_WITH_FAILURE({
@@ -1906,12 +1892,12 @@ void testExecuteOpUnpacksGroupedSymWhenAllowed(void) {
 }
 
 /* The grouped-operand deny gate must apply under
- * ARITH_FLOAT32 too, not just ARITH_SYM_INT32 — before this fix, a grouped
+ * ARITH_FLOAT32 too, not just ARITH_SYM_INT32 — otherwise a grouped
  * SYM operand reaching an ARITH_FLOAT32 op would silently succeed (the
  * FLOAT32 prologue's convertTensor call dispatches to the group-aware
  * convertSymTensorToFloat32Tensor cell regardless of any gate), letting
  * FLOAT32-math ops (e.g. an optimizer update or a FLOAT32-math backward dx)
- * quietly dequantize a grouped weight/param that PR2's contract says must be
+ * quietly dequantize a grouped weight/param that the contract says must be
  * denied outside the two declared gather-forward call sites. No position
  * declared here (zero-init deny), so this must fail-fast exactly like the
  * SYM_INT32 default-deny sibling above. */
@@ -1934,11 +1920,11 @@ void testExecuteOpRejectsGroupedSymOperandUnderFloat32ByDefault(void) {
     });
 }
 
-/* ---- Group-quant PR4 (Task 3): funnel grouped-ASYM operand gate --------- */
+/* ---- funnel grouped-ASYM operand gate --------- */
 
 /* Packed grouped ASYM tensor: codes packed verbatim (byteConversion,
  * non-negative, no sign bit), per-group scales AND code-domain zeroPoints
- * written directly (Task 1's quantizationInitAsymGrouped allocates both
+ * written directly (quantizationInitAsymGrouped allocates both
  * arrays). Mirrors buildPackedSymGrouped above. */
 static tensor_t *buildPackedAsymGrouped(size_t n, const int32_t *codes, uint8_t qBits,
                                         size_t numGroups, size_t groupSize, const float *scales,
@@ -1973,13 +1959,8 @@ static const int32_t kAsymGateMantissas[8] = {1, -15, 40, -8, 22, -41, 9, -11};
 /* Default-deny death test, ASYM twin of
  * testExecuteOpRejectsGroupedSymOperandByDefault: a grouped ASYM input
  * reaching an ARITH_SYM_INT32 op WITHOUT a matching groupedSymOperandPos must
- * fail-fast AT THE GATE. RED evidence (pre-Task-3): this test already "dies",
- * but in the WRONG place -- Task 1's requirePerTensorAsym inside the
- * ASYM->SYM_INT32 conversionMatrix cell ("grouped ASYM ... has no compute
- * image in this cell"), not the funnel's carrier-contract deny ("reached an
- * op without a matching groupedSymOperandPos declaration"); the exit-code
- * harness cannot tell them apart, so the message difference is pinned in the
- * task report's RED transcript instead. */
+ * fail-fast. (The conversion cell would also refuse it; the exit-code harness
+ * cannot tell which check fired.) */
 void testExecuteOpRejectsGroupedAsymOperandByDefault(void) {
     ASSERT_EXITS_WITH_FAILURE({
         tensor_t *in =
@@ -2030,13 +2011,9 @@ void testExecuteOpRejectsGroupedAsymOperandAtWrongPosition(void) {
     });
 }
 
-/* THE Task-3 vulnerability pin (RED = this test FAILS pre-gate): under
- * ARITH_FLOAT32 a grouped ASYM operand at a NON-declared position passes
- * SILENTLY today -- Task 2 made the ASYM->FLOAT32 conversionMatrix cell
- * group-aware, and the funnel's grouped-operand gate keys on type == SYM
- * only, so the FLOAT32 prologue dequantizes a grouped ASYM tensor at ANY
- * position with no carrier-contract check at all (unlike grouped SYM, which
- * the PR2 gate denies). Same deny semantics as the SYM sibling
+/* Under ARITH_FLOAT32 the ASYM->FLOAT32 cell is group-aware, so without the
+ * gate a grouped ASYM operand at a non-declared position would dequantize
+ * silently. Same deny semantics as the SYM sibling
  * testExecuteOpRejectsGroupedSymOperandUnderFloat32ByDefault. */
 void testExecuteOpRejectsGroupedAsymOperandUnderFloat32ByDefault(void) {
     ASSERT_EXITS_WITH_FAILURE({
@@ -2090,7 +2067,7 @@ void testExecuteOpUnpacksGroupedAsymWhenAllowed(void) {
     TEST_ASSERT_EQUAL_UINT8(6, g_capturedGroupedQMaxBits);
 }
 
-/* ---- BFP epic PR2 (Task 6): ARITH_BFP prologue/raw arms + bfpStage ------ */
+/* ---- ARITH_BFP prologue/raw arms + bfpStage ------ */
 
 /* Shared capture globals for the ARITH_BFP probe kernels (assert-after-free
  * discipline: heap targets are freed before Unity's longjmp-prone asserts). */
@@ -2124,7 +2101,7 @@ static void captureBfpOperandKernel(tensor_t **operands, size_t nOperands, tenso
         g_bfpCapCodes[i] = ((int32_t *)operands[0]->data)[i];
     }
     g_bfpCapRawQType = (int)rawOut->quantization->type;
-    /* raw is FLOAT32 under ARITH_BFP (BFP D7); write it fully so the epilogue
+    /* raw is FLOAT32 under ARITH_BFP; write it fully so the epilogue
      * never reads uninitialized stack. */
     size_t outN = calcNumberOfElementsByTensor(rawOut);
     for (size_t i = 0; i < outN; i++) {
@@ -2185,7 +2162,7 @@ void testExecuteOpBfpStoredOperandUnpacksAndBorrows(void) {
 }
 
 /* (b) A FLOAT32-STORED operand is staged fresh through the bfpStage geometry
- * template: Task 2's {100,-50,25,0}/m=4 gold — stored exponent 131 (E=+4,
+ * template: the {100,-50,25,0}/m=4 gold — stored exponent 131 (E=+4,
  * scale 16), codes {6,-3,2,0}. The template contributes GEOMETRY+WIDTHS
  * only: its exponents pointer is ignored (funnel-owned scratch backing, so
  * the captured pointer differs and the template's sentinel survives) and its
@@ -2321,24 +2298,6 @@ void testExecuteOpStagesGroupedAndPerTensorOperandsDistinctSlices(void) {
     TEST_ASSERT_TRUE(g_bfpCap2ExponentsPtr[0] != g_bfpCap2ExponentsPtr[1]);
 }
 
-/* (c) death: FLOAT32-stored operand under ARITH_BFP with no stage template. */
-void testExecuteOpBfpMissingStageDies(void) {
-    ASSERT_EXITS_WITH_FAILURE({
-        tensor_t *in = buildFloat(4, (float[]){1.f, 2.f, 3.f, 4.f});
-        tensor_t *out = buildFloat(4, (float[]){0, 0, 0, 0});
-        executeOp(
-            &(opSpec_t){
-                .kernel = captureBfpOperandKernel,
-                .inputs = (tensor_t *[]){in},
-                .nInputs = 1,
-                .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
-                .mode = OUT_WRITE,
-                /* .bfpStage intentionally not set (zero-init = NULL) */
-            },
-            out);
-    });
-}
-
 /* (d) death: SYM_INT32-stored operand under ARITH_BFP (v1 accepts FLOAT32 or
  * BFP storage only; anything else must convert explicitly first). */
 void testExecuteOpBfpRejectsSymStoredOperand(void) {
@@ -2357,36 +2316,7 @@ void testExecuteOpBfpRejectsSymStoredOperand(void) {
     });
 }
 
-/* Body extracted to a function: the death-test macro takes ONE argument, so
- * statement-level braced initializers (comma at brace depth, paren depth 0)
- * would split the macro argument list. */
-static void bfpStageGeometryMismatchBody(void) {
-    tensor_t *in = buildFloat(4, (float[]){1.f, 2.f, 3.f, 4.f});
-    tensor_t *out = buildFloat(4, (float[]){0, 0, 0, 0});
-    uint8_t sentinels[2] = {9, 9};
-    bfpQConfig_t stage = {.exponents = sentinels,
-                          .numGroups = 2,
-                          .groupSize = 3, /* 2*3 != 4 */
-                          .roundingMode = HALF_AWAY,
-                          .mantissaBits = 4,
-                          .exponentBits = 8};
-    executeOp(
-        &(opSpec_t){
-            .kernel = captureBfpOperandKernel,
-            .inputs = (tensor_t *[]){in},
-            .nInputs = 1,
-            .arithmetic = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
-            .mode = OUT_WRITE,
-            .bfpStage = {&stage},
-        },
-        out);
-}
-
 /* (e) death: grouped stage template whose numGroups*groupSize != n. */
-void testExecuteOpBfpStageGeometryMismatchDies(void) {
-    ASSERT_EXITS_WITH_FAILURE(bfpStageGeometryMismatchBody());
-}
-
 /* (f) SR staging draws from the op key's STAGE(0) stream, fold(key, STAGE = 8,
  * 0): the quotients v / 2 at the derived scale 2 (stored exponent 128, the
  * derivation itself is rounding-free) round to these codes for key
@@ -2469,11 +2399,11 @@ static void writeKnownFloatsKernel(tensor_t **operands, size_t nOperands, tensor
     }
 }
 
-/* (g) The raw intermediate under ARITH_BFP is FLOAT32 (BFP D7) and the OUT_WRITE
+/* (g) The raw intermediate under ARITH_BFP is FLOAT32 and the OUT_WRITE
  * epilogue packs a BFP target through the [FLOAT32][BFP] cell: the probe
- * writes Task 2's {100,-50,25,0} into rawOut, the m=4 target must come out
+ * writes the {100,-50,25,0} into rawOut, the m=4 target must come out
  * as stored exponent 131 + packed codes {6,-3,2,0} (composition test — the
- * cell itself is PR1-covered). */
+ * cell itself is covered elsewhere). */
 void testExecuteOpBfpRawIsFloat32AndPacksTarget(void) {
     size_t n = 4;
     size_t dims[] = {4};
@@ -2526,8 +2456,8 @@ void testExecuteOpBfpRawIsFloat32AndPacksTarget(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, mant, 4);
 }
 
-/* Body extracted for the same one-macro-argument reason as
- * bfpStageGeometryMismatchBody above. */
+/* Body extracted to a function: the death-test macro takes ONE argument, so
+ * braced initializers would split its argument list. */
 static void symArithmeticBfpStoredOperandBody(void) {
     size_t n = 4;
     size_t dims[] = {4};
@@ -2560,17 +2490,16 @@ static void symArithmeticBfpStoredOperandBody(void) {
         out);
 }
 
-/* (h) PR2-Decision 11, deny direction: a BFP-STORED operand under ARITH_SYM_INT32
+/* (h) deny direction: a BFP-STORED operand under ARITH_SYM_INT32
  * must fail-fast — the [BFP][SYM_INT32] cell would silently collapse the
  * operand's group structure to a single scalar grid. */
 void testExecuteOpSymArithmeticRejectsBfpStoredOperand(void) {
     ASSERT_EXITS_WITH_FAILURE(symArithmeticBfpStoredOperandBody());
 }
 
-/* (h) PR2-Decision 11, keep direction: a GROUPED BFP-stored operand under
- * ARITH_FLOAT32 keeps working — the PR1 fake-quant path (float-bridge
- * staging via the group-aware BFP->FLOAT32 dequant cell) is what every BFP
- * layer runs on until the Task 9 derivation flip; regression guard. */
+/* (h) keep direction: a GROUPED BFP-stored operand under
+ * ARITH_FLOAT32 keeps working through the group-aware BFP->FLOAT32 dequant
+ * (the fake-quant path). */
 void testExecuteOpFloatArithmeticStillDequantsGroupedBfp(void) {
     size_t n = 8;
     size_t dims[] = {8};
@@ -2896,7 +2825,7 @@ void testExecuteConvertHandsTheStreamToTheCellOnEveryRoute(void) {
     }
 }
 
-/* ---- Integer-only BFP forward (Task 5): the per-op bfpRawOut flag ------- */
+/* ---- Integer-only BFP forward: the per-op bfpRawOut flag ------- */
 
 static int g_rawCapQType;
 static size_t g_rawCapNumGroups;
@@ -3038,7 +2967,7 @@ void testExecuteOpBfpRawOutFloat32TargetDequantsPerTensorRaw(void) {
     TEST_ASSERT_EQUAL_MEMORY(expected, out, sizeof expected);
 }
 
-/* #282 reaches the integer re-block: the target's storage mode is SR but the
+/* The op-rounding swap reaches the integer re-block: the target's storage mode is SR but the
  * op rounds HALF_AWAY with no key (NULL streams) -- an SR re-block would die
  * without a stream; the swapped slot gives the deterministic HALF_AWAY codes
  * and is restored afterwards. */
@@ -3202,7 +3131,7 @@ void testExecuteOpBfpRawOutIntoSymInt32TargetDies(void) {
     ASSERT_EXITS_WITH_FAILURE(bfpRawOutSymInt32TargetBody());
 }
 
-/* ---- Integer-only BFP forward (Task 9): no float staging into a BFP wire -- */
+/* ---- Integer-only BFP forward: no float staging into a BFP wire -- */
 
 /* One FLOAT32-stored operand staged per-tensor at m=4 ({100,-50,25,0} ->
  * exponent 131, codes {6,-3,2,0}) under ARITH_BFP, OUT_WRITE into `dst`.
@@ -3529,9 +3458,7 @@ int main(void) {
     RUN_TEST(testExecuteOpUnpacksGroupedAsymWhenAllowed);
     RUN_TEST(testExecuteOpSymArithmeticRejectsBfpStoredOperand);
     RUN_TEST(testExecuteOpFloatArithmeticStillDequantsGroupedBfp);
-    RUN_TEST(testExecuteOpBfpMissingStageDies);
     RUN_TEST(testExecuteOpBfpRejectsSymStoredOperand);
-    RUN_TEST(testExecuteOpBfpStageGeometryMismatchDies);
     RUN_TEST(testExecuteOpBfpStoredOperandUnpacksAndBorrows);
     RUN_TEST(testExecuteOpFloat32OperandStagedToBfpCodes);
     RUN_TEST(testExecuteOpStagesGroupedAndPerTensorOperandsDistinctSlices);

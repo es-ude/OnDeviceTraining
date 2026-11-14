@@ -1,4 +1,5 @@
 #include <limits.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -9,6 +10,8 @@
 #include "DagFixtures.h"
 #include "DeathTest.h"
 #include "Deserialize.h"
+#include "Dropout.h"
+#include "DropoutApi.h"
 #include "Flatten.h"
 #include "FlattenApi.h"
 #include "GroupNorm.h"
@@ -23,6 +26,8 @@
 #include "Relu.h"
 #include "ReluApi.h"
 #include "Serialize.h"
+#include "Softmax.h"
+#include "SoftmaxApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
@@ -2829,6 +2834,65 @@ static void testDeserializeLayerNormRejectsNormalizedShapeGammaMismatch(void) {
     freeQuantization(floatQ);
 }
 
+/* The SOFTMAX record carries both maths but the skeleton fixes the wire dtypes, so the reader
+ * re-validates their coherence: the file pairs ARITH_BFP math with the skeleton's FLOAT32 wire. */
+static void expectSoftmaxLoadRejected(bool backward, const char *message) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *layer = softmaxLayerInitOwning(&lq);
+    arithmetic_t *math =
+        backward ? &layer->config->softmax->propLossMath : &layer->config->softmax->forwardMath;
+    math->type = ARITH_BFP;
+    layer_t *model[] = {layer};
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(&MODEL_CHAIN(model, 1), f);
+    fclose(f);
+    freeSoftmaxLayer(layer);
+
+    layer = softmaxLayerInitOwning(&lq);
+    model[0] = layer;
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, message, deserializeModel(&MODEL_CHAIN(model, 1), f));
+    fclose(f);
+    freeSoftmaxLayer(layer);
+    freeQuantization(floatQ);
+}
+
+static void testDeserializeSoftmaxRejectsBfpMathOverANonBfpWire(void) {
+    expectSoftmaxLoadRejected(false, "deserializeModel: SOFTMAX: ARITH_BFP forwardMath");
+    expectSoftmaxLoadRejected(true, "deserializeModel: SOFTMAX: ARITH_BFP propLossMath");
+}
+
+/* The DROPOUT record overwrites p, which the scale 1/(1-p) needs in [0, 1); NaN included. */
+static void testDeserializeDropoutRejectsAnOutOfRangeP(void) {
+    const float bad[] = {1.0f, NAN};
+    size_t dims[] = {4};
+    size_t order[] = {0};
+    shape_t shape = {.numberOfDimensions = 1, .dimensions = dims, .orderOfDimensions = order};
+    quantization_t boolQ;
+    initBoolQuantization(&boolQ);
+    uint8_t maskBits[1] = {0};
+    tensor_t mask;
+    setTensorValues(&mask, maskBits, &shape, &boolQ, NULL);
+    quantization_t *floatQ = quantizationInitFloat();
+    for (size_t i = 0; i < 2; i++) {
+        layer_t *layer = dropoutLayerInit(0.5f, &mask, floatQ, floatQ);
+        layer->config->dropout->p = bad[i];
+        layer_t *model[] = {layer};
+        FILE *f = fopen(FILE_PATH, "wb");
+        serializeModel(&MODEL_CHAIN(model, 1), f);
+        fclose(f);
+        layer->config->dropout->p = 0.5f;
+        f = fopen(FILE_PATH, "rb");
+        ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: DROPOUT: p must be in [0, 1)",
+                                 deserializeModel(&MODEL_CHAIN(model, 1), f));
+        fclose(f);
+        freeDropoutLayer(layer);
+    }
+    freeQuantization(floatQ);
+}
+
 #define BN_OFFSET_PROP_LOSS_MATH_TYPE (BN_OFFSET_FORWARD_MATH_TYPE + 2)
 
 static void testDeserializeBatchNormRejectsNonFloat32PropLossMath(void) {
@@ -3265,6 +3329,8 @@ int main(void) {
     RUN_TEST(testDeserializeBatchNormRejectsNonFloat32PropLossMath);
     RUN_TEST(testDeserializeGroupNormRejectsIncoherentGeometry);
     RUN_TEST(testDeserializeLayerNormRejectsNormalizedShapeGammaMismatch);
+    RUN_TEST(testDeserializeSoftmaxRejectsBfpMathOverANonBfpWire);
+    RUN_TEST(testDeserializeDropoutRejectsAnOutOfRangeP);
     RUN_TEST(testReadTensorRecordHeaderFloat32);
     RUN_TEST(testReadTensorRecordHeaderGroupedSym);
     RUN_TEST(testReadTensorRecordHeaderGroupedAsym);

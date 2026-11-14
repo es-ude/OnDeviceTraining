@@ -17,12 +17,14 @@ typedef struct reluConfig {
     bool ownsQuantizations;
 } reluConfig_t;
 
-void reluForwardFloat(tensor_t *input, tensor_t *output);
-void reluForwardBfp(tensor_t *input, tensor_t *output);
-void reluForward(layer_t *reluLayer, tensor_t *input, tensor_t *output, const layerExec_t *exec);
+/*! Supported arithmetic in both slots. Call once where a config enters -- the factories and the
+ *  deserializer. `who` prefixes the message. */
+void reluValidateConfig(const reluConfig_t *cfg, const char *who);
 
-void reluBackwardFloat(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss);
-void reluBackwardBfp(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss);
+/* Each direction requires every wire stored in its arithmetic's dtype. ARITH_BFP also requires
+ * equal counts, and equal grids and widths between the copied pair; BFP wires never share
+ * storage. */
+void reluForward(layer_t *reluLayer, tensor_t *input, tensor_t *output, const layerExec_t *exec);
 void reluBackward(layer_t *reluLayer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss,
                   const layerExec_t *exec);
 

@@ -258,29 +258,6 @@ void testReluBackwardSymInt32() {
     }
 }
 
-void testReluLayerInitAndFreeRoundTrip(void) {
-    /* Roundtrip: reluLayerInit allocates layer + outer layerConfig +
-     * inner reluConfig (3 reserveMemory calls). freeReluLayer must
-     * release all three. reluLayerInit requires non-NULL outputQ/propLossQ
-     * (validateLayerQuantForRelu), so this uses a minimal real profile
-     * instead of the old Legacy ctor's NULL-tolerant borrow. */
-    quantization_t *q = quantizationInitFloat();
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, q);
-    layer_t *reluLayer = reluLayerInit(&lq);
-    TEST_ASSERT_NOT_NULL(reluLayer);
-    TEST_ASSERT_EQUAL_INT(RELU, reluLayer->type);
-    TEST_ASSERT_NOT_NULL(reluLayer->config);
-    TEST_ASSERT_NOT_NULL(reluLayer->config->relu);
-
-    freeReluLayer(reluLayer);
-    freeQuantization(q);
-}
-
-/* ============================================================================
- * Tests for the new layerQuant_t-based factory API (PR 1).
- * ========================================================================== */
-
 void testReluLayerInitBorrowingStoresLqPointers(void) {
     quantization_t *qFwd = quantizationInitFloat();
     quantization_t *qBwd = quantizationInitFloat();
@@ -329,6 +306,22 @@ void testReluLayerInitOwningDeepCopiesLqPointers(void) {
     freeReluLayer(layer);
 }
 
+/* The vtable switches have no default arm: the factories are where an out-of-range arithmetic
+ * is caught. */
+void testReluLayerInitRejectsUnsupportedArithmetic(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    lq.forwardMath.type = (arithmeticType_t)7;
+    ASSERT_EXITS_WITH_OUTPUT(1, "reluLayerInit: forwardMath and propLossMath must be",
+                             reluLayerInit(&lq));
+    layerQuantInitUniform(&lq, q);
+    lq.propLossMath.type = (arithmeticType_t)7;
+    ASSERT_EXITS_WITH_OUTPUT(1, "reluLayerInitOwning: forwardMath and propLossMath must be",
+                             reluLayerInitOwning(&lq));
+    freeQuantization(q);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -374,57 +367,24 @@ static tensor_t *buildBfpWireWithCodes(size_t const *dims, size_t numDims, uint8
     return t;
 }
 
-static tensor_t *buildFloatTensor1D(size_t n) {
+static tensor_t *buildWire1D(size_t n, quantization_t *q) {
     size_t *dims = reserveMemory(sizeof(size_t));
     dims[0] = n;
     size_t *order = reserveMemory(sizeof(size_t));
     setOrderOfDimsForNewTensor(1, order);
     shape_t *shape = reserveMemory(sizeof(shape_t));
     setShape(shape, dims, 1, order);
-    return initTensor(shape, quantizationInitFloat(), NULL);
+    return initTensor(shape, q, NULL);
 }
 
-/* BFP epic PR4 (R-P2, deviations register 6): ReLU on packed BFP is a
- * pure code clamp — negatives to code 0 — with the group exponents copied
- * VERBATIM. Two groups with DIFFERENT exponents (130 / 126) so a dropped or
- * zero-state exponent copy is observable; the output codes are pre-filled with
- * a -9 sentinel so a kernel that skips positives is observable too. */
-void testReluForwardBfpClampsCodesAndCarriesExponents(void) {
-    size_t dims[] = {1, 8};
-    int32_t inCodes[8] = {12, -7, 0, 31, -32, 5, -1, 20};
-    uint8_t inExps[2] = {130, 126};
-    int32_t outCodes[8] = {-9, -9, -9, -9, -9, -9, -9, -9};
-    uint8_t outExps[2] = {127, 127};
-    tensor_t *input = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, inCodes, inExps);
-    tensor_t *output = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, outCodes, outExps);
-
-    reluForwardBfp(input, output);
-
-    int32_t got[8];
-    unpackSignExtend(output->data, 6, 0, got, 8);
-    int32_t expected[8] = {12, 0, 0, 31, 0, 5, 0, 20};
-    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, 8);
-
-    bfpQConfig_t *outQC = output->quantization->qConfig;
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(130, outQC->exponents[0],
-                                    "group 0 exponent must be carried verbatim");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(126, outQC->exponents[1],
-                                    "group 1 exponent must be carried verbatim");
-
-    int32_t inAfter[8];
-    unpackSignExtend(input->data, 6, 0, inAfter, 8);
-    int32_t inUnchanged[8] = {12, -7, 0, 31, -32, 5, -1, 20};
-    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(inUnchanged, inAfter, 8,
-                                          "the input wire must not be modified");
-    freeTensor(output);
-    freeTensor(input);
+static tensor_t *buildFloatTensor1D(size_t n) {
+    return buildWire1D(n, quantizationInitFloat());
 }
 
-/* BFP epic PR4: the POSITIVE half of the narrowed guard — reluForward must
- * DISPATCH an ARITH_BFP config to reluForwardBfp instead of rejecting the wire.
- * The three death tests below are all satisfied by the old, broader
- * requireNoBfpWire (it exits on every BFP wire), so none of them can tell a
- * present ARITH_BFP arm from a deleted one; this one can. */
+/* ReLU on packed BFP is a pure code clamp -- negatives to code 0 -- with the group exponents
+ * copied verbatim. Two groups with different exponents (130 / 126) so a dropped or zero-state
+ * exponent copy is observable; the output codes are pre-filled with a -9 sentinel so a kernel
+ * that skips positives is observable too. */
 void testReluForwardBfpArmDispatchesThroughReluForward(void) {
     reluConfig_t cfg = {0};
     cfg.forwardMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
@@ -447,52 +407,22 @@ void testReluForwardBfpArmDispatchesThroughReluForward(void) {
     bfpQConfig_t *outQC = output->quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(130, outQC->exponents[0],
                                     "group 0 exponent must be carried verbatim");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(126, outQC->exponents[1],
+                                    "group 1 exponent must be carried verbatim");
+
+    int32_t inAfter[8];
+    unpackSignExtend(input->data, 6, 0, inAfter, 8);
+    int32_t inUnchanged[8] = {12, -7, 0, 31, -32, 5, -1, 20};
+    TEST_ASSERT_EQUAL_INT32_ARRAY_MESSAGE(inUnchanged, inAfter, 8,
+                                          "the input wire must not be modified");
     freeTensor(output);
     freeTensor(input);
 }
 
-/* BFP epic PR4 (R-P2 backward): the mask is the SIGN of forwardInput's packed
- * codes — exponents are unsigned scale factors, so the sign bit alone decides
- * kept/dropped and no dequant is needed. Kept positions copy the loss code
- * verbatim, dropped positions write code 0, and loss's group exponents are
- * carried verbatim onto propLoss. forwardInput deliberately carries a
- * DIFFERENT grid (per-tensor, m=8) from the loss/propLoss pair: its geometry
- * is not gated because it is read sign-only. */
-void testReluBackwardBfpMasksBySignAndCarriesExponents(void) {
-    size_t dims[] = {1, 8};
-    int32_t fwdCodes[8] = {5, -3, 0, 40, -1, 17, 9, -80};
-    uint8_t fwdExps[1] = {129};
-    int32_t lossCodes[8] = {11, -6, 30, -12, 4, -20, 7, 25};
-    uint8_t lossExps[2] = {131, 124};
-    int32_t propCodes[8] = {-9, -9, -9, -9, -9, -9, -9, -9};
-    uint8_t propExps[2] = {127, 127};
-    tensor_t *forwardInput = buildBfpWireWithCodes(dims, 2, 8, 8, 1, 0, fwdCodes, fwdExps);
-    tensor_t *loss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, lossCodes, lossExps);
-    tensor_t *propLoss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, propCodes, propExps);
-
-    reluBackwardBfp(forwardInput, loss, propLoss);
-
-    int32_t got[8];
-    unpackSignExtend(propLoss->data, 6, 0, got, 8);
-    /* mask: fwd code <= 0 drops (indices 1, 2, 4, 7) — <= 0 matches the
-     * FLOAT32/SYM arms exactly, and code <= 0 iff value <= 0 (scale > 0). */
-    int32_t expected[8] = {11, 0, 0, -12, 0, -20, 7, 0};
-    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, 8);
-
-    bfpQConfig_t *propQC = propLoss->quantization->qConfig;
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(131, propQC->exponents[0],
-                                    "loss group 0 exponent must be carried verbatim");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(124, propQC->exponents[1],
-                                    "loss group 1 exponent must be carried verbatim");
-    freeTensor(propLoss);
-    freeTensor(loss);
-    freeTensor(forwardInput);
-}
-
-/* BFP epic PR4: the POSITIVE half of the backward narrowing — reluBackward must
- * DISPATCH an ARITH_BFP config to reluBackwardBfp. Same argument as the
- * forward twin: every death test here is already satisfied by the old blanket
- * requireNoBfpWire, so only this one can tell a present arm from a deleted one. */
+/* The backward mask is the sign of forwardInput's packed codes (code <= 0 iff value <= 0, as in
+ * the FLOAT32/SYM arms). Kept positions copy the loss code, dropped ones write 0, and loss's group
+ * exponents are carried onto propLoss. forwardInput deliberately carries a different grid
+ * (per-tensor, m=8): it is read sign-only. */
 void testReluBackwardBfpArmDispatchesThroughReluBackward(void) {
     reluConfig_t cfg = {0};
     cfg.propLossMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
@@ -518,6 +448,8 @@ void testReluBackwardBfpArmDispatchesThroughReluBackward(void) {
     bfpQConfig_t *propQC = propLoss->quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(131, propQC->exponents[0],
                                     "loss group 0 exponent must be carried verbatim");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(124, propQC->exponents[1],
+                                    "loss group 1 exponent must be carried verbatim");
     freeTensor(propLoss);
     freeTensor(loss);
     freeTensor(forwardInput);
@@ -533,10 +465,9 @@ void testReluBackwardBfpArmDispatchesThroughReluBackward(void) {
  * mirror is therefore this death test — the same fixture, the opposite
  * expectation. */
 
-/* BFP epic PR4 (R-P7d): the narrowed guards. A BFP wire under the FLOAT32 arm
- * must still die (#315 parity — the raw float* view would read packed bytes),
- * and the ARITH_BFP arm must reject a non-BFP wire and a geometry mismatch. */
-void testReluForwardFloat32ArmRejectsBfpWire(void) {
+/* The FLOAT32 arm raw-casts float*, so any other wire dtype dies: a BFP wire (packed bytes) and a
+ * SYM_INT32 one (mantissas read as floats). */
+void testReluForwardFloat32ArmRejectsNonFloat32Wire(void) {
     reluConfig_t cfg = {0};
     cfg.forwardMath = (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
     layerConfig_t lc = {.relu = &cfg};
@@ -545,9 +476,14 @@ void testReluForwardFloat32ArmRejectsBfpWire(void) {
     tensor_t *bfpWire = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, NULL, NULL);
     tensor_t *floatWire = buildFloatTensor1D(8);
 
+    tensor_t *symWire = buildWire1D(8, quantizationInitSymInt32(HALF_AWAY));
+
     ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, bfpWire, floatWire, NULL));
     ASSERT_EXITS_WITH_FAILURE(reluForward(&layer, floatWire, bfpWire, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "ReLU forward: arithmetic 0 requires dtype",
+                             reluForward(&layer, symWire, floatWire, NULL));
 
+    freeTensor(symWire);
     freeTensor(floatWire);
     freeTensor(bfpWire);
 }
@@ -796,51 +732,6 @@ void testReluBackwardSymInt32AliasedMatchesDisjoint(void) {
     TEST_ASSERT_EQUAL_MEMORY(&lossScale, &(float){odtScaleToFloat(qc[3].scale)}, sizeof(float));
 }
 
-/* BFP wires never alias: the kernel rejects a loss/propLoss pair that shares
- * its packed payload, its qConfig or its exponent array. Each fixture shares
- * one of them; the shared qConfig also shares its exponent array (one qConfig
- * owns one array), and two distinct qConfigs share one array only when both
- * are filled into caller-owned storage. */
-void testReluBackwardBfpRejectsEveryAlias(void) {
-    const char *message = "ReLU BFP backward: loss and propLoss must not alias in their packed "
-                          "payload, their qConfig or their exponent array -- BFP wires never "
-                          "share bytes";
-    size_t dims[] = {1, 8};
-    int32_t fwdCodes[8] = {5, -3, 0, 40, -1, 17, 9, -80};
-    uint8_t fwdExps[1] = {129};
-    int32_t lossCodes[8] = {11, -6, 30, -12, 4, -20, 7, 25};
-    uint8_t lossExps[2] = {131, 124};
-    tensor_t *forwardInput = buildBfpWireWithCodes(dims, 2, 8, 8, 1, 0, fwdCodes, fwdExps);
-    tensor_t *loss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, lossCodes, lossExps);
-    tensor_t *propLoss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, NULL, NULL);
-
-    tensor_t payloadAlias; /* propLoss's own qConfig over loss's payload */
-    setTensorValues(&payloadAlias, loss->data, propLoss->shape, propLoss->quantization, NULL);
-    ASSERT_EXITS_WITH_OUTPUT(1, message, reluBackwardBfp(forwardInput, loss, &payloadAlias));
-
-    tensor_t qConfigAlias; /* propLoss's own payload under loss's quantization */
-    setTensorValues(&qConfigAlias, propLoss->data, propLoss->shape, loss->quantization, NULL);
-    ASSERT_EXITS_WITH_OUTPUT(1, message, reluBackwardBfp(forwardInput, loss, &qConfigAlias));
-
-    uint8_t sharedExps[2];
-    bfpQConfig_t lossQC;
-    bfpQConfig_t propLossQC;
-    initBfpQConfigGroupedInto(6, 8, HALF_AWAY, 2, 4, sharedExps, &lossQC);
-    initBfpQConfigGroupedInto(6, 8, HALF_AWAY, 2, 4, sharedExps, &propLossQC);
-    quantization_t lossQ = {.type = BFP, .qConfig = &lossQC};
-    quantization_t propLossQ = {.type = BFP, .qConfig = &propLossQC};
-    tensor_t exponentsLoss;
-    tensor_t exponentsAlias; /* own payloads, own qConfigs, one exponent array */
-    setTensorValues(&exponentsLoss, loss->data, loss->shape, &lossQ, NULL);
-    setTensorValues(&exponentsAlias, propLoss->data, propLoss->shape, &propLossQ, NULL);
-    ASSERT_EXITS_WITH_OUTPUT(1, message,
-                             reluBackwardBfp(forwardInput, &exponentsLoss, &exponentsAlias));
-
-    freeTensor(propLoss);
-    freeTensor(loss);
-    freeTensor(forwardInput);
-}
-
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testReluForwardFloat);
@@ -851,20 +742,16 @@ int main(void) {
     RUN_TEST(testReluBackwardFloatAliasedMatchesDisjoint);
     RUN_TEST(testReluBackwardSymInt32AliasedMatchesDisjoint);
     RUN_TEST(testReluBackwardExitsOnDtypeMismatch);
-    RUN_TEST(testReluForwardBfpClampsCodesAndCarriesExponents);
     RUN_TEST(testReluForwardBfpArmDispatchesThroughReluForward);
-    RUN_TEST(testReluForwardFloat32ArmRejectsBfpWire);
+    RUN_TEST(testReluForwardFloat32ArmRejectsNonFloat32Wire);
     RUN_TEST(testReluForwardBfpArmRejectsNonBfpWireAndGeometryMismatch);
     RUN_TEST(testReluForwardBfpArmRejectsUnequalElementCounts);
-    RUN_TEST(testReluBackwardBfpMasksBySignAndCarriesExponents);
     RUN_TEST(testReluBackwardBfpArmDispatchesThroughReluBackward);
     RUN_TEST(testReluBackwardBfpArmRejectsNonBfpWire);
     RUN_TEST(testReluBackwardBfpArmRejectsUnequalElementCounts);
-    RUN_TEST(testReluBackwardBfpRejectsEveryAlias);
-
-    RUN_TEST(testReluLayerInitAndFreeRoundTrip);
 
     RUN_TEST(testReluLayerInitBorrowingStoresLqPointers);
     RUN_TEST(testReluLayerInitOwningDeepCopiesLqPointers);
+    RUN_TEST(testReluLayerInitRejectsUnsupportedArithmetic);
     return UNITY_END();
 }

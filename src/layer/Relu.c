@@ -15,68 +15,62 @@
 #include "Tensor.h"
 #include "TensorConversion.h"
 
-/* BFP epic PR4 (R-P2): ReLU still runs OUTSIDE the executeOp funnel — each arm
- * raw-views ->data in ITS OWN storage format, so the guard stays keyed on the
- * wire's STORAGE dtype and is only NARROWED per arm: the FLOAT32/SYM_INT32
- * arms keep rejecting a packed BFP wire (their float* / int32_t* views would read
- * packed bytes as wide scalars and leave the destination's exponents stale),
- * while the ARITH_BFP arm requires both wires BFP-stored. */
-static void requireBfpWire(const tensor_t *t, const char *what) {
-    if (t->quantization->type != BFP) {
-        PRINT_ERROR("%s: the ARITH_BFP arm requires BFP-stored wires (packed codes + per-group "
-                    "exponents, carried verbatim) -- got dtype %d; see "
-                    "docs/conventions/arithmetic-bfp.md §5.7",
-                    what, (int)t->quantization->type);
+static bool reluIsArithmetic(arithmeticType_t type) {
+    return type == ARITH_FLOAT32 || type == ARITH_SYM_INT32 || type == ARITH_BFP;
+}
+
+void reluValidateConfig(const reluConfig_t *cfg, const char *who) {
+    if (!reluIsArithmetic(cfg->forwardMath.type) || !reluIsArithmetic(cfg->propLossMath.type)) {
+        PRINT_ERROR("%s: forwardMath and propLossMath must be ARITH_FLOAT32, ARITH_SYM_INT32 or "
+                    "ARITH_BFP (got %d, %d)",
+                    who, (int)cfg->forwardMath.type, (int)cfg->propLossMath.type);
         exit(1);
     }
 }
 
-void reluForwardFloat(tensor_t *input, tensor_t *output) {
-    gteFloatValue(input, 0, 0, output);
-}
-
-void reluForwardSymInt32(tensor_t *input, tensor_t *output) {
-    symInt32QConfig_t *inputSymInt32QC = input->quantization->qConfig;
-    symInt32QConfig_t *outputSymInt32QC = output->quantization->qConfig;
-    gteSymInt32Zero(input, 0, output);
-    storeCanonScale(&outputSymInt32QC->scale, loadCanonScale(&inputSymInt32QC->scale));
-}
-
-void reluForwardBfp(tensor_t *input, tensor_t *output) {
-    bfpRequireSameGeometry(input->quantization->qConfig, calcNumberOfElementsByTensor(input),
-                           output->quantization->qConfig, calcNumberOfElementsByTensor(output),
-                           "ReLU forward BFP");
-    gteBfpZero(input, output);
+/* This path operates directly on storage; admit compatible wire dtypes before applying it. Each
+ * arithmetic reads its own storage dtype: FLOAT32 floats, SYM_INT32 mantissas, BFP packed codes. */
+static void reluRequireWireTypes(tensor_t *const *wires, size_t n, arithmeticType_t math,
+                                 const char *where) {
+    static const qtype_t wireType[] = {
+        [ARITH_FLOAT32] = FLOAT32, [ARITH_SYM_INT32] = SYM_INT32, [ARITH_BFP] = BFP};
+    for (size_t w = 0; w < n; w++) {
+        if (wires[w]->quantization->type != wireType[math]) {
+            PRINT_ERROR("%s: arithmetic %d requires dtype %d wires, wire %zu has dtype %d", where,
+                        (int)math, (int)wireType[math], w, (int)wires[w]->quantization->type);
+            exit(1);
+        }
+    }
 }
 
 void reluForward(layer_t *reluLayer, tensor_t *input, tensor_t *output, const layerExec_t *exec) {
     reluConfig_t *reluConfig = reluLayer->config->relu;
+    arithmeticType_t math = reluConfig->forwardMath.type;
+    reluRequireWireTypes((tensor_t *[]){input, output}, 2, math, "ReLU forward");
 
-    switch (reluConfig->forwardMath.type) {
+    switch (math) {
     case ARITH_FLOAT32:
-        bfpRequireNoBfpWire(input, "ReLU forward (input)");
-        bfpRequireNoBfpWire(output, "ReLU forward (output)");
-        reluForwardFloat(input, output);
+        gteFloatValue(input, 0, 0, output);
         break;
-    case ARITH_SYM_INT32:
-        bfpRequireNoBfpWire(input, "ReLU forward (input)");
-        bfpRequireNoBfpWire(output, "ReLU forward (output)");
-        reluForwardSymInt32(input, output);
+    case ARITH_SYM_INT32: {
+        symInt32QConfig_t *inputQC = input->quantization->qConfig;
+        symInt32QConfig_t *outputQC = output->quantization->qConfig;
+        gteSymInt32Zero(input, 0, output);
+        storeCanonScale(&outputQC->scale, loadCanonScale(&inputQC->scale));
         break;
+    }
     case ARITH_BFP:
-        requireBfpWire(input, "ReLU forward (input)");
-        requireBfpWire(output, "ReLU forward (output)");
-        reluForwardBfp(input, output);
+        bfpRequireSameGeometry(input->quantization->qConfig, calcNumberOfElementsByTensor(input),
+                               output->quantization->qConfig, calcNumberOfElementsByTensor(output),
+                               "ReLU forward BFP");
+        gteBfpZero(input, output);
         break;
-    default:
-        PRINT_ERROR("Unknown QType!");
-        exit(1);
     }
 }
 
 /* Alias-capable: propLoss may share loss's bytes (same-index read-then-write),
  * as an in-place dx plan binds them. */
-void reluBackwardFloat(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
+static void reluBackwardFloat(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
     size_t numberOfElements = calcNumberOfElementsByTensor(forwardInput);
 
     float *inputArray = (float *)forwardInput->data;
@@ -95,7 +89,7 @@ void reluBackwardFloat(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLos
 /* Alias-capable: propLoss may share loss's bytes (same-index read-then-write),
  * as an in-place dx plan binds them; the two wires keep their own qConfigs, so
  * the scale copy below goes from one config to the other. */
-void reluBackwardSymInt32(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
+static void reluBackwardSymInt32(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
     size_t numberOfElements = calcNumberOfElementsByTensor(forwardInput);
 
     int32_t *inputArray = (int32_t *)forwardInput->data;
@@ -115,46 +109,14 @@ void reluBackwardSymInt32(tensor_t *forwardInput, tensor_t *loss, tensor_t *prop
     storeCanonScale(&propLossQC->scale, loadCanonScale(&lossQC->scale));
 }
 
-/* BFP epic PR4 (R-P2 backward): mask by the SIGN of forwardInput's packed
- * codes (exponents are unsigned scale factors, so code <= 0 iff value <= 0 —
- * exact parity with the FLOAT32/SYM arms' `input[i] <= 0`), copy the loss code
- * where kept, write code 0 where dropped, and carry loss's group exponents
- * verbatim onto propLoss. Same transparency argument as the forward: zeroing
- * codes only shrinks a block's absmax, so no re-derivation (= no second
- * quantization, BFP D8) is needed. forwardInput's GEOMETRY is NOT gated — only its
- * dtype and element count matter, since it is read sign-only.
- *
- * ALL THREE wires are length-gated: this loop unpacks from forwardInput AND
- * loss and packs into propLoss, all sized off ONE count, so any wire shorter
- * than the anchor is an over-read or an over-write. A per-tensor {1, 0} grid
- * matches any length, so validateBfpQConfigShape alone would not catch it. */
-void reluBackwardBfp(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
+/* Uses forward-input signs only (code <= 0 iff value <= 0); loss and destination must share BFP
+ * geometry and disjoint storage. forwardInput may carry any grid of the same length. Kept codes
+ * and loss's exponents are carried verbatim: zeroing codes only shrinks a block's absmax. */
+static void reluBackwardBfp(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss) {
     size_t numberOfElements = calcNumberOfElementsByTensor(forwardInput);
     const bfpQConfig_t *inQC = forwardInput->quantization->qConfig;
     const bfpQConfig_t *lossQC = loss->quantization->qConfig;
     bfpQConfig_t *propLossQC = propLoss->quantization->qConfig;
-    /* forwardInput is the ANCHOR, so its count comparison is trivially true —
-     * the call is here for the GRID half (does inQC tile numberOfElements?),
-     * kept in the same idiom rather than a bare validateBfpQConfigShape so
-     * every wire in this function is admitted through one door. */
-    bfpRequireElementCount(inQC, numberOfElements, numberOfElements,
-                           "ReLU backward BFP (forwardInput grid)");
-    bfpRequireElementCount(lossQC, calcNumberOfElementsByTensor(loss), numberOfElements,
-                           "ReLU backward BFP (loss vs forwardInput)");
-    bfpRequireSameGeometry(lossQC, numberOfElements, propLossQC,
-                           calcNumberOfElementsByTensor(propLoss),
-                           "ReLU backward BFP (loss -> propLoss)");
-    /* BFP wires never alias: an in-place dx plan never pairs them, so a shared
-     * payload, qConfig or exponent array here is a caller error. The loop below
-     * reads each chunk before writing it, so this reject enforces the rule; it
-     * does not fix a hazard. A shared qConfig implies a shared exponent array;
-     * the qConfig term stays so the condition reads like Dropout's bridge. */
-    if (propLoss->data == loss->data || propLossQC == lossQC ||
-        propLossQC->exponents == lossQC->exponents) {
-        PRINT_ERROR("ReLU BFP backward: loss and propLoss must not alias in their packed payload, "
-                    "their qConfig or their exponent array -- BFP wires never share bytes");
-        exit(1);
-    }
 
     int32_t inCodes[ODT_CONVERSION_CHUNK_ELEMS];
     int32_t lossCodes[ODT_CONVERSION_CHUNK_ELEMS];
@@ -181,57 +143,26 @@ void reluBackwardBfp(tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss)
 void reluBackward(layer_t *reluLayer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss,
                   const layerExec_t *exec) {
     reluConfig_t *reluConfig = reluLayer->config->relu;
+    arithmeticType_t math = reluConfig->propLossMath.type;
+    reluRequireWireTypes((tensor_t *[]){forwardInput, loss, propLoss}, 3, math, "ReLU backward");
 
-    switch (reluConfig->propLossMath.type) {
+    switch (math) {
     case ARITH_FLOAT32:
-        /* Relu backward bypasses the executeOp funnel (scale-transparent) and
-         * raw-casts the wire data pointers. The FLOAT32 arm reads/writes
-         * forwardInput/loss/propLoss as float*; fed a SYM_INT32 wire it silently
-         * reads int mantissa codes as floats — garbage grads propagated with no
-         * diagnostic. Guard the actual wire dtypes and fail fast, mirroring the
-         * LayerNorm/GroupNorm backward guards (#315, #261). */
-        if (forwardInput->quantization->type != FLOAT32 || loss->quantization->type != FLOAT32 ||
-            propLoss->quantization->type != FLOAT32) {
-            PRINT_ERROR("ReLU backward: FLOAT32 arm requires FLOAT32 wires — got forwardInput %d, "
-                        "loss %d, propLoss %d",
-                        (int)forwardInput->quantization->type, (int)loss->quantization->type,
-                        (int)propLoss->quantization->type);
-            exit(1);
-        }
         reluBackwardFloat(forwardInput, loss, propLoss);
         break;
     case ARITH_SYM_INT32:
-        /* The SYM_INT32 arm raw-casts to int32* and derefs loss/propLoss->qConfig
-         * as symInt32QConfig_t*; a FLOAT32 wire carries qConfig == NULL, so the
-         * mismatch is a NULL deref rather than mere garbage — same fail-fast. */
-        if (forwardInput->quantization->type != SYM_INT32 ||
-            loss->quantization->type != SYM_INT32 || propLoss->quantization->type != SYM_INT32) {
-            PRINT_ERROR("ReLU backward: SYM_INT32 arm requires SYM_INT32 wires — got forwardInput "
-                        "%d, loss %d, propLoss %d",
-                        (int)forwardInput->quantization->type, (int)loss->quantization->type,
-                        (int)propLoss->quantization->type);
-            exit(1);
-        }
         reluBackwardSymInt32(forwardInput, loss, propLoss);
         break;
-    case ARITH_BFP:
-        /* R-P2: all three wires are read/written in the PACKED code domain, so
-         * all three must be BFP-stored; the loss/propLoss GRID identity is
-         * enforced inside reluBackwardBfp (forwardInput is read sign-only and
-         * may carry any BFP grid). */
-        if (forwardInput->quantization->type != BFP || loss->quantization->type != BFP ||
-            propLoss->quantization->type != BFP) {
-            PRINT_ERROR("ReLU backward: ARITH_BFP arm requires BFP wires — got forwardInput %d, "
-                        "loss %d, propLoss %d",
-                        (int)forwardInput->quantization->type, (int)loss->quantization->type,
-                        (int)propLoss->quantization->type);
-            exit(1);
-        }
+    case ARITH_BFP: {
+        size_t numberOfElements = calcNumberOfElementsByTensor(forwardInput);
+        bfpRequireElementCount(calcNumberOfElementsByTensor(loss), numberOfElements,
+                               "ReLU backward BFP (loss vs forwardInput)");
+        bfpRequireSameGeometry(
+            loss->quantization->qConfig, numberOfElements, propLoss->quantization->qConfig,
+            calcNumberOfElementsByTensor(propLoss), "ReLU backward BFP (loss -> propLoss)");
         reluBackwardBfp(forwardInput, loss, propLoss);
         break;
-    default:
-        PRINT_ERROR("Unknown QType!");
-        exit(1);
+    }
     }
 }
 

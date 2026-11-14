@@ -393,32 +393,6 @@ void testSoftmaxForwardSymLargeLogitsStaysFinite(void) {
     }
 }
 
-void testSoftmaxLayerInitAndFreeRoundTrip(void) {
-    /* Roundtrip: softmaxLayerInit allocates layer + outer layerConfig +
-     * inner softmaxConfig (3 reserveMemory calls). freeSoftmaxLayer must
-     * release all three. Leak verification is delegated to the LSan
-     * sweep — this test asserts only that the round-trip completes
-     * without a crash and that the layer was wired correctly. */
-    quantization_t *floatQ = quantizationInitFloat();
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, floatQ);
-    layer_t *softmaxLayer = softmaxLayerInit(&lq);
-    TEST_ASSERT_NOT_NULL(softmaxLayer);
-    TEST_ASSERT_EQUAL_INT(SOFTMAX, softmaxLayer->type);
-    TEST_ASSERT_NOT_NULL(softmaxLayer->config);
-    TEST_ASSERT_NOT_NULL(softmaxLayer->config->softmax);
-
-    freeSoftmaxLayer(softmaxLayer);
-
-    /* floatQ is owned by the test; freeSoftmaxLayer must not have freed
-     * it (quantization configs are externally owned and shared). */
-    freeQuantization(floatQ);
-}
-
-/* ============================================================================
- * Tests for the new layerQuant_t-based Softmax factory (PR 2).
- * ========================================================================== */
-
 void testSoftmaxLayerInitBorrowingStoresLqPointers(void) {
     quantization_t *qFwd = quantizationInitFloat();
     quantization_t *qBwd = quantizationInitFloat();
@@ -472,6 +446,42 @@ void testSoftmaxLayerInitOwningDeepCopiesLqPointers(void) {
     freeSoftmaxLayer(layer);
     freeQuantization(qFwd);
     freeQuantization(qBwd);
+}
+
+/* An ARITH_BFP slot takes its staging widths from its produced-wire config, so a non-BFP one is
+ * rejected at construction; the vtable switches have no default arm for an unknown arithmetic. */
+void testSoftmaxLayerInitRejectsIncoherentArithmetic(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    lq.forwardMath.type = ARITH_BFP;
+    ASSERT_EXITS_WITH_OUTPUT(1, "softmaxLayerInit: ARITH_BFP forwardMath requires a BFP-typed",
+                             softmaxLayerInit(&lq));
+    layerQuantInitUniform(&lq, floatQ);
+    lq.propLossMath.type = ARITH_BFP;
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "softmaxLayerInitOwning: ARITH_BFP propLossMath requires a BFP-typed",
+                             softmaxLayerInitOwning(&lq));
+    layerQuantInitUniform(&lq, floatQ);
+    lq.forwardMath.type = (arithmeticType_t)7;
+    ASSERT_EXITS_WITH_OUTPUT(1, "softmaxLayerInit: forwardMath and propLossMath must be",
+                             softmaxLayerInit(&lq));
+    layerQuantInitUniform(&lq, floatQ);
+    lq.propLossMath.type = (arithmeticType_t)7;
+    ASSERT_EXITS_WITH_OUTPUT(1, "softmaxLayerInit: forwardMath and propLossMath must be",
+                             softmaxLayerInit(&lq));
+    freeQuantization(floatQ);
+}
+
+void testSoftmaxSetBfpExpShiftRoundingRejectsAnUnknownMode(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *layer = softmaxLayerInit(&lq);
+    ASSERT_EXITS_WITH_OUTPUT(1, "softmaxSetBfpExpShiftRounding: unknown mode",
+                             softmaxSetBfpExpShiftRounding(layer, (bfpShiftRounding_t)3));
+    freeSoftmaxLayer(layer);
+    freeQuantization(floatQ);
 }
 
 void setUp() {}
@@ -861,11 +871,9 @@ void testSoftmaxBackwardSymEmptyRowsAreNoOp(void) {
     freeQuantization(symQ);
 }
 
-/* #457 b: both non-BFP arms walk loss/propLoss at the input's flat offsets, so
- * each wire must carry the input's dims. Without the gate a
- * shorter wire is an OOB heap read/write (FLOAT32 arm, raw float* casts) or
- * a silently wrong/truncated dx (SYM arm), and a longer one overflows the SYM
- * arm's input-sized stack scratch. A [2, 3] input meets each bad wire. */
+/* Both non-BFP arms walk loss/propLoss at the input's flat offsets, so each wire must carry the
+ * input's dims: a shorter wire is an OOB read/write (FLOAT32 raw casts), a longer one overflows
+ * the SYM arm's input-sized scratch. A [2, 3] input meets each bad wire. */
 static quantization_t *softmaxWireQ(bool sym) {
     return sym ? quantizationInitSymInt32(HALF_AWAY) : quantizationInitFloat();
 }
@@ -881,7 +889,8 @@ static void assertSoftmaxBackwardRejectsWire(bool sym, const size_t *lossDims,
     tensor_t *loss = buildSoftmaxWireNdQ(lossDims, 2, NULL, softmaxWireQ(sym));
     tensor_t *propLoss = buildSoftmaxWireNdQ(propLossDims, 2, NULL, softmaxWireQ(sym));
 
-    ASSERT_EXITS_WITH_FAILURE(
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "must have the input's rank and dims",
         layerFunctions[SOFTMAX].backward(softmaxLayer, input, loss, propLoss, NULL));
 
     freeTensor(propLoss);
@@ -891,32 +900,17 @@ static void assertSoftmaxBackwardRejectsWire(bool sym, const size_t *lossDims,
     freeQuantization(layerQ);
 }
 
-void testSoftmaxBackwardFloatRejectsShortLoss(void) {
+void testSoftmaxBackwardRejectsShortOrLongLoss(void) {
     assertSoftmaxBackwardRejectsWire(false, (const size_t[]){2, 2}, (const size_t[]){2, 3});
-}
-
-void testSoftmaxBackwardFloatRejectsShortPropLoss(void) {
-    assertSoftmaxBackwardRejectsWire(false, (const size_t[]){2, 3}, (const size_t[]){2, 2});
-}
-
-void testSoftmaxBackwardSymRejectsShortLoss(void) {
-    assertSoftmaxBackwardRejectsWire(true, (const size_t[]){2, 2}, (const size_t[]){2, 3});
-}
-
-void testSoftmaxBackwardSymRejectsShortPropLoss(void) {
-    assertSoftmaxBackwardRejectsWire(true, (const size_t[]){2, 3}, (const size_t[]){2, 2});
-}
-
-void testSoftmaxBackwardSymRejectsLongLoss(void) {
     assertSoftmaxBackwardRejectsWire(true, (const size_t[]){2, 4}, (const size_t[]){2, 3});
 }
 
-void testSoftmaxBackwardSymRejectsLongPropLoss(void) {
+void testSoftmaxBackwardRejectsShortOrLongPropLoss(void) {
+    assertSoftmaxBackwardRejectsWire(false, (const size_t[]){2, 3}, (const size_t[]){2, 2});
     assertSoftmaxBackwardRejectsWire(true, (const size_t[]){2, 3}, (const size_t[]){2, 4});
 }
 
-/* #457: a count-equal reshape passes a count gate, but its rows no longer line
- * up with the input's -- the wires must carry the input's dims. */
+/* A count-equal reshape passes a count gate, but its rows no longer line up with the input's. */
 void testSoftmaxBackwardFloatRejectsReshapedLoss(void) {
     assertSoftmaxBackwardRejectsWire(false, (const size_t[]){3, 2}, (const size_t[]){2, 3});
 }
@@ -1306,31 +1300,6 @@ void unitTestSoftmaxForwardBfpRejectsAFloat32Input(void) {
     ASSERT_EXITS_WITH_FAILURE(softmaxForwardBfpFloat32InputBody());
 }
 
-/* The forward's staging width anchor is the produced-wire config: a pinned
- * ARITH_BFP forwardMath next to a non-BFP outputQ leaves the arm with no
- * width source at all -- fail fast at op entry (bfpWireAnchor), never a
- * silent fallback width. Reachable because userApi factories copy
- * layerQuant_t slots by value. */
-void testSoftmaxForwardBfpRequiresBfpOutputQ(void) {
-    quantization_t *floatQ = quantizationInitFloat();
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, floatQ);
-    layer_t *softmaxLayer = softmaxLayerInit(&lq);
-    softmaxLayer->config->softmax->forwardMath =
-        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
-
-    tensor_t *in = buildSoftmaxWire1D(8, quantizationInitFloat());
-    tensorFillFromFloatBuffer(in, (float *)kSmBfpBXValues, kSmBfpBXValues_len);
-    tensor_t *out = buildSoftmaxWire1D(8, quantizationInitFloat());
-
-    ASSERT_EXITS_WITH_FAILURE(layerFunctions[SOFTMAX].forward(softmaxLayer, in, out, NULL));
-
-    freeTensor(out);
-    freeTensor(in);
-    freeSoftmaxLayer(softmaxLayer);
-    freeQuantization(floatQ);
-}
-
 /* ---- Zero-group liveness of the max grid (arithmetic-bfp.md section 13) ----
  * The max compare is value-exact, but the winner's exponent becomes the
  * alignment grid. An all-zero group stores the zero state (E = 0), an
@@ -1637,59 +1606,31 @@ void unitTestSoftmaxBackwardBfpStagedLoss(void) {
     TEST_ASSERT_EQUAL_UINT8_ARRAY(kSmBfpBwdStagedOutExponents, gotExps, 2);
 }
 
-/* The backward's staging width anchor is the produced-wire config: a pinned
- * ARITH_BFP propLossMath next to a non-BFP propLossQ leaves the arm with no
- * width source at all -- fail fast at op entry (bfpWireAnchor), never a
- * silent fallback width. Reachable because userApi factories copy
- * layerQuant_t slots by value. propLoss is non-NULL here: the anchor binds
- * only when an op actually runs (the NULL ordering is pinned below). */
-void testSoftmaxBackwardBfpRequiresBfpPropLossQ(void) {
-    quantization_t *floatQ = quantizationInitFloat();
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, floatQ);
-    layer_t *softmaxLayer = softmaxLayerInit(&lq);
-    softmaxLayer->config->softmax->propLossMath =
-        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
-
-    tensor_t *in = buildSoftmaxWire1D(8, quantizationInitFloat());
-    tensorFillFromFloatBuffer(in, (float *)kSmBfpBXValues, kSmBfpBXValues_len);
-    tensor_t *loss = buildSoftmaxWire1D(8, quantizationInitFloat());
-    tensorFillFromFloatBuffer(loss, (float *)kSmBfpBwdStagedDLdsValues,
-                              kSmBfpBwdStagedDLdsValues_len);
-    tensor_t *propLoss = buildSoftmaxWire1D(8, quantizationInitFloat());
-
-    ASSERT_EXITS_WITH_FAILURE(
-        layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss, NULL));
-
-    freeTensor(propLoss);
-    freeTensor(loss);
-    freeTensor(in);
-    freeSoftmaxLayer(softmaxLayer);
-    freeQuantization(floatQ);
-}
-
-/* The kernel's loss-count gate (the #436 OOB class): both kernel walks run
- * x's flat n, and a SHORTER per-tensor {1, 0} loss passes every grid check
- * (that sentinel is legal for ANY element count) while lArr[i] reads outside
- * its funnel scratch. Added RED-first against the gate-less kernel (mutation
- * (c)): without the gate the walk completes on garbage and the child exits
- * 0, so this death test fails -- the gate is the sole catcher. */
-void testSoftmaxBackwardBfpRejectsCountMismatchLoss(void) {
+/* The BFP arm's walks run x's flat count over the loss and the raw out, and a per-tensor {1, 0}
+ * grid matches any count, so only the entry count gate catches a short wire: without it the walk
+ * reads or writes past its scratch. */
+static void assertSoftmaxBackwardBfpRejectsShortWire(bool shortLoss) {
     static const int32_t xCodes[8] = {10, 20, -30, 40, 5, -6, 7, 8};
     static const int32_t lossCodes[4] = {1, 2, 3, -4};
     static const uint8_t perTensorExp[1] = {127}; /* E = 0 */
     tensor_t *in = buildSmBfpWireWithCodes(
         8, (uint8_t)kSmBfpXMantissaBits, (uint8_t)kSmBfpXExponentBits, 1, 0, xCodes, perTensorExp);
-    tensor_t *loss =
-        buildSmBfpWireWithCodes(4, (uint8_t)kSmBfpXMantissaBits, (uint8_t)kSmBfpXExponentBits, 1, 0,
-                                lossCodes, perTensorExp);
-    tensor_t *propLoss = buildSmBfpOutputWire((uint8_t)kSmBfpOutMantissaBits);
+    tensor_t *loss = buildSmBfpWireWithCodes(shortLoss ? 4 : 8, (uint8_t)kSmBfpXMantissaBits,
+                                             (uint8_t)kSmBfpXExponentBits, 1, 0,
+                                             shortLoss ? lossCodes : xCodes, perTensorExp);
+    tensor_t *propLoss = shortLoss ? buildSmBfpOutputWire((uint8_t)kSmBfpOutMantissaBits)
+                                   : buildSmBfpWireWithCodes(4, (uint8_t)kSmBfpOutMantissaBits,
+                                                             (uint8_t)kSmBfpOutExponentBits, 1, 0,
+                                                             lossCodes, perTensorExp);
 
     layerQuant_t lq;
     layerQuantInitUniform(&lq, propLoss->quantization);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
 
-    ASSERT_EXITS_WITH_FAILURE(
+    ASSERT_EXITS_WITH_OUTPUT(
+        1,
+        shortLoss ? "Softmax backward BFP: loss holds 4 elements"
+                  : "Softmax backward BFP: propLoss holds 4 elements",
         layerFunctions[SOFTMAX].backward(softmaxLayer, in, loss, propLoss, NULL));
 
     freeSoftmaxLayer(softmaxLayer);
@@ -1698,20 +1639,21 @@ void testSoftmaxBackwardBfpRejectsCountMismatchLoss(void) {
     freeTensor(in);
 }
 
-/* P6-6: softmax has NO param grads, so propLoss == NULL means no op runs at
- * all -- the ARITH_BFP arm returns BEFORE the anchor gate binds (documented
- * deviation from the norms' anchor-binds-even-when-NULL rule). The layer
- * here carries the SAME broken config as the death test above (pinned
- * ARITH_BFP propLossMath, FLOAT32 propLossQ): with a non-NULL propLoss it
- * dies at the anchor, so a plain return here pins the gate ORDERING, not
- * just the no-op. The input/loss wires must come back untouched. */
+void testSoftmaxBackwardBfpRejectsCountMismatchLoss(void) {
+    assertSoftmaxBackwardBfpRejectsShortWire(true);
+}
+
+void testSoftmaxBackwardBfpRejectsCountMismatchPropLoss(void) {
+    assertSoftmaxBackwardBfpRejectsShortWire(false);
+}
+
+/* Softmax has no param grads, so a NULL propLoss under ARITH_BFP runs no op; the input and loss
+ * wires come back untouched. */
 void unitTestSoftmaxBackwardBfpNullPropLossIsNoOp(void) {
-    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
     layerQuant_t lq;
-    layerQuantInitUniform(&lq, floatQ);
+    layerQuantInitUniform(&lq, bfpQ);
     layer_t *softmaxLayer = softmaxLayerInit(&lq);
-    softmaxLayer->config->softmax->propLossMath =
-        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
 
     tensor_t *in = buildSmBfpAInput();
     tensor_t *loss =
@@ -1728,7 +1670,7 @@ void unitTestSoftmaxBackwardBfpNullPropLossIsNoOp(void) {
     freeTensor(loss);
     freeTensor(in);
     freeSoftmaxLayer(softmaxLayer);
-    freeQuantization(floatQ);
+    freeQuantization(bfpQ);
 
     TEST_ASSERT_EQUAL_INT32_ARRAY(kSmBfpXCodes, gotIn, 8);
     TEST_ASSERT_EQUAL_INT32_ARRAY(kSmBfpBwdDLdsCodes, gotLoss, 8);
@@ -1781,8 +1723,7 @@ void testSoftmaxBackwardFloatArmRejectsBfpWire(void) {
  * arm would silently "work". They are the outside-funnel twin of the
  * funnel's PR2-Decision-11 deny (legal BFP-storage arithmetics are FLOAT32
  * fake-quant and BFP native only), so the pin is on POLICY. propLossMath
- * is overridden the way the anchor death test above does it (userApi
- * factories copy layerQuant_t slots by value). */
+ * is overridden after construction to reach the SYM arm with FLOAT32 wires. */
 void testSoftmaxBackwardSymArmRejectsBfpWire(void) {
     quantization_t *floatQ = quantizationInitFloat();
     layerQuant_t lq;
@@ -2395,12 +2336,8 @@ int main() {
     RUN_TEST(testSoftmaxBackwardRejectsTransposedMultiRow);
     RUN_TEST(testSoftmaxBackwardEmptyRowsAreNoOp);
     RUN_TEST(testSoftmaxBackwardSymEmptyRowsAreNoOp);
-    RUN_TEST(testSoftmaxBackwardFloatRejectsShortLoss);
-    RUN_TEST(testSoftmaxBackwardFloatRejectsShortPropLoss);
-    RUN_TEST(testSoftmaxBackwardSymRejectsShortLoss);
-    RUN_TEST(testSoftmaxBackwardSymRejectsShortPropLoss);
-    RUN_TEST(testSoftmaxBackwardSymRejectsLongLoss);
-    RUN_TEST(testSoftmaxBackwardSymRejectsLongPropLoss);
+    RUN_TEST(testSoftmaxBackwardRejectsShortOrLongLoss);
+    RUN_TEST(testSoftmaxBackwardRejectsShortOrLongPropLoss);
     RUN_TEST(testSoftmaxBackwardFloatRejectsReshapedLoss);
     RUN_TEST(testSoftmaxBackwardSymRejectsReshapedPropLoss);
     RUN_TEST(testSoftmaxBackwardRejectsTransposedMultiRowGrads);
@@ -2415,14 +2352,13 @@ int main() {
     RUN_TEST(unitTestSoftmaxForwardBfpCoarseNegativeBlock);
     RUN_TEST(unitTestSoftmaxForwardBfpCoarseSaturation);
     RUN_TEST(unitTestSoftmaxForwardBfpRejectsAFloat32Input);
-    RUN_TEST(testSoftmaxForwardBfpRequiresBfpOutputQ);
 
     RUN_TEST(testSoftmaxForwardBfpAZeroGroupDoesNotSetTheMaxGrid);
     RUN_TEST(testSoftmaxBackwardBfpIsTheIntegerVjp);
     RUN_TEST(unitTestSoftmaxBackwardBfpNative);
     RUN_TEST(unitTestSoftmaxBackwardBfpStagedLoss);
-    RUN_TEST(testSoftmaxBackwardBfpRequiresBfpPropLossQ);
     RUN_TEST(testSoftmaxBackwardBfpRejectsCountMismatchLoss);
+    RUN_TEST(testSoftmaxBackwardBfpRejectsCountMismatchPropLoss);
     RUN_TEST(unitTestSoftmaxBackwardBfpNullPropLossIsNoOp);
     RUN_TEST(testSoftmaxBackwardFloatArmRejectsBfpWire);
     RUN_TEST(testSoftmaxBackwardSymArmRejectsBfpWire);
@@ -2431,9 +2367,10 @@ int main() {
     RUN_TEST(unitTestSoftmaxForwardBfpSingleRowRank2MatchesRank1);
     RUN_TEST(unitTestSoftmaxBackwardBfpSingleRowRank2MatchesRank1);
 
-    RUN_TEST(testSoftmaxLayerInitAndFreeRoundTrip);
     RUN_TEST(testSoftmaxLayerInitBorrowingStoresLqPointers);
     RUN_TEST(testSoftmaxLayerInitOwningDeepCopiesLqPointers);
+    RUN_TEST(testSoftmaxLayerInitRejectsIncoherentArithmetic);
+    RUN_TEST(testSoftmaxSetBfpExpShiftRoundingRejectsAnUnknownMode);
     RUN_TEST(testSoftmaxBfpSrPackIsAPureFunctionOfItsForwardOpKey);
     RUN_TEST(testSoftmaxBfpSrShiftsDrawFromTheForwardShiftStream);
     RUN_TEST(testSoftmaxSymBackwardConvertsWithItsBackwardConvertStream);

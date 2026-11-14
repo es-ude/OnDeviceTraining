@@ -13,7 +13,6 @@
 #include "LayerExec.h"
 #include "Softmax.h"
 #include "TensorConversion.h"
-#include "TensorRows.h"
 
 void softmaxInitConfig(softmaxConfig_t *softmaxConfig, quantization_t *forwardQ,
                        quantization_t *backwardQ) {
@@ -30,11 +29,32 @@ void softmaxInitLayer(layerConfig_t *softmaxConfig, layer_t *softmaxLayer) {
     softmaxLayer->config = softmaxConfig;
 }
 
-/* BFP epic PR6 Task 2: the float softmax, shared by the FLOAT32/SYM forward
- * kernel and by BOTH non-BFP backward arms, which recompute the softmax
- * OUTPUT from the layer INPUT they are actually handed (P6-1). Max by strict
- * `>` (first-wins on ties), expf, float sum in index order, divide;
- * softmaxValuesBfp below is the ARITH_BFP twin of exactly this contract. */
+static bool softmaxIsArithmetic(arithmeticType_t type) {
+    return type == ARITH_FLOAT32 || type == ARITH_SYM_INT32 || type == ARITH_BFP;
+}
+
+void softmaxValidateConfig(const softmaxConfig_t *cfg, const char *who) {
+    if (!softmaxIsArithmetic(cfg->forwardMath.type) ||
+        !softmaxIsArithmetic(cfg->propLossMath.type)) {
+        PRINT_ERROR("%s: forwardMath and propLossMath must be ARITH_FLOAT32, ARITH_SYM_INT32 or "
+                    "ARITH_BFP (got %d, %d)",
+                    who, (int)cfg->forwardMath.type, (int)cfg->propLossMath.type);
+        exit(1);
+    }
+    /* The ARITH_BFP arms take their staging widths from the produced-wire config. */
+    if (cfg->forwardMath.type == ARITH_BFP && cfg->outputQ->type != BFP) {
+        PRINT_ERROR("%s: ARITH_BFP forwardMath requires a BFP-typed outputQ", who);
+        exit(1);
+    }
+    if (cfg->propLossMath.type == ARITH_BFP && cfg->propLossQ->type != BFP) {
+        PRINT_ERROR("%s: ARITH_BFP propLossMath requires a BFP-typed propLossQ", who);
+        exit(1);
+    }
+}
+
+/* Shared by the forward kernel and both non-BFP backward arms, which recompute s from the
+ * logits. Max by strict `>` (first wins on ties), expf, float sum in index order, divide;
+ * softmaxValuesBfp is the ARITH_BFP twin of this contract. */
 static void softmaxValuesFloat(const float *x, float *s, size_t n) {
     // 1. find max
     float max = x[0];
@@ -58,19 +78,40 @@ static void softmaxValuesFloat(const float *x, float *s, size_t n) {
     }
 }
 
-/* #152: row = axis 0, a row spans every trailing dim, rank 1 = one row, more
- * than one storage row needs identity order -- the shared tensorRowGeometry
- * (TensorRows.h), the same rule CrossEntropy's one-hot rows use. */
-static void softmaxRowGeometry(const tensor_t *t, const char *where, size_t *rows, size_t *rowLen) {
-    tensorRowGeometry(t, where, rows, rowLen);
+/* Rows per the Softmax.h contract (TensorRows.h's rule, the one CrossEntropy's one-hot rows use).
+ * rowLen is the trailing-dimension product, not count / rows, so an empty leading axis cannot
+ * divide by zero. */
+static void softmaxRowGeometry(const shape_t *s, size_t *rows, size_t *rowLen) {
+    size_t first = (s->numberOfDimensions >= 2) ? 1 : 0;
+    *rows = (first == 1) ? s->dimensions[0] : 1;
+    size_t len = 1;
+    for (size_t d = first; d < s->numberOfDimensions; d++) {
+        len *= s->dimensions[d];
+    }
+    *rowLen = len;
 }
 
-/* Softmax's real compute is always float (numerically stable max-shifted exp);
- * SYM_INT32 forwardMath only ever meant "convert in, compute in float, convert
- * out" (never native SYM arithmetic like Linear/Conv), so the funnel's
- * prologue/epilogue perform that conversion automatically. Arithmetic is
- * hardcoded ARITH_FLOAT32 here on purpose — forwardMath no longer selects a
- * compute path, it only declares the layer's storage dtype. */
+/* The row walk runs over physical storage, so a permuted multi-row wire would normalize a
+ * partition that is not its logical rows. One storage row is the whole tensor in any order. */
+static void softmaxRequireRowOrder(const shape_t *s, const char *where) {
+    size_t rows;
+    size_t rowLen;
+    softmaxRowGeometry(s, &rows, &rowLen);
+    if (rows <= 1) {
+        return;
+    }
+    for (size_t d = 0; d < s->numberOfDimensions; d++) {
+        if (s->orderOfDimensions[d] != d) {
+            PRINT_ERROR("%s: a wire with %zu storage rows must be identity-order (dim %zu is "
+                        "order %zu)",
+                        where, rows, d, s->orderOfDimensions[d]);
+            exit(1);
+        }
+    }
+}
+
+/* Float compute for both ARITH_FLOAT32 and ARITH_SYM_INT32 forwardMath: the funnel's prologue and
+ * epilogue convert a SYM wire. */
 static void softmaxForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                  const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -79,7 +120,7 @@ static void softmaxForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, ten
     tensor_t *input = ops[0];
     size_t rows;
     size_t rowLen;
-    softmaxRowGeometry(input, "Softmax forward", &rows, &rowLen);
+    softmaxRowGeometry(input->shape, &rows, &rowLen);
     if (rowLen == 0) {
         return; /* empty rows: no max to read */
     }
@@ -92,9 +133,9 @@ static void softmaxForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, ten
     }
 }
 
-/* BFP epic PR6 Task 4 (P6-2..P6-5): the native ARITH_BFP softmax's integer
- * steps 1-4 -- pipeline contract docs/conventions/arithmetic-bfp.md §5.9
- * (R-S2); the goldgen mirrors this function statement for statement. Writes
+/* The native ARITH_BFP softmax's integer steps 1-4
+ * (docs/conventions/arithmetic-bfp.md §5.9; the goldgen mirrors this function
+ * statement for statement). Writes
  * the i-exp code qe_i (scale A * 2^-28, >= 0) of every element to `qe`; the
  * forward normalises them in integers (softmaxForwardBfpRaw), the backward's
  * recompute in float32 (softmaxValuesBfp), so both see the same codes.
@@ -120,7 +161,7 @@ static void softmaxExpCodesBfp(const tensor_t *input, bfpShiftRounding_t mode, i
      * reads; the cast keeps this helper's const-view contract. */
     const size_t n = calcNumberOfElementsByTensor((tensor_t *)input);
 
-    /* (1) Max (P6-4): the exact (code, E) compare, strict > keeps the FIRST
+    /* (1) Max: the exact (code, E) compare, strict > keeps the FIRST
      * max; remember the winner's mantissa and UNBIASED exponent -- the
      * alignment grid below. A code of an ALL-ZERO group never decides it
      * (§13's zero-group rule): such a group stores the zero state (E = 0),
@@ -167,14 +208,9 @@ static void softmaxExpCodesBfp(const tensor_t *input, bfpShiftRounding_t mode, i
         eMax = liveTop;
     }
 
-    /* (2) Align onto the work-grid-or-coarser common grid (THE lossy site --
-     * at most ONE rounded shift per element). When the storage grid is FINER
-     * than the work grid (sigma < 0), `down` folds the extra descent into
-     * that same shift -- never two chained roundings. The net shift si MAY be
-     * NEGATIVE: eMax follows the
-     * SIGNED argmax while block exponents follow the block ABSMAX, so a
-     * negative-dominated block is legitimately coarser than the argmax block
-     * (ei > eMax) -- such elements take an EXACT saturating LEFT shift. */
+    /* (2) Combine alignment and work-grid descent into one rounded shift; negative shifts are
+     * exact unless saturated. A shift is negative when a negative-dominated block is coarser
+     * than the signed argmax's block (ei > eMax). */
     const int32_t sigma = eMax + BFP_SOFTMAX_EXP_FRAC_BITS;
     const uint32_t down = (sigma < 0) ? (uint32_t)(-sigma) : 0u;
     const int32_t mMaxW = bfpShiftRightRounded(mMax, down, mode, shift);
@@ -187,26 +223,13 @@ static void softmaxExpCodesBfp(const tensor_t *input, bfpShiftRounding_t mode, i
         } else {
             const uint32_t up = (uint32_t)(-si);
             if (m[i] < 0 && (up >= 31u || m[i] < -(INT32_MAX >> up))) {
-                /* Saturate: the element's true value sits below the
-                 * exp-underflow floor up to a residual <= exp(-16); the
-                 * INT32_MIN/2 sentinel rides the qT clamp + thr/QFLOOR
-                 * handling below (headroom: |mMaxW| <= 2^30 keeps the qT
-                 * subtraction inside int32). The m[i] < -(INT32_MAX >> up)
-                 * form avoids negating INT32_MIN. */
+                /* Saturate negative overflow: the value sits below the exp-underflow floor.
+                 * |mMaxW| <= 2^30 keeps qT inside int32; the form avoids negating INT32_MIN. */
                 aligned = INT32_MIN / 2;
             } else {
-                /* Exact left shift, unsigned image (no signed-shift UB). For
-                 * m[i] > 0 it provably cannot overflow: x_i <= x_max gives
-                 * m_i * 2^(ei - eMax) <= mMax, and -si <= ei - eMax, so
-                 * aligned <= mMax -- with m_i >= 1 that also bounds
-                 * ei - eMax <= 30, i.e. up stays a valid shift count
-                 * (comment, not assert). m[i] == 0 is the one
-                 * non-negative code that proof does NOT bound: x_i = 0 puts
-                 * no cap on ei - eMax, so up can reach >= 32 -- a shift-count
-                 * UB (C11 6.5.7p3) even though the value is 0 either way.
-                 * The up >= 31 clause returns 0's exact shift (0) explicitly;
-                 * negatives with up >= 31 already saturated above (fix
-                 * round 2). */
+                /* Exact unsigned left shift. m[i] > 0 cannot overflow (x_i <= x_max bounds
+                 * aligned <= mMax); m[i] == 0 is unbounded in `up`, so handle zero separately
+                 * when the shift count exceeds the word width. */
                 aligned = (up >= 31u) ? 0 : (int32_t)((uint32_t)m[i] << up);
             }
         }
@@ -218,13 +241,9 @@ static void softmaxExpCodesBfp(const tensor_t *input, bfpShiftRounding_t mode, i
              * jitter maps to exp(0) instead. */
             qT = 0;
         }
-        /* (3) Work-grid promotion (exact). sigma >= 31: any nonzero deficit
-         * at scale >= 2^17 is >> 22.18 -> exact underflow. sigma >= 0:
-         * saturating exact left shift -- the thr guard keeps it inside int32
-         * (|qT| <= ceil(363392/2^sigma) => |qW| < 363392 + 2^sigma); the
-         * unsigned re-shift is the two's-complement image of qT * 2^sigma
-         * without the signed-left-shift UB (the BfpSoftmaxExp.c SR idiom).
-         * sigma < 0: qT is already ON the work grid from step (2). */
+        /* (3) Promote exactly to the work grid, saturating deficits below the exponential floor
+         * (thr keeps the unsigned left shift inside int32). sigma < 0: step (2) already landed
+         * on the work grid. */
         int32_t qW;
         if (sigma >= 31) {
             qW = (qT < 0) ? BFP_SOFTMAX_QFLOOR : 0;
@@ -361,8 +380,7 @@ typedef struct {
     rngStream_t *shift;
 } softmaxKernelCtx_t;
 
-/* A BFP_SHIFT_SR softmax draws from the FORWARD-phase shift stream; a key-less
- * call (inference()) has none. Checked once per call, not per shift. */
+/* A BFP_SHIFT_SR softmax draws from the forward-phase shift stream; a key-less call has none. */
 static void softmaxRequireShiftStream(const softmaxConfig_t *cfg, const rngStream_t *shift) {
     if (cfg->bfpExpShiftRounding == BFP_SHIFT_SR && shift == NULL) {
         PRINT_ERROR("Softmax: BFP_SHIFT_SR needs a key (run it through inferenceWithLoss with "
@@ -380,18 +398,14 @@ static void softmaxForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, 
     softmaxForwardBfpRaw(ops[0], kctx->cfg->bfpExpShiftRounding, kctx->shift, rawOut);
 }
 
-/* #152: the native BFP pipeline runs ONE max/alignment grid and
- * ONE partition sum over the whole wire. Per-row BFP softmax is out of scope,
- * so a multi-row call fails fast instead of normalizing across rows; a single
- * row ([N] or [1, N]) runs unchanged. */
+/* The native BFP pipeline runs one alignment grid and one partition sum over the whole wire. */
 static void softmaxBfpRequireSingleRow(const tensor_t *t, const char *where) {
     size_t rows;
     size_t rowLen;
-    softmaxRowGeometry(t, where, &rows, &rowLen);
+    softmaxRowGeometry(t->shape, &rows, &rowLen);
     if (rows > 1) {
-        PRINT_ERROR("%s: ARITH_BFP softmax takes a single row, got %zu rows of %zu elements "
-                    "(per-row BFP softmax is out of scope, #152)",
-                    where, rows, rowLen);
+        PRINT_ERROR("%s: ARITH_BFP softmax takes a single row, got %zu rows of %zu elements", where,
+                    rows, rowLen);
         exit(1);
     }
 }
@@ -403,8 +417,10 @@ enum {
     SOFTMAX_OP_PROP_LOSS = 1,
 };
 
-static void softmaxRequireInputDims(const tensor_t *input, const tensor_t *t, const char *where,
-                                    const char *what) {
+/* For a wire walked in flat storage order at the input's offsets: it needs the input's raw dims
+ * and, when multi-row, identity order. */
+static void softmaxRequireWire(const tensor_t *input, const tensor_t *t, const char *where,
+                               const char *what) {
     const shape_t *a = input->shape;
     const shape_t *b = t->shape;
     bool same = a->numberOfDimensions == b->numberOfDimensions;
@@ -416,24 +432,28 @@ static void softmaxRequireInputDims(const tensor_t *input, const tensor_t *t, co
                     where, what, a->numberOfDimensions, what, b->numberOfDimensions);
         exit(1);
     }
+    softmaxRequireRowOrder(b, where);
+}
+
+/* Admits the input; the caller admits the other wires against it. */
+static void softmaxRequireInput(layer_t *softmaxLayer, tensor_t *input) {
+    size_t rank = input->shape->numberOfDimensions;
+    size_t outDims[rank];
+    size_t outOrder[rank];
+    shape_t outShape = {.dimensions = outDims, .orderOfDimensions = outOrder};
+    softmaxCalcOutputShape(softmaxLayer, input->shape, &outShape);
 }
 
 void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output,
                     const layerExec_t *exec) {
     rngKey_t opKey;
     softmaxConfig_t *cfg = softmaxLayer->config->softmax;
-    /* #436: every arm writes y flat at the input's row offsets into a rawOut
-     * shaped like output -- a wider output is left partly unwritten, a
-     * multi-row permuted one silently transposed (softmaxBackwardRequireWires'
-     * twin). */
-    size_t outRows;
-    size_t outRowLen;
-    softmaxRowGeometry(output, "Softmax forward (output)", &outRows, &outRowLen);
-    softmaxRequireInputDims(input, output, "Softmax forward", "output");
+    softmaxRequireInput(softmaxLayer, input);
+    softmaxRequireWire(input, output, "Softmax forward", "output");
     switch (cfg->forwardMath.type) {
     case ARITH_BFP: {
         softmaxBfpRequireSingleRow(input, "Softmax forward");
-        const bfpQConfig_t *anchor = bfpWireAnchor(cfg->outputQ, "Softmax forward");
+        const bfpQConfig_t *anchor = cfg->outputQ->qConfig;
         bfpQConfig_t stage = {.exponents = NULL,
                               .numGroups = 1,
                               .groupSize = 0,
@@ -462,11 +482,8 @@ void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output,
     }
     case ARITH_FLOAT32:
     case ARITH_SYM_INT32:
-        /* P6-7: declared SYM math keeps its documented fake-quant meaning --
-         * compute in float, funnel prologue/epilogue convert. The opSpec
-         * arithmetic stays HARDCODED ARITH_FLOAT32 (NOT cfg->forwardMath):
-         * ARITH_SYM_INT32 would make the prologue unpack into int32 scratch
-         * the float kernel misreads through a float* cast. */
+        /* Fake-quant SYM: the op stays ARITH_FLOAT32, since ARITH_SYM_INT32 would unpack int32
+         * scratch the float kernel misreads. */
         executeOp(
             &(opSpec_t){.kernel = softmaxForwardKernel,
                         .key = layerExecOpKey(exec, RNG_TAG_FORWARD, SOFTMAX_OP_FORWARD, &opKey),
@@ -477,23 +494,11 @@ void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output,
                         .mode = OUT_WRITE},
             output);
         return;
-    default:
-        PRINT_ERROR("Softmax forward: declared forwardMath %d not implemented",
-                    (int)cfg->forwardMath.type);
-        exit(1);
     }
 }
 
-/* softmaxBackward's FLOAT32/SYM arms run OUTSIDE the funnel (PR2 Task 8: the
- * FLOAT32 arm raw-casts all three wires to float*, the SYM arm convertTensors
- * through them), so each arm guards its own wires against BFP storage. PR6
- * Task 5 retired the pre-dispatch BLANKET guard: BFP wires are now legal on
- * the backward -- the ARITH_BFP arm below routes them through the funnel. */
-
-/* The Jacobian-vector product s * (dLds - <s, dLds>) per row: the softmax
- * Jacobian is block-diagonal over rows (#152), so each row recomputes its own
- * s from its own logits (P6-1) and takes its own dot. `s` is one row of
- * scratch, reused across rows. */
+/* The Jacobian-vector product s * (dLds - <s, dLds>) per row: the Jacobian is block-diagonal
+ * over rows, so each row recomputes its own s from its own logits. */
 static void softmaxVjpRows(const float *x, const float *dLds, float *dLdx, size_t rows,
                            size_t rowLen) {
     if (rowLen == 0) {
@@ -514,32 +519,22 @@ static void softmaxVjpRows(const float *x, const float *dLds, float *dLdx, size_
     }
 }
 
-/* #457: both non-BFP arms walk loss/propLoss in flat storage order at the
- * input's offsets (raw float* casts, or scratch sized from the input count),
- * so each wire needs the input's dims -- else an OOB read/write, a
- * stack-scratch overflow, or (count-equal reshape) rows that no longer line
- * up -- and a multi-row wire must be identity-order, else a silent
- * mis-placement (the BatchNorm1d wire contract). Runs before any conversion;
- * returns the input count. */
-static size_t softmaxBackwardRequireWires(tensor_t *input, tensor_t *loss, tensor_t *propLoss,
-                                          size_t *rows, size_t *rowLen) {
-    size_t wireRows;
-    size_t wireRowLen;
-    softmaxRowGeometry(input, "Softmax backward", rows, rowLen);
-    softmaxRowGeometry(loss, "Softmax backward (loss)", &wireRows, &wireRowLen);
-    softmaxRowGeometry(propLoss, "Softmax backward (propLoss)", &wireRows, &wireRowLen);
-    softmaxRequireInputDims(input, loss, "Softmax backward", "loss");
-    softmaxRequireInputDims(input, propLoss, "Softmax backward", "propLoss");
-    return calcNumberOfElementsByTensor(input);
+/* The non-BFP arms run outside the funnel: FLOAT32 raw-casts all three wires, SYM converts
+ * through input-sized scratch. Legal BFP-storage arithmetics are FLOAT32 fake-quant (funnel only)
+ * and native BFP, so both arms deny BFP wires. */
+static void softmaxRequireNonBfpGradWires(tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
+    bfpRequireNoBfpWire(input, "Softmax backward (input)");
+    bfpRequireNoBfpWire(loss, "Softmax backward (loss)");
+    bfpRequireNoBfpWire(propLoss, "Softmax backward (propLoss)");
+    softmaxRequireWire(input, loss, "Softmax backward", "loss");
+    softmaxRequireWire(input, propLoss, "Softmax backward", "propLoss");
 }
 
-/* P6-1 root fix: the training loop hands every backward the layer INPUT
- * (logits), not the softmax OUTPUT the Jacobian needs -- softmaxVjpRows
- * recomputes it. */
+/* The training loop hands the backward the logits, not s; softmaxVjpRows recomputes s. */
 static void softmaxBackwardFloat(tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
     size_t rows;
     size_t rowLen;
-    softmaxBackwardRequireWires(input, loss, propLoss, &rows, &rowLen);
+    softmaxRowGeometry(input->shape, &rows, &rowLen);
     softmaxVjpRows((const float *)input->data, (const float *)loss->data, (float *)propLoss->data,
                    rows, rowLen);
 }
@@ -548,9 +543,10 @@ static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *p
                                     rngStream_t *convert) {
     size_t rows;
     size_t rowLen;
-    size_t inputSize = softmaxBackwardRequireWires(input, loss, propLoss, &rows, &rowLen);
+    softmaxRowGeometry(input->shape, &rows, &rowLen);
+    size_t inputSize = calcNumberOfElementsByTensor(input);
     if (inputSize == 0) {
-        return; /* #457: no zero-length scratch VLAs */
+        return; /* no zero-length scratch VLAs */
     }
 
     tensor_t inputFloat;
@@ -572,10 +568,7 @@ static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *p
     initFloat32Quantization(&propLossFloatQ);
     uint8_t propLossFloatData[inputSize * sizeof(float)];
     setTensorValuesForConversion(propLossFloatData, &propLossFloatQ, propLoss, &propLossFloat);
-    convertTensor(propLoss, &propLossFloat, NULL);
 
-    /* P6-1 root fix: same recompute as the float arm -- the dequantized
-     * inputFloat is the layer INPUT (logits), not the softmax OUTPUT. */
     softmaxVjpRows((const float *)inputFloat.data, (const float *)lossFloat.data,
                    (float *)propLossFloat.data, rows, rowLen);
 
@@ -603,9 +596,8 @@ static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *p
  * Error: at most half a unit of each 15-bit cut, the dot's alignments
  * (n/2 units of 2^E_d) and p's Q30 rounding -- about 2^-15 of the group's
  * largest |dx|, below an m <= 15 wire's step (about one step at m = 16).
- * No float, no division. The loss-count gate is load-bearing (the #436 OOB
- * class): a shorter per-tensor {1, 0} loss passes every grid check. The arm
- * is single-row (softmaxBfpRequireSingleRow, #152). */
+ * No float, no division. The caller guarantees one row and equal x/loss
+ * counts. */
 #define SOFTMAX_VJP_BITS 15
 static void softmaxBackwardKernelBfp(tensor_t **ops, size_t nOps, tensor_t *rawOut,
                                      tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
@@ -627,15 +619,11 @@ static void softmaxBackwardKernelBfp(tensor_t **ops, size_t nOps, tensor_t *rawO
     if (n == 0) {
         return;
     }
-    const bfpQConfig_t *xQC = x->quantization->qConfig;
     const bfpQConfig_t *lQC = dLdsT->quantization->qConfig;
-    validateBfpQConfigShape(xQC, n);
-    bfpRequireElementCount(lQC, calcNumberOfElementsByTensor(dLdsT), n,
-                           "Softmax backward BFP (loss)");
 
     int32_t *mant = (int32_t *)rawOut->data;
-    softmaxExpCodesBfp(x, cfg->bfpExpShiftRounding, mant, kctx->shift); /* P6-6: R-N4 recompute */
-    softmaxNormalizeRaw(mant, n);                                       /* p, Q30 */
+    softmaxExpCodesBfp(x, cfg->bfpExpShiftRounding, mant, kctx->shift);
+    softmaxNormalizeRaw(mant, n); /* p, Q30 */
 
     const int32_t lBias = bfpExponentBias(lQC);
     const int32_t *gArr = (const int32_t *)dLdsT->data;
@@ -690,26 +678,27 @@ static void softmaxBackwardKernelBfp(tensor_t **ops, size_t nOps, tensor_t *rawO
     }
 }
 
+/* The BFP arm's walks run the input's flat count over loss and the raw out. */
+static void softmaxBfpRequireCount(tensor_t *t, size_t n, const char *what) {
+    size_t got = calcNumberOfElementsByTensor(t);
+    if (got != n) {
+        PRINT_ERROR("Softmax backward BFP: %s holds %zu elements, the input %zu", what, got, n);
+        exit(1);
+    }
+}
+
 void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, tensor_t *propLoss,
                      const layerExec_t *exec) {
     rngKey_t opKey;
     softmaxConfig_t *cfg = softmaxLayer->config->softmax;
+    softmaxRequireInput(softmaxLayer, input);
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:
-        bfpRequireNoBfpWire(input, "Softmax backward (input)");
-        bfpRequireNoBfpWire(loss, "Softmax backward (loss)");
-        bfpRequireNoBfpWire(propLoss, "Softmax backward (propLoss)");
+        softmaxRequireNonBfpGradWires(input, loss, propLoss);
         softmaxBackwardFloat(input, loss, propLoss);
         break;
     case ARITH_SYM_INT32:
-        /* BFP wires under DECLARED SYM math stay denied. Not because
-         * convertTensor would fail (the BFP->FLOAT32 cell exists and this arm
-         * would silently "work") but as the outside-funnel twin of the funnel's
-         * PR2-Decision-11 deny: legal BFP-storage arithmetics are FLOAT32
-         * (fake-quant) and BFP (native) only. */
-        bfpRequireNoBfpWire(input, "Softmax backward (input)");
-        bfpRequireNoBfpWire(loss, "Softmax backward (loss)");
-        bfpRequireNoBfpWire(propLoss, "Softmax backward (propLoss)");
+        softmaxRequireNonBfpGradWires(input, loss, propLoss);
         rngStream_t convertStorage;
         softmaxBackwardSymInt32(
             input, loss, propLoss,
@@ -717,10 +706,13 @@ void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, ten
         break;
     case ARITH_BFP: {
         if (propLoss == NULL) {
-            return; /* P6-6: no param grads, no ops to run */
+            return; /* no param grads, no ops to run */
         }
         softmaxBfpRequireSingleRow(input, "Softmax backward");
-        const bfpQConfig_t *anchor = bfpWireAnchor(cfg->propLossQ, "Softmax backward");
+        size_t n = calcNumberOfElementsByTensor(input);
+        softmaxBfpRequireCount(loss, n, "loss");
+        softmaxBfpRequireCount(propLoss, n, "propLoss");
+        const bfpQConfig_t *anchor = cfg->propLossQ->qConfig;
         /* Known deviation, kept on purpose: a FLOAT32-stored input is
          * re-staged here with propLossMath's rounding and the BACKWARD op's
          * stage stream, while the forward staged it with forwardMath's and the
@@ -754,14 +746,12 @@ void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, ten
             propLoss);
         break;
     }
-    default:
-        PRINT_ERROR("Softmax backward: declared propLossMath %d not implemented",
-                    (int)cfg->propLossMath.type);
-        exit(1);
     }
 }
 
 void softmaxCalcOutputShape(layer_t *softmaxLayer, shape_t *inputShape, shape_t *outputShape) {
+    (void)softmaxLayer;
+    softmaxRequireRowOrder(inputShape, "Softmax");
     memcpy(outputShape->dimensions, inputShape->dimensions,
            inputShape->numberOfDimensions * sizeof(size_t));
     memcpy(outputShape->orderOfDimensions, inputShape->orderOfDimensions,

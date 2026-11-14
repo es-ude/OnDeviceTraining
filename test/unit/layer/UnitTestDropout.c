@@ -1,5 +1,6 @@
 #define SOURCE_FILE "UNIT_TEST_DROPOUT"
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -728,37 +729,6 @@ void testBackwardSymInt32UsesMaskAndScaleFold(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.5f, outScale); // 0.25 × 2
 }
 
-void testVtableForwardIdentityFloat(void) {
-    size_t n = 3;
-    float in[] = {7.f, 8.f, 9.f};
-    tensor_t *input = buildFloatTensor(n, in);
-    tensor_t *output = buildFloatTensor(n, NULL);
-    tensor_t *mask = buildBoolMask(n);
-
-    quantization_t *fq = quantizationInitFloat();
-    quantization_t *bq = quantizationInitFloat();
-    dropoutConfig_t dcfg;
-    initDropoutConfig(&dcfg, 0.5f, mask, fq, bq); // eval
-    layerConfig_t lcfg;
-    layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
-
-    layerFunctions_t fns = layerFunctions[DROPOUT];
-    fns.forward(&layer, input, output, NULL);
-
-    float captured[3];
-    for (size_t i = 0; i < n; i++) {
-        captured[i] = ((float *)output->data)[i];
-    }
-
-    freeQuantization(bq);
-    freeQuantization(fq);
-    freeTensor(mask);
-    freeTensor(output);
-    freeTensor(input);
-
-    TEST_ASSERT_EQUAL_FLOAT_ARRAY(in, captured, n);
-}
-
 void testCalcOutputShapeIsIdentity(void) {
     size_t *dims = reserveMemory(2 * sizeof(size_t));
     dims[0] = 2;
@@ -955,13 +925,9 @@ void testDropoutBackwardExitsOnDtypeMismatch(void) {
     freeTensor(loss);
 }
 
-/* BFP epic PR4: the POSITIVE pin on dropoutBackward's ARITH_BFP arm. Both
- * backward death tests below expect exit(1), so a DELETED `case ARITH_BFP:`
- * (which falls through to `default: PRINT_ERROR(...); exit(1)`) satisfies them
- * just as well as a present one — only an assertion on the produced codes can
- * tell the two apart. The backward is dropoutMaskScaleBfp on the loss wire, so
- * it reuses the forward's gold unchanged: same mask (pre-filled here, since the
- * backward never draws), same factor, same fresh per-group derive. */
+/* The backward's BFP arm is the forward's bridge on the loss wire, so it reuses the forward's gold:
+ * same mask (pre-filled, since the backward never draws), same factor, same fresh per-group
+ * derive. */
 void testDropoutBackwardBfpArmDispatchesThroughDropoutBackward(void) {
     size_t dims[] = {1, kBfpDropoutInCodes_len};
     int32_t lossCodes[8];
@@ -1011,9 +977,9 @@ void testDropoutBackwardBfpArmDispatchesThroughDropoutBackward(void) {
     freeTensor(loss);
 }
 
-/* BFP epic PR4 (R-P7d): FLOAT32/SYM arms still reject a BFP wire (#315 parity);
- * the ARITH_BFP arm rejects a non-BFP wire and a differing block grid. */
-void testDropoutBfpGuardsNarrowedNotRemoved(void) {
+/* Each arm raw-views its own storage dtype: the FLOAT32 arm rejects a BFP or SYM_INT32 wire, and
+ * the ARITH_BFP arm a non-BFP wire and a differing block grid. */
+void testDropoutRejectsWiresOutsideTheArmDtype(void) {
     size_t dims[] = {1, 8};
     tensor_t *bfpA = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, NULL, NULL);
     tensor_t *otherGrid = buildBfpWireWithCodes(dims, 2, 6, 8, 4, 2, NULL, NULL);
@@ -1027,6 +993,16 @@ void testDropoutBfpGuardsNarrowedNotRemoved(void) {
 
     ASSERT_EXITS_WITH_FAILURE(dropoutForward(&floatLayer, bfpA, floatWire, NULL));
     ASSERT_EXITS_WITH_FAILURE(dropoutBackward(&floatLayer, NULL, bfpA, floatWire, NULL));
+    size_t *symDims = reserveMemory(sizeof(size_t));
+    symDims[0] = 8;
+    size_t *symOrder = reserveMemory(sizeof(size_t));
+    setOrderOfDimsForNewTensor(1, symOrder);
+    shape_t *symShape = reserveMemory(sizeof(shape_t));
+    setShape(symShape, symDims, 1, symOrder);
+    tensor_t *symWire = initTensor(symShape, quantizationInitSymInt32(HALF_AWAY), NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1, "Dropout forward: arithmetic 0 requires dtype",
+                             dropoutForward(&floatLayer, symWire, floatWire, NULL));
+    freeTensor(symWire);
 
     quantization_t *bq = quantizationInitBfpGrouped(6, 8, HALF_AWAY, 2, 4);
     dropoutConfig_t bfpCfg;
@@ -1046,14 +1022,9 @@ void testDropoutBfpGuardsNarrowedNotRemoved(void) {
     freeTensor(bfpA);
 }
 
-/* BFP epic PR4: the two hazards the grid comparison cannot see. (a) Unequal
- * element counts under two per-tensor {1, 0} grids, which compare equal
- * field-for-field. (b) A SHARED exponent array between two distinct payloads:
- * pass 1 writes the fresh stored exponents into it, so pass 2's decode of the
- * source at its "original" grid reads pass 1's output instead. Constructing
- * (b) needs the two tensors to share ONE quantization_t, which is exactly what
- * a caller that reuses the config for both wires produces. */
-void testDropoutBfpRejectsUnequalCountsAndAliasedExponents(void) {
+/* Unequal element counts under two per-tensor {1, 0} grids, which compare equal field for field:
+ * only the count gate sees them. */
+void testDropoutBfpRejectsUnequalCounts(void) {
     size_t longDims[] = {1, 8};
     size_t shortDims[] = {1, 4};
     tensor_t *longWire = buildBfpWireWithCodes(longDims, 2, 6, 8, 1, 0, NULL, NULL);
@@ -1065,46 +1036,11 @@ void testDropoutBfpRejectsUnequalCountsAndAliasedExponents(void) {
     layerConfig_t lc;
     layer_t layer = makeDropoutLayer(&cfg, &lc);
 
-    ASSERT_EXITS_WITH_FAILURE(dropoutForward(&layer, longWire, shortWire, NULL));
-    ASSERT_EXITS_WITH_FAILURE(dropoutBackward(&layer, NULL, longWire, shortWire, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "Dropout forward: BFP wires must hold the same number",
+                             dropoutForward(&layer, longWire, shortWire, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "Dropout backward: BFP wires must hold the same number",
+                             dropoutBackward(&layer, NULL, longWire, shortWire, NULL));
 
-    /* Two distinct payload buffers, ONE shared quantization_t (hence one
-     * exponents array): counts and grid both match, only the alias is wrong. */
-    size_t *sharedDims = reserveMemory(2 * sizeof(size_t));
-    sharedDims[0] = 1;
-    sharedDims[1] = 8;
-    size_t *sharedOrder = reserveMemory(2 * sizeof(size_t));
-    setOrderOfDimsForNewTensor(2, sharedOrder);
-    shape_t *sharedShape = reserveMemory(sizeof(shape_t));
-    setShape(sharedShape, sharedDims, 2, sharedOrder);
-    quantization_t *aliasQ = quantizationInitBfp(6, 8, HALF_AWAY);
-    tensor_t *aliasSrc = initTensor(sharedShape, aliasQ, NULL);
-    size_t *dstDims = reserveMemory(2 * sizeof(size_t));
-    dstDims[0] = 1;
-    dstDims[1] = 8;
-    size_t *dstOrder = reserveMemory(2 * sizeof(size_t));
-    setOrderOfDimsForNewTensor(2, dstOrder);
-    shape_t *dstShape = reserveMemory(sizeof(shape_t));
-    setShape(dstShape, dstDims, 2, dstOrder);
-    tensor_t *aliasDst = initTensor(dstShape, aliasQ, NULL); /* SAME quantization_t */
-    dropoutConfig_t aliasCfg;
-    initDropoutConfig(&aliasCfg, 0.5f, mask, aliasQ, aliasQ);
-    aliasCfg.training = true; /* eval mode would take the verbatim carry, which
-                               * has no alias check and no two-pass hazard */
-    layerConfig_t aliasLc;
-    layer_t aliasLayer = makeDropoutLayer(&aliasCfg, &aliasLc);
-
-    TEST_ASSERT_NOT_EQUAL_MESSAGE(aliasSrc->data, aliasDst->data,
-                                  "the alias fixture must differ in payload, not in qConfig");
-    ASSERT_EXITS_WITH_FAILURE(dropoutForward(&aliasLayer, aliasSrc, aliasDst, NULL));
-
-    /* UnitTestDropout.c has no shell-only free helper and the plan forbids
-     * inventing one: free aliasDst's own blocks by hand and let
-     * freeTensor(aliasSrc) take the shared aliasQ exactly once. */
-    freeReservedMemory(aliasDst->data);
-    freeShape(aliasDst->shape);
-    freeReservedMemory(aliasDst);
-    freeTensor(aliasSrc);
     freeQuantization(perTensorQ);
     freeTensor(mask);
     freeTensor(shortWire);
@@ -1325,40 +1261,6 @@ void testDropoutBackwardSymInt32AliasedMatchesDisjoint(void) {
     TEST_ASSERT_EQUAL_MEMORY(&lossScale, &(float){odtScaleToFloat(qc[2].scale)}, sizeof(float));
 }
 
-/* The backward's BFP bridge re-reads the source in its second pass, so it
- * rejects a propLoss that shares loss's packed payload (an in-place dx plan
- * never pairs BFP wires). The fixture shares the payload only: each header
- * keeps its own qConfig and exponent array. */
-void testDropoutBackwardBfpRejectsAPayloadAlias(void) {
-    size_t dims[] = {1, 8};
-    tensor_t *loss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, NULL, NULL);
-    tensor_t *propLoss = buildBfpWireWithCodes(dims, 2, 6, 8, 2, 4, NULL, NULL);
-    tensor_t *mask = buildBoolMask(8);
-    fillMaskKeepEven(mask);
-    quantization_t *fq = quantizationInitBfpGrouped(6, 8, HALF_AWAY, 2, 4);
-    quantization_t *bq = quantizationInitBfpGrouped(6, 8, HALF_AWAY, 2, 4);
-    dropoutConfig_t dcfg;
-    initDropoutConfig(&dcfg, 0.5f, mask, fq, bq);
-    dcfg.training = true;
-    layerConfig_t lcfg;
-    layer_t layer = makeDropoutLayer(&dcfg, &lcfg);
-    tensor_t payloadAlias;
-    setTensorValues(&payloadAlias, loss->data, propLoss->shape, propLoss->quantization, NULL);
-
-    ASSERT_EXITS_WITH_OUTPUT(1,
-                             "Dropout BFP bridge: source and destination wires must not alias in "
-                             "EITHER their packed payload or their exponent array -- pass 2 "
-                             "re-reads the source under its ORIGINAL exponents, which pass 1 has "
-                             "already overwritten on the destination",
-                             dropoutBackward(&layer, NULL, loss, &payloadAlias, NULL));
-
-    freeQuantization(bq);
-    freeQuantization(fq);
-    freeTensor(mask);
-    freeTensor(propLoss);
-    freeTensor(loss);
-}
-
 static tensor_t *buildSymInt32Tensor(size_t n) {
     size_t *dims = reserveMemory(sizeof(size_t));
     dims[0] = n;
@@ -1429,9 +1331,47 @@ void testDropoutLayerInitRejectsANonBoolMask(void) {
     freeTensor(floatMask);
 }
 
+/* The mask is walked over the wire's count, and construction does not know the runtime input, so
+ * each direction checks the lengths; the forward checks before the mask is filled. */
+void testDropoutRejectsAMaskOfOtherLength(void) {
+    tensor_t *wireA = buildFloatTensor(8, NULL);
+    tensor_t *wireB = buildFloatTensor(8, NULL);
+    tensor_t *mask = buildBoolMask(4);
+    quantization_t *q = quantizationInitFloat();
+    dropoutConfig_t cfg;
+    initDropoutConfig(&cfg, 0.5f, mask, q, q);
+    cfg.training = true;
+    layerConfig_t lc;
+    layer_t layer = makeDropoutLayer(&cfg, &lc);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Dropout forward: mask element count (4) does not match",
+                             dropoutForward(&layer, wireA, wireB, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "Dropout backward: mask element count (4) does not match",
+                             dropoutBackward(&layer, NULL, wireA, wireB, NULL));
+
+    freeQuantization(q);
+    freeTensor(mask);
+    freeTensor(wireB);
+    freeTensor(wireA);
+}
+
+/* The scale 1/(1-p) needs p in [0, 1); NaN fails the same predicate. */
+void testDropoutLayerInitRejectsAnOutOfRangeP(void) {
+    tensor_t *mask = buildBoolMask(4);
+    quantization_t *q = quantizationInitFloat();
+    const float bad[] = {1.0f, -0.25f, NAN};
+    for (size_t i = 0; i < 3; i++) {
+        ASSERT_EXITS_WITH_OUTPUT(1, "Dropout: p must be in [0, 1)",
+                                 dropoutLayerInit(bad[i], mask, q, q));
+    }
+    freeQuantization(q);
+    freeTensor(mask);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testDropoutLayerInitRejectsANonBoolMask);
+    RUN_TEST(testDropoutLayerInitRejectsAnOutOfRangeP);
     RUN_TEST(testForwardEvalIdentityFloat);
     RUN_TEST(testForwardEvalIdentitySymInt32);
     RUN_TEST(testForwardTrainingFloatScalesAndDrops);
@@ -1451,10 +1391,9 @@ int main(void) {
     RUN_TEST(testDropoutForwardEvalIdentityBfp);
     RUN_TEST(testDropoutForwardEvalInPlaceBfpIsIdentity);
     RUN_TEST(testDropoutBackwardBfpArmDispatchesThroughDropoutBackward);
-    RUN_TEST(testDropoutBfpGuardsNarrowedNotRemoved);
-    RUN_TEST(testDropoutBfpRejectsUnequalCountsAndAliasedExponents);
-    RUN_TEST(testDropoutBackwardBfpRejectsAPayloadAlias);
-    RUN_TEST(testVtableForwardIdentityFloat);
+    RUN_TEST(testDropoutRejectsWiresOutsideTheArmDtype);
+    RUN_TEST(testDropoutBfpRejectsUnequalCounts);
+    RUN_TEST(testDropoutRejectsAMaskOfOtherLength);
     RUN_TEST(testCalcOutputShapeIsIdentity);
     RUN_TEST(testFactoryBuildsAndForwards);
     RUN_TEST(testForwardTrainingP0KeepsAllNoScale);

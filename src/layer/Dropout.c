@@ -22,17 +22,21 @@ static float dropoutScale(float p) {
     return 1.0f / (1.0f - p);
 }
 
-void initDropoutConfig(dropoutConfig_t *cfg, float p, tensor_t *mask, quantization_t *forwardQ,
-                       quantization_t *backwardQ) {
-    if (!(p >= 0.0f && p < 1.0f)) {
-        PRINT_ERROR("Dropout: p must be in [0, 1), got %f", (double)p);
+void dropoutValidateConfig(const dropoutConfig_t *cfg, const char *who) {
+    if (!(cfg->p >= 0.0f && cfg->p < 1.0f)) {
+        PRINT_ERROR("%s: p must be in [0, 1), got %f", who, (double)cfg->p);
         exit(1);
     }
+}
+
+void initDropoutConfig(dropoutConfig_t *cfg, float p, tensor_t *mask, quantization_t *forwardQ,
+                       quantization_t *backwardQ) {
+    cfg->p = p;
+    dropoutValidateConfig(cfg, "Dropout");
     if (mask == NULL || mask->quantization->type != BOOL) {
         PRINT_ERROR("Dropout: mask must be a caller-allocated BOOL tensor");
         exit(1);
     }
-    cfg->p = p;
     cfg->training = false;
     cfg->mask = mask;
     cfg->forwardMath = arithmeticFromQuantizationOrDefault(forwardQ);
@@ -42,16 +46,31 @@ void initDropoutConfig(dropoutConfig_t *cfg, float p, tensor_t *mask, quantizati
     cfg->ownsQuantizations = false;
 }
 
-/* BFP epic PR4 (R-P3): Dropout still runs OUTSIDE the executeOp funnel — each
- * arm raw-views ->data in ITS OWN storage format, so the guard stays keyed on
- * the wire's STORAGE dtype and is only NARROWED per arm: the FLOAT32/SYM_INT32
- * arms keep rejecting a packed BFP wire, while the ARITH_BFP arm requires both
- * wires BFP-stored. */
-static void requireBfpWire(const tensor_t *t, const char *what) {
-    if (t->quantization->type != BFP) {
-        PRINT_ERROR("%s: the ARITH_BFP arm requires BFP-stored wires -- got dtype %d; see "
-                    "docs/conventions/arithmetic-bfp.md §5.7",
-                    what, (int)t->quantization->type);
+/* This path operates directly on storage; admit compatible wire dtypes before applying it. Each
+ * arithmetic reads its own storage dtype, and the BFP arms copy codes between equal geometries. */
+static void dropoutRequireWires(tensor_t *src, tensor_t *dst, arithmeticType_t math,
+                                const char *where) {
+    static const qtype_t wireType[] = {
+        [ARITH_FLOAT32] = FLOAT32, [ARITH_SYM_INT32] = SYM_INT32, [ARITH_BFP] = BFP};
+    if (src->quantization->type != wireType[math] || dst->quantization->type != wireType[math]) {
+        PRINT_ERROR("%s: arithmetic %d requires dtype %d wires, got %d and %d", where, (int)math,
+                    (int)wireType[math], (int)src->quantization->type,
+                    (int)dst->quantization->type);
+        exit(1);
+    }
+    if (math == ARITH_BFP) {
+        bfpRequireSameGeometry(src->quantization->qConfig, calcNumberOfElementsByTensor(src),
+                               dst->quantization->qConfig, calcNumberOfElementsByTensor(dst),
+                               where);
+    }
+}
+
+static void dropoutRequireMaskCount(const dropoutConfig_t *cfg, tensor_t *t, const char *where) {
+    size_t maskElements = calcNumberOfElementsByTensor(cfg->mask);
+    size_t elements = calcNumberOfElementsByTensor(t);
+    if (maskElements != elements) {
+        PRINT_ERROR("%s: mask element count (%zu) does not match the wire (%zu)", where,
+                    maskElements, elements);
         exit(1);
     }
 }
@@ -98,27 +117,12 @@ static void dropoutForwardSymInt32(dropoutConfig_t *cfg, tensor_t *input, tensor
     storeCanonScale(&outQC->scale, canonCoeffScale(loadCanonScale(&inQC->scale), scale));
 }
 
-/* Eval-mode / mask-free carry: identical element count and geometry mean
- * identical packed byte counts, so the payload moves verbatim and the group
- * exponents are memcpy'd — the R-P2 transparency argument, unchanged values.
- * The byte count is sized off SRC and written into DST, so the gate runs here
- * too rather than being left to the caller (PR4 idiom).
- *
- * Unlike the bridge below, aliasing is ACCEPTED, not rejected: this is a
- * one-pass verbatim copy, so copying a wire onto itself is the identity —
- * exactly what eval mode promises — and requireBfpPairForArm admits src == dst
- * (one wire passed as both input and output satisfies every count/grid/width
- * check). It must not reach the memcpys, though: their parameters are
- * restrict-qualified, so memcpy(p, p, n) is formally undefined even where every
- * real libc is benign. Each copy is skipped on ITS OWN alias rather than
- * returning on the payload's, so a pair that aliases in one block but not the
- * other still carries the block it does not alias. */
+/* Eval preserves codes and exponents. Skip each copy independently when its storage aliases
+ * (memcpy onto itself is undefined). */
 static void dropoutCopyBfpVerbatim(tensor_t *src, tensor_t *dst) {
     size_t numberOfElements = calcNumberOfElementsByTensor(src);
     const bfpQConfig_t *srcQC = src->quantization->qConfig;
     bfpQConfig_t *dstQC = dst->quantization->qConfig;
-    bfpRequireSameGeometry(srcQC, numberOfElements, dstQC, calcNumberOfElementsByTensor(dst),
-                           "Dropout BFP verbatim carry");
     if (src->data != dst->data) {
         memcpy(dst->data, src->data, calcNumberOfBytesForData(src->quantization, numberOfElements));
     }
@@ -127,51 +131,16 @@ static void dropoutCopyBfpVerbatim(tensor_t *src, tensor_t *dst) {
     }
 }
 
-/* BFP epic PR4 (R-P3, BFP D4 + deviations register 5, docs/conventions/arithmetic-bfp.md §12):
- * Dropout is non-native BY DECISION — 1/(1-p) is not a power of two, so unlike SYM there is no
- * single scale to fold it into and no exponent shift that expresses it. One float bridge, walked in
- * TWO passes over the packed payload: pass 1 derives every group's FRESH exponent from the
- * masked-and-scaled absmax, pass 2 decodes at the source grid, applies mask+factor and requantizes
- * onto the fresh grid. The skeleton is scaleBfpTensorInPlace's (TensorConversion.c) with the mask
- * fused in — cite, do NOT call: that primitive is in-place on ONE tensor and
- * cannot fuse a mask.
- *
- * Re-deriving here is NOT the double quantization BFP D8 (arithmetic-bfp.md §9) forbids: the
- * multiply CHANGES the values, so the fresh exponents quantize NEW numbers.
- * Rounding is the DESTINATION config's own storage roundingMode (#282
- * target-owned convention, scaleBfpTensorInPlace precedent) — Dropout runs
- * outside the funnel and has no op-owned rounding slot to swap in.
- * p = 0.5 is exact and falls out of the float path; no power-of-two
- * special-casing. The BOOL mask is dtype-agnostic and needs no BFP handling. */
+/* Requires disjoint payloads and exponent arrays: pass 2 re-reads the source under the exponents
+ * pass 1 overwrote on the destination. Derive destination exponents before requantizing masked,
+ * scaled values; use destination rounding. A float bridge because 1/(1-p) is no power of two
+ * (docs/conventions/arithmetic-bfp.md §12); the fresh exponents quantize new values, so this is
+ * no double quantization. */
 static void dropoutMaskScaleBfp(dropoutConfig_t *cfg, tensor_t *src, tensor_t *dst,
                                 rngStream_t *bridge) {
     size_t n = calcNumberOfElementsByTensor(src);
     const bfpQConfig_t *srcQC = src->quantization->qConfig;
     bfpQConfig_t *dstQC = dst->quantization->qConfig;
-    bfpRequireSameGeometry(srcQC, n, dstQC, calcNumberOfElementsByTensor(dst),
-                           "Dropout BFP bridge");
-    /* TWO aliases to reject, not one. The payload alias is the obvious half.
-     * The EXPONENT-ARRAY alias is the subtle one: pass 1 writes fresh stored
-     * exponents into dstQC->exponents, and pass 2 then reads srcQC->exponents
-     * to decode at the ORIGINAL grid — if the two qConfigs share one exponent
-     * array (or are literally the same qConfig object, which a caller that
-     * reuses one quantization_t for both wires produces), pass 1 has already
-     * destroyed the grid pass 2 depends on and every decoded value is wrong.
-     * A two-pass walk fails fast on aliasing instead of silently miscomputing.
-     *
-     * The exponents term is unreachable through today's API: every
-     * quantizationInitBfp / …Grouped allocates its own exponents block, so two
-     * DISTINCT qConfigs cannot share one and the only constructible alias is
-     * the shared quantization_t caught by srcQC == dstQC. It stays as defence
-     * for a future borrowed / non-owning qConfig, not as dead code. */
-    if (src->data == dst->data || srcQC == dstQC || srcQC->exponents == dstQC->exponents) {
-        PRINT_ERROR("Dropout BFP bridge: source and destination wires must not alias in EITHER "
-                    "their packed payload or their exponent array -- pass 2 re-reads the source "
-                    "under its ORIGINAL exponents, which pass 1 has already overwritten on the "
-                    "destination");
-        exit(1);
-    }
-
     const float factor = dropoutScale(cfg->p);
     const float qMax = powf(2, (float)dstQC->mantissaBits - 1) - 1;
     const float qMin = -powf(2, (float)dstQC->mantissaBits - 1);
@@ -212,33 +181,9 @@ static void dropoutMaskScaleBfp(dropoutConfig_t *cfg, tensor_t *src, tensor_t *d
         }
     }
 
-    /* pass 2: decode at the source grid, mask+scale, requantize at the fresh
-     * one; clamp before the write (value-domain saturation, BFP D6).
-     *
-     * PR4 adversarial gate: the saturation clamp runs in the FLOAT domain
-     * FIRST, the same order scaleBfpTensorInPlace's pass 2 uses (this bridge's
-     * skeleton). In the BFP D6 cap regime a destination group has NO headroom left
-     * -- its exponent is pinned at maxStored -- so v / dstScale can exceed
-     * int32 range for entirely finite, in-contract inputs (a narrow
-     * exponentBits plus a factor 1/(1-p) that legally reaches 2^24), and
-     * (int32_t)round(x) is undefined there (C17 6.3.1.4). Behaviour-identical
-     * to clamping after the round for every DEFINED case: in range the float
-     * clamp is the identity, and outside it roundByMode is monotone, so both
-     * orders land on the same boundary code.
-     *
-     * The clampInt32 behind it is defensive: SR_HALF_AWAY is exact, so a float
-     * clamp onto an exactly representable qMax/qMin has no fraction and never
-     * moves. It stays for grids whose float bound is not exact (wide SYM grids,
-     * q >= 25) and covers both bounds.
-     *
-     * NaN never reaches the clamp, so its comparison-based form is safe: the
-     * decoded mantissa is a finite int, factor is finite (initDropoutConfig
-     * pins p to [0, 1)), and both scales are finite non-zero powers of two
-     * (deriveBfpStoredExponent caps the stored exponent at bias + 127, the
-     * largest finite float32 scale -- §2 of docs/conventions/arithmetic-bfp.md).
-     * finite * finite * finite is at worst +-inf, an inf divided by a finite
-     * non-zero scale stays +-inf, and the 0 * inf that would make a NaN cannot
-     * arise because neither scale nor factor is ever zero or inf. */
+    /* pass 2: decode at the source grid, mask+scale, requantize at the fresh one. Clamp in float
+     * before rounding: exponent saturation can put finite inputs outside int32 range. The bounds
+     * are exact integers (mantissa width <= 16), so the rounded code stays inside them. */
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackSignExtend((const uint8_t *)src->data + off * srcQC->mantissaBits / 8,
@@ -255,26 +200,13 @@ static void dropoutMaskScaleBfp(dropoutConfig_t *cfg, tensor_t *src, tensor_t *d
                 float v =
                     tensorBoolGet(cfg->mask, i) ? (float)mant[i - off] * srcScale * factor : 0.f;
                 float q = clamp(v / dstScale, qMin, qMax);
-                codes[i - off] = clampInt32(roundByMode(q, dstQC->roundingMode, bridge),
-                                            (int32_t)qMin, (int32_t)qMax);
+                codes[i - off] = roundByMode(q, dstQC->roundingMode, bridge);
             }
             idx = runEnd;
         }
         byteConversion((uint8_t *)codes, 32, (uint8_t *)dst->data + off * dstQC->mantissaBits / 8,
                        dstQC->mantissaBits, count);
     }
-}
-
-/* The full ARITH_BFP admission check, as ONE callable unit: dtype, element
- * counts, grid, widths. It is a pure predicate, so the forward can run it
- * BEFORE bernoulliFillMask (RNG neutrality, below) while the workers still
- * gate themselves — no ordering constraint is expressed by where it sits. */
-static void requireBfpPairForArm(tensor_t *a, tensor_t *b, const char *whatA, const char *whatB,
-                                 const char *whatPair) {
-    requireBfpWire(a, whatA);
-    requireBfpWire(b, whatB);
-    bfpRequireSameGeometry(a->quantization->qConfig, calcNumberOfElementsByTensor(a),
-                           b->quantization->qConfig, calcNumberOfElementsByTensor(b), whatPair);
 }
 
 static void dropoutForwardBfp(dropoutConfig_t *cfg, tensor_t *input, tensor_t *output,
@@ -286,49 +218,18 @@ static void dropoutForwardBfp(dropoutConfig_t *cfg, tensor_t *input, tensor_t *o
     dropoutMaskScaleBfp(cfg, input, output, bridge);
 }
 
-static void dropoutBackwardBfp(dropoutConfig_t *cfg, tensor_t *loss, tensor_t *propLoss,
-                               rngStream_t *bridge) {
-    dropoutMaskScaleBfp(cfg, loss, propLoss, bridge);
-}
-
 void dropoutForward(layer_t *dropoutLayer, tensor_t *input, tensor_t *output,
                     const layerExec_t *exec) {
     dropoutConfig_t *cfg = dropoutLayer->config->dropout;
-    /* Before bernoulliFillMask: a rejected call must fail before it touches
-     * the mask, so the ARITH_BFP case validates EVERYTHING here — dtype,
-     * element counts, grid, widths — and not just the dtype. Leaving the
-     * geometry half inside dropoutForwardBfp (which runs after the fill)
-     * would let a geometry-rejected call overwrite the mask first. R-P3:
-     * keyed on the wire's STORAGE dtype, narrowed per declared arm. */
-    switch (cfg->forwardMath.type) {
-    case ARITH_FLOAT32:
-    case ARITH_SYM_INT32:
-        bfpRequireNoBfpWire(input, "Dropout forward (input)");
-        bfpRequireNoBfpWire(output, "Dropout forward (output)");
-        break;
-    case ARITH_BFP:
-        requireBfpPairForArm(input, output, "Dropout forward (input)", "Dropout forward (output)",
-                             "Dropout forward BFP (input -> output)");
-        break;
-    default:
-        PRINT_ERROR("Dropout forward: quantization type not implemented");
-        exit(1);
-    }
+    /* Reject incompatible wires before filling the mask. */
+    dropoutRequireWires(input, output, cfg->forwardMath.type, "Dropout forward");
     if (cfg->training) {
-        size_t maskElements = calcNumberOfElementsByTensor(cfg->mask);
-        size_t inputElements = calcNumberOfElementsByTensor(input);
-        if (maskElements != inputElements) {
-            PRINT_ERROR("Dropout forward: mask element count (%zu) does not match input (%zu)",
-                        maskElements, inputElements);
-            exit(1);
-        }
+        dropoutRequireMaskCount(cfg, input, "Dropout forward");
         rngStream_t maskStorage;
         bernoulliFillMask(cfg->mask, 1.0f - cfg->p,
                           layerExecPurposeStream(exec, RNG_TAG_FORWARD, RNG_TAG_DROPOUT_MASK,
                                                  &maskStorage)); // fill once before dtype apply
     }
-    /* The first switch has already rejected everything but the three known
-     * arms, so this default IS the BFP arm — no unreachable duplicate error. */
     switch (cfg->forwardMath.type) {
     case ARITH_FLOAT32:
         dropoutForwardFloat(cfg, input, output);
@@ -336,7 +237,7 @@ void dropoutForward(layer_t *dropoutLayer, tensor_t *input, tensor_t *output,
     case ARITH_SYM_INT32:
         dropoutForwardSymInt32(cfg, input, output);
         break;
-    default: {
+    case ARITH_BFP: {
         rngStream_t bridgeStorage;
         dropoutForwardBfp(
             cfg, input, output,
@@ -382,53 +283,22 @@ void dropoutBackward(layer_t *dropoutLayer, tensor_t *forwardInput, tensor_t *lo
                      tensor_t *propLoss, const layerExec_t *exec) {
     (void)forwardInput; // not needed: the stored mask + p fully determine the gradient.
     dropoutConfig_t *cfg = dropoutLayer->config->dropout;
-    /* forwardInput is deliberately NOT guarded — it is never dereferenced here
-     * (callers legitimately pass NULL). */
-    size_t maskElements = calcNumberOfElementsByTensor(cfg->mask);
-    size_t lossElements = calcNumberOfElementsByTensor(loss);
-    if (maskElements != lossElements) {
-        PRINT_ERROR("Dropout backward: mask element count (%zu) does not match loss (%zu)",
-                    maskElements, lossElements);
-        exit(1);
-    }
+    dropoutRequireMaskCount(cfg, loss, "Dropout backward");
+    dropoutRequireWires(loss, propLoss, cfg->propLossMath.type, "Dropout backward");
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:
-        /* Dropout backward bypasses the executeOp funnel and raw-casts loss/propLoss
-         * to float* (forwardInput is unused — the mask + p fully determine dx). Fed a
-         * SYM_INT32 wire, the FLOAT32 arm reads int mantissa codes as floats — silent
-         * garbage grads. Guard the dereferenced wire dtypes and fail fast, mirroring
-         * the LayerNorm/GroupNorm backward guards (#315, #261). */
-        if (loss->quantization->type != FLOAT32 || propLoss->quantization->type != FLOAT32) {
-            PRINT_ERROR("Dropout backward: FLOAT32 arm requires FLOAT32 wires — got loss %d, "
-                        "propLoss %d",
-                        (int)loss->quantization->type, (int)propLoss->quantization->type);
-            exit(1);
-        }
         dropoutBackwardFloat(cfg, loss, propLoss);
         break;
     case ARITH_SYM_INT32:
-        /* The SYM_INT32 arm raw-casts to int32* and derefs loss/propLoss->qConfig;
-         * a FLOAT32 wire carries qConfig == NULL, so the mismatch is a NULL deref. */
-        if (loss->quantization->type != SYM_INT32 || propLoss->quantization->type != SYM_INT32) {
-            PRINT_ERROR("Dropout backward: SYM_INT32 arm requires SYM_INT32 wires — got loss %d, "
-                        "propLoss %d",
-                        (int)loss->quantization->type, (int)propLoss->quantization->type);
-            exit(1);
-        }
         dropoutBackwardSymInt32(cfg, loss, propLoss);
         break;
-    case ARITH_BFP:
-        requireBfpPairForArm(loss, propLoss, "Dropout backward (loss)",
-                             "Dropout backward (propLoss)",
-                             "Dropout backward BFP (loss -> propLoss)");
+    case ARITH_BFP: {
         rngStream_t bridgeStorage;
-        dropoutBackwardBfp(
+        dropoutMaskScaleBfp(
             cfg, loss, propLoss,
             layerExecPurposeStream(exec, RNG_TAG_BACKWARD, RNG_TAG_DROPOUT_BRIDGE, &bridgeStorage));
         break;
-    default:
-        PRINT_ERROR("Dropout backward: quantization type not implemented");
-        exit(1);
+    }
     }
 }
 

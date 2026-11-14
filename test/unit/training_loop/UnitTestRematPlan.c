@@ -427,8 +427,11 @@ void testTableInitCrossEntropyHeadIsOneOfTwoDeclaredArms(void) {
     const char *msg = "is neither the bfp head";
     ASSERT_EXITS_WITH_OUTPUT(1, msg, headBfpSoftmaxFloatCe());
     ASSERT_EXITS_WITH_OUTPUT(1, msg, headFloatSoftmaxPackedP());
-    ASSERT_EXITS_WITH_OUTPUT(1, msg, headIntegerCeFloatP());
-    ASSERT_EXITS_WITH_OUTPUT(1, msg, headIntegerCeFloatDx());
+    /* An ARITH_BFP slot over a non-BFP wire already dies at the Softmax factory. */
+    ASSERT_EXITS_WITH_OUTPUT(1, "ARITH_BFP forwardMath requires a BFP-typed outputQ",
+                             headIntegerCeFloatP());
+    ASSERT_EXITS_WITH_OUTPUT(1, "ARITH_BFP propLossMath requires a BFP-typed propLossQ",
+                             headIntegerCeFloatDx());
     ASSERT_EXITS_WITH_OUTPUT(1, msg, headFloatSoftmaxIntegerCe());
     ASSERT_EXITS_WITH(0, headMismatchButFrozen());
 }

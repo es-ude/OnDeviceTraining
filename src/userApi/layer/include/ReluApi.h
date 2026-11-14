@@ -4,17 +4,12 @@
 #include "Layer.h"
 #include "LayerQuant.h"
 
-/*! Borrowing variant — stores lq->outputQ and lq->propLossQ as the
- *  layer's outputQ / propLossQ pointers. Caller retains ownership of lq.
- *  Use when: the quantizations are shared/long-lived (e.g. reused across
- *  several layers) and the caller manages their lifetime — they must
- *  outlive the layer. */
+/*! Borrowing variant: the layer keeps lq->outputQ / lq->propLossQ, which must outlive it.
+ *  Use when the quantizations are shared or long-lived. Exits on unsupported arithmetic. */
 layer_t *reluLayerInit(layerQuant_t *lq);
 
-/*! Owning variant — deep-copies lq->outputQ and lq->propLossQ.
- *  Caller can drop lq + quantizations immediately.
- *  Use when: the quantizations are stack-locals or one-off configs and you
- *  want fire-and-forget teardown (freeReluLayer tears them down too). */
+/*! Owning variant: deep-copies both quantizations, so the caller may drop them at once;
+ *  freeReluLayer frees the copies. */
 layer_t *reluLayerInitOwning(layerQuant_t *lq);
 
 /*! Tears down the layer. Reads config->ownsQuantizations to decide whether

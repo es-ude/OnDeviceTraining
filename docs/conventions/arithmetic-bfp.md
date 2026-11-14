@@ -1203,16 +1203,15 @@ no softmax pins at all.
 **R-S1 — wire-anchored staging, ONE op per direction.** Softmax has no weight
 operand, so the staging anchor is the layer's OWN produced-wire config, the
 R-P1/R-N1 rule at this layer: `outputQ` anchors the forward op, `propLossQ`
-the backward op, checked EAGERLY at op entry through the now-shared
-`bfpWireAnchor` (`BfpKernelSupport.h`) — an `ARITH_BFP` math slot whose
-produced-wire config is NULL or non-BFP fails fast, because without it there
-is no width source at all. The stage template is per-tensor `{1,0}` at the
+the backward op. `softmaxValidateConfig` (factory and model load) requires
+every `ARITH_BFP` math slot to have a BFP produced-wire config, because
+without it there is no width source at all. The stage template is per-tensor `{1,0}` at the
 anchor's `mantissaBits`/`exponentBits`, rounded by the op's own
 `arithmetic.roundingMode`; a BFP-stored operand is borrowed zero-copy (D8) and
 never re-blocked. The backward's operands are `{x (logits), loss}`, both under
 that one template. Pinned by `unitTestSoftmaxForwardBfpStagedWidths` /
-`unitTestSoftmaxBackwardBfpStagedLoss` (widths) and the two
-`…RequiresBfp{OutputQ,PropLossQ}` death tests (the eager gate).
+`unitTestSoftmaxBackwardBfpStagedLoss` (widths) and the factory and load
+rejection tests (the config gate).
 
 **R-S2 — the integer pipeline and its three lossy shift sites.** Per element,
 with `E_i` the element's unbiased block exponent and `EMax` the exponent of

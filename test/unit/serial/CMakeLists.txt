@@ -32,6 +32,10 @@ add_elastic_ai_unit_test(
         GroupNormApi
         LayerNorm
         LayerNormApi
+        Softmax
+        SoftmaxApi
+        Dropout
+        DropoutApi
         LayerQuant
         ArithmeticType
 

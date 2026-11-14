@@ -11,8 +11,8 @@
 layer_t *dropoutLayerInit(float p, tensor_t *mask, quantization_t *forwardQ,
                           quantization_t *backwardQ);
 
-/*! Frees the layer_t + its config wrappers. Does NOT free the borrowed mask or
- *  quantizations (ownsQuantizations is false). */
+/*! Frees the layer_t and its config; frees the quantizations only when the config owns them
+ *  (ownsQuantizations). Never frees the mask. */
 void freeDropoutLayer(layer_t *dropoutLayer);
 
 #endif // ODT_DROPOUT_API_H

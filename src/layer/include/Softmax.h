@@ -13,13 +13,8 @@ typedef struct softmaxConfig {
     quantization_t *outputQ;
     quantization_t *propLossQ;
     bool ownsQuantizations;
-    /* P6-2: rounding of the INTEGER right-shift sites inside the native BFP
-     * softmax kernels (alignment shift + the >>z inside bfpIExpQ). ORTHOGONAL
-     * to every roundingMode_t in the config -- it never derives from one, and
-     * the OUT_WRITE pack/staging keep using the normal roundingMode_t
-     * machinery. Factories default to BFP_SHIFT_TRUNC (I-BERT-faithful); set
-     * via softmaxSetBfpExpShiftRounding (SoftmaxApi.h). Inert unless
-     * forwardMath/propLossMath is ARITH_BFP. */
+    /* Controls integer exp shifts independently of staging/packing rounding; defaults to TRUNC.
+     * SR requires a keyed call. Inert unless a math slot is ARITH_BFP. */
     bfpShiftRounding_t bfpExpShiftRounding;
 } softmaxConfig_t;
 
@@ -28,15 +23,11 @@ void softmaxInitConfig(softmaxConfig_t *softmaxConfig, quantization_t *forwardQ,
 
 void softmaxInitLayer(layerConfig_t *softmaxConfig, layer_t *softmaxLayer);
 
-/* Row semantic (#152): row = axis 0 -- each row normalizes over all elements
- * after axis 0 (count / dims[0] of them) and a rank-1 input is one row, the
- * same partition as crossEntropyForwardFloat's MEAN rule. The row count is
- * the storage dimensions[0] (the field that rule reads), not the logical
- * axis 0 of a transposeTensor view. An input with more than
- * one storage row must be identity-order (fail fast otherwise), so a logical
- * [1, N] stored as [N, 1] + transpose fails fast; one storage row takes any
- * order. The ARITH_BFP arms take a single storage row only ([N] or [1, N]);
- * more rows fail fast. */
+/*! The config contract forward/backward rely on: supported arithmetic in both slots and a
+ *  BFP-typed produced-wire config for each ARITH_BFP slot. Call once where a config enters --
+ *  the factories and the deserializer. `who` prefixes the message. */
+void softmaxValidateConfig(const softmaxConfig_t *cfg, const char *who);
+
 /* The integer-only ARITH_BFP forward (arithmetic-bfp.md §5.9 R-S2, §13):
  * steps 1-4 on the unpacked-BFP `input` (int32 codes under a live
  * bfpQConfig_t, mantissaBits <= 16), step 5 an integer normalisation into
@@ -46,11 +37,14 @@ void softmaxInitLayer(layerConfig_t *softmaxConfig, layer_t *softmaxLayer);
  * forward kernel adapter calls it; exported for kernel-level tests. */
 void softmaxForwardBfpRaw(const tensor_t *input, bfpShiftRounding_t mode, rngStream_t *shift,
                           tensor_t *rawOut);
+
+/* Rank 1 is one row; otherwise storage axis 0 selects rows and trailing dimensions form each
+ * row. Multiple rows require identity order. Native BFP supports at most one row. */
 void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output,
                     const layerExec_t *exec);
 
-/* Same row partition as softmaxForward: the Jacobian is block-diagonal over
- * rows, and each row's s is recomputed from its own logits (P6-1). */
+/* Same row partition as softmaxForward; each row's s is recomputed from its own logits. A NULL
+ * propLoss is a no-op under ARITH_BFP propLossMath. */
 void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, tensor_t *propLoss,
                      const layerExec_t *exec);
 

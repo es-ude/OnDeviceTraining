@@ -11,68 +11,51 @@
 #include "StorageApi.h"
 #include "TensorApi.h"
 
-/* ============================================================================
- * New factory API — layerQuant_t profile (PR 2).
- * ========================================================================== */
-
-static void validateLayerQuantForSoftmax(layerQuant_t *lq) {
+static layer_t *buildSoftmaxLayer(layerQuant_t *lq, bool owning, const char *who) {
     if (lq == NULL) {
-        PRINT_ERROR("softmaxLayerInit: lq pointer is NULL");
+        PRINT_ERROR("%s: lq pointer is NULL", who);
         exit(1);
     }
-    if (lq->outputQ == NULL) {
-        PRINT_ERROR("softmaxLayerInit: layerQuant.outputQ must be set");
+    if (lq->outputQ == NULL || lq->propLossQ == NULL) {
+        PRINT_ERROR("%s: layerQuant.outputQ and layerQuant.propLossQ must be set", who);
         exit(1);
     }
-    if (lq->propLossQ == NULL) {
-        PRINT_ERROR("softmaxLayerInit: layerQuant.propLossQ must be set");
-        exit(1);
+    softmaxConfig_t probe = {.forwardMath = lq->forwardMath,
+                             .propLossMath = lq->propLossMath,
+                             .outputQ = lq->outputQ,
+                             .propLossQ = lq->propLossQ};
+    softmaxValidateConfig(&probe, who);
+
+    layer_t *layer = reserveMemory(sizeof(layer_t));
+    layer->type = SOFTMAX;
+    layerConfig_t *layerCfg = reserveMemory(sizeof(layerConfig_t));
+    softmaxConfig_t *cfg = reserveMemory(sizeof(softmaxConfig_t));
+    layerCfg->softmax = cfg;
+    layer->config = layerCfg;
+
+    *cfg = probe;
+    if (owning) {
+        cfg->outputQ = deepCopyQuantization(lq->outputQ);
+        cfg->propLossQ = deepCopyQuantization(lq->propLossQ);
     }
+    cfg->ownsQuantizations = owning;
+    cfg->bfpExpShiftRounding = BFP_SHIFT_TRUNC;
+    return layer;
 }
 
 layer_t *softmaxLayerInit(layerQuant_t *lq) {
-    validateLayerQuantForSoftmax(lq);
-
-    layer_t *layer = reserveMemory(sizeof(layer_t));
-    layer->type = SOFTMAX;
-
-    layerConfig_t *layerCfg = reserveMemory(sizeof(layerConfig_t));
-    softmaxConfig_t *cfg = reserveMemory(sizeof(softmaxConfig_t));
-    layerCfg->softmax = cfg;
-    layer->config = layerCfg;
-
-    cfg->forwardMath = lq->forwardMath;
-    cfg->propLossMath = lq->propLossMath;
-    cfg->outputQ = lq->outputQ;
-    cfg->propLossQ = lq->propLossQ;
-    cfg->ownsQuantizations = false;
-    cfg->bfpExpShiftRounding = BFP_SHIFT_TRUNC;
-
-    return layer;
+    return buildSoftmaxLayer(lq, false, "softmaxLayerInit");
 }
 
 layer_t *softmaxLayerInitOwning(layerQuant_t *lq) {
-    validateLayerQuantForSoftmax(lq);
-
-    layer_t *layer = reserveMemory(sizeof(layer_t));
-    layer->type = SOFTMAX;
-
-    layerConfig_t *layerCfg = reserveMemory(sizeof(layerConfig_t));
-    softmaxConfig_t *cfg = reserveMemory(sizeof(softmaxConfig_t));
-    layerCfg->softmax = cfg;
-    layer->config = layerCfg;
-
-    cfg->forwardMath = lq->forwardMath;
-    cfg->propLossMath = lq->propLossMath;
-    cfg->outputQ = deepCopyQuantization(lq->outputQ);
-    cfg->propLossQ = deepCopyQuantization(lq->propLossQ);
-    cfg->ownsQuantizations = true;
-    cfg->bfpExpShiftRounding = BFP_SHIFT_TRUNC;
-
-    return layer;
+    return buildSoftmaxLayer(lq, true, "softmaxLayerInitOwning");
 }
 
 void softmaxSetBfpExpShiftRounding(layer_t *softmaxLayer, bfpShiftRounding_t mode) {
+    if (mode != BFP_SHIFT_TRUNC && mode != BFP_SHIFT_HALF_AWAY && mode != BFP_SHIFT_SR) {
+        PRINT_ERROR("softmaxSetBfpExpShiftRounding: unknown mode %d", (int)mode);
+        exit(1);
+    }
     softmaxLayer->config->softmax->bfpExpShiftRounding = mode;
 }
 
@@ -81,14 +64,9 @@ void freeSoftmaxLayer(layer_t *softmaxLayer) {
         return;
     }
     softmaxConfig_t *cfg = softmaxLayer->config->softmax;
-
     if (cfg->ownsQuantizations) {
-        if (cfg->outputQ != NULL) {
-            freeQuantization(cfg->outputQ);
-        }
-        if (cfg->propLossQ != NULL && cfg->propLossQ != cfg->outputQ) {
-            freeQuantization(cfg->propLossQ);
-        }
+        freeQuantization(cfg->outputQ);
+        freeQuantization(cfg->propLossQ);
     }
     freeReservedMemory(cfg);
     freeReservedMemory(softmaxLayer->config);

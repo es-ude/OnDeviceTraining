@@ -10,22 +10,8 @@
 #include "Quantization.h"
 #include "ScaleCanon.h"
 
-/* BFP epic PR4 (R-P5, exponent array carried verbatim): Flatten is a
- * pure reshape — storage order and element count are unchanged, so the packed
- * mantissa payload moves byte-for-byte (calcNumberOfBytesForData is already
- * BFP-correct) and the per-group exponent VALUES are memcpy'd alongside.
- * Flatten has no arithmetic slot at all, so it dispatches on STORAGE dtype:
- * a BFP wire on EITHER side needs a BFP wire on the other (a mixed pair would
- * size the byte memcpy off the wrong side and overrun the packed buffer) and
- * an IDENTICAL grid (the payload is moved verbatim, so a differing grid would
- * silently reinterpret every code) and the SAME element count. The count is
- * checked explicitly and not left to the grid: Flatten's whole purpose is to
- * change the SHAPE, so the two wires legitimately have different dimensions
- * and only their products may agree — and a per-tensor {1, 0} grid matches any
- * product at all, which is exactly the pair that would slip through and let
- * the byte memcpy (sized off the source) overrun the destination.
- * Re-blocking belongs to the Quantization layer. Non-const because
- * calcNumberOfElementsByTensor takes a mutable tensor_t*. */
+/* Copies physical storage without reblocking; BFP pairs require equal counts, grids and widths.
+ * A BFP wire on one side needs one on the other, or the byte copy is sized off the wrong side. */
 static void requireMatchingBfpWires(tensor_t *a, tensor_t *b, const char *what) {
     bool aBfp = a->quantization->type == BFP;
     bool bBfp = b->quantization->type == BFP;

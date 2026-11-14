@@ -821,6 +821,7 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeArithmetic(&reluConfig->propLossMath, f);
         deserializeQuantization(reluConfig->outputQ, f, 0);
         deserializeQuantization(reluConfig->propLossQ, f, 0);
+        reluValidateConfig(reluConfig, "deserializeModel: RELU");
         break;
     }
     case ADD: {
@@ -888,6 +889,7 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeArithmetic(&softmaxConfig->propLossMath, f);
         deserializeQuantization(softmaxConfig->outputQ, f, 0);
         deserializeQuantization(softmaxConfig->propLossQ, f, 0);
+        softmaxValidateConfig(softmaxConfig, "deserializeModel: SOFTMAX");
         break;
     }
     case FLATTEN:
@@ -915,6 +917,7 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeArithmetic(&dropoutConfig->propLossMath, f);
         deserializeQuantization(dropoutConfig->outputQ, f, 0);
         deserializeQuantization(dropoutConfig->propLossQ, f, 0);
+        dropoutValidateConfig(dropoutConfig, "deserializeModel: DROPOUT");
         break;
     }
     case LAYERNORM: {

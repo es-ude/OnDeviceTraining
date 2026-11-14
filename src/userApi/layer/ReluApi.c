@@ -11,63 +11,43 @@
 #include "StorageApi.h"
 #include "TensorApi.h"
 
-/* ============================================================================
- * New factory API — layerQuant_t profile (PR 1).
- * ========================================================================== */
-
-static void validateLayerQuantForRelu(layerQuant_t *lq) {
+static layer_t *buildReluLayer(layerQuant_t *lq, bool owning, const char *who) {
     if (lq == NULL) {
-        PRINT_ERROR("reluLayerInit: lq pointer is NULL");
+        PRINT_ERROR("%s: lq pointer is NULL", who);
         exit(1);
     }
-    if (lq->outputQ == NULL) {
-        PRINT_ERROR("reluLayerInit: layerQuant.outputQ must be set");
+    if (lq->outputQ == NULL || lq->propLossQ == NULL) {
+        PRINT_ERROR("%s: layerQuant.outputQ and layerQuant.propLossQ must be set", who);
         exit(1);
     }
-    if (lq->propLossQ == NULL) {
-        PRINT_ERROR("reluLayerInit: layerQuant.propLossQ must be set");
-        exit(1);
+    reluConfig_t probe = {.forwardMath = lq->forwardMath,
+                          .propLossMath = lq->propLossMath,
+                          .outputQ = lq->outputQ,
+                          .propLossQ = lq->propLossQ};
+    reluValidateConfig(&probe, who);
+
+    layer_t *layer = reserveMemory(sizeof(layer_t));
+    layer->type = RELU;
+    layerConfig_t *layerCfg = reserveMemory(sizeof(layerConfig_t));
+    reluConfig_t *cfg = reserveMemory(sizeof(reluConfig_t));
+    layerCfg->relu = cfg;
+    layer->config = layerCfg;
+
+    *cfg = probe;
+    if (owning) {
+        cfg->outputQ = deepCopyQuantization(lq->outputQ);
+        cfg->propLossQ = deepCopyQuantization(lq->propLossQ);
     }
+    cfg->ownsQuantizations = owning;
+    return layer;
 }
 
 layer_t *reluLayerInit(layerQuant_t *lq) {
-    validateLayerQuantForRelu(lq);
-
-    layer_t *layer = reserveMemory(sizeof(layer_t));
-    layer->type = RELU;
-
-    layerConfig_t *layerCfg = reserveMemory(sizeof(layerConfig_t));
-    reluConfig_t *cfg = reserveMemory(sizeof(reluConfig_t));
-    layerCfg->relu = cfg;
-    layer->config = layerCfg;
-
-    cfg->forwardMath = lq->forwardMath;
-    cfg->propLossMath = lq->propLossMath;
-    cfg->outputQ = lq->outputQ;
-    cfg->propLossQ = lq->propLossQ;
-    cfg->ownsQuantizations = false;
-
-    return layer;
+    return buildReluLayer(lq, false, "reluLayerInit");
 }
 
 layer_t *reluLayerInitOwning(layerQuant_t *lq) {
-    validateLayerQuantForRelu(lq);
-
-    layer_t *layer = reserveMemory(sizeof(layer_t));
-    layer->type = RELU;
-
-    layerConfig_t *layerCfg = reserveMemory(sizeof(layerConfig_t));
-    reluConfig_t *cfg = reserveMemory(sizeof(reluConfig_t));
-    layerCfg->relu = cfg;
-    layer->config = layerCfg;
-
-    cfg->forwardMath = lq->forwardMath;
-    cfg->propLossMath = lq->propLossMath;
-    cfg->outputQ = deepCopyQuantization(lq->outputQ);
-    cfg->propLossQ = deepCopyQuantization(lq->propLossQ);
-    cfg->ownsQuantizations = true;
-
-    return layer;
+    return buildReluLayer(lq, true, "reluLayerInitOwning");
 }
 
 void freeReluLayer(layer_t *reluLayer) {
@@ -75,14 +55,9 @@ void freeReluLayer(layer_t *reluLayer) {
         return;
     }
     reluConfig_t *cfg = reluLayer->config->relu;
-
     if (cfg->ownsQuantizations) {
-        if (cfg->outputQ != NULL) {
-            freeQuantization(cfg->outputQ);
-        }
-        if (cfg->propLossQ != NULL && cfg->propLossQ != cfg->outputQ) {
-            freeQuantization(cfg->propLossQ);
-        }
+        freeQuantization(cfg->outputQ);
+        freeQuantization(cfg->propLossQ);
     }
     freeReservedMemory(cfg);
     freeReservedMemory(reluLayer->config);

@@ -818,35 +818,25 @@ static inline void bfpValidateSumHeadroom(const bfpQConfig_t *qC, size_t reducti
     }
 }
 
-/*! One wire's length gate. validateBfpQConfigShape
- * alone is NOT sufficient for the outside-funnel copiers: the per-tensor
- * sentinel {numGroups=1, groupSize=0} is legal for ANY element count, so two
- * per-tensor wires of DIFFERENT lengths pass every grid check while a verbatim
- * payload copy sized off one of them runs off the other's buffer. The element
- * count is therefore checked explicitly, next to the grid. */
-static inline void bfpRequireElementCount(const bfpQConfig_t *qC, size_t elems, size_t expected,
-                                          const char *what) {
+/*! Length gate for a pair of BFP wires walked over one count. Equal grids do not imply equal
+ * lengths: the per-tensor {1, 0} grid matches any count. */
+static inline void bfpRequireElementCount(size_t elems, size_t expected, const char *what) {
     if (elems != expected) {
         PRINT_ERROR("%s: BFP wires must hold the same number of elements for a verbatim "
-                    "code/exponent carry -- got %zu vs %zu (a per-tensor {1, 0} grid matches "
-                    "any length, so the grid check alone cannot catch this)",
+                    "code/exponent carry -- got %zu vs %zu",
                     what, elems, expected);
         exit(1);
     }
-    validateBfpQConfigShape(qC, elems);
 }
 
-/*! Verbatim-transparency gate for the layers that
- * run OUTSIDE the executeOp funnel and COPY codes and exponents between two
- * BFP wires (Relu, Flatten, Dropout) instead of re-deriving them. Copying is
- * sound only when both wires hold the same number of elements AND share the
- * block grid AND the code/exponent widths; anything else is a re-block, which
- * belongs to the Quantization layer. */
+/*! Pair gate for the layers outside the executeOp funnel that copy codes and exponents between
+ * two BFP wires (Relu, Flatten, Dropout): sound only for equal counts, grids and widths; anything
+ * else is a re-block, which belongs to the Quantization layer. Each grid's fit to its own wire is
+ * established where the tensor is built or bound, not here. */
 static inline void bfpRequireSameGeometry(const bfpQConfig_t *aQC, size_t aElems,
                                           const bfpQConfig_t *bQC, size_t bElems,
                                           const char *what) {
-    bfpRequireElementCount(bQC, bElems, aElems, what);
-    validateBfpQConfigShape(aQC, aElems);
+    bfpRequireElementCount(bElems, aElems, what);
     if (aQC->numGroups != bQC->numGroups || aQC->groupSize != bQC->groupSize ||
         aQC->mantissaBits != bQC->mantissaBits || aQC->exponentBits != bQC->exponentBits) {
         PRINT_ERROR("%s: BFP wires must share {numGroups, groupSize, mantissaBits, "

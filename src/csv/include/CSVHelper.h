@@ -11,39 +11,20 @@ typedef struct csvData {
     size_t *entriesInRow; /*!< Number of entries in each row*/
 } csvData_t;
 
-/*!
- * Sets values of given csvData.
- *
- * \param csvData: Pointer to csvData struct
- * \param rows: Pointer to array of row pointers
- * \param numberOfRows: Number of rows
- * \param entriesInRow: Number of entries in each row
- */
+/*! Borrows caller-owned row buffers and entry-count storage. */
 void setCSVData(csvData_t *csvData, char **rows, size_t numberOfRows, size_t *entriesInRow);
 
-/*!
- * Reads file until buffer is full.
- *
- * \param filePath: Path to file
- * \param csvData: Pointer to csvData buffer
- */
+/*! Reads numberOfRows rows into buffers of at least MAX_ROW_SIZE bytes and records each
+ * row's comma-delimited field count. A missing file or a file with fewer rows exits(1). */
 void csvReadRowsByBufferSize(char *filePath, csvData_t *csvData);
 
-/*!
- * Parses csvData buffer as floats.
- *
- * \param csvData: Pointer to buffer
- * \param output: Pointer to float array for outputs
- */
+/*! Consumes the row strings in place (strtok); output rows must have entriesInRow
+ * capacity. A field without a leading number exits(1); text after the number is
+ * ignored. */
 void csvParseBufferAsFloat(csvData_t *csvData, float **output);
 
-/*!
- * Writes buffer to file.
- *
- * \param filePath: Path to file
- * \param csvData: Pointer to csvData buffer
- * \param mode: Mode of write (a = append, w = write)
- */
+/*! Writes the caller-supplied row text verbatim; callers supply separators and newlines.
+ * mode is the fopen mode ("w" or "a"). */
 void csvWriteRowsByBufferSize(char *filePath, csvData_t *csvData, char *mode);
 
 #endif // CSVHELPER_H

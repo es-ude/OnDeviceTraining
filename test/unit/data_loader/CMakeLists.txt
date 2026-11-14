@@ -27,6 +27,7 @@ target_compile_definitions(UnitTestDataLoader PRIVATE
         PROXY_X_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proxy_x.npy"
         PROXY_Y_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proxy_y.npy"
         PROXY_W_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proxy_w.npy"
+        PROXY_X_CHW_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proxy_x_chw.npy"
 )
 
 add_elastic_ai_unit_test(

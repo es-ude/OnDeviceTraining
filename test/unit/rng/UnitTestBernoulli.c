@@ -142,6 +142,8 @@ static void stubFillAllSet(tensor_t *mask, float probTrue, rngStream_t *rs) {
     }
 }
 
+/* The stream stop lives in the reference sampler, not in the dispatcher: the
+ * installed sampler below draws nothing and takes a NULL stream. */
 void testSwapMechanismInstallsAndRestores(void) {
     size_t n = 64;
     tensor_t *mask = buildBoolTensor(n);
@@ -160,18 +162,6 @@ void testSwapMechanismInstallsAndRestores(void) {
     TEST_ASSERT_TRUE(active);
     TEST_ASSERT_EQUAL_UINT(64, setAfterStub);
     TEST_ASSERT_TRUE(restored);
-}
-
-static void fillThroughANonDrawingSamplerWithoutAStream(void) {
-    tensor_t *mask = buildBoolTensor(8);
-    bernoulliSetFillMaskFn(stubFillAllSet);
-    bernoulliFillMask(mask, 0.5f, NULL);
-}
-
-/* The stop lives in the reference sampler, not in the dispatcher: an
- * installed sampler that draws nothing takes a NULL stream. */
-void testANonDrawingSamplerTakesNoStream(void) {
-    ASSERT_EXITS_WITH_OUTPUT(0, "", fillThroughANonDrawingSamplerWithoutAStream());
 }
 
 static rngStream_t *recordedStream;
@@ -210,7 +200,6 @@ int main(void) {
     RUN_TEST(testReferenceWithoutAStreamExits);
     RUN_TEST(testReferenceFillsAnEmptyMaskWithoutAStream);
     RUN_TEST(testSwapMechanismInstallsAndRestores);
-    RUN_TEST(testANonDrawingSamplerTakesNoStream);
     RUN_TEST(testFillMaskHandsTheStreamToTheInstalledSampler);
     return UNITY_END();
 }

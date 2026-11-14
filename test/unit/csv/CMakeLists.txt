@@ -3,4 +3,5 @@ add_elastic_ai_unit_test(
         CSVHelper
         MORE_LIBS
         CommonLayerLibs
+        odt_test_death
 )

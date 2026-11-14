@@ -99,13 +99,6 @@ static bool classEligible(const replayLoader_t *rl, size_t c) {
 
 static batch_t *replayGetBatch(dataLoader_t *dl, size_t index, const rngKey_t *stepKey) {
     replayLoader_t *rl = (replayLoader_t *)dl;
-    /* The wrapper copied the base's fields when it wrapped it, but both share
-     * one order array: an order set through the wrapper is the base's order
-     * too. Hand that on before the base's own fetch checks it, and never clear
-     * it: the base may have been shuffled itself after wrapping. */
-    if (rl->pub.shuffled) {
-        rl->base->shuffled = true;
-    }
     batch_t *baseBatch = rl->base->getBatch(rl->base, index, stepKey);
     if (!rl->poolsReady) {
         initPoolsFromFirstSample(rl, baseBatch->samples[0]);

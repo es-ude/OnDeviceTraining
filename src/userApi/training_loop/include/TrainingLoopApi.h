@@ -262,8 +262,8 @@ void freeTrainingStats(trainingStats_t *trainingStats);
 /* The evaluation entry points below are key-less: a model whose forward draws
  * (stochastic rounding) stops with a named error at its first draw; trainingRun
  * evaluates under each epoch's evaluation key. They never shuffle: a
- * shuffle = true loader stops at its first batch unless dataLoaderShuffle has
- * set its order. */
+ * shuffle = true loader serves its identity order until dataLoaderShuffle has
+ * set its order (DataLoaderApi.h). */
 
 /*! Per-sample primitive over one batch_t: never stacks (the epoch entry points do, #468). */
 float evaluationBatch(const model_t *model, lossFuncType_t funcType, batch_t *batch,

@@ -4,53 +4,30 @@
 #include "DataLoader.h"
 
 /*!
- * Initializes a dataloader_t.
- * Uses reserveMemory().
+ * Creates a loader over caller-owned dataset callbacks. Requires batchSize >= 1
+ * and dropLast = true; the dataset size must stay stable while the loader owns its
+ * indices. transform and targetTransform are stored but never called.
  *
- * \param getSample: Pointer to function to be used for getBatch()
- * \param getDatasetSize: Pointer to function to calculate dataset size
- * \param batchSize: batch size to be used
- * \param transform: Pointer to transform function to be used once after loading
- * \param targetTransform: Pointer to transform function to be used for each getBatch()
- * \param shuffle: Shuffle or not; a shuffle = true loader serves no batch until
- *                 dataLoaderShuffle has set its order
- * \param dropLast: If last batch can't be filled, drop or not
- * \return Pointer to initialized data loader
+ * Call order: a shuffle = true loader starts in the identity order and serves it
+ * until dataLoaderShuffle sets its keyed order. trainingRun shuffles its loaders
+ * itself; a caller that fetches from a shuffle = true loader directly (getBatch,
+ * trainingEpochDefault, an evaluation entry point) calls dataLoaderShuffle first,
+ * with a key from the trainingRng helpers (trainingRngShuffleKey).
+ *
+ * Release with freeDataLoader.
  */
 dataLoader_t *dataLoaderInit(getSampleFn_t getSample, getDatasetSizeFn_t getDatasetSize,
                              uint16_t batchSize, transformFn_t transform,
                              transformFn_t targetTransform, bool shuffle, bool dropLast);
 
-/*!
- * Free sample_t pointer.
- *
- * Only frees the sample_t pointer. We assume, that the contained tensors
- * are stored in the dataset and thus are not directly mutable.
- *
- * \param sample: Pointer to be freed
- * \return void
- */
+/*! Frees the sample wrapper; its tensors remain dataset-owned. */
 void freeSample(sample_t *sample);
 
-/*!
- * Free batch_t pointer and contained **sample_t.
- *
- * Only frees the batch_t and sample_t pointer! We assume, that the contained tensors
- * are stored in the dataset and thus are not directly mutable.
- *
- * \param batch: Pointer to be freed
- * \return void
- */
+/*! Frees the batch and its pointer array. Release each sample wrapper separately
+ * (freeSample); the tensors remain dataset-owned. */
 void freeBatch(batch_t *batch);
 
-/*!
- * Free dataloader pointer and contained indices array.
- *
- * Only frees the dataloader_t and indices pointer.
- *
- * \param dataloader: Pointer to be freed
- * \return void
- */
+/*! Releases the loader-owned indices and the loader. */
 void freeDataLoader(dataLoader_t *dataloader);
 
 #endif // DATALOADERAPI_H

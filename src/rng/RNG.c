@@ -50,10 +50,7 @@ float rngNextUnitFloat(rngStream_t *stream) {
  * bias included (a non-zero xorshift32 state never draws 0): every keyed
  * shuffle and the Python mirror repeat it. */
 size_t rngNextBounded(rngStream_t *stream, size_t bound) {
-    /* Bound 0 has no valid draw. A draw is 32 bits wide, so a bound above
-     * UINT32_MAX cannot be met: the 32-bit cast below would divide by zero
-     * (2^32) or draw from a smaller range (2^32 + k gives [0, k)). Both are
-     * caller bugs. */
+    /* Reject zero and bounds that cannot be represented before narrowing. */
     if (bound == 0) {
         PRINT_ERROR("rngNextBounded: bound is 0");
         exit(1);

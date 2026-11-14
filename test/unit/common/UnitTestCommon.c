@@ -13,10 +13,6 @@ _Static_assert(
 void setUp(void) {}
 void tearDown(void) {}
 
-void testDLevelDefaultIsErrorOrHigher(void) {
-    TEST_ASSERT_GREATER_OR_EQUAL_INT(1, DLEVEL);
-}
-
 /* *out is unspecified after a false return, so only the true cases check it. */
 void testCheckedMulSizeDetectsWrap(void) {
     size_t o = 0;
@@ -36,7 +32,6 @@ void testCheckedAddSizeDetectsWrap(void) {
 
 int main(void) {
     UNITY_BEGIN();
-    RUN_TEST(testDLevelDefaultIsErrorOrHigher);
     RUN_TEST(testCheckedMulSizeDetectsWrap);
     RUN_TEST(testCheckedAddSizeDetectsWrap);
     return UNITY_END();

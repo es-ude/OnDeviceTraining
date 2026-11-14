@@ -5,8 +5,9 @@
 #include "Common.h"
 #include "DataLoader.h"
 #include "DataLoaderApi.h"
-#include "DataLoaderApiInternal.h"
 #include "StorageApi.h"
+
+static batch_t *getBatch(dataLoader_t *dataLoader, size_t index, const rngKey_t *stepKey);
 
 dataLoader_t *dataLoaderInit(getSampleFn_t getSample, getDatasetSizeFn_t getDatasetSize,
                              uint16_t batchSize, transformFn_t transform,
@@ -14,6 +15,11 @@ dataLoader_t *dataLoaderInit(getSampleFn_t getSample, getDatasetSizeFn_t getData
 
     if (dropLast == false) {
         PRINT_ERROR("dropLast == false is not supported!");
+        exit(1);
+    }
+    if (batchSize == 0) {
+        /* Every consumer computes datasetSize / batchSize. */
+        PRINT_ERROR("dataLoaderInit: batchSize must be >= 1");
         exit(1);
     }
 
@@ -49,12 +55,6 @@ static sample_t *getSampleByIndex(dataLoader_t *dataLoader, size_t index) {
 
 static batch_t *getBatch(dataLoader_t *dataLoader, size_t index, const rngKey_t *stepKey) {
     (void)stepKey;
-    /* Before dataLoaderShuffle a shuffle = true loader would silently serve the
-     * identity order. */
-    if (dataLoader->shuffle && !dataLoader->shuffled) {
-        PRINT_ERROR("getBatch: shuffle = true loader was never shuffled (call dataLoaderShuffle)");
-        exit(1);
-    }
     batch_t *batch = reserveMemory(sizeof(batch_t));
 
     size_t batchSize = dataLoader->batchSize;

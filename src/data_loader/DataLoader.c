@@ -11,18 +11,6 @@ void initDataLoader(dataLoader_t *dataLoader, getSampleFn_t getSample,
                     getDatasetSizeFn_t getDatasetSize, getBatchFn_t getBatch, uint16_t batchSize,
                     transformFn_t transform, transformFn_t targetTransform, bool shuffle,
                     size_t *indices, bool dropLast) {
-
-    if (dropLast == false) {
-        PRINT_ERROR("dropLast == false is not supported!");
-        exit(1);
-    }
-
-    if (batchSize == 0) {
-        /* Every consumer computes datasetSize / batchSize. */
-        PRINT_ERROR("initDataLoader: batchSize must be >= 1");
-        exit(1);
-    }
-
     dataLoader->getSample = getSample;
     dataLoader->getDatasetSize = getDatasetSize;
 
@@ -44,8 +32,6 @@ void initDataLoader(dataLoader_t *dataLoader, getSampleFn_t getSample,
     for (size_t i = 0; i < sizeDataset; ++i) {
         indices[i] = i;
     }
-    /* The order of a shuffle = true loader stays unset until dataLoaderShuffle. */
-    dataLoader->shuffled = false;
 }
 
 void dataLoaderSetReshufflePerEpoch(dataLoader_t *dataLoader, bool enable) {
@@ -75,9 +61,4 @@ void dataLoaderShuffle(dataLoader_t *dataLoader, const rngKey_t *key) {
             indices[j] = swapped;
         }
     }
-    dataLoader->shuffled = true;
 }
-
-tensor_t *transform(tensor_t *tensorList);
-
-tensor_t *targetTransform(tensor_t *tensor);

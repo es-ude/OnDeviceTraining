@@ -1,4 +1,5 @@
 #include "CSVHelper.h"
+#include "DeathTest.h"
 #include "unity.h"
 #include <stdlib.h>
 #include <string.h>
@@ -78,6 +79,41 @@ void testCSVWriteRowsByBufferSize() {
     TEST_ASSERT_EQUAL_STRING("1, 2, 3, 4, 5, 6", ptr);
 }
 
+static void readRows(char *filePath, size_t numberOfRows) {
+    char row0[MAX_ROW_SIZE];
+    char row1[MAX_ROW_SIZE];
+    char *rows[2] = {row0, row1};
+    size_t entriesInRow[2];
+    csvData_t csvData;
+    setCSVData(&csvData, rows, numberOfRows, entriesInRow);
+    csvReadRowsByBufferSize(filePath, &csvData);
+}
+
+void testCSVReadExitsOnMissingFile() {
+    ASSERT_EXITS_WITH_OUTPUT(1, "Could not open file", readRows("no/such/file.csv", 1));
+}
+
+/* input.csv holds one row; asking for two must stop instead of counting entries of a
+ * NULL row. */
+void testCSVReadExitsOnPrematureEof() {
+    ASSERT_EXITS_WITH_OUTPUT(1, "ended after 1 of 2 rows", readRows(CSV_INPUT_PATH, 2));
+}
+
+static void parseRow(char *row) {
+    char *rows[1] = {row};
+    size_t entriesInRow[1] = {3};
+    csvData_t csvData;
+    setCSVData(&csvData, rows, 1, entriesInRow);
+    float values[3];
+    float *output[1] = {values};
+    csvParseBufferAsFloat(&csvData, output);
+}
+
+void testCSVParseExitsOnFieldWithoutANumber() {
+    char row[] = "1, x, 3";
+    ASSERT_EXITS_WITH_OUTPUT(1, "row 0 field 1 is not a number", parseRow(row));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -86,5 +122,8 @@ int main() {
     RUN_TEST(testCSVReadRowsByBufferSize);
     RUN_TEST(testCSVParseBufferAsFloat);
     RUN_TEST(testCSVWriteRowsByBufferSize);
+    RUN_TEST(testCSVReadExitsOnMissingFile);
+    RUN_TEST(testCSVReadExitsOnPrematureEof);
+    RUN_TEST(testCSVParseExitsOnFieldWithoutANumber);
     return UNITY_END();
 }

@@ -17,8 +17,7 @@ if(DEBUG_MODE_DEBUG)
     target_compile_definitions(Common__hdrs INTERFACE DEBUG_MODE_DEBUG=true)
 endif()
 
-# Phase hook for external profilers (#419 precondition). A compiled library,
-# unlike the header-only Common target above, because the hook slot is state.
+# Compiled separately because the process-wide hook owns mutable state.
 add_library(OdtHook OdtHook.c)
 target_include_directories(OdtHook PUBLIC include)
 target_link_libraries(OdtHook PRIVATE Common)

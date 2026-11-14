@@ -2525,13 +2525,6 @@ static void runWithoutAnRngOverAShuffledTrainLoader(void) {
     runShuffled(&f, 1, NULL);
 }
 
-static void evaluateANeverShuffledLoader(void) {
-    shuffleRunFixture_t f;
-    buildShuffleRunFixture(&f, false, true);
-    (void)evaluationEpoch(&MODEL_CHAIN(f.model, 1), MSE, f.evalDl, inferenceWithLoss,
-                          REDUCTION_MEAN, 1);
-}
-
 /* Without options->rng a shuffle = true loader has no key: the eval loader's
  * shuffle stops before the label probe fetches from it, and the train loader's
  * stops at the start of epoch 0. */
@@ -2543,14 +2536,6 @@ void testTrainingRunWithoutAnRngStopsAtAShuffledEvalLoader(void) {
 void testTrainingRunWithoutAnRngStopsAtAShuffledTrainLoader(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "dataLoaderShuffle: shuffle without a key",
                              runWithoutAnRngOverAShuffledTrainLoader());
-}
-
-/* The public evaluation entry points never shuffle: a shuffle = true loader
- * must be shuffled by its caller first. */
-void testEvaluationEpochOfANeverShuffledLoaderExits(void) {
-    ASSERT_EXITS_WITH_OUTPUT(
-        1, "getBatch: shuffle = true loader was never shuffled (call dataLoaderShuffle)",
-        evaluateANeverShuffledLoader());
 }
 
 /* ---- the step key of a batch fetch (#4) ---- */
@@ -4491,7 +4476,6 @@ int main(void) {
     RUN_TEST(testTrainingRunShuffleFollowsTheEpochCounterAcrossCalls);
     RUN_TEST(testTrainingRunWithoutAnRngStopsAtAShuffledEvalLoader);
     RUN_TEST(testTrainingRunWithoutAnRngStopsAtAShuffledTrainLoader);
-    RUN_TEST(testEvaluationEpochOfANeverShuffledLoaderExits);
     RUN_TEST(testTrainingRunFetchesEachTrainBatchWithTheKeyOfItsUpdate);
     RUN_TEST(testTrainingEpochDefaultWithoutAnRngFetchesWithoutAKey);
     RUN_TEST(testTrainingRun_DefaultRunsAllEpochsThroughNonFiniteLoss);

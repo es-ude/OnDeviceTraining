@@ -46,16 +46,4 @@
         }                                                                                          \
     } while (false)
 
-// TODO
-
-#define PRINT_BYTE_ARRAY(prefix, byteArray, numberOfBytes)                                         \
-    do {                                                                                           \
-        printf("[%s: %s] ", SOURCE_FILE, __FUNCTION__);                                            \
-        printf(prefix);                                                                            \
-        for (size_t index = 0; index < numberOfBytes; index++) {                                   \
-            printf("0x%02X ", byteArray[index]);                                                   \
-        }                                                                                          \
-        printf("\n");                                                                              \
-    } while (false)
-
 #endif

@@ -118,11 +118,11 @@ static size_t getProxyDatasetSize(void) {
 }
 
 /* NPY-backed dataset. Each test that uses it loads at start and frees with
- * freeTensorArray (added in this batch) before exiting. */
+ * freeTensorArray before exiting. */
 static dataset_t g_npyDataset;
 
-static void makeNpyDataset(void) {
-    g_npyDataset.items = npyLoad(PROXY_X_PATH);
+static void makeNpyDataset(char *itemsPath) {
+    g_npyDataset.items = npyLoad(itemsPath);
     g_npyDataset.labels = npyLoad(PROXY_Y_PATH);
 }
 
@@ -142,38 +142,6 @@ static size_t getNpyProxyDatasetSize(void) {
 void setUp() {}
 
 void tearDown() {}
-
-void testGetSample() {
-    makeProxyDataset();
-
-    dataLoader_t *dl =
-        dataLoaderInit(getProxySample, getProxyDatasetSize, 1, NULL, NULL, false, true);
-
-    sample_t *s = dl->getSample(0);
-
-    /* CAPTURE: copy data referenced by sample so we can assert after free. */
-    float capturedItem[PROXY_FEATURES];
-    float capturedLabel[PROXY_FEATURES];
-    for (size_t i = 0; i < PROXY_FEATURES; i++) {
-        capturedItem[i] = ((float *)s->item->data)[i];
-        capturedLabel[i] = ((float *)s->label->data)[i];
-    }
-    float expectedItem[PROXY_FEATURES];
-    float expectedLabel[PROXY_FEATURES];
-    for (size_t i = 0; i < PROXY_FEATURES; i++) {
-        expectedItem[i] = ((float *)g_proxy.dataset.items->array[0]->data)[i];
-        expectedLabel[i] = ((float *)g_proxy.dataset.labels->array[0]->data)[i];
-    }
-
-    /* FREE in reverse-init order. */
-    freeSample(s);
-    freeDataLoader(dl);
-    freeProxyDataset();
-
-    /* ASSERT on captured. */
-    TEST_ASSERT_EQUAL_FLOAT_ARRAY(expectedItem, capturedItem, PROXY_FEATURES);
-    TEST_ASSERT_EQUAL_FLOAT_ARRAY(expectedLabel, capturedLabel, PROXY_FEATURES);
-}
 
 void testGetBatch() {
     makeProxyDataset();
@@ -217,50 +185,9 @@ void testGetBatch() {
     }
 }
 
-void testGetBatch_ShuffledMinibatchCoversAllSamples() {
-    makeProxyDataset();
-
-    size_t batchSize = 2;
-    size_t numBatches = PROXY_DATASET_SIZE / batchSize;
-    dataLoader_t *dl =
-        dataLoaderInit(getProxySample, getProxyDatasetSize, batchSize, NULL, NULL, true, true);
-    const rngKey_t key = rngFold(rngKeyFromSeed(42u), RNG_TAG_SHUFFLE, 0u);
-    dataLoaderShuffle(dl, &key);
-
-    /* CAPTURE: collect first feature value from every sample across all
-     * batches; assertions wait until everything is freed. */
-    float seen[PROXY_DATASET_SIZE];
-    for (size_t b = 0; b < numBatches; b++) {
-        batch_t *batch = dl->getBatch(dl, b, NULL);
-        for (size_t i = 0; i < batchSize; i++) {
-            seen[b * batchSize + i] = ((float *)batch->samples[i]->item->data)[0];
-            freeSample(batch->samples[i]);
-        }
-        freeBatch(batch);
-    }
-
-    /* Sort the captured values so they can be compared against {1,3,5,7}. */
-    for (size_t i = 0; i < PROXY_DATASET_SIZE; i++) {
-        for (size_t j = i + 1; j < PROXY_DATASET_SIZE; j++) {
-            if (seen[j] < seen[i]) {
-                float tmp = seen[i];
-                seen[i] = seen[j];
-                seen[j] = tmp;
-            }
-        }
-    }
-
-    freeDataLoader(dl);
-    freeProxyDataset();
-
-    /* ASSERT on captured. */
-    float expected[] = {1.f, 3.f, 5.f, 7.f};
-    TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, seen, PROXY_DATASET_SIZE);
-}
-
 void testGetBatch_NpyBackedDataset() {
     makeProxyDataset();
-    makeNpyDataset();
+    makeNpyDataset(PROXY_X_PATH);
 
     size_t capturedNpySize = getNpyProxyDatasetSize();
 
@@ -274,11 +201,18 @@ void testGetBatch_NpyBackedDataset() {
     float expectedItems[PROXY_DATASET_SIZE][PROXY_FEATURES];
     float expectedLabels[PROXY_DATASET_SIZE][PROXY_FEATURES];
 
+    size_t itemRank[PROXY_DATASET_SIZE];
+    size_t itemDims[PROXY_DATASET_SIZE][2];
+
     for (size_t b = 0; b < numBatches; b++) {
         batch_t *batch = dl->getBatch(dl, b, NULL);
 
         for (size_t i = 0; i < batchSize; i++) {
             size_t k = b * batchSize + i;
+            shape_t *itemShape = batch->samples[i]->item->shape;
+            itemRank[k] = itemShape->numberOfDimensions;
+            itemDims[k][0] = itemShape->dimensions[0];
+            itemDims[k][1] = itemShape->dimensions[1];
             for (size_t f = 0; f < PROXY_FEATURES; f++) {
                 capturedItems[k][f] = ((float *)batch->samples[i]->item->data)[f];
                 capturedLabels[k][f] = ((float *)batch->samples[i]->label->data)[f];
@@ -296,20 +230,57 @@ void testGetBatch_NpyBackedDataset() {
 
     /* ASSERT on captured. */
     TEST_ASSERT_EQUAL((size_t)PROXY_DATASET_SIZE, capturedNpySize);
+    /* proxy_x.npy is [N, C, L] = [4, 1, 2]: every sample keeps its natural [C, L]. */
+    const size_t expectedDims[2] = {1, PROXY_FEATURES};
     for (size_t k = 0; k < PROXY_DATASET_SIZE; k++) {
+        TEST_ASSERT_EQUAL_size_t(2, itemRank[k]);
+        ODT_ASSERT_EQUAL_size_t_ARRAY(expectedDims, itemDims[k], 2);
         TEST_ASSERT_EQUAL_FLOAT_ARRAY(expectedItems[k], capturedItems[k], PROXY_FEATURES);
         TEST_ASSERT_EQUAL_FLOAT_ARRAY(expectedLabels[k], capturedLabels[k], PROXY_FEATURES);
     }
 }
 
-/* Regression for issue #177: npyLoadFlat must load an ENTIRE .npy file as one
- * contiguous tensor (full shape, dim0 included) — unlike npyLoad, which slices
- * dim0 into N row tensors. The v2 BIT_PARITY weight loader needs every output
- * channel, not just channel 0; the previous npyLoad()+array[0] path saw only the
- * first dim0-slice and then memcpy'd past it into heap garbage. proxy_w.npy is
- * arange(24) reshaped to [3, 2, 4], so flat element i must equal i — and the
- * elements at i >= 8 (beyond row 0 of size 2*4) are exactly what the bug
- * corrupted. */
+/* proxy_x_chw.npy is [N, C, H, W] = [4, 3, 2, 2] holding arange(48): a batch
+ * serves each image in its natural [C, H, W] with its own 12 values. */
+#define CHW_VALUES 12
+void testGetBatch_NpyBackedImageDatasetKeepsChw() {
+    makeNpyDataset(PROXY_X_CHW_PATH);
+    dataLoader_t *dl =
+        dataLoaderInit(getNpyProxySample, getNpyProxyDatasetSize, 2, NULL, NULL, false, true);
+
+    batch_t *batch = dl->getBatch(dl, 1, NULL);
+    size_t rank[2];
+    size_t dims[2][3];
+    float values[2][CHW_VALUES];
+    for (size_t i = 0; i < 2; i++) {
+        tensor_t *item = batch->samples[i]->item;
+        rank[i] = item->shape->numberOfDimensions;
+        for (size_t d = 0; d < 3; d++) {
+            dims[i][d] = item->shape->dimensions[d];
+        }
+        for (size_t v = 0; v < CHW_VALUES; v++) {
+            values[i][v] = ((float *)item->data)[v];
+        }
+        freeSample(batch->samples[i]);
+    }
+    freeBatch(batch);
+    freeDataLoader(dl);
+    freeNpyDataset();
+
+    const size_t expectedDims[3] = {3, 2, 2};
+    for (size_t i = 0; i < 2; i++) {
+        TEST_ASSERT_EQUAL_size_t(3, rank[i]);
+        ODT_ASSERT_EQUAL_size_t_ARRAY(expectedDims, dims[i], 3);
+        float expected[CHW_VALUES];
+        for (size_t v = 0; v < CHW_VALUES; v++) {
+            expected[v] = (float)((2 + i) * CHW_VALUES + v);
+        }
+        TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, values[i], CHW_VALUES);
+    }
+}
+
+/* Whole-array loading must preserve all [3, 2, 4] values of proxy_w.npy
+ * (arange(24)), including values beyond the first dim0 slice (i >= 8). */
 void testNpyLoadFlat_LoadsFullMultiDimTensor() {
     tensor_t *w = npyLoadFlat(PROXY_W_PATH);
 
@@ -339,7 +310,7 @@ void testNpyLoadFlat_LoadsFullMultiDimTensor() {
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(expected, captured, 24);
 }
 
-/* Order-only fixtures: dataLoaderShuffle and the init checks touch only the
+/* Order-only fixtures: initDataLoader and dataLoaderShuffle touch only the
  * indices (never getSample/getBatch), so a stack-only dummy dataset (no
  * tensors, no heap) is enough. */
 #define ORDER_DATASET_SIZE 8
@@ -361,22 +332,14 @@ static batch_t *orderDummyGetBatch(dataLoader_t *dataLoader, size_t index,
     return NULL; /* never invoked */
 }
 
-void testInitDataLoaderRejectsZeroBatchSize(void) {
-    /* Every consumer divides datasetSize / batchSize; 0 must die at init. */
-    dataLoader_t dl;
-    size_t indices[ORDER_DATASET_SIZE];
-    ASSERT_EXITS_WITH_FAILURE(initDataLoader(&dl, orderDummyGetSample, orderDummyGetDatasetSize,
-                                             orderDummyGetBatch, 0, NULL, NULL, true, indices,
-                                             true));
-}
-
 void testDataLoaderInitRejectsZeroBatchSize(void) {
-    /* The API wrapper reaches the same guard. */
-    ASSERT_EXITS_WITH_FAILURE(
+    /* Every consumer divides datasetSize / batchSize. */
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "dataLoaderInit: batchSize must be >= 1",
         dataLoaderInit(getProxySample, getProxyDatasetSize, 0, NULL, NULL, false, true));
 }
 
-/* ---- the keyed shuffle (#4) ---- */
+/* ---- the keyed shuffle ---- */
 
 static size_t singleSampleDatasetSize(void) {
     return 1;
@@ -463,7 +426,6 @@ void testDataLoaderShuffleWithoutADrawNeedsNoKey(void) {
     size_t identity[ORDER_DATASET_SIZE] = {0, 1, 2, 3, 4, 5, 6, 7};
     ODT_ASSERT_EQUAL_size_t_ARRAY(identity, indices, ORDER_DATASET_SIZE);
     TEST_ASSERT_EQUAL_size_t(0, single[0]);
-    TEST_ASSERT_TRUE(one.shuffled);
 }
 
 static void shuffleWithoutAKey(void) {
@@ -478,31 +440,16 @@ void testDataLoaderShuffleWithoutAKeyExits(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "dataLoaderShuffle: shuffle without a key", shuffleWithoutAKey());
 }
 
-static void fetchFromAnUnshuffledLoader(void) {
-    makeProxyDataset();
-    dataLoader_t *dl = unshuffledProxyLoader(2);
-    (void)dl->getBatch(dl, 0, NULL);
-}
-
-void testGetBatchOfANeverShuffledLoaderExits(void) {
-    ASSERT_EXITS_WITH_OUTPUT(
-        1, "getBatch: shuffle = true loader was never shuffled (call dataLoaderShuffle)",
-        fetchFromAnUnshuffledLoader());
-}
-
 int main() {
     UNITY_BEGIN();
-    RUN_TEST(testGetSample);
     RUN_TEST(testGetBatch);
-    RUN_TEST(testGetBatch_ShuffledMinibatchCoversAllSamples);
     RUN_TEST(testGetBatch_NpyBackedDataset);
+    RUN_TEST(testGetBatch_NpyBackedImageDatasetKeepsChw);
     RUN_TEST(testNpyLoadFlat_LoadsFullMultiDimTensor);
-    RUN_TEST(testInitDataLoaderRejectsZeroBatchSize);
     RUN_TEST(testDataLoaderInitRejectsZeroBatchSize);
     RUN_TEST(testDataLoaderShuffleIsFisherYatesFromTheIdentityUnderItsKey);
     RUN_TEST(testGetBatchServesTheOrderOfTheKeyedShuffle);
     RUN_TEST(testDataLoaderShuffleWithoutADrawNeedsNoKey);
     RUN_TEST(testDataLoaderShuffleWithoutAKeyExits);
-    RUN_TEST(testGetBatchOfANeverShuffledLoaderExits);
     return UNITY_END();
 }

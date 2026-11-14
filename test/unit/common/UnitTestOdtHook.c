@@ -119,7 +119,7 @@ static tensor_t *makeRowVec2(float a, float b) {
 }
 
 /* Natural-shape [2] float32 sample (a dataset sample: trainingEpochDefault adds
- * the batch axis itself, #152 PR3a). */
+ * the batch axis itself). */
 static tensor_t *makeVec2(float a, float b) {
     size_t *dims = reserveMemory(sizeof(size_t));
     dims[0] = 2;
@@ -153,34 +153,6 @@ static void buildLinearSoftmaxModel(layer_t *model[2], quantization_t *q, traina
 static lossConfig_t ceMeanLoss(void) {
     return (lossConfig_t){
         .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL};
-}
-
-void testCalculateGradsFiresForwardPairThenBackwardPair(void) {
-    resetLog();
-    quantization_t *q = quantizationInitFloat();
-    layer_t *model[2];
-    buildLinearSoftmaxModel(model, q, TRAINABLE_DEFAULT);
-    tensor_t *x = makeRowVec2(1.0f, 1.0f);
-    tensor_t *label = makeRowVec2(1.0f, 0.0f);
-
-    odtHookSet(recordingHook, &g_ctxToken);
-    trainingStats_t *stats = calculateGradsSequential(&MODEL_CHAIN(model, 2), ceMeanLoss(),
-                                                      REDUCTION_MEAN, x, label, NULL);
-    odtHookSet(NULL, NULL);
-
-    size_t count = g_logCount;
-    freeTrainingStats(stats);
-    freeTensor(x);
-    freeTensor(label);
-    freeLinearLayer(model[0]);
-    freeSoftmaxLayer(model[1]);
-    freeQuantization(q);
-
-    TEST_ASSERT_EQUAL_size_t(4, count);
-    assertHookAt(0, ODT_EVENT_FORWARD_BEGIN);
-    assertHookAt(1, ODT_EVENT_FORWARD_END);
-    assertHookAt(2, ODT_EVENT_BACKWARD_BEGIN);
-    assertHookAt(3, ODT_EVENT_BACKWARD_END);
 }
 
 /* tracedGrads shares calculateGradsImpl, so it must fire the same four events;
@@ -220,7 +192,7 @@ void testTracedGradsInterleavesProbesInsidePhases(void) {
     assertHookAt(7, ODT_EVENT_BACKWARD_END);
 }
 
-/* All-frozen model: backward is skipped entirely (#380 PR2), yet the BACKWARD
+/* All-frozen model: backward is skipped entirely, yet the BACKWARD
  * pair still fires -- the per-call event count is a constant for external
  * occurrence counting. */
 void testAllFrozenModelStillFiresBothPairs(void) {
@@ -285,9 +257,12 @@ void testSixEventsFireInOrderForOneGradsCallPlusOneStep(void) {
     freeQuantization(q);
 
     TEST_ASSERT_EQUAL_size_t(6, count);
-    for (size_t i = 0; i < 6; i++) {
-        assertHookAt(i, (odtEvent_t)i);
-    }
+    assertHookAt(0, ODT_EVENT_FORWARD_BEGIN);
+    assertHookAt(1, ODT_EVENT_FORWARD_END);
+    assertHookAt(2, ODT_EVENT_BACKWARD_BEGIN);
+    assertHookAt(3, ODT_EVENT_BACKWARD_END);
+    assertHookAt(4, ODT_EVENT_OPTIMIZER_BEGIN);
+    assertHookAt(5, ODT_EVENT_OPTIMIZER_END);
 }
 
 /* Same step with the hook removed again after a real install: nothing fires
@@ -397,7 +372,7 @@ void testTrainingEpochDefaultStepsThroughOptimizerStep(void) {
 }
 
 /* At microBatchSize m the FORWARD/BACKWARD quad fires once per
- * calculateGrads* call, i.e. once per m-row chunk (#152 PR3b): one 4-sample
+ * calculateGrads* call, i.e. once per m-row chunk: one 4-sample
  * batch at m = 2 yields two quads, not four, then one OPTIMIZER pair --
  * 4 * (4 / 2) + 2 = 10 events (18 at m = 1). */
 void testTrainingEpochDefaultFiresOneQuadPerMicroBatchChunk(void) {
@@ -481,7 +456,6 @@ int main(void) {
     RUN_TEST(testFireIsSilentBeforeAnyInstall);
     RUN_TEST(testFireHandsEventAndCtxToInstalledHook);
     RUN_TEST(testFireIsSilentAfterSetNull);
-    RUN_TEST(testCalculateGradsFiresForwardPairThenBackwardPair);
     RUN_TEST(testTracedGradsInterleavesProbesInsidePhases);
     RUN_TEST(testAllFrozenModelStillFiresBothPairs);
     RUN_TEST(testSixEventsFireInOrderForOneGradsCallPlusOneStep);

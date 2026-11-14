@@ -601,13 +601,13 @@ checkpointing, limitations, literature).
   reader/writer helper, `src/csv/include/CSVHelper.h`, not wired as a `DataLoader` source);
   `DataLoader` with batch + keyed shuffle: `dataLoaderShuffle(loader, key)` sets
   a `shuffle = true` loader's order (Fisher-Yates from the identity order, a
-  function of the key alone), and its default `getBatch` stops on a loader whose
-  order was never set. `trainingRun` shuffles the train loader at the start of
+  function of the key alone); until then it serves the identity order.
+  `trainingRun` shuffles the train loader at the start of
   every epoch, under that epoch's key with the opt-in per-epoch reshuffle
   (`dataLoaderSetReshufflePerEpoch`, default off, #381) and under epoch 0's key
   without it, and a `shuffle = true` eval loader once per run under its own key.
   Plus `dropLast` (only
-  `true` supported). `initDataLoader` fails fast on `batchSize == 0`. No
+  `true` supported). `dataLoaderInit` fails fast on `batchSize == 0`. No
   dedicated MNIST loader in `src/` (examples preprocess to `.npy`).
 - **RNG** — keyed and order-independent, **byte-mirrored in Python** and CI-verified:
   `rngKeyFromSeed`, `rngFold` = one Threefry-2x32-20 block per key-tree edge, `rngOpen`

@@ -33,6 +33,10 @@ void csvReadRowsByBufferSize(char *filePath, csvData_t *csvData) {
 
     for (size_t i = 0; i < csvData->numberOfRows; i++) {
         char *ptr = fgets(csvData->rows[i], MAX_ROW_SIZE, fp);
+        if (ptr == NULL) {
+            PRINT_ERROR("%s ended after %zu of %zu rows", filePath, i, csvData->numberOfRows);
+            exit(1);
+        }
         csvData->entriesInRow[i] = countCsvEntries(ptr);
     }
 
@@ -45,7 +49,12 @@ void csvParseBufferAsFloat(csvData_t *csvData, float **output) {
         size_t index = 0;
 
         while (token != NULL && index < csvData->entriesInRow[i]) {
-            output[i][index] = strtof(token, NULL);
+            char *end;
+            output[i][index] = strtof(token, &end);
+            if (end == token) {
+                PRINT_ERROR("row %zu field %zu is not a number: '%s'", i, index, token);
+                exit(1);
+            }
             index++;
             token = strtok(NULL, ",");
         }

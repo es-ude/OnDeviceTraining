@@ -3,7 +3,7 @@ add_elastic_ai_unit_test(
         Common
 )
 
-# Phase hook (#419 precondition): the library is two functions, but the test
+# Phase hook: the library is two functions, but the test
 # drives a real Linear+Softmax model through calculateGradsSequential /
 # tracedGrads / trainingEpochDefault + an SGD step, hence the long link list
 # (mirrors test/unit/training_loop + the TrainingLoopApi test).

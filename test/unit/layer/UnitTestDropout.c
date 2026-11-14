@@ -1420,8 +1420,18 @@ void testSymInt32ScaleFoldIsCanonicalNearest(void) {
     assertSymInt32FoldFor(0.3f);
 }
 
+/* The mask accessors trust a BOOL mask, so the entry rejects any other dtype. */
+void testDropoutLayerInitRejectsANonBoolMask(void) {
+    tensor_t *floatMask = buildFloatTensor(4, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "Dropout: mask must be a caller-allocated BOOL tensor",
+        dropoutLayerInit(0.5f, floatMask, quantizationInitFloat(), quantizationInitFloat()));
+    freeTensor(floatMask);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testDropoutLayerInitRejectsANonBoolMask);
     RUN_TEST(testForwardEvalIdentityFloat);
     RUN_TEST(testForwardEvalIdentitySymInt32);
     RUN_TEST(testForwardTrainingFloatScalesAndDrops);

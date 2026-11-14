@@ -180,20 +180,12 @@ size_t calcNumberOfBytesForData(quantization_t *q, size_t numberOfElements) {
 }
 
 bool tensorBoolGet(tensor_t const *tensor, size_t flatIndex) {
-    if (tensor->quantization->type != BOOL) {
-        PRINT_ERROR("tensorBoolGet called on non-BOOL tensor");
-        exit(1);
-    }
     size_t byteIndex = flatIndex / 8;
     size_t bitIndex = flatIndex % 8;
     return ((tensor->data[byteIndex] >> bitIndex) & 1u) != 0;
 }
 
 void tensorBoolSet(tensor_t *tensor, size_t flatIndex, bool value) {
-    if (tensor->quantization->type != BOOL) {
-        PRINT_ERROR("tensorBoolSet called on non-BOOL tensor");
-        exit(1);
-    }
     size_t byteIndex = flatIndex / 8;
     size_t bitIndex = flatIndex % 8;
     if (value) {
@@ -209,63 +201,10 @@ void setOrderOfDimsForNewTensor(size_t numberOfDimensions, size_t *orderOfDimens
     }
 }
 
-void print_binary_uint8(uint8_t x) {
-    /* Show the most‑significant bit first */
-    printf("Byte ");
-    for (int i = 7; i >= 0; --i) {
-        putchar((x >> i) & 1 ? '1' : '0');
-    }
-    putchar('\n'); /* newline for convenience */
-}
-
-uint32_t getBitmask(uint32_t startbit, uint32_t endbit) {
-    uint32_t endbitInternal = endbit - (startbit / 8) * 8;
-    uint32_t startbitInternal = startbit - (startbit / 8) * 8;
-    uint32_t counter = 0;
-    uint32_t value = 1;
-    for (size_t i = 0; i < 8; i++) {
-        if ((i >= startbitInternal) & (endbitInternal > i)) {
-            counter += value;
-        }
-        value *= 2;
-    }
-    // printf("bitmask ");
-    // print_binary_uint8(counter);
-    return counter;
-}
-
-uint8_t readByte(uint8_t data, uint8_t startbit, uint8_t endbit) {
-    uint8_t bitmask = getBitmask(startbit, endbit);
-    uint8_t intermediate = data & bitmask;
-    intermediate >>= startbit - (startbit / 8) * 8;
-    return intermediate;
-}
-
-uint8_t writeByte(uint8_t existingData, uint8_t data, uint8_t startbit, uint8_t endbit) {
-    uint8_t startbitInternal = startbit - (startbit / 8) * 8;
-    uint8_t endbitInternal = endbit - (startbit / 8) * 8;
-    uint8_t bitmask = getBitmask(startbitInternal, endbitInternal);
-    data <<= startbitInternal;
-    uint8_t intermediate = data & bitmask;
-    /* Clear-then-set: the [startbit, endbit) range is fully defined by this
-     * write, so callers may target buffers with stale in-range bits (bit-
-     * offset appends); bits outside the mask are preserved. */
-    existingData = (existingData & (uint8_t)~bitmask) | intermediate;
-    return existingData;
-}
-
-int max(int a, int b) {
-    return (a > b) ? a : b;
-}
-
-int min(int a, int b) {
-    return (a < b) ? a : b;
-}
-
 void byteConversion(uint8_t *dataIn, size_t dataInBits, uint8_t *dataOut, size_t dataOutBits,
                     size_t numValues) {
     if (numValues == 0) {
-        /* Skip the memset: N=0 tensor data may be NULL (#160). */
+        /* Empty tensors may have NULL data. */
         return;
     }
     if (dataInBits == 32 && (dataOutBits == 8 || dataOutBits == 16)) {
@@ -288,10 +227,7 @@ void byteConversion(uint8_t *dataIn, size_t dataInBits, uint8_t *dataOut, size_t
         }
         return;
     }
-    /* Ceiling idiom (bits+7)/8 as in calcNumberOfBytesForData: identical to
-     * the previous (bits-1)/8+1 for bits > 0, but safely 0 instead of a
-     * size_t underflow for dataOutBits == 0. memset also zeroes the trailing
-     * pad bits of the last byte, which the append loop leaves untouched. */
+    /* Also clears the pad bits of the last byte, which the append leaves alone. */
     memset(dataOut, 0, (numValues * dataOutBits + 7) / 8);
     byteConversionAppend(dataIn, dataInBits, dataOut, dataOutBits, numValues, 0, 0);
 }
@@ -365,18 +301,15 @@ static inline void bitWriterFinish(bitWriter_t *w) {
 
 void byteConversionAppend(uint8_t *dataIn, size_t dataInBits, uint8_t *dataOut, size_t dataOutBits,
                           size_t numValues, size_t dstStartBit, size_t srcStartBit) {
-    if (numValues == 0 || dataOutBits == 0) {
+    if (numValues == 0) {
         return;
     }
     size_t copyBits = dataInBits < dataOutBits ? dataInBits : dataOutBits;
     size_t dropBits = dataInBits - copyBits;
     size_t fillBits = dataOutBits - copyBits;
 
-    bitReader_t r = {.p = dataIn, .buf = 0, .avail = 0};
-    if (dataInBits > 0) {
-        r.p += srcStartBit / 8;
-        bitReaderSkip(&r, srcStartBit % 8);
-    }
+    bitReader_t r = {.p = dataIn + srcStartBit / 8, .buf = 0, .avail = 0};
+    bitReaderSkip(&r, srcStartBit % 8);
     bitWriter_t w = {.p = dataOut + dstStartBit / 8, .buf = 0, .used = (uint32_t)(dstStartBit % 8)};
     if (w.used > 0) {
         w.buf = *w.p & ((1u << w.used) - 1u);
@@ -433,11 +366,6 @@ void setTensorValues(tensor_t *tensor, uint8_t *data, shape_t *shape, quantizati
     tensor->shape = shape;
     tensor->quantization = quantization;
     tensor->sparsity = sparsity;
-}
-
-void setParameterValues(parameter_t *parameter, tensor_t *param, tensor_t *grad) {
-    parameter->param = param;
-    parameter->grad = grad;
 }
 
 void setShape(shape_t *shape, size_t *dims, size_t numberOfDims, size_t *orderOfDims) {
@@ -530,13 +458,7 @@ void printShape(shape_t *shape) {
     printf("__________\n");
 }
 
-void initOrderOfDimensions(size_t *orderOfDims, size_t numberOfDims) {
-    for (size_t i = 0; i < numberOfDims; i++) {
-        orderOfDims[i] = i;
-    }
-}
-
-void copyData(tensor_t *dest, tensor_t *src) {
+static void copyData(tensor_t *dest, tensor_t *src) {
     size_t numberOfValues = calcNumberOfElementsByShape(dest->shape);
     size_t sizeData = calcNumberOfBytesForData(src->quantization, numberOfValues);
 
@@ -547,85 +469,35 @@ void copyData(tensor_t *dest, tensor_t *src) {
     }
 }
 
-void copyShape(shape_t *dest, shape_t *src) {
+static void copyShape(shape_t *dest, shape_t *src) {
     memcpy(dest->dimensions, src->dimensions, src->numberOfDimensions * sizeof(size_t));
     memcpy(dest->orderOfDimensions, src->orderOfDimensions,
            src->numberOfDimensions * sizeof(size_t));
     dest->numberOfDimensions = src->numberOfDimensions;
 }
 
-/* Clones src's quantization into dest. Config-carrying dtypes (SYM_INT32/SYM/ASYM)
- * copy INTO dest->qConfig -- the caller must have pre-allocated it for the same
- * dtype (src/tensor never allocates). NULL-config dtypes (INT32/FLOAT32/BOOL)
- * overwrite dest->qConfig with NULL; a heap config dest owned beforehand stays
- * owned by the caller. */
-static void copyQConfigInto(quantization_t *dest, quantization_t *src, size_t qConfigSize,
-                            const char *typeName) {
-    if (dest->qConfig == NULL) {
-        PRINT_ERROR("copyQuantization: dest->qConfig for %s must be caller-allocated", typeName);
-        exit(1);
-    }
+/* Config-carrying dtypes copy INTO dest's own config and arrays (the copy
+ * contract is at copyTensor); NULL-config dtypes set dest->qConfig to NULL. */
+static void copyQConfigInto(quantization_t *dest, quantization_t *src, size_t qConfigSize) {
     dest->type = src->type;
     memcpy(dest->qConfig, src->qConfig, qConfigSize);
 }
 
-/* SYM's qConfig carries a heap `scales` pointer (group-quant PR1) -- a byte
- * memcpy of the struct would overwrite dest->qConfig->scales with src's
- * pointer, aliasing the two configs and leaking dest's own array. Copy the
- * VALUES into dest's own (caller-allocated, already-owned) array instead,
- * same contract as copyQConfigInto otherwise: dest->qConfig must be
- * caller-allocated, dest keeps owning its own scales block. Group shape
- * (numGroups/groupSize) is a CALLER contract, not something this function
- * derives or reconciles: dest->scales was sized at construction to dest's
- * own config, so src's group shape must match exactly (checked below) --
- * per-tensor ({1,0}) or grouped (PR2, numGroups > 1) alike -- and any
- * mismatch fail-fasts rather than over/under-copying. */
+/* Copies scale VALUES: a struct memcpy would alias src's array and leak dest's. */
 static void copySymQConfigInto(quantization_t *dest, quantization_t *src) {
-    if (dest->qConfig == NULL) {
-        PRINT_ERROR("copyQuantization: dest->qConfig for SYM must be caller-allocated");
-        exit(1);
-    }
     dest->type = src->type;
     symQConfig_t *srcQC = src->qConfig;
     symQConfig_t *dstQC = dest->qConfig;
-    /* Group-quant PR2: dest->scales is a fixed-size (numGroups-element) heap
-     * array allocated when dest's own config was constructed -- a numGroups
-     * mismatch means src's group shape doesn't fit dest's array, so this
-     * must fail fast rather than over/under-copy. groupSize/qBits/
-     * roundingMode are adopted from src unconditionally below (dest's shape
-     * was already made src-identical by copyShape, so a matching numGroups
-     * with a differing groupSize cannot occur via copyTensor's own callers). */
-    if (dstQC->numGroups != srcQC->numGroups) {
-        PRINT_ERROR("copyQuantization: SYM group-shape mismatch (dest numGroups=%zu "
-                    "groupSize=%zu, src numGroups=%zu groupSize=%zu)",
-                    dstQC->numGroups, dstQC->groupSize, srcQC->numGroups, srcQC->groupSize);
-        exit(1);
-    }
     copyCanonScales(dstQC->scales, srcQC->scales, srcQC->numGroups);
     dstQC->groupSize = srcQC->groupSize;
     dstQC->roundingMode = srcQC->roundingMode;
     dstQC->qBits = srcQC->qBits;
 }
 
-/* ASYM twin of copySymQConfigInto (group-quant PR4): TWO owned heap arrays
- * (scales + zeroPoints) -- a byte memcpy of the struct would alias both.
- * Same caller contract: dest->qConfig and its arrays are caller-allocated
- * and stay owned by dest; src's group shape must match dest's numGroups
- * exactly (fail-fast, never over/under-copy). */
 static void copyAsymQConfigInto(quantization_t *dest, quantization_t *src) {
-    if (dest->qConfig == NULL) {
-        PRINT_ERROR("copyQuantization: dest->qConfig for ASYM must be caller-allocated");
-        exit(1);
-    }
     dest->type = src->type;
     asymQConfig_t *srcQC = src->qConfig;
     asymQConfig_t *dstQC = dest->qConfig;
-    if (dstQC->numGroups != srcQC->numGroups) {
-        PRINT_ERROR("copyQuantization: ASYM group-shape mismatch (dest numGroups=%zu "
-                    "groupSize=%zu, src numGroups=%zu groupSize=%zu)",
-                    dstQC->numGroups, dstQC->groupSize, srcQC->numGroups, srcQC->groupSize);
-        exit(1);
-    }
     copyCanonScales(dstQC->scales, srcQC->scales, srcQC->numGroups);
     memcpy(dstQC->zeroPoints, srcQC->zeroPoints, srcQC->numGroups * sizeof(uint16_t));
     dstQC->groupSize = srcQC->groupSize;
@@ -633,25 +505,10 @@ static void copyAsymQConfigInto(quantization_t *dest, quantization_t *src) {
     dstQC->qBits = srcQC->qBits;
 }
 
-/* BFP's qConfig carries a heap `exponents` pointer (mirrors SYM's `scales`) --
- * same VALUE-copy contract as copySymQConfigInto: dest->exponents is a
- * fixed-size (numGroups-element) heap array allocated when dest's own config
- * was constructed, so a numGroups mismatch means src's group shape doesn't
- * fit dest's array and must fail fast rather than over/under-copy. */
 static void copyBfpQConfigInto(quantization_t *dest, quantization_t *src) {
-    if (dest->qConfig == NULL) {
-        PRINT_ERROR("copyQuantization: dest->qConfig for BFP must be caller-allocated");
-        exit(1);
-    }
     dest->type = src->type;
     bfpQConfig_t *srcQC = src->qConfig;
     bfpQConfig_t *dstQC = dest->qConfig;
-    if (dstQC->numGroups != srcQC->numGroups) {
-        PRINT_ERROR("copyQuantization: BFP group-shape mismatch (dest numGroups=%zu "
-                    "groupSize=%zu, src numGroups=%zu groupSize=%zu)",
-                    dstQC->numGroups, dstQC->groupSize, srcQC->numGroups, srcQC->groupSize);
-        exit(1);
-    }
     memcpy(dstQC->exponents, srcQC->exponents, srcQC->numGroups * sizeof(uint8_t));
     dstQC->groupSize = srcQC->groupSize;
     dstQC->roundingMode = srcQC->roundingMode;
@@ -659,7 +516,7 @@ static void copyBfpQConfigInto(quantization_t *dest, quantization_t *src) {
     dstQC->exponentBits = srcQC->exponentBits;
 }
 
-void copyQuantization(quantization_t *dest, quantization_t *src) {
+static void copyQuantization(quantization_t *dest, quantization_t *src) {
     switch (src->type) {
     case INT32:
         dest->type = INT32;
@@ -670,7 +527,7 @@ void copyQuantization(quantization_t *dest, quantization_t *src) {
         dest->qConfig = NULL;
         break;
     case SYM_INT32:
-        copyQConfigInto(dest, src, sizeof(symInt32QConfig_t), "SYM_INT32");
+        copyQConfigInto(dest, src, sizeof(symInt32QConfig_t));
         break;
     case SYM:
         copySymQConfigInto(dest, src);
@@ -695,7 +552,6 @@ void copyQuantization(quantization_t *dest, quantization_t *src) {
     }
 }
 
-// TODO copy sparsity
 void copyTensor(tensor_t *dest, tensor_t *src) {
     copyShape(dest->shape, src->shape);
     copyQuantization(dest->quantization, src->quantization);

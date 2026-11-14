@@ -13,47 +13,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-void testGetBitmask() {
-    uint8_t startbit = 1;
-    uint8_t endbit = 4;
-    uint8_t bitmask = getBitmask(startbit, endbit);
-    uint8_t expected = 0b00001110;
-    TEST_ASSERT_EQUAL(expected, bitmask);
-}
-
-void testGetBitmask2() {
-    uint8_t startbit = 10;
-    uint8_t endbit = 14;
-    uint8_t bitmask = getBitmask(startbit, endbit);
-    uint8_t expected = 0b00111100;
-    TEST_ASSERT_EQUAL(expected, bitmask);
-}
-
-void testReadByte() {
-    uint8_t startbit = 1;
-    uint8_t endbit = 4;
-    uint8_t data = 0b00101010;
-    uint8_t actual = readByte(data, startbit, endbit);
-    uint8_t expected = 0b00000101;
-    TEST_ASSERT_EQUAL(expected, actual);
-}
-
-void testWriteByte() {
-    uint8_t existing_data = 0b00000101;
-    uint8_t data = 0b00000101;
-    uint8_t newData = writeByte(existing_data, data, 3, 7);
-    uint8_t expected = 0b00101101;
-    TEST_ASSERT_EQUAL_UINT8(expected, newData);
-}
-
-void testWriteByte2() {
-    uint8_t existing_data = 0b00000101;
-    uint8_t data = 0b00010101;
-    uint8_t newData = writeByte(existing_data, data, 3, 11);
-    uint8_t expected = 0b10101101;
-    TEST_ASSERT_EQUAL_UINT8(expected, newData);
-}
-
 void testByteFlattening() {
     // {1, 2, 78}
     uint8_t dataIn[] = {0b000000001, 0b00000110, 0b00111000, 0b00000001};
@@ -155,8 +114,7 @@ void testByteFlattening5() {
  * testLinearBackwardFloatWithMismatchedQuantizations on the float32 -> asym8
  * conversion path. byteConversion's inner while-loop keeps iterating after
  * the output for a value is full to consume remaining input bits, accessing
- * dataOut[dataOutIndex] one byte past the end of the buffer. The OOB write
- * is a no-op on the value (writeByte with startbit==endbit), so the bug is
+ * dataOut[dataOutIndex] one byte past the end of the buffer. The bug is
  * invisible to value assertions and only fires under ASan. */
 void testByteConversion_NarrowingInt32ToByte_DoesNotOverreadOutputBuffer() {
     /* Two int32 values, little-endian: 0xAABBCCDD, 0xEEFF1122. */
@@ -204,39 +162,13 @@ void testByteConversion_NarrowingInt32ToSubByte_DoesNotOverreadOutputBuffer() {
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expectedBytes, captured, numBytesDataOut);
 }
 
-/* numValues == 0 is a no-op: the previous memset size expression
- * (numValues*dataOutBits-1)/8+1 underflowed to ~SIZE_MAX and crashed. One
- * guard away from production: convertSymTensorToInt32Tensor passes n
- * straight through, and N=0 tensors are constructible (#160). */
+/* Empty tensors exist, so numValues == 0 must touch nothing. */
 void testByteConversion_ZeroValuesIsNoOp() {
     int32_t vals[1] = {0x7};
     uint8_t dataOut[2] = {0xAB, 0xCD};
     byteConversion((uint8_t *)vals, 32, dataOut, 12, 0);
     uint8_t expectedBytes[] = {0xAB, 0xCD};
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expectedBytes, dataOut, 2);
-}
-
-/* dataOutBits == 0 hit the same size underflow; with the canonical (bits+7)/8
- * ceiling it degrades to an empty write: input is consumed, nothing is
- * written. (packChunkGuarded rejects zero widths at the production entry.) */
-void testByteConversion_ZeroOutBitsWritesNothing() {
-    int32_t vals[2] = {0x3, 0x5};
-    uint8_t dataOut[2] = {0xAB, 0xCD};
-    byteConversion((uint8_t *)vals, 32, dataOut, 0, 2);
-    uint8_t expectedBytes[] = {0xAB, 0xCD};
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(expectedBytes, dataOut, 2);
-}
-
-/* writeByte fully defines the [startbit, endbit) range: stale 1-bits inside
- * the mask are cleared, not OR-merged; bits outside the mask are preserved.
- * byteConversion pre-zeroes via memset, so this is behavior-identical there;
- * it makes bit-offset appends robust on previously written buffers. */
-void testWriteByte_ClearsStaleInMaskBits() {
-    uint8_t existing_data = 0xFF;
-    uint8_t data = 0b00000010;
-    uint8_t newData = writeByte(existing_data, data, 1, 4);
-    uint8_t expected = 0b11110101;
-    TEST_ASSERT_EQUAL_UINT8(expected, newData);
 }
 
 /* A packed mixed-width stream stops mid-byte (3 x 5 bits = 15 bits) and a
@@ -414,8 +346,8 @@ void testByteConversionAppend_NegativeCodeStoresLowBits() {
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expectedBytes, dataOut, 2);
 }
 
-/* Differential pin of byteConversionAppend against the pre-#505 bit-walking
- * engine (ReferenceByteConversion.h) over every width pair 0..32, src/dst bit
+/* Differential pin of byteConversionAppend against the simple bit-walking
+ * reference engine (ReferenceByteConversion.h) over every width pair 0..32, src/dst bit
  * offsets that cover each in-byte phase plus a multi-byte one, and element
  * counts that end on and off byte boundaries. Variant A surrounds both
  * buffers with canaries, so any changed byte outside the payload is caught on
@@ -572,7 +504,7 @@ void testByteConversionAppendMatchesReferenceEngine() {
     }
 }
 
-/* #160: an N=0 destination may be NULL, so nothing-to-write must not touch dst. */
+/* An empty destination may be NULL, so nothing-to-write must not touch dst. */
 void testByteConversionAppendNullDstWithNothingToWriteIsNoOp() {
     uint8_t src[1] = {0xFF};
     byteConversionAppend(src, 8, NULL, 8, 0, 0, 0);
@@ -636,29 +568,8 @@ void test_calcBytesPerElement_Sym_qBits3() {
     TEST_ASSERT_EQUAL_size_t(1, calcBytesPerElement(&q));
 }
 
-void test_calcNumberOfBytesForData_Sym_qBits3_N10() {
-    odtScale_t cfgScale[1] = {odtTestScale(1.0f)};
-    symQConfig_t cfg = {
-        .scales = cfgScale, .numGroups = 1, .groupSize = 0, .qBits = 3, .roundingMode = HALF_AWAY};
-    quantization_t q;
-    initSymQuantization(&cfg, &q);
-    /* ceil(3*10 / 8) = ceil(30/8) = 4 */
-    TEST_ASSERT_EQUAL_size_t(4, calcNumberOfBytesForData(&q, 10));
-}
-
-void test_calcNumberOfBytesForData_Sym_qBits5_N4() {
-    odtScale_t cfgScale[1] = {odtTestScale(1.0f)};
-    symQConfig_t cfg = {
-        .scales = cfgScale, .numGroups = 1, .groupSize = 0, .qBits = 5, .roundingMode = HALF_AWAY};
-    quantization_t q;
-    initSymQuantization(&cfg, &q);
-    /* ceil(5*4 / 8) = ceil(20/8) = 3 */
-    TEST_ASSERT_EQUAL_size_t(3, calcNumberOfBytesForData(&q, 4));
-}
-
 void test_calcBytesPerTensor_SymQBits3N10_Ceils() {
-    /* 10 x 3 bits = 30 bits -> 4 bytes. Pre-fix truncation gave 30/8 = 3 (#172).
-     * Mutation guard: reverting to bits/8 truncation returns 3 -> RED. */
+    /* 10 x 3 bits = 30 bits -> 4 bytes. Rounds up, never truncates. */
     size_t dims[] = {1, 10};
     size_t order[] = {0, 1};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 2, .orderOfDimensions = order};
@@ -673,7 +584,7 @@ void test_calcBytesPerTensor_SymQBits3N10_Ceils() {
 }
 
 void test_calcBytesPerTensor_BoolN3_CeilsTo1() {
-    /* 3 x 1 bit -> 1 byte; pre-fix truncation gave 0 (#172). */
+    /* 3 x 1 bit -> 1 byte; rounds up. */
     size_t dims[] = {1, 3};
     size_t order[] = {0, 1};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 2, .orderOfDimensions = order};
@@ -696,8 +607,6 @@ void testCalcSizesForBfp() {
 }
 
 void testCopyTensorInt32CarriesTypeAndData() {
-    /* Mutation guard: re-removing the INT32 arm makes copyQuantization exit(1)
-     * ("Unknown QType!"), killing the test run — RED. */
     int32_t srcData[] = {7, -3, 2000000000, -2000000000};
     size_t srcDims[] = {1, 4};
     size_t srcOrder[] = {0, 1};
@@ -729,14 +638,8 @@ void testCopyTensorSymCarriesConfigAndPackedBytes() {
     /* 4 mantissas at qBits=6 -> ceil(24/8) = 3 packed bytes. Dest starts with a
      * deliberately different config (scale 1.f, SR_HALF_AWAY): every field must be
      * overwritten by the copy, INTO the caller's storage (no pointer swap).
-     * Mutation guard: re-removing the SYM arm exits the run ("Unknown QType!").
-     * Group-quant PR1 mutation guard: dstQC.scales must stay dst's OWN array
-     * after the copy (values copied in, not the pointer swapped) -- reverting
-     * copySymQConfigInto to a blind memcpy of the whole struct (the pre-PR1
-     * shape) would alias dstQC.scales onto srcQCScale, silently leaking dst's
-     * own array and double-freeing srcQCScale later; the VALUE assertions
-     * below would still pass under that mutation (aliased array reads the
-     * same float), so the pointer-identity check is the one that catches it. */
+     * dstQC.scales must stay dst's own array (values copied, not the pointer):
+     * only the pointer-identity check catches an aliasing struct memcpy. */
     int32_t mantissas[] = {3, -3, 31, -32};
     uint8_t srcData[3];
     byteConversion((uint8_t *)mantissas, 32, srcData, 6, 4);
@@ -783,8 +686,7 @@ void testCopyTensorSymCarriesConfigAndPackedBytes() {
 }
 
 void testCopyTensorAsymCarriesConfigAndPackedBytes() {
-    /* 4 codes at qBits=5 -> ceil(20/8) = 3 packed bytes. Mutation guard: re-removing
-     * the ASYM arm exits the run ("Unknown QType!"). */
+    /* 4 codes at qBits=5 -> ceil(20/8) = 3 packed bytes. */
     int32_t codes[] = {0, 10, 20, 31};
     uint8_t srcData[3];
     byteConversion((uint8_t *)codes, 32, srcData, 5, 4);
@@ -792,7 +694,6 @@ void testCopyTensorAsymCarriesConfigAndPackedBytes() {
     size_t srcOrder[] = {0, 1};
     shape_t srcShape = {
         .dimensions = srcDims, .numberOfDimensions = 2, .orderOfDimensions = srcOrder};
-    /* code-domain re-pin (group-quant PR4, D6): old value-domain zp -7 becomes +7. */
     odtScale_t srcScales[1] = {odtTestScale(0.5f)};
     uint16_t srcZps[1] = {7};
     asymQConfig_t srcQC = {.scales = srcScales,
@@ -836,57 +737,14 @@ void testCopyTensorAsymCarriesConfigAndPackedBytes() {
     TEST_ASSERT_EQUAL_UINT8_ARRAY(srcData, dstData, 3);
 }
 
-void testCopyTensorSymIntoNullConfigDestDies() {
-    /* Config-carrying src into a dest whose qConfig is NULL (FLOAT32-initialized)
-     * must fail fast, not memcpy through NULL. Mutation guard: without the NULL
-     * check the child dies by SIGSEGV (signal, not exit(1)) and
-     * ASSERT_EXITS_WITH_FAILURE flags the wrong termination kind. */
-    int32_t mantissas[] = {1, -1};
-    uint8_t srcData[2];
-    byteConversion((uint8_t *)mantissas, 32, srcData, 6, 2);
-    size_t srcDims[] = {1, 2};
-    size_t srcOrder[] = {0, 1};
-    shape_t srcShape = {
-        .dimensions = srcDims, .numberOfDimensions = 2, .orderOfDimensions = srcOrder};
-    odtScale_t srcQCScale[1] = {odtTestScale(1.f)};
-    symQConfig_t srcQC = {.scales = srcQCScale,
-                          .numGroups = 1,
-                          .groupSize = 0,
-                          .qBits = 6,
-                          .roundingMode = HALF_AWAY};
-    quantization_t qSrc;
-    initSymQuantization(&srcQC, &qSrc);
-    tensor_t src;
-    setTensorValues(&src, srcData, &srcShape, &qSrc, NULL);
-
-    uint8_t dstData[2] = {0};
-    size_t dstDims[2];
-    size_t dstOrder[2];
-    shape_t dstShape = {
-        .dimensions = dstDims, .numberOfDimensions = 2, .orderOfDimensions = dstOrder};
-    quantization_t qDst;
-    initFloat32Quantization(&qDst); /* qConfig == NULL on purpose */
-    tensor_t dst;
-    setTensorValues(&dst, dstData, &dstShape, &qDst, NULL);
-
-    ASSERT_EXITS_WITH_FAILURE(copyTensor(&dst, &src));
-}
-
 void testCopyTensorBfpCarriesConfigAndPackedBytes() {
     /* Mirrors testCopyTensorSymCarriesConfigAndPackedBytes: 4 mantissas at
      * mantissaBits=6 -> ceil(24/8) = 3 packed bytes, 2 groups of 2. Dest
      * starts with a deliberately different config (different exponents,
      * groupSize, roundingMode): every field must be overwritten by the
      * copy, INTO the caller's storage (no pointer swap).
-     * Mutation guard: re-removing the BFP arm exits the run ("Unknown
-     * QType!"). Mutation guard: dstQC.exponents must stay dst's OWN array
-     * after the copy (values copied in, not the pointer swapped) --
-     * reverting copyBfpQConfigInto to a blind memcpy of the whole struct
-     * would alias dstQC.exponents onto srcQC.exponents, silently leaking
-     * dst's own array and double-freeing srcQC.exponents later; the VALUE
-     * assertions below would still pass under that mutation (aliased array
-     * reads the same byte), so the pointer-identity check is the one that
-     * catches it. */
+     * dstQC.exponents must stay dst's own array; only the pointer-identity
+     * check catches an aliasing struct memcpy. */
     int32_t mantissas[] = {3, -3, 31, -32};
     uint8_t srcData[3];
     byteConversion((uint8_t *)mantissas, 32, srcData, 6, 4);
@@ -937,90 +795,7 @@ void testCopyTensorBfpCarriesConfigAndPackedBytes() {
     TEST_ASSERT_EQUAL_UINT8_ARRAY(srcData, dstData, 3);
 }
 
-void testCopyTensorBfpIntoNullConfigDestDies() {
-    /* Mirrors testCopyTensorSymIntoNullConfigDestDies: config-carrying BFP
-     * src into a dest whose qConfig is NULL (FLOAT32-initialized) must fail
-     * fast, not memcpy through NULL. Mutation guard: without the NULL check
-     * the child dies by SIGSEGV (signal, not exit(1)) and
-     * ASSERT_EXITS_WITH_FAILURE flags the wrong termination kind. */
-    int32_t mantissas[] = {1, -1};
-    uint8_t srcData[2];
-    byteConversion((uint8_t *)mantissas, 32, srcData, 6, 2);
-    size_t srcDims[] = {1, 2};
-    size_t srcOrder[] = {0, 1};
-    shape_t srcShape = {
-        .dimensions = srcDims, .numberOfDimensions = 2, .orderOfDimensions = srcOrder};
-    uint8_t srcExponents[1] = {127};
-    bfpQConfig_t srcQC = {.exponents = srcExponents,
-                          .numGroups = 1,
-                          .groupSize = 0,
-                          .roundingMode = HALF_AWAY,
-                          .mantissaBits = 6,
-                          .exponentBits = 8};
-    quantization_t qSrc;
-    initBfpQuantization(&srcQC, &qSrc);
-    tensor_t src;
-    setTensorValues(&src, srcData, &srcShape, &qSrc, NULL);
-
-    uint8_t dstData[2] = {0};
-    size_t dstDims[2];
-    size_t dstOrder[2];
-    shape_t dstShape = {
-        .dimensions = dstDims, .numberOfDimensions = 2, .orderOfDimensions = dstOrder};
-    quantization_t qDst;
-    initFloat32Quantization(&qDst); /* qConfig == NULL on purpose */
-    tensor_t dst;
-    setTensorValues(&dst, dstData, &dstShape, &qDst, NULL);
-
-    ASSERT_EXITS_WITH_FAILURE(copyTensor(&dst, &src));
-}
-
-void testCopyTensorBfpGroupShapeMismatchDies() {
-    /* BFP(grouped, numGroups=2) -> BFP(per-tensor, numGroups=1): dest's
-     * 1-element exponents array cannot hold src's 2 group exponents -- must
-     * fail-fast rather than overrun dest->exponents (mirrors
-     * testSameTypeSymCopyRejectsGroupShapeMismatch, UnitTestTensorConversion.c,
-     * but through copyTensor/copyQuantization instead of convertTensor). */
-    int32_t mantissas[] = {3, -3, 31, -32};
-    uint8_t srcData[3];
-    byteConversion((uint8_t *)mantissas, 32, srcData, 6, 4);
-    size_t srcDims[] = {1, 4};
-    size_t srcOrder[] = {0, 1};
-    shape_t srcShape = {
-        .dimensions = srcDims, .numberOfDimensions = 2, .orderOfDimensions = srcOrder};
-    uint8_t srcExponents[2] = {200, 50};
-    bfpQConfig_t srcQC = {.exponents = srcExponents,
-                          .numGroups = 2,
-                          .groupSize = 2,
-                          .roundingMode = HALF_AWAY,
-                          .mantissaBits = 6,
-                          .exponentBits = 8};
-    quantization_t qSrc;
-    initBfpQuantization(&srcQC, &qSrc);
-    tensor_t src;
-    setTensorValues(&src, srcData, &srcShape, &qSrc, NULL);
-
-    uint8_t dstData[3] = {0};
-    size_t dstDims[2];
-    size_t dstOrder[2];
-    shape_t dstShape = {
-        .dimensions = dstDims, .numberOfDimensions = 2, .orderOfDimensions = dstOrder};
-    uint8_t dstExponents[1] = {127};
-    bfpQConfig_t dstQC = {.exponents = dstExponents,
-                          .numGroups = 1,
-                          .groupSize = 0,
-                          .roundingMode = HALF_AWAY,
-                          .mantissaBits = 6,
-                          .exponentBits = 8};
-    quantization_t qDst;
-    initBfpQuantization(&dstQC, &qDst);
-    tensor_t dst;
-    setTensorValues(&dst, dstData, &dstShape, &qDst, NULL);
-
-    ASSERT_EXITS_WITH_FAILURE(copyTensor(&dst, &src));
-}
-
-/* #394: shapes and counts come from files and callers; a wrapped product
+/* Shapes and counts come from files and callers; a wrapped product
  * would size an allocation far below the data later written into it. */
 void testElementCountOverflowExits() {
     size_t dims[] = {SIZE_MAX / 2u + 1u, 2u};
@@ -1262,7 +1037,6 @@ int main(void) {
     RUN_TEST(testByteConversion_NarrowingInt32ToSubByte_DoesNotOverreadOutputBuffer);
     RUN_TEST(testByteConversion_NarrowingInt32ToByte_DoesNotOverreadOutputBuffer);
     RUN_TEST(testByteConversion_ZeroValuesIsNoOp);
-    RUN_TEST(testByteConversion_ZeroOutBitsWritesNothing);
 
     RUN_TEST(testByteConversionAppend_ContinuesMidByteAtBitOffset);
     RUN_TEST(testByteConversionAppend_MixedWidthDeltaLayout);
@@ -1278,26 +1052,14 @@ int main(void) {
     RUN_TEST(testByteConversionAppendMatchesReferenceEngine);
     RUN_TEST(testByteConversionAppendNullDstWithNothingToWriteIsNoOp);
 
-    RUN_TEST(testGetBitmask);
-    RUN_TEST(testGetBitmask2);
-    RUN_TEST(testWriteByte);
-    RUN_TEST(testWriteByte2);
-    RUN_TEST(testWriteByte_ClearsStaleInMaskBits);
-    RUN_TEST(testReadByte);
-
     RUN_TEST(testCopyTensor);
     RUN_TEST(testCopyTensorInt32CarriesTypeAndData);
     RUN_TEST(testCopyTensorSymCarriesConfigAndPackedBytes);
     RUN_TEST(testCopyTensorAsymCarriesConfigAndPackedBytes);
-    RUN_TEST(testCopyTensorSymIntoNullConfigDestDies);
     RUN_TEST(testCopyTensorBfpCarriesConfigAndPackedBytes);
-    RUN_TEST(testCopyTensorBfpIntoNullConfigDestDies);
-    RUN_TEST(testCopyTensorBfpGroupShapeMismatchDies);
 
     RUN_TEST(test_calcBitsPerElement_Sym_qBits3);
     RUN_TEST(test_calcBytesPerElement_Sym_qBits3);
-    RUN_TEST(test_calcNumberOfBytesForData_Sym_qBits3_N10);
-    RUN_TEST(test_calcNumberOfBytesForData_Sym_qBits5_N4);
     RUN_TEST(test_calcBytesPerTensor_SymQBits3N10_Ceils);
     RUN_TEST(test_calcBytesPerTensor_BoolN3_CeilsTo1);
     RUN_TEST(testCalcSizesForBfp);

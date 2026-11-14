@@ -7,43 +7,8 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Compile-time contract: initBoolQuantization takes (quantization_t *). */
-_Static_assert(_Generic((&initBoolQuantization), void (*)(quantization_t *): 1, default: 0),
-               "initBoolQuantization must take (quantization_t *)");
-
-/* Compile-time contract: tensorBoolGet / tensorBoolSet signatures. */
-_Static_assert(_Generic((&tensorBoolGet), bool (*)(tensor_t const *, size_t): 1, default: 0),
-               "tensorBoolGet must take (tensor_t const *, size_t) and return bool");
-
-_Static_assert(_Generic((&tensorBoolSet), void (*)(tensor_t *, size_t, bool): 1, default: 0),
-               "tensorBoolSet must take (tensor_t *, size_t, bool)");
-
 void setUp() {}
 void tearDown() {}
-
-void test_calcNumberOfBytesForData_Bool_N3() {
-    quantization_t q;
-    initBoolQuantization(&q);
-    TEST_ASSERT_EQUAL_size_t(1, calcNumberOfBytesForData(&q, 3));
-}
-
-void test_calcNumberOfBytesForData_Bool_N8() {
-    quantization_t q;
-    initBoolQuantization(&q);
-    TEST_ASSERT_EQUAL_size_t(1, calcNumberOfBytesForData(&q, 8));
-}
-
-void test_calcNumberOfBytesForData_Bool_N9() {
-    quantization_t q;
-    initBoolQuantization(&q);
-    TEST_ASSERT_EQUAL_size_t(2, calcNumberOfBytesForData(&q, 9));
-}
-
-void test_calcNumberOfBytesForData_Bool_N17() {
-    quantization_t q;
-    initBoolQuantization(&q);
-    TEST_ASSERT_EQUAL_size_t(3, calcNumberOfBytesForData(&q, 17));
-}
 
 void test_calcBytesPerElement_Bool() {
     quantization_t q;
@@ -205,10 +170,6 @@ void test_printTensorBool_Smoke() {
 
 int main(void) {
     UNITY_BEGIN();
-    RUN_TEST(test_calcNumberOfBytesForData_Bool_N3);
-    RUN_TEST(test_calcNumberOfBytesForData_Bool_N8);
-    RUN_TEST(test_calcNumberOfBytesForData_Bool_N9);
-    RUN_TEST(test_calcNumberOfBytesForData_Bool_N17);
     RUN_TEST(test_calcBytesPerElement_Bool);
     RUN_TEST(test_calcBitsPerElement_Bool);
     RUN_TEST(test_tensorBoolGet_AfterZeroInit_AllFalse);

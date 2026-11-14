@@ -28,8 +28,8 @@ void initDropoutConfig(dropoutConfig_t *cfg, float p, tensor_t *mask, quantizati
         PRINT_ERROR("Dropout: p must be in [0, 1), got %f", (double)p);
         exit(1);
     }
-    if (mask == NULL) {
-        PRINT_ERROR("Dropout: mask must not be NULL — caller must pre-allocate a BOOL tensor");
+    if (mask == NULL || mask->quantization->type != BOOL) {
+        PRINT_ERROR("Dropout: mask must be a caller-allocated BOOL tensor");
         exit(1);
     }
     cfg->p = p;

@@ -8,60 +8,13 @@
 #include "OptimizerApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
-#include "TensorApi.h"
-
-/*! Moment buffer at `param`'s shape with its OWN quantization (deep clone
- * of momentQuant) -- accumulator dtype decoupled from the parameter's
- * storage dtype (SgdApi momentumStateInit precedent, #277). */
-static tensor_t *momentStateInit(tensor_t *param, quantization_t *momentQuant) {
-    /* Group-quant PR2 carrier gate (mirrors gradInit,
-     * TensorApi.c, and SgdApi's momentumStateInit twin): groups are legal
-     * ONLY on GEMM-family weight tensors -- moment states stay per-tensor
-     * unconditionally until PR3. Without this, getQLike would silently
-     * clone a grouped SYM momentQuant template into a grouped moment
-     * buffer -- a state PR2's contract never intended to support. */
-    if (momentQuant->type == SYM) {
-        symQConfig_t *symQC = momentQuant->qConfig;
-        if (symQC->numGroups > 1) {
-            PRINT_ERROR("momentStateInit: grouped SYM moment templates are unsupported -- "
-                        "grouped moments are a future #300 axis");
-            exit(1);
-        }
-    }
-    /* Group-quant PR4 (Task 3): ASYM twin of the gate above (SgdApi's
-     * momentumStateInit mirror) -- getQLike's ASYM arm deep-clones grouped
-     * grids, so without this a grouped template would silently become a
-     * grouped moment buffer. */
-    if (momentQuant->type == ASYM) {
-        asymQConfig_t *asymQC = momentQuant->qConfig;
-        if (asymQC->numGroups > 1) {
-            PRINT_ERROR("momentStateInit: grouped ASYM moment templates are unsupported -- "
-                        "grouped moments are a future #300 axis");
-            exit(1);
-        }
-    }
-    /* BFP epic PR3 Task 7: the PR1 unconditional carrier gate above lifted
-     * (SgdApi's momentumStateInit twin) -- BFP moment storage is now
-     * per-tensor-only, mirroring the SYM/ASYM grouped gates above and
-     * gradInit's Task 6 lift (a grouped template only fits one param's
-     * element count; grouped BFP states have no spec mandate, #300 axis). */
-    if (momentQuant->type == BFP) {
-        bfpQConfig_t *bfpQC = momentQuant->qConfig;
-        if (bfpQC->numGroups > 1) {
-            PRINT_ERROR("momentStateInit: grouped BFP moment templates are unsupported -- "
-                        "per-tensor only (#300 axis)");
-            exit(1);
-        }
-    }
-    return initTensor(getShapeLike(param->shape), getQLike(momentQuant), NULL);
-}
 
 optimizer_t *adamWCreateOptim(float learningRate, double beta1, double beta2, double eps,
                               double weightDecay, const model_t *m, quantization_t *momentQuant,
                               arithmetic_t updateMath) {
     optimizer_t *optim = reserveMemory(sizeof(optimizer_t));
     optim->type = ADAM_W;
-    /* #279 ratified default: seeded-SR training write-back (dead-zone escape);
+    /* Seeded SR write-back by default (dead-zone escape);
      * optimizerSetWriteBackRounding(optim, HALF_AWAY) is the explicit opt-out. */
     optim->writeBackRounding = SR_HALF_AWAY;
 
@@ -72,12 +25,7 @@ optimizer_t *adamWCreateOptim(float learningRate, double beta1, double beta2, do
     optim->impl = impl;
 
     size_t sizeStates = calcTotalNumberOfStates(m);
-    /* #380: a zero-state model is only an error when it's DEGENERATE -- every
-     * parameter-bearing layer got frozen (nothing to optimize). A model that
-     * simply has no parameter-bearing layer types at all (e.g. a lone
-     * Dropout/pooling layer) is a pre-existing, deliberately-supported
-     * zero-state configuration (SgdApi sibling contract) and must keep
-     * working. */
+    /* Reject all-frozen models while allowing parameterless models. */
     if (sizeStates == 0 && modelHasFrozenLayer(m)) {
         PRINT_ERROR("adamWCreateOptim: model has no trainable parameters "
                     "(every parameter-bearing layer is frozen) - nothing to optimize");
@@ -88,19 +36,8 @@ optimizer_t *adamWCreateOptim(float learningRate, double beta1, double beta2, do
     optim->parameter = parameter;
     collectTrainableParameters(m, parameter);
 
-    /* AdamW always carries both moments (m = stateBuffers[0], v = [1]);
-     * there is no SGD-style momentum==0 stateless arm. reserveMemory
-     * zero-fills, so both moments start at torch's init (zeros). */
-    states_t **states = reserveMemory(sizeStates * sizeof(states_t *));
-    for (size_t s = 0; s < sizeStates; s++) {
-        states_t *paramStates = reserveMemory(sizeof(states_t));
-        paramStates->statesPerParameter = 2;
-        paramStates->stateBuffers = reserveMemory(2 * sizeof(tensor_t *));
-        paramStates->stateBuffers[0] = momentStateInit(optim->parameter[s]->param, momentQuant);
-        paramStates->stateBuffers[1] = momentStateInit(optim->parameter[s]->param, momentQuant);
-        states[s] = paramStates;
-    }
-    optim->states = states;
+    /* m = stateBuffers[0], v = [1], both zero-initialized like torch. */
+    optim->states = initMomentStates(optim, 2, momentQuant, "adamWCreateOptim");
 
     validateOptimizerGradStorage(optim, "adamWCreateOptim");
     return optim;

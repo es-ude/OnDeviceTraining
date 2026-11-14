@@ -13,24 +13,15 @@
  * in double. Same expression shape as LrScheduler's closed forms, with gamma
  * DIVIDING. */
 static double computeExact(const bsScheduler_t *sched, size_t epoch) {
-    switch (sched->type) {
-    case STEP_BS: {
+    if (sched->type == STEP_BS) {
         double exponent = (double)(epoch / sched->params.stepBs.stepSize);
         return (double)sched->baseBs / pow((double)sched->params.stepBs.gamma, exponent);
     }
-    case EXPONENTIAL_BS:
-        return (double)sched->baseBs /
-               pow((double)sched->params.exponentialBs.gamma, (double)epoch);
-    }
-    PRINT_ERROR("bsScheduler: unknown scheduler type %d", (int)sched->type);
-    exit(1);
+    return (double)sched->baseBs / pow((double)sched->params.exponentialBs.gamma, (double)epoch);
 }
 
-/* THE batch computation, shared by bsSchedulerStep (which writes it) and
- * bsSchedulerBatchSizeAt (which only reports it) so the two cannot diverge
- * (#152): closed form -> non-finite guard -> round half away -> clamp to
- * [1, maxBatchSize]. `fn` names the public entry in the message; *exactOut
- * receives the un-rounded target (the LR compensation's divisor). */
+/* Shared rounding/clamping for stepping and peeking; exactOut supplies the LR-compensation
+ * divisor. `fn` names the public entry in the message. */
 static size_t appliedBatchAt(const bsScheduler_t *sched, size_t epoch, const char *fn,
                              double *exactOut) {
     double exact = computeExact(sched, epoch);
@@ -130,7 +121,7 @@ void bsSchedulerStep(bsScheduler_t *sched) {
         /* lr = baseLr * applied / exact keeps lr/batch = baseLr/exact, i.e. the
          * LR scheduler's ratio, regardless of rounding and the cap. Past the
          * cap this degrades into plain LR decay (baseLr * max / exact) BY
-         * DESIGN — do not "fix" it. Written absolutely from baseLr (#327). */
+         * DESIGN — do not "fix" it. Written absolutely from baseLr. */
         float lr = (float)((double)sched->baseLr * (double)applied / exact);
         if (!isfinite(lr)) {
             PRINT_ERROR("bsSchedulerStep: compensated learning rate is not finite at lastEpoch %zu "

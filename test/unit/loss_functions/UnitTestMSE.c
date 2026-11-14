@@ -551,6 +551,37 @@ void testMseBackwardRequantizesTheGradWithItsLossStream(void) {
     TEST_ASSERT_EQUAL_HEX32(0x7114be1fu, mseCellState);
 }
 
+/* The backward checks its output itself: a forward call is no proof. */
+void testMseLossBackwardRejectsRank1Output(void) {
+    size_t dims[] = {3};
+    tensor_t *output = buildFloatTensorShaped(dims, 1, (float[]){1.f, 2.f, 3.f});
+    tensor_t *label = buildFloatTensorShaped(dims, 1, (float[]){2.f, 4.f, 6.f});
+    tensor_t *result = buildFloatTensorShaped(dims, 1, (float[]){0.f, 0.f, 0.f});
+    ASSERT_EXITS_WITH_OUTPUT(1, "mseLossBackward: model output shape has rank 1",
+                             mseLossBackward(output, label, result, NULL));
+    freeTensor(result);
+    freeTensor(label);
+    freeTensor(output);
+}
+
+/* The FLOAT32 arm reads label and result data as float, so SYM_INT32 codes there would be
+ * reinterpreted as float bit patterns. */
+void testMseFloat32ArmRejectsNonFloat32Operands(void) {
+    size_t dims[] = {1, 3};
+    tensor_t *output = buildFloatTensorShaped(dims, 2, (float[]){1.f, 2.f, 3.f});
+    tensor_t *floatOperand = buildFloatTensorShaped(dims, 2, (float[]){2.f, 4.f, 6.f});
+    tensor_t *symOperand = mseBuildSym1x3();
+    ASSERT_EXITS_WITH_OUTPUT(1, "mseLossForward: label dtype",
+                             (void)mseLossForward(output, symOperand, REDUCTION_MEAN, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "mseLossBackward: label dtype",
+                             mseLossBackward(output, symOperand, floatOperand, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "mseLossBackward: result (grad wire) dtype",
+                             mseLossBackward(output, floatOperand, symOperand, NULL));
+    freeTensor(symOperand);
+    freeTensor(floatOperand);
+    freeTensor(output);
+}
+
 int main(void) {
     UNITY_BEGIN();
 
@@ -579,6 +610,8 @@ int main(void) {
     RUN_TEST(testComputeMeanScaleMseRejectsEmptyBatch);
     RUN_TEST(testComputeMeanScaleMseRejectsRank1View);
     RUN_TEST(testMseBackwardRequantizesTheGradWithItsLossStream);
+    RUN_TEST(testMseLossBackwardRejectsRank1Output);
+    RUN_TEST(testMseFloat32ArmRejectsNonFloat32Operands);
 
     return UNITY_END();
 }

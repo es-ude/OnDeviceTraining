@@ -8,19 +8,21 @@ float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution,
                                reduction_t reduction);
 
 /* Dtype dispatcher registered as lossFunctions[CROSS_ENTROPY].forward.
- * FLOAT32 -> crossEntropyForwardFloat (raw float* view); SYM_INT32 and BFP ->
- * the dtype-generic fake-quant arm, which dequantizes both operands through
- * convertTensor before running the float core. Every other dtype fails fast:
- * the raw float impl casts the data buffer to float*, so e.g. ASYM codes would
- * be silently reinterpreted as float bit patterns.
+ * FLOAT32 -> crossEntropyForwardFloat (raw float* view) when the distribution
+ * is FLOAT32 too, else the fake-quant arm; SYM_INT32 and BFP -> the dtype-generic fake-quant arm,
+ * which dequantizes both operands through convertTensor before running the
+ * float core. Every other output dtype fails fast: the raw float impl casts
+ * the data buffer to float*, so e.g. ASYM codes would be silently
+ * reinterpreted as float bit patterns.
  * It also fails fast when softmaxOutput has rank < 2 or no elements, or the
- * distribution's shape differs from it (#153).
+ * distribution's shape differs from it.
  * Returns NaN (and prints one PRINT_ERROR per process) when any softmax
- * element is non-finite; it no longer aborts (#446). */
+ * element is non-finite; it does not abort. */
 float crossEntropyForward(tensor_t *softmaxOutput, tensor_t *distribution, reduction_t reduction,
                           const layerExec_t *exec);
 
-/* The combined Softmax + CE gradient p - y into the loss-grad wire. A BFP p
+/* Writes the fused logits gradient p - y (raw, no batch divisor): it already includes the
+ * Softmax backward, so the training loop must not run Softmax backward again. A BFP p
  * is the integer head (needs a BFP grad wire and a FLOAT32 or BFP one-hot
  * label, fails fast otherwise); a FLOAT32 p the float island (ONE conversion into a
  * quantized grad wire); SYM_INT32 / ASYM p the dequantizing island. */

@@ -57,58 +57,12 @@ static void rejectUnimplementedIntegerSgd(const optimizer_t *optim, const sgd_t 
     }
 }
 
-/*! Builds a momentum-state tensor at `param`'s shape but with its OWN
- * quantization (`momentumQuant`, deep-cloned via getQLike) -- decouples the
- * accumulator's dtype from the parameter's storage dtype (#277 Task 2). */
-static tensor_t *momentumStateInit(tensor_t *param, quantization_t *momentumQuant) {
-    /* Group-quant PR2 carrier gate (mirrors gradInit,
-     * TensorApi.c): groups are legal ONLY on GEMM-family weight tensors --
-     * momentum states stay per-tensor unconditionally until PR3. Without
-     * this, getQLike would silently clone a grouped SYM momentumQuant
-     * template into a grouped momentum buffer -- a state PR2's contract
-     * never intended to support. */
-    if (momentumQuant->type == SYM) {
-        symQConfig_t *symQC = momentumQuant->qConfig;
-        if (symQC->numGroups > 1) {
-            PRINT_ERROR("momentumStateInit: grouped SYM momentum templates are unsupported -- "
-                        "grouped momentum is a future #300 axis");
-            exit(1);
-        }
-    }
-    /* Group-quant PR4 (Task 3): ASYM twin of the gate above -- same carrier
-     * contract (getQLike's ASYM arm deep-clones grouped grids, scales AND
-     * zeroPoints, so without this a grouped template would silently become a
-     * grouped momentum buffer). */
-    if (momentumQuant->type == ASYM) {
-        asymQConfig_t *asymQC = momentumQuant->qConfig;
-        if (asymQC->numGroups > 1) {
-            PRINT_ERROR("momentumStateInit: grouped ASYM momentum templates are unsupported -- "
-                        "grouped momentum is a future #300 axis");
-            exit(1);
-        }
-    }
-    /* BFP epic PR3 Task 7: the PR1 unconditional carrier gate above lifted --
-     * BFP momentum storage is now per-tensor-only, mirroring the SYM/ASYM
-     * grouped gates above and gradInit's Task 6 lift (a grouped template only
-     * fits one param's element count; grouped BFP states have no spec
-     * mandate, #300 axis). */
-    if (momentumQuant->type == BFP) {
-        bfpQConfig_t *bfpQC = momentumQuant->qConfig;
-        if (bfpQC->numGroups > 1) {
-            PRINT_ERROR("momentumStateInit: grouped BFP momentum templates are unsupported -- "
-                        "per-tensor only (#300 axis)");
-            exit(1);
-        }
-    }
-    return initTensor(getShapeLike(param->shape), getQLike(momentumQuant), NULL);
-}
-
 optimizer_t *sgdMCreateOptim(float learningRate, float momentumFactor, float weightDecay,
                              const model_t *m, quantization_t *momentumQuant,
                              arithmetic_t updateMath) {
     optimizer_t *optim = reserveMemory(sizeof(optimizer_t));
     optim->type = SGD_M;
-    /* #279 ratified default: seeded-SR training write-back (dead-zone escape);
+    /* Seeded SR write-back by default (dead-zone escape);
      * optimizerSetWriteBackRounding(optim, HALF_AWAY) is the explicit opt-out. */
     optim->writeBackRounding = SR_HALF_AWAY;
 
@@ -119,12 +73,7 @@ optimizer_t *sgdMCreateOptim(float learningRate, float momentumFactor, float wei
     optim->impl = sgdImpl;
 
     size_t sizeStates = calcTotalNumberOfStates(m);
-    /* #380: a zero-state model is only an error when it's DEGENERATE -- every
-     * parameter-bearing layer got frozen (nothing to optimize). A model that
-     * simply has no parameter-bearing layer types at all (e.g. a lone
-     * Dropout/pooling layer) is a pre-existing, deliberately-supported
-     * zero-state configuration (UnitTestDropoutIntegration/
-     * UnitTestAdaptiveAvgPool1dIntegration) and must keep working. */
+    /* Reject all-frozen models while allowing parameterless models. */
     if (sizeStates == 0 && modelHasFrozenLayer(m)) {
         PRINT_ERROR("sgdMCreateOptim: model has no trainable parameters "
                     "(every parameter-bearing layer is frozen) - nothing to optimize");
@@ -135,24 +84,10 @@ optimizer_t *sgdMCreateOptim(float learningRate, float momentumFactor, float wei
     optim->parameter = parameter;
     collectTrainableParameters(m, parameter);
 
-    /* momentumFactor == 0: momentum state is semantically nonexistent --
-     * allocate none (sgdStepM's momentum==0 path never reads states, #308).
-     * Every trainable parameter otherwise gets one state buffer at the
-     * param's shape with the caller's momentumQuant (dtype-decoupled, #277). */
-    if (momentumFactor == 0.0f) {
-        optim->states = NULL;
-    } else {
-        states_t **states = reserveMemory(sizeStates * sizeof(states_t *));
-        for (size_t s = 0; s < sizeStates; s++) {
-            states_t *paramStates = reserveMemory(sizeof(states_t));
-            paramStates->statesPerParameter = 1;
-            paramStates->stateBuffers = reserveMemory(sizeof(tensor_t *));
-            paramStates->stateBuffers[0] =
-                momentumStateInit(optim->parameter[s]->param, momentumQuant);
-            states[s] = paramStates;
-        }
-        optim->states = states;
-    }
+    /* momentumFactor == 0 has no momentum state, so momentumQuant is ignored. */
+    optim->states = (momentumFactor == 0.0f)
+                        ? NULL
+                        : initMomentStates(optim, 1, momentumQuant, "sgdMCreateOptim");
 
     validateOptimizerGradStorage(optim, "sgdMCreateOptim");
     rejectUnimplementedIntegerSgd(optim, sgd, momentumQuant);

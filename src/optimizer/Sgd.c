@@ -33,12 +33,10 @@ static void sgdSetLearningRate(sgd_t *sgd, float learningRate) {
 
 void sgdInit(sgd_t *sgd, float learningRate, float momentumFactor, float weightDecay,
              arithmetic_t updateMath) {
-    /* Only ARITH_FLOAT32 update arithmetic is implemented; fail at
-     * construction so a training run cannot start on an unimplemented
-     * arm (#310). */
+    /* The step trusts this: its kernels raw-cast operand data to float*. */
     if (updateMath.type != ARITH_FLOAT32) {
         PRINT_ERROR("SGD updateMath: only ARITH_FLOAT32 is implemented "
-                    "(integer-arithmetic update numerics not yet designed, #310)");
+                    "(integer-arithmetic update numerics not yet designed)");
         exit(1);
     }
     sgdSetLearningRate(sgd, learningRate);
@@ -74,14 +72,14 @@ typedef struct {
 } sgdMFusedCtx_t; /* momentum: state and param in one op */
 
 /* executeOp update kernels. The update arithmetic comes from the sgd_t's
- * updateMath knob (#310); only ARITH_FLOAT32 is implemented (guards in
- * sgdInit + sgdStepM), so the funnel prologue dequants every operand to
+ * updateMath knob; only ARITH_FLOAT32 is implemented (sgdInit rejects the
+ * rest), so the funnel prologue dequants every operand to
  * float and the OUT_WRITE epilogue requants rawOut into the target's own
  * dtype -- per-parameter dtype dispatch without a qtype switch here.
- * Rounding ownership (#282): the OUT_WRITE epilogue rounds by the op's
+ * Rounding ownership: the OUT_WRITE epilogue rounds by the op's
  * arithmetic.roundingMode, so each step function overrides it with
  * optim->writeBackRounding on every param/state write-back -- that is where
- * a SYM param's SR_HALF_AWAY dead-zone escape lives (#279, PR #284). The
+ * a SYM param's SR_HALF_AWAY dead-zone escape lives. The
  * tensors' own qConfig roundingMode stays untouched (storage/serialization).
  * Momentum runs a state op and then a param op; with a FLOAT32 state and grad
  * the two collapse into one op (sgdMFusedKernel) so a quantized param is
@@ -242,16 +240,7 @@ static void sgdParamUpdateBfp(const sgd_t *sgd, tensor_t *param, const tensor_t 
 void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
     sgd_t *sgd = optim->impl->sgd;
 
-    /* Re-checked here (not only in sgdInit): the update kernels raw-cast
-     * operand data to float*, so a non-FLOAT32 prologue would be silently
-     * misread -- hand-assembled optimizers must hit the same wall (#310). */
-    if (sgd->updateMath.type != ARITH_FLOAT32) {
-        PRINT_ERROR("SGD updateMath: only ARITH_FLOAT32 is implemented "
-                    "(integer-arithmetic update numerics not yet designed, #310)");
-        exit(1);
-    }
-
-    /* #282: training write-backs round by the OPTIMIZER's knob -- the update
+    /* Training write-backs round by the OPTIMIZER's knob -- the update
      * ops run with writeBackRounding as their operation-owned rounding. */
     arithmetic_t updateMath = sgd->updateMath;
     updateMath.roundingMode = optim->writeBackRounding;
@@ -261,7 +250,7 @@ void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
      * may be NULL), so run the stateless single-op update instead of the
      * two-op momentum path. Mathematically identical at momentum == 0:
      * state would be exactly grad + wd*param, and param -= lr*state
-     * collapses to param -= lr*(grad + wd*param). (#308) */
+     * collapses to param -= lr*(grad + wd*param). */
     if (sgd->momentumIsZero) {
         for (size_t i = 0; i < optim->sizeStates; i++) {
             parameter_t *p = optim->parameter[i];
@@ -276,7 +265,7 @@ void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
             }
             sgdUpdateCtx_t ctx = {.lr = sgd->learningRate, .weightDecay = sgd->weightDecay};
             rngKey_t opKey;
-            /* #296 Stage 1: all three update kernels are elementwise (read i before
+            /* All three update kernels are elementwise (read i before
              * write i), so the FLOAT32 fast paths may write params/state in place
              * instead of staging through rawData. */
             executeOp(
@@ -290,8 +279,7 @@ void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
                     .mode = OUT_WRITE,
                     .auxOut = NULL,
                     .writesInPlaceSafe = true,
-                    /* Group-quant PR3 Task 4: param is inputs[0] -- the only
-                     * operand allowed to be a grouped-SYM tensor here. */
+                    /* param, inputs[0], is the only operand that may be grouped. */
                     .groupedSymOperandPos = 1,
                 },
                 p->param);
@@ -355,10 +343,8 @@ void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
                     .mode = OUT_WRITE,
                     .auxOut = NULL,
                     .writesInPlaceSafe = true,
-                    /* Group-quant PR3 Task 4: param is inputs[2] here (state,
-                     * then grad, then param) -- the momentum-state carrier gate
-                     * (PR2) keeps state/grad per-tensor, so param is the only
-                     * operand allowed to be grouped-SYM. */
+                    /* param, inputs[2], is the only operand that may be grouped:
+                     * state and grad are per-tensor. */
                     .groupedSymOperandPos = 3,
                 },
                 state);
@@ -382,7 +368,7 @@ void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
                 .mode = OUT_WRITE,
                 .auxOut = NULL,
                 .writesInPlaceSafe = true,
-                /* Group-quant PR3 Task 4: param is inputs[0] here. */
+                /* param, inputs[0], is the only operand that may be grouped. */
                 .groupedSymOperandPos = 1,
             },
             p->param);

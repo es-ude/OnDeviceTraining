@@ -680,50 +680,29 @@ void testCrossEntropySoftmaxBackwardRejectsDistributionRankMismatch(void) {
     freeTensor(softmaxOutput);
 }
 
+/* NaN and +-Inf are distinct non-finite patterns: an isfinite() check narrowed to isnan() must
+ * fail one row. */
 void testCrossEntropyForward_NonFiniteSoftmaxReturnsNanInsteadOfAborting(void) {
-    size_t inputSize = 3;
-    float softmaxData[] = {0.5f, NAN, 0.5f};
-    size_t dims[] = {1, inputSize};
-    size_t order[] = {0, 1};
-    shape_t shape;
-    setShape(&shape, dims, 2, order);
-    quantization_t q;
-    initFloat32Quantization(&q);
-    tensor_t softmaxOutput;
-    setTensorValues(&softmaxOutput, (uint8_t *)softmaxData, &shape, &q, NULL);
+    const float nonFinite[] = {NAN, INFINITY, -INFINITY};
+    for (size_t i = 0; i < sizeof nonFinite / sizeof nonFinite[0]; i++) {
+        float softmaxData[] = {0.5f, nonFinite[i], 0.5f};
+        size_t dims[] = {1, 3};
+        size_t order[] = {0, 1};
+        shape_t shape;
+        setShape(&shape, dims, 2, order);
+        quantization_t q;
+        initFloat32Quantization(&q);
+        tensor_t softmaxOutput;
+        setTensorValues(&softmaxOutput, (uint8_t *)softmaxData, &shape, &q, NULL);
 
-    float distData[] = {0.f, 1.f, 0.f};
-    tensor_t distribution;
-    setTensorValues(&distribution, (uint8_t *)distData, &shape, &q, NULL);
+        float distData[] = {0.f, 1.f, 0.f};
+        tensor_t distribution;
+        setTensorValues(&distribution, (uint8_t *)distData, &shape, &q, NULL);
 
-    float loss = crossEntropyForward(&softmaxOutput, &distribution, REDUCTION_MEAN, NULL);
+        float loss = crossEntropyForward(&softmaxOutput, &distribution, REDUCTION_MEAN, NULL);
 
-    TEST_ASSERT_TRUE(isnan(loss));
-}
-
-/* Sibling of the NAN pin above: an INFINITY softmax element must also yield
- * NaN rather than abort (#446) -- NAN and INFINITY are both "non-finite" but
- * distinct bit patterns, so the NAN case alone would not catch an isfinite()
- * check narrowed to isnan(). */
-void testCrossEntropyForward_InfiniteSoftmaxReturnsNanInsteadOfAborting(void) {
-    size_t inputSize = 3;
-    float softmaxData[] = {0.5f, INFINITY, 0.5f};
-    size_t dims[] = {1, inputSize};
-    size_t order[] = {0, 1};
-    shape_t shape;
-    setShape(&shape, dims, 2, order);
-    quantization_t q;
-    initFloat32Quantization(&q);
-    tensor_t softmaxOutput;
-    setTensorValues(&softmaxOutput, (uint8_t *)softmaxData, &shape, &q, NULL);
-
-    float distData[] = {0.f, 1.f, 0.f};
-    tensor_t distribution;
-    setTensorValues(&distribution, (uint8_t *)distData, &shape, &q, NULL);
-
-    float loss = crossEntropyForward(&softmaxOutput, &distribution, REDUCTION_MEAN, NULL);
-
-    TEST_ASSERT_TRUE(isnan(loss));
+        TEST_ASSERT_TRUE(isnan(loss));
+    }
 }
 
 void setUp() {}
@@ -1344,6 +1323,22 @@ void testCeOneHotRowsRejectATwoHotSoftmaxRow(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "needs exactly one 1.0", ceDieRank1TwoHot());
 }
 
+/* The backward checks its output itself: a forward call is no proof. */
+void testCrossEntropySoftmaxBackwardRejectsRank1Output(void) {
+    size_t dims[] = {3};
+    tensor_t *softmaxOutput = buildFloatTensorShaped(dims, 1, (float[]){0.6f, 0.3f, 0.1f});
+    tensor_t *distribution = buildFloatTensorShaped(dims, 1, (float[]){1.f, 0.f, 0.f});
+    tensor_t *lossWire = buildFloatTensorShaped(dims, 1, (float[]){0.f, 0.f, 0.f});
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "crossEntropySoftmaxBackward: model output shape has rank 1",
+        crossEntropySoftmaxBackward(softmaxOutput, distribution, lossWire, NULL));
+    freeTensor(lossWire);
+    freeTensor(distribution);
+    freeTensor(softmaxOutput);
+}
+
+/* The FLOAT32 arm reads distribution and loss data as float, so SYM_INT32 codes there would be
+ * reinterpreted as float bit patterns. */
 int main() {
     UNITY_BEGIN();
     RUN_TEST(testCeIntegerHeadReadsABfpOneHotLabelExactly);
@@ -1374,8 +1369,8 @@ int main() {
     RUN_TEST(testCrossEntropyForwardRejectsLeadingAxisMismatch);
     RUN_TEST(testCrossEntropySoftmaxBackwardRejectsDistributionRankMismatch);
     RUN_TEST(testCrossEntropyForward_NonFiniteSoftmaxReturnsNanInsteadOfAborting);
-    RUN_TEST(testCrossEntropyForward_InfiniteSoftmaxReturnsNanInsteadOfAborting);
     RUN_TEST(testCrossEntropyBackwardRequantizesTheGradWithItsLossStream);
+    RUN_TEST(testCrossEntropySoftmaxBackwardRejectsRank1Output);
     RUN_TEST(testCeIntegerHeadRawMatchesTheInt64Reference);
     RUN_TEST(testCeIntegerHeadSubtractsOneExactly);
     RUN_TEST(testCeIntegerHeadRejectsALabelFinerThanTwoToMinus30);

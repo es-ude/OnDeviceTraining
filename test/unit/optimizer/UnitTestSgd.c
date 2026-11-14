@@ -1183,42 +1183,6 @@ void testSgdMCreateOptimRejectsNonFloat32UpdateMath(void) {
     freeQuantization(layerQ);
 }
 
-void testSgdStepMRejectsNonFloat32UpdateMath(void) {
-    /* #310 airtightness: the update kernels raw-cast operand data to
-     * float*, so a non-FLOAT32 prologue (e.g. int32 scratch codes) would be
-     * silently misread as float bit patterns. A hand-assembled optimizer
-     * bypasses the factory guard -- the step itself must also fail fast. */
-    size_t *pDims = reserveMemory(1 * sizeof(size_t));
-    pDims[0] = 1;
-    size_t *pOrder = reserveMemory(1 * sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, pOrder);
-    shape_t *pShape = reserveMemory(sizeof(shape_t));
-    setShape(pShape, pDims, 1, pOrder);
-    tensor_t *p = initTensor(pShape, quantizationInitFloat(), NULL);
-    tensorFillFromFloatBuffer(p, (float[]){1.f}, 1);
-    tensor_t *g = gradInitFloat(p, NULL);
-    parameter_t *param = parameterInit(p, g);
-
-    sgd_t sgd;
-    sgdInit(&sgd, 0.1f, 0.0f, 0.0f,
-            (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
-    sgd.updateMath.type = ARITH_SYM_INT32; /* bypass the sgdInit guard */
-    parameter_t *params[1] = {param};
-    optimImpl_t impl;
-    impl.sgd = &sgd;
-    optimizer_t optim;
-    optim.parameter = params;
-    optim.states = NULL;
-    optim.sizeStates = 1;
-    optim.impl = &impl;
-    optim.writeBackRounding =
-        HALF_AWAY; /* hand-built: field is otherwise uninitialized stack (#279) */
-
-    ASSERT_EXITS_WITH_FAILURE(sgdStepM(&optim, NULL));
-
-    freeParameter(param);
-}
-
 void testSgdStepMFloatReadsPackedSymGradGeneric(void) {
     /* Packed-SYM grad through the fast path (generic-read guard, PR3 #261).
      * Hand-built optimizer (UnitTestSgd.c:545-556 stack pattern): FLOAT32
@@ -1679,10 +1643,10 @@ void testSgdStepMStateWriteBackHonorsOptimizerSrRounding(void) {
 }
 
 void testSgdMCreateOptimMomentumZeroAllocatesNoStates(void) {
-    /* #308: momentumFactor == 0 must not allocate momentum-state buffers
-     * (real RAM on an MCU for a configuration that has no state). Contract:
-     * optim->states == NULL; freeOptim still frees all parameters.
-     * RED today: the factory unconditionally allocates states. */
+    /* momentumFactor == 0 must not allocate momentum-state buffers
+     * (real RAM on an MCU for a configuration that has no state), and it
+     * never inspects the unused momentum template: a grouped one is accepted.
+     * Contract: optim->states == NULL; freeOptim still frees all parameters. */
     quantization_t *layerQ = quantizationInitFloat();
 
     size_t *wDims = reserveMemory(2 * sizeof(size_t));
@@ -1700,7 +1664,7 @@ void testSgdMCreateOptimMomentumZeroAllocatesNoStates(void) {
     layer_t *linear = buildBorrowedLinearLayer(weights, NULL, layerQ);
     layer_t *model[] = {linear};
 
-    quantization_t *momentumQ = quantizationInitFloat();
+    quantization_t *momentumQ = quantizationInitSymGrouped(4, HALF_AWAY, 2, 4);
     optimizer_t *optim =
         sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
@@ -1716,6 +1680,29 @@ void testSgdMCreateOptimMomentumZeroAllocatesNoStates(void) {
 
     TEST_ASSERT_EQUAL_size_t(1, capturedSizeStates);
     TEST_ASSERT_NULL(capturedStates);
+}
+
+/* A parameterless model builds no state, so its momentum template is never inspected: a
+ * grouped one is accepted. */
+void testSgdMCreateOptimParameterlessModelIgnoresMomentumTemplate(void) {
+    quantization_t *layerQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, layerQ);
+    layer_t *relu = reluLayerInit(&lq);
+    layer_t *model[] = {relu};
+
+    quantization_t *momentumQ = quantizationInitSymGrouped(4, HALF_AWAY, 2, 4);
+    optimizer_t *optim =
+        sgdMCreateOptim(0.1f, 0.9f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    size_t capturedSizeStates = optim->sizeStates;
+
+    freeOptim(optim);
+    freeReluLayer(relu);
+    freeQuantization(momentumQ);
+    freeQuantization(layerQ);
+
+    TEST_ASSERT_EQUAL_size_t(0, capturedSizeStates);
 }
 
 void testSgdMCreateOptimDefaultsWriteBackRoundingToSr(void) {
@@ -2046,15 +2033,14 @@ void testOptimizerClipGradNormRejectsBfpGradStorage(void) {
     freeParameter(param);
 }
 
-/* momentumStateInit (SgdApi.c) builds the momentum
- * buffer via getQLike(momentumQuant) with no carrier gate of its own --
- * unlike gradInit (TensorApi.c), which already fail-fasts a grouped SYM
- * template (grouped grads are a future #300 axis). A grouped SYM
- * momentumQuant would silently getQLike-clone into a grouped momentum
- * buffer today, contradicting the plan's PR3 boundary (groups are legal
+/* initMomentStates (OptimizerApi.c) builds the momentum
+ * buffer via getQLike(momentumQuant) after its own carrier gate, like
+ * gradInit (TensorApi.c) fail-fasts a grouped SYM grad template. Without
+ * it a grouped SYM momentumQuant would silently getQLike-clone into a
+ * grouped momentum buffer, contradicting the plan's PR3 boundary (groups are legal
  * ONLY as GEMM-family weights in the two gather forwards) -- momentum must
  * fail-fast exactly like grads do. momentumFactor=0.9f (nonzero) so
- * momentumStateInit actually runs (momentumFactor==0 allocates no states at
+ * initMomentStates actually runs (momentumFactor==0 allocates no states at
  * all). The gate is on the momentumQuant TEMPLATE, mirroring gradInit's
  * gate on gradQ, not on the param being decorated -- so the weight tensor's
  * OWN element count (2*4=8) is deliberately made to EQUAL the momentumQuant
@@ -2065,7 +2051,7 @@ void testOptimizerClipGradNormRejectsBfpGradStorage(void) {
  * confirmed by construction, not just by inspection, since an earlier draft
  * of this test used a mismatched shape and passed for the WRONG reason
  * before this gate existed). bias=NULL keeps the model to exactly one
- * trainable state (the weight), so there is no second momentumStateInit
+ * trainable state (the weight), so there is no second initMomentStates
  * call to reason about. */
 void testSgdCreateGroupedSymMomentumQuantExits(void) {
     ASSERT_EXITS_WITH(1, {
@@ -2092,7 +2078,7 @@ void testSgdCreateGroupedSymMomentumQuantExits(void) {
 }
 
 /* BFP epic PR3 Task 7: the PR1 unconditional carrier gate lifts --
- * momentumStateInit now admits a PER-TENSOR BFP momentum template, mirroring
+ * initMomentStates now admits a PER-TENSOR BFP momentum template, mirroring
  * gradInit's Task 6 lift (grads and states share the per-tensor-only rule,
  * #300 axis). The state buffer must be a getQLike clone at zero-state:
  * BFP-typed, per-tensor {numGroups=1, groupSize=0}, exponent at bias
@@ -3539,7 +3525,6 @@ int main() {
     RUN_TEST(testSgdMCreateOptimRejectsBoolGradStorage);
     RUN_TEST(testSgdMCreateOptimRejectsNullGradSlot);
     RUN_TEST(testSgdMCreateOptimRejectsNonFloat32UpdateMath);
-    RUN_TEST(testSgdStepMRejectsNonFloat32UpdateMath);
     RUN_TEST(testSgdStepMFloatReadsPackedSymGradGeneric);
     RUN_TEST(testSgdZeroGradAsymSubByteZeroesAllPackedBytes);
     RUN_TEST(testSgdZeroGradSymSubByteZeroesAllPackedBytesAndResetsScale);
@@ -3551,6 +3536,7 @@ int main() {
     RUN_TEST(testSgdStepMMomentumPathHonorsOptimizerSrWriteBack);
     RUN_TEST(testSgdStepMStateWriteBackHonorsOptimizerSrRounding);
     RUN_TEST(testSgdMCreateOptimMomentumZeroAllocatesNoStates);
+    RUN_TEST(testSgdMCreateOptimParameterlessModelIgnoresMomentumTemplate);
     RUN_TEST(testSgdMCreateOptimDefaultsWriteBackRoundingToSr);
     RUN_TEST(testOptimizerSetWriteBackRoundingOptsOutToDeterministic);
     RUN_TEST(testOptimizerVtableGetSetLrRoundTripsSgdLearningRate);

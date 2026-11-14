@@ -39,13 +39,7 @@ static float linearWarmupLrComputeLr(const lrScheduler_t *sched) {
     if (main == NULL) {
         return sched->baseLr;
     }
-    /* Delegate via a LOCAL COPY rather than mutating main->lastEpoch in
-     * place: computeLr only takes a const pointer, and a copy means the
-     * caller's main scheduler is never even transiently modified (no
-     * restore-on-early-return risk, and safe if another thread were ever
-     * reading main concurrently -- MCUs here are not assumed single-
-     * threaded). Mirrors torch's SequentialLR handing the post-milestone
-     * scheduler epoch (lastEpoch - warmupEpochs) as its OWN local_epoch. */
+    /* Evaluate the main scheduler at its local epoch without mutating it. */
     lrScheduler_t localMain = *main;
     localMain.lastEpoch = sched->lastEpoch - warmupEpochs;
     return lrSchedulerFunctions[localMain.type].computeLr(&localMain);
@@ -119,7 +113,7 @@ void linearWarmupLrInit(lrScheduler_t *sched, optimizer_t *optimizer, size_t war
     }
     if (mainSched != NULL && mainSched->optimizer != optimizer) {
         PRINT_ERROR("linearWarmupLrInit: mainSched is wired to a different optimizer than the "
-                    "one passed to linearWarmupLrInit (#327)");
+                    "one passed to linearWarmupLrInit");
         exit(1);
     }
     initCommon(sched, optimizer, LINEAR_WARMUP_LR);

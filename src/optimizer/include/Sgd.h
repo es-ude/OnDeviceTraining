@@ -11,7 +11,7 @@ typedef struct sgd {
     float learningRate;
     float momentumFactor;
     float weightDecay;
-    arithmetic_t updateMath; /* #310: arithmetic for the update ops */
+    arithmetic_t updateMath; /* arithmetic for the update ops; FLOAT32-only, checked by sgdInit */
     /* momentumFactor as the integer scalar momentumQ * 2^momentumE (bfpScalar_t,
      * BfpKernelSupport.h), encoded once by sgdInit for the integer momentum store
      * on BFP state; momentumIntValid is false when momentumFactor lies outside

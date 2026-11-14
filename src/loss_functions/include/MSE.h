@@ -17,7 +17,7 @@ void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result,
  * Returns 1 / (totalSamples * numFeaturesPerSample) for MSE, where
  * numFeaturesPerSample is derived from the model output's shape:
  * numElements(modelOutput) / dimensions[0]. Fails fast unless modelOutput
- * has rank >= 2 and at least one element (#153), so dimensions[0] is
+ * has rank >= 2 and at least one element, so dimensions[0] is
  * never 0.
  *
  * Caller must check backwardReduction == REDUCTION_MEAN before invoking. */

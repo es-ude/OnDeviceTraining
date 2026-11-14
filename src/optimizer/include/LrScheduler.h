@@ -5,7 +5,7 @@
 
 #include "Optimizer.h"
 
-/*! Learning-rate schedulers with PyTorch-parity semantics (#327).
+/*! Learning-rate schedulers with PyTorch-parity semantics.
  *
  * Caller-owned struct, zero allocation. `baseLr` is captured ONCE at init
  * (via the optimizer vtable's getLr); every lrSchedulerStep() computes the
@@ -17,7 +17,7 @@
  * boundary (per-batch included). `lastEpoch` counts step() calls, exactly
  * like PyTorch's last_epoch. After init (lastEpoch == 0) the LR equals
  * baseLr for STEP_LR, EXPONENTIAL_LR, and COSINE_ANNEALING_LR, matching
- * PyTorch after construction. LINEAR_WARMUP_LR (#383) is the one exception:
+ * PyTorch after construction. LINEAR_WARMUP_LR is the one exception:
  * mirroring torch's LinearLR, its init writes baseLr*startFactor through
  * setLr immediately, so the LR right after linearWarmupLrInit is
  * baseLr*startFactor, not baseLr — see linearWarmupLrInit's doc comment.
@@ -77,32 +77,12 @@ void exponentialLrInit(lrScheduler_t *sched, optimizer_t *optimizer, float gamma
  *  (torch CosineAnnealingLR closed form; periodic past tMax) */
 void cosineAnnealingLrInit(lrScheduler_t *sched, optimizer_t *optimizer, size_t tMax, float etaMin);
 
-/*! lr = baseLr * (startFactor + (1-startFactor) * lastEpoch / warmupEpochs)
- *  while lastEpoch < warmupEpochs; once lastEpoch >= warmupEpochs, delegates
- *  to mainSched's own computeLr evaluated at (lastEpoch - warmupEpochs), or
- *  holds at baseLr when mainSched == NULL. (torch parity:
- *  SequentialLR(opt, [LinearLR(startFactor, end_factor=1.0,
- *  total_iters=warmupEpochs), mainSched], milestones=[warmupEpochs]).)
- *
- *  Validates warmupEpochs >= 1, 0 < startFactor <= 1 (finite), and — if
- *  mainSched is non-NULL — mainSched->optimizer == optimizer (mirrors the
- *  #327 trainingRun wiring guard). Writes baseLr*startFactor through setLr
- *  immediately (torch LinearLR applies its factor at construction) — this is
- *  the one scheduler type whose LR right after init is NOT baseLr.
- *
- *  ORDERING REQUIREMENT: if mainSched is non-NULL, it MUST already be
- *  initialized (its own ...Init call already made, so it captured baseLr via
- *  getLr while the optimizer's LR was still pristine) BEFORE calling
- *  linearWarmupLrInit. This mirrors torch's SequentialLR: torch's
- *  group["initial_lr"] is set once, from the pristine LR, by whichever
- *  scheduler is EVER attached to that optimizer first, and every later
- *  scheduler on the same optimizer inherits that same value regardless of
- *  the optimizer's currently-visible LR at its own construction time. The C
- *  API has no such per-optimizer memory, so the equivalent behavior only
- *  falls out if mainSched captures baseLr strictly before this call mutates
- *  the optimizer's LR to baseLr*startFactor. Initializing mainSched AFTER
- *  linearWarmupLrInit would silently capture the wrong (already-scaled)
- *  baseLr — this is not checked at runtime, only documented here. */
+/*! Warm up from baseLr*startFactor to baseLr, then evaluate mainSched at the local
+ *  post-warmup epoch (lastEpoch - warmupEpochs), or hold baseLr when NULL (torch
+ *  SequentialLR(LinearLR, mainSched) parity). Requires warmupEpochs >= 1, finite
+ *  startFactor in (0, 1], and mainSched wired to the same optimizer. Initialize mainSched
+ *  first, against the same optimizer, so it captures the original LR; this order is not
+ *  checked. Initialization immediately writes the warmup LR. */
 void linearWarmupLrInit(lrScheduler_t *sched, optimizer_t *optimizer, size_t warmupEpochs,
                         float startFactor, lrScheduler_t *mainSched);
 

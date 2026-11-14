@@ -28,15 +28,15 @@ float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution,
         float pi = p[i];
 
         if (!isfinite(pi)) {
-            /* #446: a diverged model (NaN/Inf logits) must not take the
-             * process down. Return NaN so the training loop can see the
-             * divergence (trainingRunOptions_t.stopOnNonFiniteLoss) and the
-             * harness can log it. Printed once per process, not per call:
-             * at batch 1 this runs thousands of times per epoch. */
+            /* A diverged model (NaN/Inf logits) must not take the process
+             * down: return NaN so the training loop can see the divergence
+             * (trainingRunOptions_t.stopOnNonFiniteLoss) and the harness can
+             * log it. Printed once per process, not per call: at batch 1 this
+             * runs thousands of times per epoch. */
             static int reported = 0;
             if (!reported) {
                 PRINT_ERROR("crossEntropyForward: non-finite softmax output at element %zu "
-                            "(%f); returning NaN loss (#446)",
+                            "(%f); returning NaN loss",
                             i, (double)pi);
                 reported = 1;
             }
@@ -47,7 +47,7 @@ float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution,
         loss += y[i] * -logf(pi);
     }
 
-    /* Rank < 2 only via a direct arm call (the dispatchers reject it, #153): no
+    /* Rank < 2 only via a direct arm call (the dispatchers reject it): no
      * batch axis, so MEAN is the raw sum. */
     if (reduction == REDUCTION_MEAN && softmaxOutput->shape->numberOfDimensions >= 2) {
         size_t microbatch = softmaxOutput->shape->dimensions[0];
@@ -56,16 +56,11 @@ float crossEntropyForwardFloat(tensor_t *softmaxOutput, tensor_t *distribution,
     return loss;
 }
 
-/* Fake-quant forward (#206, M5 — the MSE idiom): dequantize both operands
- * into FLOAT32 stack scratch (convertTensor handles any source dtype; a
- * FLOAT32 label passes through as a copy) and run the float core on the
- * scratch views. The scratch tensors share softmaxOutput's shape/sparsity
- * pointers, so the core's microbatch MEAN branch sees the real
- * dimensions[0].
- * Since BFP epic PR4 (R-P6) the same body also serves BFP: convertTensor hits
- * conversionMatrix[BFP][FLOAT32] on the read side and, in the backward,
- * conversionMatrix[FLOAT32][BFP] (fresh per-group exponents) on the write
- * side. */
+/* Fake-quant forward: dequantize both operands into FLOAT32 stack scratch
+ * (convertTensor handles any source dtype; a FLOAT32 label passes through as a
+ * copy) and run the float core on the scratch views. The scratch tensors share
+ * softmaxOutput's shape/sparsity pointers, so the core's microbatch MEAN branch
+ * sees the real dimensions[0]. */
 static float crossEntropyForwardFakeQuant(tensor_t *softmaxOutput, tensor_t *distribution,
                                           reduction_t reduction) {
     size_t inputSize = calcNumberOfElementsByTensor(softmaxOutput);
@@ -94,6 +89,7 @@ static float crossEntropyForwardFakeQuant(tensor_t *softmaxOutput, tensor_t *dis
  * the integer head, whose gradient is crossEntropySoftmaxBackwardKernelBfp. */
 float crossEntropyForward(tensor_t *softmaxOutput, tensor_t *distribution, reduction_t reduction,
                           const layerExec_t *exec) {
+    requireBatchedOutput(softmaxOutput, "model output", "crossEntropyForward");
     requireOperandMatchesOutput(softmaxOutput, distribution, "distribution", "crossEntropyForward");
     switch (softmaxOutput->quantization->type) {
     case FLOAT32:
@@ -130,11 +126,7 @@ BFP_WALK_NOINLINE void crossEntropySoftmaxBackwardFloat(tensor_t *softmaxOutput,
     }
 }
 
-/* Fake-quant backward — dtype-generic: every operand goes through
- * convertTensor, so the same body serves ASYM (its original home) and
- * SYM_INT32 (#206). The final convertTensor requantizes the raw (p-y) into
- * the result's own quantized config (fresh absmax scale for SYM — dynamic
- * activation scaling, like every quantized wire producer), drawing from rs. */
+/* Convert operands to float and requantize the fused gradient into the result grid using rs. */
 static void crossEntropySoftmaxBackwardFakeQuant(tensor_t *softmaxOutput, tensor_t *distribution,
                                                  tensor_t *loss, rngStream_t *rs) {
     size_t inputSize = calcNumberOfElementsByTensor(softmaxOutput);
@@ -155,22 +147,15 @@ static void crossEntropySoftmaxBackwardFakeQuant(tensor_t *softmaxOutput, tensor
                                  &distributionFloat);
     convertTensor(distribution, &distributionFloat, NULL);
 
-    /* Write-only scratch: the loop below overwrites every element, so the
-     * pre-call contents of `loss` are never dequantized (MSE.c precedent —
-     * mseLossBackwardFakeQuant skips the same wasted convert). */
+    /* Write-only scratch: the float core overwrites every element, so the
+     * pre-call contents of `loss` are never dequantized. */
     tensor_t lossFloat;
     quantization_t lossFloatQ;
     initFloat32Quantization(&lossFloatQ);
     uint8_t lossFloatData[inputSize * sizeof(float)];
     setTensorValuesForConversion(lossFloatData, &lossFloatQ, loss, &lossFloat);
 
-    float *softmaxOutputFloatArr = (float *)softmaxOutputFloat.data;
-    float *distributionFloatArr = (float *)distributionFloat.data;
-    float *lossFloatArr = (float *)lossFloat.data;
-
-    for (size_t i = 0; i < inputSize; i++) {
-        lossFloatArr[i] = softmaxOutputFloatArr[i] - distributionFloatArr[i];
-    }
+    crossEntropySoftmaxBackwardFloat(&softmaxOutputFloat, &distributionFloat, &lossFloat);
 
     convertTensor(&lossFloat, loss, rs);
 }
@@ -460,6 +445,7 @@ static void crossEntropySoftmaxBackwardBfp(tensor_t *softmaxOutput, tensor_t *di
  *   - SYM_INT32 / ASYM p: the dequantizing island (fake-quant), unchanged. */
 void crossEntropySoftmaxBackward(tensor_t *softmaxOutput, tensor_t *distribution, tensor_t *loss,
                                  const layerExec_t *exec) {
+    requireBatchedOutput(softmaxOutput, "model output", "crossEntropySoftmaxBackward");
     requireOperandMatchesOutput(softmaxOutput, distribution, "distribution",
                                 "crossEntropySoftmaxBackward");
     requireOperandMatchesOutput(softmaxOutput, loss, "loss (grad wire)",

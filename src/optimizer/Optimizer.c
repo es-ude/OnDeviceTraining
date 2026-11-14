@@ -37,12 +37,8 @@ void optimizerZeroGrad(optimizer_t *optimizer) {
 
         memset(param->grad->data, 0, totalNumberOfBytes);
 
-        /* Byte-zero the mantissa/code storage above is necessary but, for
-         * SYM/ASYM, not sufficient for VALUE-zero: config-reset the grid so
-         * code 0 decodes to exactly 0.0f. SYM_INT32's scale reset
-         * is hygiene (the first-store trigger is the all-zero mantissa state,
-         * not the scale); ASYM's zeroPoint reset is load-bearing - without it,
-         * code 0 would decode to zeroPoint*scale, not 0. */
+        /* Reset quantization metadata so zeroed codes represent zero. Grads are per-tensor, so
+         * element 0 is the whole SYM/ASYM grid. */
         switch (param->grad->quantization->type) {
         case SYM_INT32: {
             symInt32QConfig_t *symIntQ = param->grad->quantization->qConfig;
@@ -55,28 +51,15 @@ void optimizerZeroGrad(optimizer_t *optimizer) {
             break;
         }
         case ASYM: {
-            /* grads are per-tensor (gradInit carrier gate), so element 0 IS
-             * the whole grid; zeroPoints[0]=0 is the load-bearing half (code
-             * 0 must decode to exactly 0.0f -- (0 - 0)*scale under the group-quant D6
-             * code-domain decode), scales[0]=1 is hygiene. */
+            /* Decode is (code - zeroPoint) * scale: the zero point must be reset. */
             asymQConfig_t *asymQ = param->grad->quantization->qConfig;
             odtScaleStore(&asymQ->scales[0], ODT_SCALE_ONE);
             asymQ->zeroPoints[0] = 0;
             break;
         }
         case BFP: {
-            /* BFP epic PR3 Task 6: grads are per-tensor (gradInit's carrier
-             * gate), but exponents is still a [numGroups]-array -- loop
-             * generically. Byte-zero above already zero-values every packed
-             * mantissa (code 0 decodes to exactly 0.0f regardless of
-             * exponent), and the next accumulate does not key on exponents
-             * either: FixedGrid's fresh-vs-carry decision (Task 5) is a
-             * codes-only scan, so a byte-zeroed grad is classified fresh
-             * whatever its exponents say. This reset is pure hygiene like
-             * SYM_INT32's scale reset above -- the canonical zero state
-             * (stored = bias) for serialization/inspection and any future
-             * exponent-reading consumer; pinned by the Task 6 e2e's
-             * exponent assertion (UnitTestMultiLayerTraining.c). */
+            /* Reset BFP exponents to the canonical zero grid; byte-zeroed mantissas already
+             * represent zero. */
             bfpQConfig_t *bfpQ = param->grad->quantization->qConfig;
             for (size_t g = 0; g < bfpQ->numGroups; g++) {
                 bfpQ->exponents[g] = (uint8_t)bfpExponentBias(bfpQ);

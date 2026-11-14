@@ -138,13 +138,32 @@ void deserializeTensor(tensor_t *tensor, FILE *f) {
     deserializeSparsity();
 }
 
+/* Gradients are per-tensor (gradInit's rule), but a SYM/ASYM record may regroup the skeleton's
+ * grid, and the optimizer folds a gradient scale into group 0 only. */
+static void requirePerTensorGrad(const tensor_t *grad) {
+    const quantization_t *q = grad->quantization;
+    size_t numGroups = 1;
+    if (q->type == SYM) {
+        numGroups = ((const symQConfig_t *)q->qConfig)->numGroups;
+    } else if (q->type == ASYM) {
+        numGroups = ((const asymQConfig_t *)q->qConfig)->numGroups;
+    }
+    if (numGroups > 1) {
+        PRINT_ERROR("deserializeParameter: grouped %s gradient record (numGroups=%zu); "
+                    "gradients must be per-tensor",
+                    q->type == SYM ? "SYM" : "ASYM", numGroups);
+        exit(1);
+    }
+}
+
 void deserializeParameter(parameter_t *parameter, FILE *f) {
     uint8_t hasGrad = serialReadU8(f);
     deserializeTensor(parameter->param, f);
     if (hasGrad && parameter->grad != NULL) {
         deserializeTensor(parameter->grad, f);
+        requirePerTensorGrad(parameter->grad);
     } else if (hasGrad) {
-        /* Frozen skeleton, full checkpoint (#380 PR3): grads are transient
+        /* Frozen skeleton, full checkpoint: grads are transient
          * (zeroed before every batch) and a frozen layer allocates none -
          * parse past the record so the stream stays synced. */
         skipSerializedTensor(f);

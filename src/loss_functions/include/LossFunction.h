@@ -13,7 +13,7 @@ typedef enum reduction { REDUCTION_SUM, REDUCTION_MEAN } reduction_t;
 typedef struct lossConfig {
     lossFuncType_t funcType;
     reduction_t backwardReduction;
-    tensor_t *classWeights;
+    tensor_t *classWeights; /* not consumed: weighted loss is unsupported */
 } lossConfig_t;
 
 /* Convenience initializer. Returns {funcType, REDUCTION_MEAN, NULL}.
@@ -28,16 +28,17 @@ lossConfig_t defaultLossConfig(lossFuncType_t funcType);
  * \param modelOutput  Tensor of shape [B, ...], rank >= 2 with at least one
  *                     element (B = microbatch dim). Always explicit: the
  *                     training loop passes [1, ...] views (microBatchSize 1)
- *                     or [m, ...] stacks (#152); see docs/conventions/loss.md,
+ *                     or [m, ...] stacks; see docs/conventions/loss.md,
  *                     "Microbatch shape".
- * \param label        Same rank and dimensions as modelOutput (enforced, #153).
+ * \param label        Same rank and dimensions as modelOutput (enforced).
  * \param reduction    REDUCTION_MEAN ⇒ per-microbatch mean over own elements;
  *                     REDUCTION_SUM  ⇒ per-microbatch raw sum.
  * \return Per-microbatch scalar loss value.
  *
- * Contract, enforced by every dispatcher (#153): modelOutput has rank >= 2
+ * Contract, enforced by every dispatcher: modelOutput has rank >= 2
  * and at least one element, and the label has modelOutput's rank and dimensions
- * (orderOfDimensions is not compared). All microbatches in one macro batch
+ * (orderOfDimensions is not compared). A FLOAT32 modelOutput requires FLOAT32
+ * label (and backward result) storage. All microbatches in one macro batch
  * must have equal B (uniform microbatch size assumption — see
  * docs/conventions/loss.md, "Loss API: microbatch contracts"). */
 typedef float (*lossFwdFn_t)(tensor_t *modelOutput, tensor_t *label, reduction_t reduction,
@@ -51,7 +52,7 @@ typedef float (*lossFwdFn_t)(tensor_t *modelOutput, tensor_t *label, reduction_t
  * trainingEpochDefault when backwardReduction == REDUCTION_MEAN.
  *
  * \param modelOutput  Same shape contract as forward.
- * \param label        Same rank and dimensions as modelOutput (enforced, #153).
+ * \param label        Same rank and dimensions as modelOutput (enforced).
  * \param result       Output buffer (same shape) for the raw per-element grad.
  * \param exec         The context of the layer position after the last layer
  *                     (the layer key); NULL = no randomness. */
@@ -68,10 +69,10 @@ typedef void (*lossBwdFn_t)(tensor_t *modelOutput, tensor_t *label, tensor_t *re
  *
  * Contract on modelOutput: a `[B, ...]` tensor (rank >= 2, at least one
  * element) whose dims[0] is the batch axis; computeMeanScaleMSE fails fast
- * otherwise (#153), computeMeanScaleCE never reads it. The in-tree callers
+ * otherwise, computeMeanScaleCE never reads it. The in-tree callers
  * (trainingEpochDefault, examples/kws_raw/trace_c.c) do not pass the model
  * output itself -- they pass the batchViewOf view of the first sample's
- * label (#152 PR3a), so for MSE this is dims[0] of the LABEL's [1, ...]
+ * label, so for MSE this is dims[0] of the LABEL's [1, ...]
  * view, not the model's output tensor. */
 typedef float (*computeMeanScaleFn_t)(size_t totalSamples, tensor_t *modelOutput);
 

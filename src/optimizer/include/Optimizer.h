@@ -30,8 +30,8 @@ typedef struct optimizer {
     parameter_t **parameter;
     states_t **states;
     size_t sizeStates;
-    /* #279: rounding for TRAINING write-backs -- the step functions set this
-     * as the update ops' operation-owned arithmetic.roundingMode (#282), so
+    /* Rounding for TRAINING write-backs -- the step functions set this
+     * as the update ops' operation-owned arithmetic.roundingMode, so
      * every OUT_WRITE requant of param/state storage rounds with THIS mode
      * instead of the tensor's own qConfig roundingMode (which stays
      * authoritative for storage/inference encodes and is what serialization
@@ -47,10 +47,10 @@ typedef struct optimizer {
  * optimizerStep). */
 typedef void (*stepFn_t)(optimizer_t *optim, const rngKey_t *updateKey);
 typedef void (*zeroFn_t)(optimizer_t *optim);
-/* #327: optimizer-agnostic LR access for the scheduler. LR stays in the impl
+/* Optimizer-agnostic LR access for the scheduler. LR stays in the impl
  * structs; these accessors are the only sanctioned cross-impl path.
  * MANDATORY for every row: trainingRun reads getLr once per epoch for every
- * caller (#445, epochInfo_t.learningRate), so a NULL slot crashes on the
+ * caller (epochInfo_t.learningRate), so a NULL slot crashes on the
  * first epoch even without a scheduler -- docs/conventions/optimizer-step.md. */
 typedef float (*getLrFn_t)(optimizer_t *optim);
 typedef void (*setLrFn_t)(optimizer_t *optim, float learningRate);
@@ -68,7 +68,7 @@ extern optimizerFunctions_t optimizerFunctions[];
  * here unless an impl needs custom zeroing. */
 void optimizerZeroGrad(optimizer_t *optimizer);
 
-/* #279: the explicit opt-out from the factories' seeded-SR training
+/* The explicit opt-out from the factories' seeded-SR training
  * write-back default. Call with HALF_AWAY for deterministic write-backs
  * (bit-parity twins, storage round-trip tests) -- stating it in one call
  * instead of silently inheriting a non-learning default is the point. */

@@ -2084,6 +2084,57 @@ static tensor_t *makeAsymGroupedTensor1D(size_t d0, uint8_t qBits, roundingMode_
                       NULL);
 }
 
+/* Writes a parameter record whose grad is `fileGrad`, then loads it into a trainable skeleton
+ * whose grad is the per-tensor `skeletonGrad` of the same payload size. */
+static void loadGradRecordIntoPerTensorSkeleton(tensor_t *fileGrad, tensor_t *skeletonGrad) {
+    tensor_t *param = makeFloatTensor2D(2, 3, (float[]){1.f, 2.f, 3.f, 4.f, 5.f, 6.f}, 6);
+    FILE *f = fopen(FILE_PATH, "wb");
+    uint8_t hasGrad = 1;
+    fwrite(&hasGrad, sizeof(uint8_t), 1, f);
+    serializeTensor(param, f);
+    serializeTensor(fileGrad, f);
+    fclose(f);
+
+    parameter_t skeleton = {.param = makeFloatTensor2D(2, 3, NULL, 0), .grad = skeletonGrad};
+    f = fopen(FILE_PATH, "rb");
+    deserializeParameter(&skeleton, f);
+    fclose(f);
+    freeTensor(skeleton.param);
+    freeTensor(param);
+}
+
+/* The optimizer's gradient scaling folds into group 0 only, so a loaded gradient must stay
+ * per-tensor even when its record regroups the skeleton's grid. */
+static void testDeserializeParameterRejectsGroupedSymGrad(void) {
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "grouped SYM gradient record",
+        loadGradRecordIntoPerTensorSkeleton(makeSymGroupedTensor1D(6, 8, HALF_AWAY, 3, 2),
+                                            makeSymTensor1D(6, 8, HALF_AWAY)));
+}
+
+static void testDeserializeParameterRejectsGroupedAsymGrad(void) {
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "grouped ASYM gradient record",
+        loadGradRecordIntoPerTensorSkeleton(makeAsymGroupedTensor1D(6, 8, HALF_AWAY, 3, 2),
+                                            makeAsymTensor1D(6)));
+}
+
+/* A per-tensor grad record still loads into a trainable skeleton. */
+static void testDeserializeParameterLoadsPerTensorSymGrad(void) {
+    tensor_t *fileGrad = makeSymTensor1D(6, 8, HALF_AWAY);
+    tensorFillFromFloatBuffer(fileGrad, (float[]){1.f, -2.f, 3.f, -4.f, 5.f, -6.f}, 6);
+    tensor_t *skeletonGrad = makeSymTensor1D(6, 8, HALF_AWAY);
+    loadGradRecordIntoPerTensorSkeleton(fileGrad, skeletonGrad);
+
+    size_t bytes = calcNumberOfBytesForData(fileGrad->quantization, 6);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(fileGrad->data, skeletonGrad->data, bytes);
+    TEST_ASSERT_EQUAL_FLOAT(
+        odtScaleToFloat(((symQConfig_t *)fileGrad->quantization->qConfig)->scales[0]),
+        odtScaleToFloat(((symQConfig_t *)skeletonGrad->quantization->qConfig)->scales[0]));
+    freeTensor(skeletonGrad);
+    freeTensor(fileGrad);
+}
+
 /*! group-quant PR4 (Task 4): a hand-crafted v5 ASYM record whose group shape
  *  passes the numGroups==1<=>groupSize==0 sentinel (numGroups=3, groupSize=2
  *  is a well-formed GROUPED shape) but whose numGroups*groupSize (6) does
@@ -3339,6 +3390,9 @@ int main(void) {
     RUN_TEST(testDeserializeSymRejectsWireQBitsAbove31InWireConfig);
     RUN_TEST(testDeserializeSymAcceptsWireQBitsBoundsInWireConfig);
     RUN_TEST(testDeserializeGroupedAsymRejectsBadDivisibility);
+    RUN_TEST(testDeserializeParameterRejectsGroupedSymGrad);
+    RUN_TEST(testDeserializeParameterRejectsGroupedAsymGrad);
+    RUN_TEST(testDeserializeParameterLoadsPerTensorSymGrad);
     RUN_TEST(testDeserializeGroupedAsymIntoPerTensorSkeleton);
     RUN_TEST(testSkipSerializedGroupedAsymGrad);
     RUN_TEST(testSkipSerializedGroupedAsymGradRejectsBadDivisibility);

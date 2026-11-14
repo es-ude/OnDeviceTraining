@@ -72,64 +72,28 @@ static __attribute__((noinline)) void scaleNonBfpGradient(parameter_t *param, gr
         break;
     }
     case SYM_INT32: {
-        /* float_value = int32_value * scale ⇒ multiplicative scaling can
-         * be absorbed into the per-tensor scale, leaving the int32 storage
-         * untouched. O(1) and avoids quantization round-trip loss. */
+        /* Dequant is linear in scale: fold the factor into it, codes untouched. */
         symInt32QConfig_t *gradQ = param->grad->quantization->qConfig;
         storeCanonScale(&gradQ->scale, foldStoredScale(loadCanonScale(&gradQ->scale), fold, what));
         break;
     }
     case SYM: {
-        /* Packed-SYM dequant (mantissa * scale) is linear in scale exactly
-         * like the SYM_INT32 case above — fold the factor into the
-         * per-tensor scale, packed codes untouched (O(1), exact).
-         * Defensive (belt-and-suspenders, group-quant PR3 Task 4):
-         * gradInit's own carrier gate already rejects a grouped SYM
-         * template before a grad tensor is ever built (grads are
-         * per-tensor unconditionally, #300 axis), so numGroups > 1
-         * should be unreachable here — but a hand-assembled optimizer
-         * (this file's own comment above, and the pattern every
-         * hand-built optimizer_t test in this tree exercises) could
-         * still hand it a grad tensor that bypassed that gate. Folding
-         * `factor` into scales[0] alone would silently scale ONLY group
-         * 0 and leave every other group's scale untouched — fail fast
-         * instead of corrupting the gradient. */
+        /* Fold scaling into the per-tensor scale; leave the codes unchanged. */
         symQConfig_t *gradQ = param->grad->quantization->qConfig;
-        if (gradQ->numGroups > 1) {
-            PRINT_ERROR("%s: grouped SYM grad storage "
-                        "(numGroups=%zu) is not supported — grads are per-tensor "
-                        "unconditionally (gradInit's carrier gate, #300 axis)",
-                        what, gradQ->numGroups);
-            exit(1);
-        }
         storeCanonScale(&gradQ->scales[0],
                         foldStoredScale(loadCanonScale(&gradQ->scales[0]), fold, what));
         break;
     }
     case ASYM: {
-        /* Packed-ASYM dequant is (code - zeroPoint) * scale (group-quant D6 code
-         * domain): still linear in scale, so the fold is exact the same
-         * way; zeroPoint is an additive offset on the code axis and is
-         * untouched. Same defensive grouped gate as the SYM arm above
-         * (grads are per-tensor by gradInit's carrier gate, but a
-         * hand-assembled optimizer could bypass it -- folding into
-         * scales[0] alone would corrupt every other group). */
+        /* Fold scaling into the per-tensor scale; leave codes and zero point unchanged. */
         asymQConfig_t *gradQ = param->grad->quantization->qConfig;
-        if (gradQ->numGroups > 1) {
-            PRINT_ERROR("%s: grouped ASYM grad storage "
-                        "(numGroups=%zu) is not supported — grads are per-tensor "
-                        "unconditionally (gradInit's carrier gate, #300 axis)",
-                        what, gradQ->numGroups);
-            exit(1);
-        }
         storeCanonScale(&gradQ->scales[0],
                         foldStoredScale(loadCanonScale(&gradQ->scales[0]), fold, what));
         break;
     }
     default:
         PRINT_ERROR("%s: unsupported gradient qtype "
-                    "(accepted: FLOAT32, SYM_INT32, SYM, ASYM, BFP; INT32/BOOL "
-                    "grad storage remains unsupported, #261)",
+                    "(accepted: FLOAT32, SYM_INT32, SYM, ASYM, BFP)",
                     what);
         exit(1);
     }
@@ -145,8 +109,7 @@ static __attribute__((noinline)) float meanFactorOf(size_t divisor) {
 void scaleOptimizerGradients(optimizer_t *optimizer, float factor, const rngKey_t *updateKey) {
     const char *what = "scaleOptimizerGradients";
     requireParamIndexFitsKey(optimizer, updateKey, what);
-    /* Validation: warn (currently via PRINT_ERROR — see #151 for unified
-     * warn/assert macros) on non-positive or non-finite factor. */
+    /* Warns only: FLOAT32 grads carry a non-finite factor on; scale folds and BFP reject it. */
     if (!(factor > 0.0f && isfinite(factor))) {
         PRINT_ERROR("scaleOptimizerGradients: suspicious factor %f "
                     "(expected positive, finite)",
@@ -159,26 +122,8 @@ void scaleOptimizerGradients(optimizer_t *optimizer, float factor, const rngKey_
             scaleNonBfpGradient(param, (gradFold_t){.factor = factor, .divisor = 0}, what);
             continue;
         }
-        /* No O(1) fold here: BFP dequant is mantissa * 2^(E-bias) per
-         * group, and an arbitrary factor is not a power of two -- an
-         * honest O(n) value-domain repack (scaleBfpTensorInPlace: fresh
-         * exponents from the scaled absmax, requant with the grad
-         * config's own storage roundingMode). No grouped gate, unlike
-         * the SYM/ASYM fold arms above: the primitive handles grouped
-         * tensors correctly, so a hand-assembled grouped grad is scaled
-         * right rather than corrupted (in-tree grads are per-tensor
-         * anyway, gradInit's carrier gate, #300 axis).
-         * Non-finite-factor asymmetry: the FLOAT32 arm warns (the check
-         * at the top of this function) and then PROPAGATES the non-finite
-         * factor -- a float grad element represents NaN/inf fine, so the
-         * failure stays loud downstream. The SYM_INT32/SYM/ASYM arms and BFP
-         * warn the same way and then HARD-FAIL (a stored scale is a positive
-         * dyadic value, so a zero, negative or non-finite factor has no
-         * fold; BFP inside the primitive), because
-         * a (mantissa, shared exponent) grid has no non-finite code:
-         * silently skipping would mask the caller's bug and saturating
-         * would invent data. Precedent for the exit: optimizerClipGradNorm
-         * below. */
+        /* BFP requires value-domain repacking and storage rounding; non-finite factors cannot
+         * be represented. */
         rngStream_t scaleStream;
         scaleBfpTensorInPlace(param->grad, factor,
                               optimizerScaleStream(updateKey, (uint32_t)i, &scaleStream));
@@ -255,19 +200,12 @@ float optimizerClipGradNorm(optimizer_t *optimizer, float maxNorm) {
             sumSquares += scale * scale * tensorSumSquares;
             break;
         }
-        case SYM:
-        case ASYM:
-        case BFP:
-            PRINT_ERROR("optimizerClipGradNorm: packed SYM/ASYM/BFP grad storage not supported "
-                        "(v1) -- computing a norm needs unpacked element values; the O(1) "
-                        "scale-fold only helps APPLYING an already-computed clip coefficient, "
-                        "not computing the norm itself (follow-up, not implemented). accepted: "
-                        "FLOAT32, SYM_INT32");
-            exit(1);
         default:
-            PRINT_ERROR("optimizerClipGradNorm: unsupported gradient qtype (accepted: FLOAT32, "
-                        "SYM_INT32; packed SYM/ASYM/BFP rejected above, INT32/BOOL grad storage "
-                        "remains unsupported, #261)");
+            /* SYM, ASYM and BFP: valid optimizer grad storage, but the norm needs unpacked
+             * element values this clip does not compute. */
+            PRINT_ERROR("optimizerClipGradNorm: packed SYM/ASYM/BFP grad storage not supported "
+                        "-- computing a norm needs unpacked element values. accepted: "
+                        "FLOAT32, SYM_INT32");
             exit(1);
         }
     }
@@ -371,9 +309,6 @@ void collectTrainableParameters(const model_t *m, parameter_t **slots) {
         case QUANTIZATION:
         case ADD:
             break;
-        default:
-            PRINT_ERROR("Unknown Layer Type");
-            exit(1);
         }
     }
 }
@@ -387,17 +322,55 @@ bool modelHasFrozenLayer(const model_t *m) {
     return false;
 }
 
+static void requirePerTensorMomentTemplate(const quantization_t *momentQuant,
+                                           const char *factoryName) {
+    size_t numGroups = 1;
+    const char *dtypeName = "";
+    switch (momentQuant->type) {
+    case SYM:
+        numGroups = ((const symQConfig_t *)momentQuant->qConfig)->numGroups;
+        dtypeName = "SYM";
+        break;
+    case ASYM:
+        numGroups = ((const asymQConfig_t *)momentQuant->qConfig)->numGroups;
+        dtypeName = "ASYM";
+        break;
+    case BFP:
+        numGroups = ((const bfpQConfig_t *)momentQuant->qConfig)->numGroups;
+        dtypeName = "BFP";
+        break;
+    default:
+        break;
+    }
+    if (numGroups > 1) {
+        PRINT_ERROR("%s: grouped %s moment templates are unsupported -- moment storage is "
+                    "per-tensor",
+                    factoryName, dtypeName);
+        exit(1);
+    }
+}
+
+states_t **initMomentStates(optimizer_t *optim, size_t statesPerParameter,
+                            quantization_t *momentQuant, const char *factoryName) {
+    if (optim->sizeStates > 0) {
+        requirePerTensorMomentTemplate(momentQuant, factoryName);
+    }
+    states_t **states = reserveMemory(optim->sizeStates * sizeof(states_t *));
+    for (size_t s = 0; s < optim->sizeStates; s++) {
+        states_t *paramStates = reserveMemory(sizeof(states_t));
+        paramStates->statesPerParameter = statesPerParameter;
+        paramStates->stateBuffers = reserveMemory(statesPerParameter * sizeof(tensor_t *));
+        tensor_t *param = optim->parameter[s]->param;
+        for (size_t k = 0; k < statesPerParameter; k++) {
+            paramStates->stateBuffers[k] =
+                initTensor(getShapeLike(param->shape), getQLike(momentQuant), NULL);
+        }
+        states[s] = paramStates;
+    }
+    return states;
+}
+
 void validateOptimizerGradStorage(optimizer_t *optim, const char *factoryName) {
-    /* #261, PR3: grads may be stored FLOAT32 (default), SYM_INT32 (explicit
-     * low-level knob), packed SYM/ASYM, or per-tensor BFP (explicit
-     * grad-storage knob, memory-constrained targets; BFP epic PR3 Task 6 --
-     * grouped BFP grads stay rejected at gradInit's own carrier gate, #300
-     * axis, so a grad tensor reaching here is always per-tensor). INT32/BOOL
-     * grad storage remains unimplemented - fail fast rather than silently
-     * misread bytes in an unsupported layout. A NULL grad in a collected slot
-     * is a mis-built model (frozen layers are skipped before collection
-     * (#380); a collected slot must always carry an allocated grad) - fail
-     * fast here instead of crashing mid-training (PR #366 review). */
     for (size_t s = 0; s < optim->sizeStates; s++) {
         tensor_t *grad = optim->parameter[s]->grad;
         if (grad == NULL) {
@@ -411,8 +384,7 @@ void validateOptimizerGradStorage(optimizer_t *optim, const char *factoryName) {
         if (gradType != FLOAT32 && gradType != SYM_INT32 && gradType != SYM && gradType != ASYM &&
             gradType != BFP) {
             PRINT_ERROR("%s: gradient storage dtype %d not supported "
-                        "(accepted: FLOAT32, SYM_INT32, SYM, ASYM, BFP; INT32/BOOL grad "
-                        "storage remains unsupported, #261)",
+                        "(accepted: FLOAT32, SYM_INT32, SYM, ASYM, BFP)",
                         factoryName, (int)gradType);
             exit(1);
         }

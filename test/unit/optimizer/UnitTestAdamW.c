@@ -241,18 +241,6 @@ void testAdamWStepIncrementsStepCountPerCall(void) {
     TEST_ASSERT_EQUAL_size_t(2, captured);
 }
 
-void testAdamWStepRejectsTamperedUpdateMath(void) {
-    /* #310 pattern: hand-assembled optimizers must hit the same wall at
-     * step time, not only at init. */
-    adamWHarness_t h;
-    optimizer_t *optim = harnessInit(&h, adamw_step1_default_p0, adamw_step1_default_g, 32, 0.001f,
-                                     0.9, 0.999, 1e-8, 0.01);
-    h.adamW.updateMath.type = ARITH_SYM_INT32;
-    ASSERT_EXITS_WITH_FAILURE(adamWStep(optim, NULL));
-    h.adamW.updateMath.type = ARITH_FLOAT32; /* restore for clean teardown */
-    harnessFree(&h);
-}
-
 void testAdamWTrajectoryMatchesGoldEveryStep(void) {
     adamWHarness_t h;
     optimizer_t *optim = harnessInit(&h, adamw_traj_default_p0, adamw_traj_default_g, 32, 0.001f,
@@ -888,9 +876,8 @@ void testAdamWCreateAllFrozenModelExits(void) {
 
 /* AdamW twin of the SGD momentum-carrier-gate death
  * test (UnitTestSgd.c's testSgdCreateGroupedSymMomentumQuantExits) --
- * momentStateInit (AdamWApi.c) builds BOTH moment buffers via
- * getQLike(momentQuant) with no carrier gate of its own, mirroring SgdApi's
- * momentumStateInit exactly (#277 precedent noted in both files' comments).
+ * initMomentStates (OptimizerApi.c), shared with SGD, builds BOTH moment buffers
+ * via getQLike(momentQuant) after its own carrier gate.
  * A grouped SYM momentQuant template must fail-fast just like gradInit's
  * gate (TensorApi.c) -- grouped moments are a future #300 axis, not
  * something PR2's optimizer paths support. The weight tensor's OWN element
@@ -955,8 +942,8 @@ void testAdamWCreateGroupedAsymMomentQuantExits(void) {
 }
 
 /* BFP epic PR3 Task 7: the PR1 unconditional carrier gate lifts --
- * momentStateInit now admits a PER-TENSOR BFP moment template (SgdApi
- * momentumStateInit twin; grads and states share the per-tensor-only rule,
+ * initMomentStates now admits a PER-TENSOR BFP moment template (SgdApi
+ * initMomentStates twin; grads and states share the per-tensor-only rule,
  * #300 axis). BOTH moment buffers (m and v) must be getQLike clones at
  * zero-state: BFP-typed, per-tensor, exponent at bias (e=8 -> 127),
  * all-zero packed codes. */
@@ -1184,7 +1171,7 @@ void testAdamWStepGroupedSymParamRunsAndRequantsPerGroup(void) {
  * BOTH stored exponents have moved off the zero-state bias (e=8 -> 127)
  * with nonzero packed codes -- i.e. every step's OUT_WRITE really
  * re-derived a fresh absmax exponent and repacked, so the moments live on
- * the BFP grid rather than in a float buffer a broken momentStateInit could
+ * the BFP grid rather than in a float buffer a broken initMomentStates could
  * have handed out. writeBackRounding opts out to HALF_AWAY (#279) for
  * determinism, though these assertions would hold under seeded SR too. */
 void testAdamWStepBfpMomentsRunAndRequantize(void) {
@@ -1373,7 +1360,6 @@ int main(void) {
     RUN_TEST(testAdamWStepMatchesGoldStep1OrderDiscrim);
     RUN_TEST(testAdamWVtableRowIsFullyPopulated);
     RUN_TEST(testAdamWStepIncrementsStepCountPerCall);
-    RUN_TEST(testAdamWStepRejectsTamperedUpdateMath);
     RUN_TEST(testAdamWTrajectoryMatchesGoldEveryStep);
     RUN_TEST(testAdamWTrajectoryWdZeroMatchesGold);
     RUN_TEST(testAdamWWithCosineSchedulerMatchesGold);

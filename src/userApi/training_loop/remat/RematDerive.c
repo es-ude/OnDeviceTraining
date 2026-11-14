@@ -14,6 +14,8 @@
 #include "RematPlan.h"
 #include "RematPlanPolicy.h"
 
+/* CE backward writes the fused logits gradient (p - y), so the Softmax position is skipped:
+ * running Softmax backward on it again would apply the Jacobian twice. */
 bool rematHasBackward(size_t n, lossFuncType_t lt, const uint8_t *needsGrad) {
     return needsGrad[lt == CROSS_ENTROPY ? n - 1u : n] != 0;
 }

@@ -15,19 +15,19 @@
  *
  * \param momentumQuant: Quantization template for momentum state buffers
  *        (caller-owned; not consumed -- cloned once per state via getQLike).
- * \param updateMath: arithmetic_t the three update ops run in (by-value,
+ *        Must be per-tensor; ignored when momentumFactor == 0.
+ * \param updateMath: arithmetic_t the update ops run in (by-value,
  *        mirroring the layer-side per-op knobs). Pass
  *        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY}
  *        for the established behavior. Only ARITH_FLOAT32 is implemented;
- *        any other type fails fast at creation (and again at step time)
- *        until the integer-update numerics design lands. Rounding
- *        ownership (#282): updateMath.roundingMode is superseded at step
- *        time -- every write-back op runs with the optimizer's
- *        writeBackRounding as its operation-owned rounding (#279; seeded
+ *        any other type fails fast at creation until the integer-update
+ *        numerics design lands. Rounding ownership: updateMath.roundingMode
+ *        is superseded at step time -- every write-back op runs with the
+ *        optimizer's writeBackRounding as its operation-owned rounding (seeded
  *        SR factory default, optimizerSetWriteBackRounding to opt out).
  *
  * \note momentumFactor is creation-fixed: it determines whether momentum-state
- *       buffers are allocated (momentumFactor == 0 → none, #308), so callers
+ *       buffers are allocated (momentumFactor == 0 → none), so callers
  *       must not mutate sgd_t.momentumFactor from 0 to nonzero after creation.
  */
 optimizer_t *sgdMCreateOptim(float learningRate, float momentumFactor, float weightDecay,

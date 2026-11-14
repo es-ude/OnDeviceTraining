@@ -16,12 +16,10 @@
 
 void adamWInit(adamW_t *adamW, float learningRate, double beta1, double beta2, double eps,
                double weightDecay, arithmetic_t updateMath) {
-    /* Only ARITH_FLOAT32 update arithmetic is implemented; fail at
-     * construction so a training run cannot start on an unimplemented
-     * arm (#310 pattern, Sgd.c precedent). */
+    /* The step trusts this: its kernels read float operands. */
     if (updateMath.type != ARITH_FLOAT32) {
         PRINT_ERROR("AdamW updateMath: only ARITH_FLOAT32 is implemented "
-                    "(integer-arithmetic update numerics not yet designed, #310 pattern)");
+                    "(integer-arithmetic update numerics not yet designed)");
         exit(1);
     }
     /* Negated comparisons so NaN betas/eps fail too. */
@@ -118,14 +116,6 @@ enum { ADAMW_OP_MOMENT = 0, ADAMW_OP_VARIANCE = 1, ADAMW_OP_PARAM = 2 };
 void adamWStep(optimizer_t *optim, const rngKey_t *updateKey) {
     adamW_t *adamW = optim->impl->adamW;
 
-    /* Re-checked here (not only in adamWInit): hand-assembled optimizers
-     * must hit the same wall (#310 pattern, Sgd.c precedent). */
-    if (adamW->updateMath.type != ARITH_FLOAT32) {
-        PRINT_ERROR("AdamW updateMath: only ARITH_FLOAT32 is implemented "
-                    "(integer-arithmetic update numerics not yet designed, #310 pattern)");
-        exit(1);
-    }
-
     adamW->stepCount++;
 
     /* Per-step scalars in DOUBLE (PyTorch's python-double prelude), cast to
@@ -147,7 +137,7 @@ void adamWStep(optimizer_t *optim, const rngKey_t *updateKey) {
                           .eps = (float)adamW->eps,
                           .stepScale = (float)stepScale};
 
-    /* #282: training write-backs round by the OPTIMIZER's knob -- the update
+    /* Training write-backs round by the OPTIMIZER's knob -- the update
      * ops run with writeBackRounding as their operation-owned rounding. */
     arithmetic_t updateMath = adamW->updateMath;
     updateMath.roundingMode = optim->writeBackRounding;
@@ -190,13 +180,9 @@ void adamWStep(optimizer_t *optim, const rngKey_t *updateKey) {
                               .mode = OUT_WRITE,
                               .auxOut = NULL,
                               .writesInPlaceSafe = true,
-                              /* Group-quant PR3 Task 4: param is inputs[0]
-                               * here -- m/v are per-tensor FLOAT32 states
-                               * (the momentum-state carrier gate, PR2), so
-                               * param is the only operand allowed to be
-                               * grouped-SYM. The moment/variance opSpecs
-                               * above take no param operand at all, so they
-                               * need no declaration. */
+                              /* param, inputs[0], is the only operand that may
+                               * be grouped: m/v are per-tensor states, and the
+                               * moment/variance ops take no param operand. */
                               .groupedSymOperandPos = 1},
                   p->param);
     }

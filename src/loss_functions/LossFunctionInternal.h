@@ -4,25 +4,13 @@
 /* Private to src/loss_functions (MSE.c, CrossEntropy.c). Include AFTER the
  * file's SOURCE_FILE define: PRINT_ERROR reports the includer's name.
  *
- * Every operand of a loss must have the MODEL OUTPUT's exact shape (#153),
- * and the check sits at each PUBLIC dispatcher, above the dtype switch,
- * because every arm needs it (hoisted there from the fake-quant helpers in
- * BFP epic PR4). Fake-quant arms size each VLA scratch from the output's count while
- * each convertTensor walks its OWN operand's count, so a longer operand
- * overruns the scratch; FLOAT32 arms index every operand at the output's
- * count, so a shorter one is read -- and for the backward's grad wire,
- * written -- out of bounds. Equal counts are not enough either. A label with
- * another layout at the same count ([B, C, L] vs [B, L, C]) would be scored
- * element-by-element against the wrong values, and a label with another rank
- * ([C] vs [1, C]) leaves the batch axis to be guessed -- the CE MEAN divisor
- * and the MSE mean scale read dims[0] -- and hides a missed or doubled batch
- * wrap.
- *
- * The output must be [B, ...] with a feature axis (rank >= 2; a rank-1
- * tensor would leave the batch axis to be guessed) and at least one element
- * (a zero anywhere in the shape makes zero-length VLAs and 0/0 means).
- * Fail fast: a mismatch is a caller's shape bug. The *Float arm bodies stay
- * unguarded on purpose; the dispatchers are the guarded API. */
+ * Each public dispatcher validates its output once with requireBatchedOutput, then each
+ * operand with requireOperandMatchesOutput. Output must be nonempty [B,...], rank >= 2; operands
+ * must share its rank and dimensions (orderOfDimensions is not compared). Float kernels trust
+ * these checks and read every operand at the output's count; fake-quant scratch is sized from
+ * the output. MSE's FLOAT32 arm reads label/result data as float, so it also requires FLOAT32
+ * operands (requireFloat32Operand); CE's FLOAT32 arm sends a quantized label or grad wire
+ * through its converting arm instead. */
 
 #include <stdlib.h>
 
@@ -44,9 +32,9 @@ static inline void requireBatchedOutput(tensor_t *output, const char *role, cons
     }
 }
 
+/* Call after requireBatchedOutput(output). */
 static inline void requireOperandMatchesOutput(tensor_t *output, tensor_t *operand,
                                                const char *operandName, const char *what) {
-    requireBatchedOutput(output, "model output", what);
     size_t rank = output->shape->numberOfDimensions;
     size_t operandRank = operand->shape->numberOfDimensions;
     if (operandRank != rank) {
@@ -62,6 +50,15 @@ static inline void requireOperandMatchesOutput(tensor_t *output, tensor_t *opera
                         k, operandDim, outputDim);
             exit(1);
         }
+    }
+}
+
+static inline void requireFloat32Operand(tensor_t *operand, const char *operandName,
+                                         const char *what) {
+    if (operand->quantization->type != FLOAT32) {
+        PRINT_ERROR("%s: %s dtype %d must be FLOAT32 for a FLOAT32 model output", what, operandName,
+                    (int)operand->quantization->type);
+        exit(1);
     }
 }
 

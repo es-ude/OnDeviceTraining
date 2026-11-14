@@ -23,7 +23,7 @@ change over PR1's `ARITH_FLOAT32` float bridge), and `ARITH_BFP` runs the GEMM-f
 **forward** (Linear/Conv1d/Conv1dTransposed) natively with both operands blocked. Since
 epic PR3, `ARITH_BFP` also runs the GEMM family's **backward** natively
 (`weightGrad`/`biasGrad`/`dx`), and BFP grad/optimizer-state storage is a per-tensor-only
-knob (`gradInit`/`momentumStateInit`/`momentStateInit`/PPCA state, all reject a grouped
+knob (`gradInit`/`initMomentStates`/PPCA state, all reject a grouped
 BFP template, #300 axis); fake-quant BFP training (pin the math slot(s) to
 `ARITH_FLOAT32` explicitly) remains available end to end as an alternative, not a
 workaround. Since epic PR4 the weight-less layers join in: pools run `ARITH_BFP`
@@ -133,7 +133,8 @@ Notes on the qualified cells:
   ASYM packed grad storage work for the five non-BatchNorm trainable layers
   (Linear/Conv1d/Conv1dTransposed/LayerNorm/GroupNorm; BatchNorm1d grads are
   FLOAT32-only) via `gradInit`→`getQLike` (BOOL rejected, #269). `gradInit` rejects a
-  grouped SYM, ASYM or BFP template (grads are per-tensor, #300 axis), and a SYM/ASYM/
+  grouped SYM, ASYM or BFP template (grads are per-tensor, #300 axis; `deserializeParameter`
+  likewise rejects a grouped SYM/ASYM grad record), and a SYM/ASYM/
   SYM_INT32 grad target wider than `ODT_SYM_GRAD_QMAXBITS` (16) fail-fasts at its first
   accumulate (`executeOp`'s ACC epilogue; no such width gate on the BFP arm). Accumulate
   epilogue: SYM target honors both `OUT_ACC_FIXED_SCALE`
@@ -241,7 +242,7 @@ Notes on the qualified cells:
   default; quantized moment storage is a memory knob routed through the executeOp
   funnel like any other dtype, with no bit-parity claim). BFP moment storage (epic PR3
   Task 7) is per-tensor-only, same carrier gate and rationale as the grad-storage knob
-  above — `momentStateInit` rejects a grouped BFP `momentQuant` template ("#300 axis").
+  above — `initMomentStates` rejects a grouped BFP `momentQuant` template.
   `updateMath` is
   FLOAT32-only, fail-fast at both create time and every `adamWStep` call (the #310
   pattern). `stepCount` (bias-correction exponent `t`) is **not** checkpointed — no

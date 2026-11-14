@@ -514,11 +514,11 @@ silent wrong arithmetic, not a crash.
   second grid for it would only add a needless second quantization step
   (§9's double-quantization rationale).
 - **Per-tensor-only grad/optimizer-state knob (epic PR3 Tasks 6–7).**
-  `gradInit`'s carrier gate (`src/userApi/tensor/TensorApi.c`), `SgdApi.c`'s
-  `momentumStateInit`, `AdamWApi.c`'s `momentStateInit`, and
+  `gradInit`'s carrier gate (`src/userApi/tensor/TensorApi.c`), `OptimizerApi.c`'s
+  `initMomentStates` (shared by the SGD and AdamW factories), and
   `PpcaReplayApi.c`'s state-template validation each accept a per-tensor
   (`{1,0}`) BFP template and reject a grouped one with the same "unsupported
-  — per-tensor only (#300 axis)" shape of message: a template is deep-cloned
+  ... per-tensor" shape of message: a template is deep-cloned
   per parameter/state buffer via `getQLike`, and a grouped template only
   ever fits the ONE element count it was built against, so honoring
   `numGroups > 1` generically would be a silent shape trap the moment the

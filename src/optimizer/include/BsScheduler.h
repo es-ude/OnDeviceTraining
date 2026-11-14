@@ -6,7 +6,7 @@
 #include "DataLoader.h"
 #include "Optimizer.h"
 
-/*! Batch-size schedulers, the batch analogue of LrScheduler (#327):
+/*! Batch-size schedulers, the batch analogue of LrScheduler:
  *  where StepLR/ExponentialLR multiply the LR by gamma, these DIVIDE the
  *  batch size by gamma, so lr/batch follows the same trajectory as the LR
  *  scheduler at the same gamma. Caller-owned, zero allocation. baseBs is
@@ -60,7 +60,7 @@ void bsSchedulerStep(bsScheduler_t *sched);
 /*! The batch bsSchedulerStep writes when it advances lastEpoch to `epoch`
  *  (epoch 0 = baseBs), from the SAME computation -- closed form, rounding,
  *  clamp and non-finite fail-fast -- so a peek can never disagree with the
- *  step (#152). Pure: never touches lastEpoch, the loader or the LR.
+ *  step. Pure: never touches lastEpoch, the loader or the LR.
  *  trainingRun walks the whole schedule through it before epoch 0 to check
  *  every scheduled batch against microBatchSize. */
 size_t bsSchedulerBatchSizeAt(const bsScheduler_t *sched, size_t epoch);

@@ -4,17 +4,15 @@
 #include "ArithmeticType.h"
 #include "Optimizer.h"
 
-/*! Decoupled-weight-decay Adam (torch.optim.AdamW parity, #328).
+/*! Decoupled-weight-decay Adam (torch.optim.AdamW parity).
  *
- * Numerics contract (empirical): beta1/beta2/eps/weightDecay
- * are stored DOUBLE, and every per-step scalar (1-beta1, 1-beta2, the bias
- * corrections, -(lr/bc1), 1-lr*wd) is composed in double, then cast to float
- * exactly once at the kernel-call boundary -- mirroring PyTorch, which
- * composes these in python doubles and casts once inside the ATen kernel.
- * Storing beta2=0.999 as C float loses 1-beta2 unrecoverably (~111 ulps;
- * measured: v bit-mismatch 4096/4096 after 10 steps with float betas,
- * 0/4096 with double). learningRate stays float: it is what the
- * getLr/setLr vtable row and the LR scheduler (#327) exchange.
+ * Numerics contract: beta1/beta2/eps/weightDecay are stored DOUBLE, and every
+ * per-step scalar (1-beta1, 1-beta2, the bias corrections, -(lr/bc1), 1-lr*wd)
+ * is composed in double, then cast to float exactly once at the kernel-call
+ * boundary -- mirroring PyTorch, which composes these in python doubles and
+ * casts once inside the ATen kernel. Float betas would lose 1-beta2
+ * unrecoverably. learningRate stays float: it is what the getLr/setLr vtable
+ * row and the LR scheduler exchange.
  *
  * weightDecay is DECOUPLED (param *= 1 - lr*wd, torch.optim.AdamW) --
  * deliberately different from sgd_t.weightDecay's coupled L2
@@ -27,15 +25,14 @@
  *
  * stepCount is NOT persisted: StateDictApi serializes only weights/biases,
  * so a checkpoint-resumed run restarts bias correction at t=1 and
- * re-amplifies the first steps on a converged model (#350). Documented
- * here, tracked there. */
+ * re-amplifies the first steps on a converged model. */
 typedef struct adamW {
     float learningRate;  /* float: getLr/setLr vtable + scheduler contract */
     double beta1, beta2; /* DOUBLE, deliberately (numerics note above) */
     double eps;
     double weightDecay;      /* decoupled (torch.optim.AdamW) */
     size_t stepCount;        /* t; starts 0, ++ at each adamWStep entry */
-    arithmetic_t updateMath; /* FLOAT32-only, fail-fast (#310 pattern) */
+    arithmetic_t updateMath; /* FLOAT32-only, checked by adamWInit */
 } adamW_t;
 
 /*! Validates beta1/beta2 in [0,1), eps > 0, updateMath == ARITH_FLOAT32;

@@ -30,13 +30,11 @@ float mseLossForwardFloat(tensor_t *output, tensor_t *label, reduction_t reducti
     return sum;
 }
 
-/* Fake-quant arm — dtype-generic by construction (CrossEntropy.c's naming and
- * precedent): every operand goes through convertTensor, so the same body
- * serves SYM_INT32 and, since BFP epic PR4 (R-P6), BFP. The read side hits
- * conversionMatrix[BFP][FLOAT32] (chunked exact dequant, mantissa * 2^E);
- * the backward's write side hits conversionMatrix[FLOAT32][BFP], which
- * derives FRESH per-group exponents — the BFP analog of the SYM arm's fresh
- * absmax scale. NATIVE BFP losses stay an optional stretch (BFP D4). */
+/* Fake-quant arm, dtype-generic: convertTensor dequantizes every operand into
+ * FLOAT32 stack scratch (sharing the operand's shape). The loop deliberately
+ * repeats mseLossForwardFloat's instead of calling it: under -ffp-contract=fast
+ * the compiler can contract the two loops differently (host clang does), so a call would change
+ * the fake-quant loss in the last bit. */
 static float mseLossForwardFakeQuant(tensor_t *output, tensor_t *label, reduction_t reduction) {
     size_t size = calcNumberOfElementsByTensor(output);
 
@@ -72,9 +70,11 @@ static float mseLossForwardFakeQuant(tensor_t *output, tensor_t *label, reductio
 
 float mseLossForward(tensor_t *output, tensor_t *label, reduction_t reduction,
                      const layerExec_t *exec) {
+    requireBatchedOutput(output, "model output", "mseLossForward");
     requireOperandMatchesOutput(output, label, "label", "mseLossForward");
     switch (output->quantization->type) {
     case FLOAT32:
+        requireFloat32Operand(label, "label", "mseLossForward");
         return mseLossForwardFloat(output, label, reduction);
     case SYM_INT32:
     case BFP:
@@ -98,9 +98,9 @@ void mseLossBackwardFloat(tensor_t *modelOutput, tensor_t *label, tensor_t *resu
     }
 }
 
-/* Backward twin of mseLossForwardFakeQuant above — same dtype-generic
- * contract, plus the final convertTensor that requantizes the raw grad into
- * the result's own quantized grid, drawing from rs. */
+/* Backward twin of mseLossForwardFakeQuant: the float core writes write-only
+ * scratch, and the final convertTensor requantizes the raw grad into the
+ * result's own grid, drawing from rs. */
 static void mseLossBackwardFakeQuant(tensor_t *modelOutput, tensor_t *label, tensor_t *result,
                                      rngStream_t *rs) {
     size_t numberOfElements = calcNumberOfElementsByTensor(modelOutput);
@@ -126,19 +126,14 @@ static void mseLossBackwardFakeQuant(tensor_t *modelOutput, tensor_t *label, ten
     uint8_t resultFloatData[numberOfElements * sizeof(float)];
     setTensorValuesForConversion(resultFloatData, &resultFloatQ, result, &resultFloat);
 
-    float *modelOutputArray = (float *)modelOutputFloat.data;
-    float *labelArray = (float *)labelFloat.data;
-    float *resultArray = (float *)resultFloat.data;
-
-    for (size_t i = 0; i < numberOfElements; i++) {
-        resultArray[i] = 2.0f * (modelOutputArray[i] - labelArray[i]);
-    }
+    mseLossBackwardFloat(&modelOutputFloat, &labelFloat, &resultFloat);
 
     convertTensor(&resultFloat, result, rs);
 }
 
 void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result,
                      const layerExec_t *exec) {
+    requireBatchedOutput(modelOutput, "model output", "mseLossBackward");
     requireOperandMatchesOutput(modelOutput, label, "label", "mseLossBackward");
     requireOperandMatchesOutput(modelOutput, result, "result (grad wire)", "mseLossBackward");
     qtype_t modelOutputQType = modelOutput->quantization->type;
@@ -146,6 +141,8 @@ void mseLossBackward(tensor_t *modelOutput, tensor_t *label, tensor_t *result,
 
     switch (modelOutputQType) {
     case FLOAT32:
+        requireFloat32Operand(label, "label", "mseLossBackward");
+        requireFloat32Operand(result, "result (grad wire)", "mseLossBackward");
         mseLossBackwardFloat(modelOutput, label, result);
         break;
     case SYM_INT32:

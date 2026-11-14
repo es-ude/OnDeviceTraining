@@ -240,7 +240,7 @@ static optimizer_t *buildSymInt32OneLayerOptim(layer_t **modelOut, parameter_t *
     return optim;
 }
 
-void testScaleOptimizerGradients_SymInt32_ScalesScaleOnly() {
+void testScaleOptimizerGradients_SymInt32_ScalesScaleOnly(void) {
     layer_t *model[1];
     parameter_t *w;
     parameter_t *b;
@@ -278,64 +278,6 @@ void testScaleOptimizerGradients_SymInt32_ScalesScaleOnly() {
     /* scale absorbed the multiplicative factor. */
     TEST_ASSERT_FLOAT_WITHIN(1e-7f, wScale0 * factor, capturedWScale);
     TEST_ASSERT_FLOAT_WITHIN(1e-7f, bScale0 * factor, capturedBScale);
-}
-
-void testScaleOptimizerGradients_SymInt32_DequantEquivalence() {
-    layer_t *model[1];
-    parameter_t *w;
-    parameter_t *b;
-    int32_t wGradInt[6] = {7, -14, 21, -28, 35, -42};
-    int32_t bGradInt[2] = {3, -3};
-    float wScale0 = 0.125f;
-    float bScale0 = 1.0f;
-    float factor = 0.5f;
-
-    /* Pre-compute dequantized grads (float_value = int32_value * scale) before
-     * scaling, then multiply by factor — this is the mathematical identity the
-     * scale-only path must satisfy. */
-    float wDequantBeforeTimesFactor[6];
-    for (size_t i = 0; i < 6; i++) {
-        wDequantBeforeTimesFactor[i] = (float)wGradInt[i] * wScale0 * factor;
-    }
-    float bDequantBeforeTimesFactor[2];
-    for (size_t i = 0; i < 2; i++) {
-        bDequantBeforeTimesFactor[i] = (float)bGradInt[i] * bScale0 * factor;
-    }
-
-    optimizer_t *sgd =
-        buildSymInt32OneLayerOptim(model, &w, &b, wScale0, wGradInt, bScale0, bGradInt, 0.01f, 0.f);
-
-    scaleOptimizerGradients(sgd, factor, NULL);
-
-    /* CAPTURE dequantized values after scaling, using post-scale int32 + scale. */
-    float wDequantAfter[6];
-    {
-        int32_t *gradInt = (int32_t *)w->grad->data;
-        float postScale =
-            odtScaleToFloat(((symInt32QConfig_t *)w->grad->quantization->qConfig)->scale);
-        for (size_t i = 0; i < 6; i++) {
-            wDequantAfter[i] = (float)gradInt[i] * postScale;
-        }
-    }
-    float bDequantAfter[2];
-    {
-        int32_t *gradInt = (int32_t *)b->grad->data;
-        float postScale =
-            odtScaleToFloat(((symInt32QConfig_t *)b->grad->quantization->qConfig)->scale);
-        for (size_t i = 0; i < 2; i++) {
-            bDequantAfter[i] = (float)gradInt[i] * postScale;
-        }
-    }
-
-    freeOptim(sgd);
-    freeLinearLayerShellOnly(model[0]);
-
-    for (size_t i = 0; i < 6; i++) {
-        TEST_ASSERT_FLOAT_WITHIN(1e-6f, wDequantBeforeTimesFactor[i], wDequantAfter[i]);
-    }
-    for (size_t i = 0; i < 2; i++) {
-        TEST_ASSERT_FLOAT_WITHIN(1e-6f, bDequantBeforeTimesFactor[i], bDequantAfter[i]);
-    }
 }
 
 void testScaleOptimizerGradients_SymInt32_MomentumSgdAppliesScaledGradient() {
@@ -504,6 +446,11 @@ void testScaleOptimizerGradients_Sym_ScalesScaleOnly(void) {
     float bScaleBefore =
         odtScaleToFloat(((symQConfig_t *)b->grad->quantization->qConfig)->scales[0]);
 
+    float wDequantBefore[6];
+    float bDequantBefore[2];
+    dequantGradToFloat(w->grad, wDequantBefore, 6);
+    dequantGradToFloat(b->grad, bDequantBefore, 2);
+
     scaleOptimizerGradients(sgd, factor, NULL);
 
     /* CAPTURE before frees. */
@@ -516,6 +463,11 @@ void testScaleOptimizerGradients_Sym_ScalesScaleOnly(void) {
     float bScaleAfter =
         odtScaleToFloat(((symQConfig_t *)b->grad->quantization->qConfig)->scales[0]);
 
+    float wDequantAfter[6];
+    float bDequantAfter[2];
+    dequantGradToFloat(w->grad, wDequantAfter, 6);
+    dequantGradToFloat(b->grad, bDequantAfter, 2);
+
     freeOptim(sgd);
     freeLinearLayerShellOnly(model[0]);
 
@@ -525,35 +477,7 @@ void testScaleOptimizerGradients_Sym_ScalesScaleOnly(void) {
     /* scale absorbed the multiplicative factor. */
     TEST_ASSERT_FLOAT_WITHIN(1e-7f, wScaleBefore * factor, wScaleAfter);
     TEST_ASSERT_FLOAT_WITHIN(1e-7f, bScaleBefore * factor, bScaleAfter);
-}
-
-void testScaleOptimizerGradients_Sym_DequantEquivalence(void) {
-    layer_t *model[1];
-    parameter_t *w;
-    parameter_t *b;
-    float wGradInit[6] = {1.f, -2.f, 3.f, -4.f, 5.f, -6.f};
-    float bGradInit[2] = {0.5f, -0.5f};
-    uint8_t qBits = 8;
-    float factor = 0.5f;
-
-    optimizer_t *sgd =
-        buildSymOneLayerOptim(model, &w, &b, wGradInit, bGradInit, qBits, 0.01f, 0.f);
-
-    float wDequantBefore[6];
-    float bDequantBefore[2];
-    dequantGradToFloat(w->grad, wDequantBefore, 6);
-    dequantGradToFloat(b->grad, bDequantBefore, 2);
-
-    scaleOptimizerGradients(sgd, factor, NULL);
-
-    float wDequantAfter[6];
-    float bDequantAfter[2];
-    dequantGradToFloat(w->grad, wDequantAfter, 6);
-    dequantGradToFloat(b->grad, bDequantAfter, 2);
-
-    freeOptim(sgd);
-    freeLinearLayerShellOnly(model[0]);
-
+    /* the decoded values scaled by the factor. */
     for (size_t i = 0; i < 6; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, wDequantBefore[i] * factor, wDequantAfter[i]);
     }
@@ -639,6 +563,11 @@ void testScaleOptimizerGradients_Asym_ScalesScaleOnly(void) {
     uint16_t wZeroPointBefore = wQ->zeroPoints[0];
     uint16_t bZeroPointBefore = bQ->zeroPoints[0];
 
+    float wDequantBefore[6];
+    float bDequantBefore[2];
+    dequantGradToFloat(w->grad, wDequantBefore, 6);
+    dequantGradToFloat(b->grad, bDequantBefore, 2);
+
     scaleOptimizerGradients(sgd, factor, NULL);
 
     /* CAPTURE before frees. */
@@ -650,6 +579,11 @@ void testScaleOptimizerGradients_Asym_ScalesScaleOnly(void) {
     float bScaleAfter = odtScaleToFloat(bQ->scales[0]);
     uint16_t wZeroPointAfter = wQ->zeroPoints[0];
     uint16_t bZeroPointAfter = bQ->zeroPoints[0];
+
+    float wDequantAfter[6];
+    float bDequantAfter[2];
+    dequantGradToFloat(w->grad, wDequantAfter, 6);
+    dequantGradToFloat(b->grad, bDequantAfter, 2);
 
     freeOptim(sgd);
     freeLinearLayerShellOnly(model[0]);
@@ -663,35 +597,7 @@ void testScaleOptimizerGradients_Asym_ScalesScaleOnly(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-7f, bScaleBefore * factor, bScaleAfter);
     TEST_ASSERT_EQUAL_INT32(wZeroPointBefore, wZeroPointAfter);
     TEST_ASSERT_EQUAL_INT32(bZeroPointBefore, bZeroPointAfter);
-}
-
-void testScaleOptimizerGradients_Asym_DequantEquivalence(void) {
-    layer_t *model[1];
-    parameter_t *w;
-    parameter_t *b;
-    float wGradInit[6] = {1.f, -2.f, 3.f, -4.f, 5.f, -6.f};
-    float bGradInit[2] = {0.5f, -0.5f};
-    uint8_t qBits = 8;
-    float factor = 0.5f;
-
-    optimizer_t *sgd =
-        buildAsymOneLayerOptim(model, &w, &b, wGradInit, bGradInit, qBits, 0.01f, 0.f);
-
-    float wDequantBefore[6];
-    float bDequantBefore[2];
-    dequantGradToFloat(w->grad, wDequantBefore, 6);
-    dequantGradToFloat(b->grad, bDequantBefore, 2);
-
-    scaleOptimizerGradients(sgd, factor, NULL);
-
-    float wDequantAfter[6];
-    float bDequantAfter[2];
-    dequantGradToFloat(w->grad, wDequantAfter, 6);
-    dequantGradToFloat(b->grad, bDequantAfter, 2);
-
-    freeOptim(sgd);
-    freeLinearLayerShellOnly(model[0]);
-
+    /* the decoded values scaled by the factor. */
     for (size_t i = 0; i < 6; i++) {
         TEST_ASSERT_FLOAT_WITHIN(1e-5f, wDequantBefore[i] * factor, wDequantAfter[i]);
     }
@@ -845,51 +751,6 @@ static void scaleAnSrBfpGradWithoutAKey(void) {
 void testScaleOptimizerGradientsWithoutAnUpdateKeyExitsOnAnSrBfpGrad(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "roundByMode: SR rounding without a stream",
                              scaleAnSrBfpGradWithoutAKey());
-}
-
-/* Group-quant PR3 Task 4: defensive belt-and-suspenders fail-fast on the
- * SYM grad arm. gradInit's own carrier gate already rejects a grouped SYM
- * template before a grad tensor is ever built through the sanctioned API
- * (grads are per-tensor unconditionally, symQConfig_t's carrier-gate doc
- * comment, #300 axis) -- so this fixture bypasses gradInit entirely and
- * hand-builds a grouped SYM grad tensor directly (initTensor +
- * quantizationInitSymGrouped), exactly the kind of hand-assembled optimizer
- * this file's other builders (buildSymOneLayerOptim etc.) and the SGD/AdamW
- * hand-built optimizer_t tests already exercise elsewhere in this tree.
- * Folding `factor` into scales[0] alone (the per-tensor SYM arm's existing
- * code) would silently scale ONLY group 0 and leave every other group
- * untouched -- scaleOptimizerGradients must fail fast instead. */
-void testScaleOptimizerGradientsRejectsGroupedSymGrad(void) {
-    ASSERT_EXITS_WITH_FAILURE({
-        size_t *pDims = reserveMemory(1 * sizeof(size_t));
-        pDims[0] = 6;
-        size_t *pOrder = reserveMemory(1 * sizeof(size_t));
-        setOrderOfDimsForNewTensor(1, pOrder);
-        shape_t *pShape = reserveMemory(sizeof(shape_t));
-        setShape(pShape, pDims, 1, pOrder);
-        tensor_t *wParam = initTensor(pShape, quantizationInitFloat(), NULL);
-        tensorFillFromFloatBuffer(wParam, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f}, 6);
-
-        size_t *gDims = reserveMemory(1 * sizeof(size_t));
-        gDims[0] = 6;
-        size_t *gOrder = reserveMemory(1 * sizeof(size_t));
-        setOrderOfDimsForNewTensor(1, gOrder);
-        shape_t *gShape = reserveMemory(sizeof(shape_t));
-        setShape(gShape, gDims, 1, gOrder);
-        tensor_t *wGrad = initTensor(gShape, quantizationInitSymGrouped(8, HALF_AWAY, 2, 3), NULL);
-
-        parameter_t *w = parameterInit(wParam, wGrad);
-        parameter_t *parArr[1] = {w};
-        /* Extra parens (not just the usual designated-initializer literal):
-         * the preprocessor's macro-argument comma scan only tracks real
-         * parentheses, not braces, so a bare `{a, b}` initializer here would
-         * split ASSERT_EXITS_WITH_FAILURE's single block argument in two --
-         * wrapping the whole compound literal in one more `()` pair keeps
-         * the comma enclosed. */
-        optimizer_t optim = ((optimizer_t){.parameter = parArr, .sizeStates = 1});
-
-        scaleOptimizerGradients(&optim, 2.0f, NULL);
-    });
 }
 
 #define SR_SCALE_ELEMENTS 16
@@ -1233,16 +1094,12 @@ int main(void) {
     RUN_TEST(testScaleOptimizerGradients_FactorZero_DoesNotAbort);
     RUN_TEST(testScaleOptimizerGradients_FactorNaN_DoesNotAbort);
     RUN_TEST(testScaleOptimizerGradients_SymInt32_ScalesScaleOnly);
-    RUN_TEST(testScaleOptimizerGradients_SymInt32_DequantEquivalence);
     RUN_TEST(testScaleOptimizerGradients_SymInt32_MomentumSgdAppliesScaledGradient);
     RUN_TEST(testScaleOptimizerGradients_Sym_ScalesScaleOnly);
-    RUN_TEST(testScaleOptimizerGradients_Sym_DequantEquivalence);
     RUN_TEST(testScaleOptimizerGradients_Asym_ScalesScaleOnly);
-    RUN_TEST(testScaleOptimizerGradients_Asym_DequantEquivalence);
     RUN_TEST(testScaleOptimizerGradients_Bfp_DequantEquivalence);
     RUN_TEST(testScaleOptimizerGradients_Bfp_NonFiniteFactorAborts);
     RUN_TEST(testScaleOptimizerGradientsWithoutAnUpdateKeyExitsOnAnSrBfpGrad);
-    RUN_TEST(testScaleOptimizerGradientsRejectsGroupedSymGrad);
     RUN_TEST(testMeanScaleOfAnSrBfpGradIsAPureFunctionOfTheUpdateKeyAndTheParam);
 #if SIZE_MAX > UINT32_MAX
     RUN_TEST(testScaleOptimizerGradientsExitsWhenAParameterIndexExceedsUint32Max);

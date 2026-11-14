@@ -25,14 +25,15 @@ typedef struct conv1dTransposedConfig {
     quantization_t *outputQ;   /* produced forward-wire storage config */
     quantization_t *propLossQ; /* storage config of the produced dx-wire buffer */
 
-    outputMode_t weightGradAccMode; /* weight-grad executeOp accumulate mode (packed-grad D1) */
-    outputMode_t biasGradAccMode;   /* bias-grad executeOp accumulate mode (packed-grad D1) */
+    outputMode_t weightGradAccMode; /* weight-grad executeOp accumulate mode */
+    outputMode_t biasGradAccMode;   /* bias-grad executeOp accumulate mode */
 
     bool ownsQuantizations; /* true -> free* will tear down outputQ/propLossQ and their
                                qConfigs */
 
-    bool frozen; /* create-time freeze (#380): no grad buffers; optimizer collection,
-                    state allocation and backward weight/bias-grad ops skip this layer */
+    bool frozen; /* no parameter-gradient buffers; optimizer collection, state allocation
+                    and backward weight/bias-grad ops skip this layer, but input gradients
+                    still propagate */
 } conv1dTransposedConfig_t;
 
 void initConv1dTransposedConfigWithWeightsAndBias(
@@ -51,11 +52,9 @@ void conv1dTransposedCalcWeightGradsSymInt32(conv1dTransposedConfig_t *cfg, tens
 void conv1dTransposedCalcBiasGradsSymInt32(conv1dTransposedConfig_t *cfg, tensor_t *lossGrad,
                                            const rngKey_t *key);
 
-/*! BFP epic PR3 (Task 4): ARITH_BFP grad twins (executeOp-funneled, raw
- *  FLOAT32 intermediates, rounding-free ldexpf folds). Both REQUIRE
- *  BFP-stored weights (caller guarantees; conv1dTransposedBackward checks)
- *  -- the width anchor FLOAT32-stored operands stage at; BFP-stored
- *  operands are borrowed zero-copy. */
+/*! ARITH_BFP gradients with rounding-free ldexpf folds into FLOAT32
+ *  intermediates. Requires BFP-stored weights (the caller guarantees it;
+ *  conv1dTransposedBackward checks); FLOAT32 operands stage at their widths. */
 void conv1dTransposedCalcWeightGradsBfp(conv1dTransposedConfig_t *cfg, tensor_t *forwardInput,
                                         tensor_t *lossGrad, const rngKey_t *key);
 void conv1dTransposedCalcBiasGradsBfp(conv1dTransposedConfig_t *cfg, tensor_t *lossGrad,

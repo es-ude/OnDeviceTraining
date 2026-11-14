@@ -68,7 +68,7 @@ void testConv1dTransposedLayerInitBorrowingBuildsLayerWithCorrectShape(void) {
     TEST_ASSERT_EQUAL_INT(ARITH_FLOAT32, cfg->biasGradMath.type);
     TEST_ASSERT_EQUAL_PTR(q, cfg->propLossQ);
 
-    /* Weight shape: [inChannels, outChannels/groups, kernelSize] per Conv1dTransposed.h:12.
+    /* Weight shape: [inChannels, outChannels/groups, kernelSize].
      * Note SWAP from Conv1d. */
     TEST_ASSERT_NOT_NULL(cfg->weights);
     tensor_t *weightTensor = cfg->weights->param;
@@ -241,10 +241,9 @@ void testConv1dTransposedLayerInitKeepsFloat32Grad(void) {
 }
 
 void testConv1dTransposedLayerInitOwningWeightGradStorageKnobOverridesFloatDefault(void) {
-    /* Default (knob == NULL) grad storage stays hard-pinned FLOAT32 (Conv1dTransposed
-     * backward is FLOAT32-only); a non-NULL weightGradStorage config must
-     * override that default end-to-end, through the same getQLike path
-     * gradInit already uses (mirrors Linear's #261 knob). */
+    /* Grad storage defaults to FLOAT32 when the knob is NULL; a non-NULL
+     * weightGradStorage config must override that default end-to-end, through
+     * the getQLike path gradInit uses. */
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);

@@ -35,25 +35,21 @@ typedef struct conv1dInit {
     trainable_t trainable;   /* zero-init → TRAINABLE_DEFAULT (trainable) */
 } conv1dInit_t;
 
-/*! Borrowing variant — factory allocates weights/bias/kernel internally
- *  and stores the four math `quantization_t*` from `lq` verbatim. Caller
- *  retains ownership of `lq` and the quantizations; `lq` may be a
- *  compound literal.
- *  Use when: the quantizations are shared/long-lived (e.g. reused across
- *  several layers) and the caller manages their lifetime — they must
- *  outlive the layer. */
+/*! Arithmetic slots are copied by value. Borrowing keeps the outputQ and
+ *  propLossQ pointers; owning deep-copies those two configurations. Parameter
+ *  quantizations are owned independently.
+ *
+ *  Borrowing variant: `lq` itself may be a compound literal, but the outputQ
+ *  and propLossQ it points to must outlive the layer. Use when those
+ *  configurations are shared across layers. */
 layer_t *conv1dLayerInit(conv1dInit_t *init, layerQuant_t *lq);
 
-/*! Owning variant — same as `conv1dLayerInit`, but additionally
- *  `deepCopyQuantization`s each of the four math quantizations. Caller
- *  can drop `lq` and the quantization_t's immediately.
- *  Use when: the quantizations are stack-locals or one-off configs and you
- *  want fire-and-forget teardown (freeConv1dLayer tears them down too). */
+/*! Owning variant: the caller may drop `lq` and every quantization it points
+ *  to right after the call; freeConv1dLayer tears the copies down. */
 layer_t *conv1dLayerInitOwning(conv1dInit_t *init, layerQuant_t *lq);
 
-/*! Tears down everything the factory allocated. Reads
- *  `config->ownsQuantizations` to decide whether to also free the four
- *  math quantizations and their qConfigs. */
+/*! Frees everything the factory allocated, plus outputQ/propLossQ when the
+ *  layer owns them. */
 void freeConv1dLayer(layer_t *conv1dLayer);
 
 #endif // CONV1DAPI_H

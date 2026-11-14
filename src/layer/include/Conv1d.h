@@ -24,14 +24,15 @@ typedef struct conv1dConfig {
     quantization_t *outputQ;   /* produced forward-wire storage config */
     quantization_t *propLossQ; /* storage config of the produced dx-wire buffer */
 
-    outputMode_t weightGradAccMode; /* weight-grad executeOp accumulate mode (packed-grad D1) */
-    outputMode_t biasGradAccMode;   /* bias-grad executeOp accumulate mode (packed-grad D1) */
+    outputMode_t weightGradAccMode; /* weight-grad executeOp accumulate mode */
+    outputMode_t biasGradAccMode;   /* bias-grad executeOp accumulate mode */
 
     bool ownsQuantizations; /* true -> free* will tear down outputQ/propLossQ and their
                                qConfigs */
 
-    bool frozen; /* create-time freeze (#380): no grad buffers; optimizer collection,
-                    state allocation and backward weight/bias-grad ops skip this layer */
+    bool frozen; /* no parameter-gradient buffers; optimizer collection, state allocation
+                    and backward weight/bias-grad ops skip this layer, but input gradients
+                    still propagate */
 } conv1dConfig_t;
 
 void initConv1dConfigWithWeightsAndBias(conv1dConfig_t *conv1dConfig, kernel_t *kernel,
@@ -48,11 +49,10 @@ void conv1dCalcWeightGradsSymInt32(conv1dConfig_t *cfg, tensor_t *forwardInput, 
                                    const rngKey_t *key);
 void conv1dCalcBiasGradsSymInt32(conv1dConfig_t *cfg, tensor_t *lossGrad, const rngKey_t *key);
 
-/* BFP epic PR3 (Task 3): native ARITH_BFP grad twins of the SYM publics
- * above (executeOp wrappers; accumulate into cfg->weights->grad /
- * cfg->bias->grad under the layer's acc modes). REQUIRE BFP-stored weights
- * (caller guarantees; conv1dBackward checks) -- the width anchor FLOAT32-stored
- * operands stage at; BFP-stored operands are borrowed zero-copy. */
+/* ARITH_BFP gradients, accumulated into cfg->weights->grad / cfg->bias->grad
+ * under the layer's accumulate modes. Requires BFP-stored weights (the caller
+ * guarantees it; conv1dBackward checks); FLOAT32 operands stage at their
+ * widths. */
 void conv1dCalcWeightGradsBfp(conv1dConfig_t *cfg, tensor_t *forwardInput, tensor_t *lossGrad,
                               const rngKey_t *key);
 void conv1dCalcBiasGradsBfp(conv1dConfig_t *cfg, tensor_t *lossGrad, const rngKey_t *key);

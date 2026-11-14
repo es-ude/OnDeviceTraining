@@ -17,10 +17,6 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 
-/* ============================================================================
- * New factory API — conv1dInit_t struct + layerQuant_t profile (PR 2).
- * ========================================================================== */
-
 static bool resolveConv1dBias(bias_t b) {
     switch (b) {
     case BIAS_DEFAULT:
@@ -53,8 +49,7 @@ static parameter_t *allocateConv1dWeights(size_t outChannels, size_t inChannels,
                                           size_t kernelSize, weightInit_t weightInit,
                                           quantization_t *storageQ, quantization_t *gradQ,
                                           bool trainable) {
-    /* Conv1d weight shape: [outChannels, inChannels/groups, kernelSize].
-     * Per Conv1d.h:11. */
+    /* Weight shape [outChannels, inChannels/groups, kernelSize]. */
     if (inChannels % groups != 0) {
         PRINT_ERROR("conv1dLayerInit: inChannels (%zu) must be divisible by groups (%zu)",
                     inChannels, groups);
@@ -151,9 +146,8 @@ static kernel_t *buildConv1dKernel(conv1dInit_t *init) {
     size_t stride = init->stride == 0 ? 1 : init->stride;
     size_t dilation = init->dilation == 0 ? 1 : init->dilation;
     if (init->padding == EXPLICIT) {
-        /* Symmetric integer padding (PyTorch padding=N). Required to match a
-         * reference conv trained with explicit padding under stride>1, where
-         * SAME's minimal/asymmetric padding would diverge (issue #177 enc1). */
+        /* Explicit padding is symmetric (PyTorch padding=N); SAME may pad
+         * asymmetrically, which diverges from such a reference under stride > 1. */
         initKernelExplicit(kernel, init->kernelSize, init->paddingAmount, dilation, stride);
     } else {
         initKernel(kernel, init->kernelSize, init->padding, dilation, stride);
@@ -161,14 +155,8 @@ static kernel_t *buildConv1dKernel(conv1dInit_t *init) {
     return kernel;
 }
 
-layer_t *conv1dLayerInit(conv1dInit_t *init, layerQuant_t *lq) {
-    validateConv1dInit(init);
-    bool hasBias = resolveConv1dBias(init->bias);
-    bool trainable = resolveTrainable(init->trainable, "conv1dLayerInit");
-    validateLayerQuantForConv1d(lq, hasBias, trainable);
-
-    size_t groups = init->groups == 0 ? 1 : init->groups;
-
+static layer_t *buildConv1dLayerSkeleton(conv1dInit_t *init, layerQuant_t *lq, bool hasBias,
+                                         size_t groups, bool trainable) {
     layer_t *layer = reserveMemory(sizeof(layer_t));
     layer->type = CONV1D;
 
@@ -179,11 +167,8 @@ layer_t *conv1dLayerInit(conv1dInit_t *init, layerQuant_t *lq) {
 
     cfg->kernel = buildConv1dKernel(init);
     size_t fanIn = (init->inChannels / groups) * init->kernelSize;
-    /* Grad storage knob (#261): NULL falls back to a hard-pinned FLOAT32
-     * default (parameter grads are persistent state — SYM_INT32 is a compute
-     * format, not storage); a non-NULL weightGradStorage/biasGradStorage
-     * overrides it explicitly to opt into SYM/ASYM/BFP (BFP per-tensor only,
-     * gradInit's carrier gate, #300 axis). */
+    /* Parameter gradients default to FLOAT32; explicit storage overrides take
+     * precedence. */
     quantization_t *floatGradQ = quantizationInitFloat();
     quantization_t *weightGradQ =
         lq->weightGradStorage != NULL ? lq->weightGradStorage : floatGradQ;
@@ -196,9 +181,21 @@ layer_t *conv1dLayerInit(conv1dInit_t *init, layerQuant_t *lq) {
                         : NULL;
     freeQuantization(floatGradQ);
     cfg->groups = groups;
+    cfg->frozen = !trainable;
+    return layer;
+}
 
-    /* Borrowing: store the forward-wire/dx-wire storage configs verbatim, no copy.
-     * Arithmetic slots are plain by-value copies of the profile's declared math. */
+layer_t *conv1dLayerInit(conv1dInit_t *init, layerQuant_t *lq) {
+    validateConv1dInit(init);
+    bool hasBias = resolveConv1dBias(init->bias);
+    bool trainable = resolveTrainable(init->trainable, "conv1dLayerInit");
+    validateLayerQuantForConv1d(lq, hasBias, trainable);
+
+    size_t groups = init->groups == 0 ? 1 : init->groups;
+
+    layer_t *layer = buildConv1dLayerSkeleton(init, lq, hasBias, groups, trainable);
+    conv1dConfig_t *cfg = layer->config->conv1d;
+
     cfg->forwardMath = lq->forwardMath;
     cfg->weightGradMath = lq->weightGradMath;
     cfg->biasGradMath = lq->biasGradMath;
@@ -208,8 +205,6 @@ layer_t *conv1dLayerInit(conv1dInit_t *init, layerQuant_t *lq) {
     cfg->weightGradAccMode = lq->weightGradAccMode;
     cfg->biasGradAccMode = lq->biasGradAccMode;
     cfg->ownsQuantizations = false;
-    cfg->frozen = !trainable;
-
     return layer;
 }
 
@@ -221,39 +216,9 @@ layer_t *conv1dLayerInitOwning(conv1dInit_t *init, layerQuant_t *lq) {
 
     size_t groups = init->groups == 0 ? 1 : init->groups;
 
-    layer_t *layer = reserveMemory(sizeof(layer_t));
-    layer->type = CONV1D;
+    layer_t *layer = buildConv1dLayerSkeleton(init, lq, hasBias, groups, trainable);
+    conv1dConfig_t *cfg = layer->config->conv1d;
 
-    layerConfig_t *layerCfg = reserveMemory(sizeof(layerConfig_t));
-    conv1dConfig_t *cfg = reserveMemory(sizeof(conv1dConfig_t));
-    layerCfg->conv1d = cfg;
-    layer->config = layerCfg;
-
-    cfg->kernel = buildConv1dKernel(init);
-    /* allocateConv1dWeights / allocateConv1dBias internally clone via getQLike,
-     * so the parameter tensors own their quantization_t — caller can drop
-     * lq->weightStorage / lq->biasStorage immediately. */
-    size_t fanIn = (init->inChannels / groups) * init->kernelSize;
-    /* Grad storage knob (#261): NULL falls back to a hard-pinned FLOAT32
-     * default (parameter grads are persistent state — SYM_INT32 is a compute
-     * format, not storage); a non-NULL weightGradStorage/biasGradStorage
-     * overrides it explicitly to opt into SYM/ASYM/BFP (BFP per-tensor only,
-     * gradInit's carrier gate, #300 axis). */
-    quantization_t *floatGradQ = quantizationInitFloat();
-    quantization_t *weightGradQ =
-        lq->weightGradStorage != NULL ? lq->weightGradStorage : floatGradQ;
-    quantization_t *biasGradQ = lq->biasGradStorage != NULL ? lq->biasGradStorage : floatGradQ;
-    cfg->weights =
-        allocateConv1dWeights(init->outChannels, init->inChannels, groups, init->kernelSize,
-                              init->weightInit, lq->weightStorage, weightGradQ, trainable);
-    cfg->bias = hasBias ? allocateConv1dBias(init->outChannels, fanIn, lq->biasStorage, biasGradQ,
-                                             trainable, init->weightInit.key)
-                        : NULL;
-    freeQuantization(floatGradQ);
-    cfg->groups = groups;
-
-    /* Owning: same arithmetic as Borrowing; deep-copy the two storage configs
-     * (outputQ, propLossQ) into fresh allocations — 2 allocs, not 4. */
     cfg->forwardMath = lq->forwardMath;
     cfg->weightGradMath = lq->weightGradMath;
     cfg->biasGradMath = lq->biasGradMath;
@@ -263,8 +228,6 @@ layer_t *conv1dLayerInitOwning(conv1dInit_t *init, layerQuant_t *lq) {
     cfg->weightGradAccMode = lq->weightGradAccMode;
     cfg->biasGradAccMode = lq->biasGradAccMode;
     cfg->ownsQuantizations = true;
-    cfg->frozen = !trainable;
-
     return layer;
 }
 

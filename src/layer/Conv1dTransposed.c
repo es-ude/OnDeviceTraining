@@ -59,34 +59,16 @@ void initConv1dTransposedConfigWithWeightsAndBias(
     cfg->outputQ = forwardQ;
     cfg->propLossQ = propLossQ;
     cfg->ownsQuantizations = false;
-
-    /* Today's per-callsite hardcodes (conv1dTransposedCalcWeightGradsFloat32/
-     * SymInt32, conv1dTransposedCalcBiasGradsFloat32/SymInt32 below), now
-     * carried on the config so every caller of this init function --
-     * factory-built or hand-wired directly
-     * (test/unit/layer/UnitTestConv1dTransposed.c) -- gets the historical
-     * behavior without having to know about the PR3 knob. A layerQuant_t-
-     * driven factory overrides these right after this call
-     * (Conv1dTransposedApi.c) if the caller opted into a different mode. */
     cfg->weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
     cfg->biasGradAccMode = OUT_ACC_FIXED_SCALE;
     cfg->frozen = false;
 }
 
-/* Group-quant PR3 (Task 2): forward's ctx must carry BOTH the layer's
- * kernel_t/groups/outputPadding geometry (conv1dTransposedConfig_t, needed
- * by every adapter below) AND -- only when the stored weight is grouped SYM
- * or ASYM -- the symGroupedWeight_t carrying the ORIGINAL symQConfig_t with
- * the real per-group scales plus the weight's code domain. executeOp's
- * prologue hands the kernel only the UNPACKED, poisoned-scale scratch
- * (ops[1]), never the source tensor (ExecuteOp.c), so the group shape must
- * travel via ctx -- the identical wrapper Conv1d.c grew in PR2. Set
- * together with groupedSymOperandPos (conv1dTransposedForward, below) --
- * both or neither, same invariant as Linear.c/Conv1d.c. PR3 (Task 3): the
- * dx (propLoss) adapters carry the SAME wrapper -- dx consumes the weight
- * AS STORED through the adjoint gather, whose group binding is to flat
- * storage, so the identical {cfg, groupedWeight} pair serves both
- * directions. */
+/* Carries the layer geometry plus, for a grouped SYM/ASYM weight, the stored
+ * weight's group metadata, because executeOp's unpacked scratch does not retain
+ * its per-group scales. Pair a non-NULL groupedWeight with
+ * groupedSymOperandPos = 2, for forward and dx alike: dx reads the weight in
+ * its stored flat layout, so the same groups apply. */
 typedef struct convT1dForwardCtx {
     const conv1dTransposedConfig_t *cfg;
     const symGroupedWeight_t *groupedWeight; /* NULL unless the weight is grouped SYM or ASYM
@@ -94,9 +76,8 @@ typedef struct convT1dForwardCtx {
                                                 symGroupedWeightOrNull) */
 } convT1dForwardCtx_t;
 
-/* executeOp forward kernel adapters — operands are {input, weights} or
- * {input, weights, bias} (bias omitted, not NULL-padded, when the layer has
- * no bias). */
+/* Forward operands are {input, weights} or {input, weights, bias}; a missing
+ * bias is omitted, not NULL-padded. */
 static void forwardKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                const void *ctx, rngStream_t *rs) {
     (void)auxOut;
@@ -120,12 +101,10 @@ static void forwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_
                                       cfg->outputPadding, rawOut, rs);
     }
 }
-/* BFP epic PR2 (Task 7): operands arrive in the funnel's unpacked-BFP
- * scratch form; routes to the output-centric GATHER kernel (BFP D9 — the SYM
- * scatter cores stay SYM-only). All quant info comes from the operands, so
- * only kernel_t/groups/outputPadding geometry is taken from ctx —
- * ctx->groupedWeight stays NULL (BFP weights never take the SYM carrier
- * path, symGroupedWeightOrNull returns NULL for the BFP dtype). */
+/* BFP operands arrive unpacked and carry their own block metadata, so only the
+ * geometry comes from ctx; groupedWeight is always NULL for BFP weights. BFP
+ * uses the gather kernel, which reduces per output cell to keep the
+ * block-partial folding order. */
 static void forwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                              const void *ctx, rngStream_t *rs) {
     (void)auxOut;
@@ -152,19 +131,9 @@ void conv1dTransposedForward(layer_t *layer, tensor_t *input, tensor_t *output,
     tensor_t *weightTensor = cfg->weights->param;
     tensor_t *biasTensor = cfg->bias ? cfg->bias->param : NULL;
 
-    /* Group-quant PR3 (Task 2, inverting PR2's ConvT deny-pin) + PR4
-     * (grouped ASYM via the symQConfig-shaped view): a stored grouped weight
-     * routes the SYM kernel adapter to the grouped SCATTER-core entry
-     * (groupedWeight carried via ctx) AND opts the funnel's prologue into
-     * unpacking the grouped operand (groupedSymOperandPos), always together
-     * -- mirrors conv1dForward's identical wiring (Conv1d.c) exactly.
-     * Per-tensor SYM/ASYM (numGroups==1) and SYM_INT32 weights are
-     * untouched. weightTensor is always inputs[1] (bias present or not) in
-     * BOTH math arms -- the FLOAT32 arm must declare the SAME position as
-     * the SYM arm (a grouped weight
-     * forwarded under FLOAT32 math dequantizes via the funnel's group-aware
-     * convertTensor cell, gated on this field exactly like the SYM arm's
-     * unpack). */
+    /* A grouped SYM/ASYM weight needs groupedSymOperandPos = 2 on the FLOAT32
+     * arm too: executeOp's group-aware dequantization is gated on the same
+     * field. The weight is always inputs[1], with or without bias. */
     symQConfig_t asymWeightView; /* lifetime: this frame (SymGroupedWeight.h view doc) */
     symGroupedWeight_t groupedWeightCtx;
     const symGroupedWeight_t *groupedWeight =
@@ -210,13 +179,8 @@ void conv1dTransposedForward(layer_t *layer, tensor_t *input, tensor_t *output,
             output);
         break;
     case ARITH_BFP: {
-        /* BFP epic PR2 (Task 7) — identical layer-side rules in Linear.c
-         * (canonical rule comment there, arm parity): 1. BFP-stored weights
-         * required (the width source for every staged FLOAT32 operand);
-         * 2. FLOAT32-stored input/bias get the per-tensor stack template at
-         * the WEIGHTS' widths, BFP-stored operands NULL (borrowed);
-         * 3. groupedSymOperandPos = 0 (SYM/ASYM-carrier detail — BFP
-         * blocking is per-operand-legal). */
+        /* BFP-stored weights set the widths at which FLOAT32-stored input and
+         * bias are staged; BFP-stored operands are borrowed unstaged. */
         if (weightTensor->quantization->type != BFP) {
             PRINT_ERROR("Conv1dTransposed: ARITH_BFP forward requires BFP-stored weights "
                         "(FLOAT32-init + requantizeTensorInPlace, see "
@@ -257,14 +221,11 @@ void conv1dTransposedForward(layer_t *layer, tensor_t *input, tensor_t *output,
     }
 }
 
-/* executeOp kernel adapters (ctx = conv1dTransposedConfig_t*, for
- * kernel_t/groups geometry — mirrors Conv1d.c). Weight-grad kernels `+=`
- * across many (b, inPos) iterations, so they memset rawOut first; bias-grad
- * kernels write each output-channel index exactly once. SYM weight-grad
- * sets the raw intermediate's scale itself (s_in*s_loss); SYM bias-grad
- * emits the raw per-channel sum at the loss scale, letting the
- * OUT_ACC_FIXED_SCALE epilogue's rescaleIntoAccumulatorScale (target
- * roundingMode, PR1b.2 D4) do the rescale that used to happen inline here. */
+/* Gradient adapters take ctx = conv1dTransposedConfig_t* for the geometry.
+ * FLOAT32/SYM weight gradients accumulate into uninitialized executeOp scratch,
+ * so clear it first. SYM weight gradients set the scale s_in*s_loss; SYM bias
+ * gradients keep the loss scale and leave the rescale to the
+ * OUT_ACC_FIXED_SCALE epilogue. */
 static void weightGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                   const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -378,7 +339,7 @@ static void conv1dTransposedCalcBiasGradsFloat32(conv1dTransposedConfig_t *cfg, 
 }
 
 /* Weight-grad scatter, instantiated twice by weightGradKernelSym with `checked`
- * a compile-time constant: false is the historical `+= mulInt32s`, true routes
+ * a compile-time constant: false is a plain multiply-accumulate, true routes
  * every accumulate through the SYM accumulator guard (SymAccumGuard.h). */
 SYM_ACCUM_ALWAYS_INLINE void conv1dTransposedWeightGradSymScatter(
     size_t batch, size_t groups, size_t inChPerGroup, size_t outChPerGroup, size_t inChannels,
@@ -500,13 +461,10 @@ void conv1dTransposedCalcWeightGradsSymInt32(conv1dTransposedConfig_t *cfg, tens
         cfg->weights->grad);
 }
 
-/* BFP epic PR3 (Task 4): OUTPUT-CENTRIC ConvT weight grad -- one reduction
- * per gw element (its contributors walked b outer / inPos inner, the goldgen
- * refs' normative order), restoring the int32 block-partial fold contract
- * the SYM/float twins' scatter-style `+=` accumulation cannot offer (see
- * Conv1d.c's weightGradKernelBfp). Unlike Conv1d's windowed walk, the
- * contributor map is the ConvT AFFINE outIdx = inPos*stride + k*dilation.
- * Each gw element is written exactly once, so there is NO memset. */
+/* Reduce each weight cell separately to preserve BFP block-partial folding
+ * order; write each cell once, so no clearing is needed. Contributors are
+ * walked b outer / inPos inner, the reference order, along the affine map
+ * outIdx = inPos*stride + k*dilation. */
 static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                 const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -563,11 +521,11 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
                     for (size_t b = 0; b < batch; b++) {
                         for (size_t inPos = 0; inPos < inputLength; inPos++) {
                             size_t outIdx = inPos * stride + k * dilation;
-                            /* Defensive clip, mirroring the float/SYM twins:
-                             * under the outputLength guard above it is
-                             * unreachable (max outIdx = outputLength -
-                             * outputPadding - 1) -- it only bites if non-VALID
-                             * padding ever shifts the affine base. */
+                            /* Unreachable under VALID padding once backward's
+                             * loss gate has fixed outputLength (max outIdx =
+                             * outputLength - outputPadding - 1); it only
+                             * matters if non-VALID padding shifts the affine
+                             * base. */
                             if (outIdx >= outputLength) {
                                 continue;
                             }
@@ -730,13 +688,11 @@ void conv1dTransposedCalcBiasGradsSymInt32(conv1dTransposedConfig_t *cfg, tensor
         cfg->bias->grad);
 }
 
-/* BFP epic PR3 (Task 4): per-oc batch*outputLength sum of BFP loss mantissas
- * -- int32 partial per same-group visited segment, lossless ldexpf fold on
- * group change + tail (Conv1d.c's biasGradKernelBfp on the identical
- * [B, C, L] loss walk, indices (b*outChannels + oc)*outputLength + outPos,
- * b outer / outPos inner -- this sum ALSO covers the outputPadding tail
- * positions the weightGrad affine never reaches). Sum headroom via
- * bfpValidateSumHeadroom (the product bound does not apply to sums). */
+/* Per-oc sum of BFP loss mantissas over b outer / outPos inner: an int32
+ * partial per same-group segment, folded losslessly with ldexpf on each group
+ * change and at the tail. The sum also covers the outputPadding tail positions
+ * the weight-grad map never reaches. Sums need bfpValidateSumHeadroom, not the
+ * product bound. */
 static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                               const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -808,16 +764,11 @@ void conv1dTransposedCalcBiasGradsBfp(conv1dTransposedConfig_t *cfg, tensor_t *l
         cfg->bias->grad);
 }
 
-/* dL/dx via the adjoint: conv1d-correlation of lossGrad with weight. The
- * kernel here uses VALID (Phase-1 contract); conv1dKernelFloat32/SymInt32
- * accept the same weight tensor (no flip needed).
- * PR3 (Task 3): ctx = convT1dForwardCtx_t* (the same wrapper as forward) --
- * the gather kernel's weight index arithmetic
- * ((oc*inChPerGroup + icOffset)*K + k, Conv1dKernel.c) computes exactly the
- * ConvT1d weight's [Cin, Cout/groups, K] flat storage index in this adjoint
- * role, so a grouped weight's storage-bound quantization groups apply
- * unchanged: route to the grouped GATHER entry with the stored weight's own
- * symQConfig_t. */
+/* dx adapters (ctx = convT1dForwardCtx_t*): dL/dx is the VALID conv1d
+ * correlation of lossGrad with the unflipped weight. The gather index
+ * (oc*inChPerGroup + icOffset)*K + k is exactly the ConvT weight's
+ * [Cin, Cout/groups, K] flat storage index here, so a grouped weight's
+ * quantization groups apply unchanged. */
 static void propLossKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                 const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -841,12 +792,7 @@ static void propLossKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
     }
 }
 
-/* BFP epic PR3 (Task 4): dx via the output-centric GATHER adjoint (BFP D9 fold
- * contract; the SYM cores stay SYM-only) -- conv1dKernelBfp reads the ConvT
- * weight's [Cin, Cout/groups, K] flat storage index unchanged in the adjoint
- * role (see the dx adapter block comment above). Same {cfg, groupedWeight}
- * ctx wrapper as the other dx adapters, groupedWeight always NULL for BFP
- * (symGroupedWeightOrNull returns NULL for the BFP dtype). */
+/* groupedWeight is always NULL for BFP weights. */
 static void propLossKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                               const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -875,16 +821,10 @@ void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *
         layerRequireDenseWire(propLoss, &inExpected, "Conv1dTransposed backward", "propLoss");
     }
 
-    /* BFP epic PR3, backward mirror of the forward's ARITH_BFP rule 1 (see
-     * conv1dTransposedForward; Linear.c's linearBackward is the canonical
-     * backward copy): BFP-stored weights are the width anchor every
-     * FLOAT32-stored operand stages at. The stack template below serves the
-     * propLoss executeOp call in THIS frame (the two grad WRAPPERS rebuild
-     * it internally -- they are public, callable without passing here).
-     * Zero-init keeps the template inert when no slot runs ARITH_BFP: the
-     * .bfpStage ternary below wires &stage unconditionally on FLOAT32-stored
-     * operands (ExecuteOp.h: entries are ignored under other arithmetics),
-     * so &stage must never point at uninitialized stack. */
+    /* BFP-stored weights set the staging widths for FLOAT32-stored operands.
+     * The stack staging template must outlive the propLoss executeOp; inactive
+     * arithmetic slots ignore it. The gradient helpers build their own
+     * template. */
     bool anyBfpBackward = cfg->weightGradMath.type == ARITH_BFP ||
                           cfg->biasGradMath.type == ARITH_BFP ||
                           cfg->propLossMath.type == ARITH_BFP;
@@ -958,22 +898,9 @@ void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *
         }
     }
 
-    /* propLoss (dx wire): OUT_WRITE. For a SYM_INT32 target this now requants
-     * through the conversionMatrix diagonal (width-restored at the producer,
-     * PR1b.2 D3) instead of the old direct kernel write of raw, unrestored
-     * accumulator-range mantissas — the #187 dtype guard is superseded by the
-     * funnel's own prologue/epilogue and is deleted (it had
-     * zero test coverage and was a tautology after #221).
-     * propLoss == NULL (#380 PR2): grads-only call -- skip the dx write
-     * entirely rather than dereference the absent buffer. */
+    /* NULL propLoss requests parameter gradients only. */
     if (propLoss != NULL) {
-        /* Group-quant PR3 (Task 3) + PR4 (grouped ASYM via the view): same
-         * detection + always-together wiring as conv1dTransposedForward (see
-         * the comment there) -- ctx routes the SYM dx adapter to the grouped
-         * GATHER entry, groupedSymOperandPos opts the funnel prologue into
-         * unpacking (SYM arm) / group-aware dequant (FLOAT32 arm) of the
-         * weight at inputs[1] (position 2), declared on BOTH math arms (the same
-         * arm-parity rule as conv1dTransposedForward). */
+        /* Same grouped-weight wiring as conv1dTransposedForward, on every arm. */
         symQConfig_t asymWeightView; /* lifetime: this frame (SymGroupedWeight.h view doc) */
         symGroupedWeight_t groupedWeightCtx;
         const symGroupedWeight_t *groupedWeight =
@@ -1023,12 +950,9 @@ void conv1dTransposedBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *
                     .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, CONV1D_TRANSPOSED_OP_PROP_LOSS,
                                           &opKey),
                     .mode = OUT_WRITE,
-                    /* SYM/ASYM-carrier gate -- BFP blocking is
-                     * per-operand-legal, nothing is declared. */
                     .groupedSymOperandPos = 0,
-                    /* weights operand: always BFP-stored under ARITH_BFP
-                     * (rule-1 mirror above) -> borrowed zero-copy, never
-                     * staged. */
+                    /* The weights are BFP-stored (checked above), so they are
+                     * borrowed, never staged. */
                     .bfpStage = {lossGrad->quantization->type == FLOAT32 ? &stage : NULL, NULL,
                                  NULL},
                 },

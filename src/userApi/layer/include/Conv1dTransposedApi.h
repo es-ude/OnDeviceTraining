@@ -18,9 +18,9 @@ _Static_assert(VALID == 0,
  *          .inChannels = 16, .outChannels = 8, .kernelSize = 5, .stride = 5,
  *      }, lq);
  *
- *  REQUIRED fields fire PRINT_ERROR + exit(1) if zero. Phase-1 contract:
- *  only VALID padding is supported (initConv1dTransposedConfigWithWeightsAndBias
- *  aborts on SAME). */
+ *  REQUIRED fields fire PRINT_ERROR + exit(1) if zero. Only VALID padding is
+ *  supported: output-shape inference assumes VALID, and the factory does not
+ *  reject other values, so the caller must not pass them. */
 typedef struct conv1dTransposedInit {
     /* REQUIRED */
     size_t inChannels;
@@ -28,7 +28,7 @@ typedef struct conv1dTransposedInit {
     size_t kernelSize;
     /* OPTIONAL */
     size_t stride;           /* 0 → 1 */
-    paddingType_t padding;   /* 0 → VALID. SAME is rejected by the internal layer in Phase 1. */
+    paddingType_t padding;   /* 0 → VALID; VALID is the only supported value */
     size_t dilation;         /* 0 → 1 */
     size_t groups;           /* 0 → 1 */
     size_t outputPadding;    /* PyTorch parity; default 0; must be < max(stride, dilation) */
@@ -37,23 +37,21 @@ typedef struct conv1dTransposedInit {
     trainable_t trainable;   /* zero-init → TRAINABLE_DEFAULT (trainable) */
 } conv1dTransposedInit_t;
 
-/*! Borrowing variant — allocates kernel, weights, bias; stores the four
- *  lq math quantizations verbatim. Caller retains ownership of lq.
- *  Use when: the quantizations are shared/long-lived (e.g. reused across
- *  several layers) and the caller manages their lifetime — they must
- *  outlive the layer. */
+/*! Arithmetic slots are copied by value. Borrowing keeps the outputQ and
+ *  propLossQ pointers; owning deep-copies those two configurations. Parameter
+ *  quantizations are owned independently.
+ *
+ *  Borrowing variant: `lq` itself may be a compound literal, but the outputQ
+ *  and propLossQ it points to must outlive the layer. Use when those
+ *  configurations are shared across layers. */
 layer_t *conv1dTransposedLayerInit(conv1dTransposedInit_t *init, layerQuant_t *lq);
 
-/*! Owning variant — additionally deep-copies the four math quantizations
- *  via deepCopyQuantization.
- *  Use when: the quantizations are stack-locals or one-off configs and you
- *  want fire-and-forget teardown (freeConv1dTransposedLayer tears them down
- *  too). */
+/*! Owning variant: the caller may drop `lq` and every quantization it points
+ *  to right after the call; freeConv1dTransposedLayer tears the copies down. */
 layer_t *conv1dTransposedLayerInitOwning(conv1dTransposedInit_t *init, layerQuant_t *lq);
 
-/*! Tears down everything the factory allocated. Reads
- *  config->ownsQuantizations to decide whether to also free the four
- *  math quantizations and their qConfigs. */
+/*! Frees everything the factory allocated, plus outputQ/propLossQ when the
+ *  layer owns them. */
 void freeConv1dTransposedLayer(layer_t *layer);
 
 #endif /* CONV1D_TRANSPOSED_API_H */

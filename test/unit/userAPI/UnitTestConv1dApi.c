@@ -232,8 +232,8 @@ void testConv1dLayerInitOwningFreesAllAllocationsWithoutLeak(void) {
 }
 
 void testConv1dLayerInitKeepsFloat32GradEvenWithSymInt32BackwardMath(void) {
-    /* Conv1d backward is FLOAT32-only; its grad must stay FLOAT32 regardless of
-     * backwardMath, so the gradInit plumbing defaults Conv1d to FLOAT32. */
+    /* Gradient storage defaults to FLOAT32 regardless of the gradient
+     * arithmetic. */
     quantization_t *fwd = quantizationInitFloat();
     quantization_t *bwd = quantizationInitSymInt32(HALF_AWAY);
     layerQuant_t lq = {
@@ -268,17 +268,14 @@ void testConv1dLayerInitKeepsFloat32GradEvenWithSymInt32BackwardMath(void) {
     freeQuantization(bwd);
     freeQuantization(fwd);
 
-    TEST_ASSERT_EQUAL_INT_MESSAGE(
-        FLOAT32, weightGradType, "Conv1d weight grad must stay FLOAT32 (backward is FLOAT32-only)");
-    TEST_ASSERT_EQUAL_INT_MESSAGE(FLOAT32, biasGradType,
-                                  "Conv1d bias grad must stay FLOAT32 (backward is FLOAT32-only)");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(FLOAT32, weightGradType, "Conv1d weight grad must stay FLOAT32");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(FLOAT32, biasGradType, "Conv1d bias grad must stay FLOAT32");
 }
 
 void testConv1dLayerInitOwningWeightGradStorageKnobOverridesFloatDefault(void) {
-    /* Default (knob == NULL) grad storage stays hard-pinned FLOAT32 (Conv1d
-     * backward is FLOAT32-only); a non-NULL weightGradStorage config must
-     * override that default end-to-end, through the same getQLike path
-     * gradInit already uses (mirrors Linear's #261 knob). */
+    /* Grad storage defaults to FLOAT32 when the knob is NULL; a non-NULL
+     * weightGradStorage config must override that default end-to-end, through
+     * the getQLike path gradInit uses. */
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);

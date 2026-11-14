@@ -48,8 +48,8 @@ static parameter_t *allocateConv1dTransposedWeights(size_t inChannels, size_t ou
                                                     weightInit_t weightInit,
                                                     quantization_t *storageQ, quantization_t *gradQ,
                                                     bool trainable) {
-    /* Conv1dTransposed weight shape: [inChannels, outChannels/groups, kernelSize].
-     * Note SWAP relative to Conv1d. Per Conv1dTransposed.h:12. */
+    /* Weight shape [inChannels, outChannels/groups, kernelSize]: the channel
+     * axes are swapped relative to Conv1d. */
     if (outChannels % groups != 0) {
         PRINT_ERROR("conv1dTransposedLayerInit: outChannels (%zu) must be divisible by "
                     "groups (%zu)",
@@ -171,11 +171,8 @@ static layer_t *buildConv1dTransposedLayerSkeleton(conv1dTransposedInit_t *init,
 
     cfg->kernel = buildConv1dTransposedKernel(init);
     size_t fanIn = (init->outChannels / groups) * init->kernelSize;
-    /* Grad storage knob (#261): NULL falls back to a hard-pinned FLOAT32
-     * default (parameter grads are persistent state — SYM_INT32 is a compute
-     * format, not storage); a non-NULL weightGradStorage/biasGradStorage
-     * overrides it explicitly to opt into SYM/ASYM/BFP (BFP per-tensor only,
-     * gradInit's carrier gate, #300 axis). */
+    /* Parameter gradients default to FLOAT32; explicit storage overrides take
+     * precedence. */
     quantization_t *floatGradQ = quantizationInitFloat();
     quantization_t *weightGradQ =
         lq->weightGradStorage != NULL ? lq->weightGradStorage : floatGradQ;
@@ -204,8 +201,6 @@ layer_t *conv1dTransposedLayerInit(conv1dTransposedInit_t *init, layerQuant_t *l
     layer_t *layer = buildConv1dTransposedLayerSkeleton(init, lq, hasBias, groups, trainable);
     conv1dTransposedConfig_t *cfg = layer->config->conv1dTransposed;
 
-    /* Borrowing: store the forward-wire/dx-wire storage configs verbatim, no copy.
-     * Arithmetic slots are plain by-value copies of the profile's declared math. */
     cfg->forwardMath = lq->forwardMath;
     cfg->weightGradMath = lq->weightGradMath;
     cfg->biasGradMath = lq->biasGradMath;
@@ -229,8 +224,6 @@ layer_t *conv1dTransposedLayerInitOwning(conv1dTransposedInit_t *init, layerQuan
     layer_t *layer = buildConv1dTransposedLayerSkeleton(init, lq, hasBias, groups, trainable);
     conv1dTransposedConfig_t *cfg = layer->config->conv1dTransposed;
 
-    /* Owning: same arithmetic as Borrowing; deep-copy the two storage configs
-     * (outputQ, propLossQ) into fresh allocations — 2 allocs, not 4. */
     cfg->forwardMath = lq->forwardMath;
     cfg->weightGradMath = lq->weightGradMath;
     cfg->biasGradMath = lq->biasGradMath;

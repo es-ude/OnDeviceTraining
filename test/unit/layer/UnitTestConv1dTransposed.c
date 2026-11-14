@@ -30,7 +30,7 @@
 #define GOLD_U32_SCALAR(e, a) TEST_ASSERT_EQUAL_UINT32((e), (a))
 #include "golden_conv1d_transposed_weight_grad.h"
 
-// Helper: build a Conv1dTransposed layer manually (no UserAPI in Phase 1)
+// Helper: build a Conv1dTransposed layer from caller-supplied parameters
 typedef struct convT1dRunResult {
     parameter_t *weights;
     parameter_t *bias;
@@ -118,20 +118,10 @@ static float symScaleOf(tensor_t *t) {
     return odtScaleToFloat(((symInt32QConfig_t *)t->quantization->qConfig)->scale);
 }
 
-/* Re-gold (PR1b.2 D5): conv1dTransposedForward now routes SYM through
- * executeOp's OUT_WRITE epilogue, which requants the raw s_in*s_w
- * accumulator wire through the conversionMatrix diagonal
- * (requantSymInt32Tensor) instead of writing it unrestored (pre-PR1b.2
- * behavior — the fixture this test asserted against was the raw wire).
- * Dequant-equivalence: restored mantissa*restoredScale == raw
- * mantissa*rawScale within representation tolerance (same real value
- * re-expressed at a different int12 scale) — verified by
- * generate_expected_conv1d_transposed.py's `emulate_sym_convT` self-check
- * (fwd_err <= fwd_tol against the float64 PyTorch-autograd reference,
- * computed on the RESTORED fwd_deq/fwd_scale). Same re-gold class as Task 2's
- * propLoss/Task 3's LayerNorm/Conv1d's own forward pins (ratified PR1b.2 D5
- * principle). Applies identically to the 3 other
- * testConv1dTransposedForwardSym* tests below. */
+/* Expect produced-wire values after executeOp requantization, for this and the
+ * other testConv1dTransposedForwardSym* tests.
+ * generate_expected_conv1d_transposed.py checks the requantized values against
+ * the float64 PyTorch reference. */
 void testConv1dTransposedForwardSymSingleChannelSingleBatch() {
     size_t weightDims[] = {1, 1, 2};
     size_t inputDims[] = {1, 1, 3};
@@ -711,23 +701,9 @@ void testConv1dTransposedCalcBiasGradsSymMultiChannel() {
     }
 }
 
-/* Re-gold (PR1b.2 D5): conv1dTransposedBackward's dx wire (propLoss) is a
- * *produced* wire, not a passthrough — conv1dKernelSymInt32 (the VALID
- * gather adjoint) emits the raw s_loss*s_w mantissa, and executeOp's
- * OUT_WRITE epilogue then requants it through the conversionMatrix diagonal
- * to propLossQ's declared width (int12) before conv1dTransposedBackward
- * returns it — the same restoration every other producer wire gets (forward
- * output, weightGrad, biasGrad). The propLoss expectations below are
- * therefore POST-restoration values, not the kernel's raw output; the old
- * #187 fail-fast (produced propLoss tensor must be SYM) is retired along
- * with the raw-wire validator (docs/conventions/arithmetic-sym.md).
- * Dequant-equivalence: restored mantissa*restoredScale == raw
- * mantissa*rawScale within representation tolerance — verified by
- * generate_expected_conv1d_transposed.py's `emulate_sym_convT` dx section
- * (`_requant_absmax_i12_f32`, dx_err <= dx_tol against the float64
- * PyTorch-autograd reference, computed on the RESTORED dx_deq/dx_scale).
- * Same re-gold class as this file's forward pins above. Applies identically
- * to the 2 other testConv1dTransposedBackwardSym* tests below. */
+/* Expect produced-wire values after executeOp requantization: the propLoss
+ * expectations here and in the other testConv1dTransposedBackwardSym* tests
+ * are the int12-requantized wire, not the kernel's raw output. */
 void testConv1dTransposedBackwardSymStride2OutputPadding() {
     size_t weightDims[] = {1, 1, 2};
     size_t biasDims[] = {1};
@@ -905,21 +881,11 @@ void testConv1dTransposedBackwardSymDilation2() {
     /* no biasGrad: bias == NULL */
 }
 
-/* ---------------------------------------------------------------------------
- * Shape-guard death tests (#232).
- *
- * Conv1dTransposed weight layout is [Cin, Cout/groups, K], so weight Cout is
- * dimensions[1] * groups (mirror image of Conv1d). The weightGrad helpers stride
- * lossGrad by `batch` (from forwardInput) and write the weight grad by
- * `outChannels` (from lossGrad); the biasGrad helpers write the bias grad by
- * `outChannels`. Each guard must fail-fast via exit(1). FLOAT helpers are static
- * and exercised through conv1dTransposedBackward; SYM helpers are called
- * directly. Data is all-zero — guards read shapes only. convT1dBuild does not
- * run forward, so intentionally inconsistent layers are safe to build here.
- * The Float batch/outChannels pair now dies at the #436 op-entry loss gate and
- * asserts that banner; those two FLOAT wrapper checks are unreachable from the
- * public entry, so only the SYM twins pin that check class.
- * ------------------------------------------------------------------------- */
+/* Exercise loss-shape validation before gradient dispatch: a lossGrad whose
+ * batch or channel count disagrees with the forward geometry would read or
+ * write out of bounds in the gradient kernels. Weight Cout is
+ * dimensions[1] * groups (layout [Cin, Cout/groups, K]). Data is all-zero;
+ * only shapes matter. */
 
 void testConv1dTransposedWeightGradFloatRejectsBatchMismatch() {
     size_t weightDims[] = {1, 1, 2}; // [Cin=1, Cout/groups=1, K=2], groups=1 -> Cout=1
@@ -979,7 +945,7 @@ void testConv1dTransposedForwardRejectsInputChannelMismatch(void) {
         layerFunctions[CONV1D_TRANSPOSED].forward(&r.layer, r.input, r.output, NULL));
 }
 
-/* #380 PR1 Task 2: create-time trainable knob (trainable_t). */
+/* Create-time trainable knob (trainable_t). */
 static layer_t *buildFloatConv1dTransposedWithTrainable(trainable_t trainable) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
@@ -1020,7 +986,7 @@ void testConv1dTransposedFactoryDefaultAllocatesGrads(void) {
     TEST_ASSERT_FALSE(frozen);
 }
 
-/* #380 PR1 Task 5: backward guard -- a frozen twin must skip the weight/bias
+/* A frozen twin must skip the weight/bias
  * grad writes entirely (buffers stay all-zero) while still producing a
  * propLoss byte-identical to its trainable twin. Hand-seeded FLOAT32
  * fixtures via the file's own convT1dBuild helper (no borrowed builder
@@ -1087,9 +1053,9 @@ void testConv1dTransposedBackwardFrozenTwinPropLossIdenticalGradsZero(void) {
     TEST_ASSERT_TRUE_MESSAGE(propLossIdentical, "propLoss must be byte-identical between twins");
 }
 
-/* Factory-frozen layer (grads == NULL, Task 2): conv1dTransposedBackward must
- * complete without dereferencing the (absent) grad buffers -- the ASan gate
- * catches any NULL/OOB deref if the guard is missing or misplaced. */
+/* Factory-frozen layer (grads == NULL): conv1dTransposedBackward must
+ * complete without dereferencing the absent grad buffers; ASan catches any
+ * NULL/OOB deref. */
 void testConv1dTransposedBackwardFrozenFactoryLayerRunsWithoutGradBuffers(void) {
     layer_t *layer = buildFloatConv1dTransposedWithTrainable(TRAINABLE_FALSE);
 
@@ -1110,14 +1076,11 @@ void testConv1dTransposedBackwardFrozenFactoryLayerRunsWithoutGradBuffers(void) 
     TEST_ASSERT_TRUE(gradStillNull);
 }
 
-/* #380 PR2 Task 1: propLoss == NULL is a grads-only call -- weight/bias grads
- * must be computed exactly as with a real propLoss, and no dx memory may be
- * touched. Twin fixture (both TRAINABLE, hand-seeded, bit-identical) via the
- * file's own convT1dBuild helper (no borrowed builder exists for ConvT1d),
- * mirroring the PR1 frozen-twin fixture above: twin A gets a real propLoss
- * buffer, twin B gets a literal NULL. Pre-guard, twin B's call dereferences
- * the NULL propLoss and crashes (RED); post-guard, weight/bias grads match
- * twin A's byte-for-byte and twin A's propLoss is non-degenerate. */
+/* propLoss == NULL is a grads-only call: weight/bias grads must be computed
+ * exactly as with a real propLoss, and no dx memory may be touched. Twin
+ * fixture (both trainable, hand-seeded, bit-identical) via convT1dBuild: twin
+ * A gets a real propLoss buffer, twin B a literal NULL; the grads must match
+ * byte-for-byte and twin A's propLoss must be non-degenerate. */
 void testConv1dTransposedBackwardNullPropLossComputesGradsOnly(void) {
     convT1dRunResult_t rA, rB;
     size_t weightDims[] = {1, 1, 2};
@@ -1170,11 +1133,9 @@ void testConv1dTransposedBackwardNullPropLossComputesGradsOnly(void) {
                              "NULL round only skipped dx");
 }
 
-/* ---- Group-quant PR3 (Task 2): ConvT1d forward with a grouped SYM weight.
+/* ---- ConvT1d forward with a grouped SYM weight.
  *
- * PR2's deny-pin (testConvT1dForwardGroupedWeightsFailFast, the death test
- * these gold tests REPLACE) is deliberately INVERTED here: grouped ConvT1d
- * forward is now the shipped behavior, routed through the grouped SCATTER
+ * Grouped ConvT1d forward routes through the grouped SCATTER
  * core convTranspose1dKernelSymInt32Grouped. A scatter has no per-(target,
  * group) run across which a raw partial could be carried, unlike the gather
  * cores' running-partial idiom; its fold path (linq fold T3) instead folds
@@ -1216,7 +1177,7 @@ static tensor_t *buildSymInt32TensorExact(size_t numDims, const size_t *dimsIn,
 }
 
 /*! Builds the shared grouped-SYM weight/bias/input ConvT1d layer (borrowed,
- *  no grad buffers -- grouped grads are a future axis, #300). No borrowed
+ *  no grad buffers). No borrowed
  *  builder exists for ConvT1d, so the layer is hand-wired into the caller's
  *  fixture struct (cfg/lc/layer must outlive the forward call). `numGroups`/
  *  `groupSize`/`wScales` vary per fixture (perChannel vs general); the
@@ -1425,7 +1386,7 @@ void testConvT1dForwardGroupedFloatPathAgreesWithinTolerance(void) {
     }
 }
 
-/* ---- Group-quant PR3 (Task 3): ConvT1d backward dx with a grouped SYM
+/* ---- ConvT1d backward dx with a grouped SYM
  * weight -- the adjoint GATHER (conv1dKernelSymInt32Grouped in the adjoint
  * role: running group-partial, one integer combine per group RUN of the
  * reduction at A = {loss.m, loss.e + E + 15 - F}, linq fold T4). Fixture:
@@ -1439,7 +1400,7 @@ void testConvT1dForwardGroupedFloatPathAgreesWithinTolerance(void) {
  *  ONLY backward op that consumes the (grouped) weight tensor -- the
  *  weight/bias grad ops take {fwdIn, loss}/{loss} and are pinned by the
  *  existing SYM backward tests -- so freezing scopes these tests to the dx
- *  wire; #380: frozen layers still propagate loss), then runs
+ *  wire; frozen layers still propagate loss), then runs
  *  conv1dTransposedBackward with the gold lossGrad into a FLOAT32 propLoss
  *  wire and returns it. */
 static tensor_t *runGroupedConvTDxBackward(convTGroupedFixture_t *f, quantization_t *q,
@@ -1467,8 +1428,8 @@ static tensor_t *runGroupedConvTDxBackward(convTGroupedFixture_t *f, quantizatio
  * SYM_INT32, the propLoss WIRE is FLOAT32, so the OUT_WRITE epilogue takes
  * the exact SYM_INT32->FLOAT32 cell. Routes through conv1dTransposedBackward
  * -> executeOp's grouped-operand gate, so the dx opSpec's
- * groupedSymOperandPos declaration is under test too (removing it dies with
- * the funnel deny -- mutation (iii)). */
+ * groupedSymOperandPos declaration is under test too (removing it dies in
+ * executeOp's grouped-operand check). */
 void testConvT1dBackwardGroupedDxPerChannelMatchesGold(void) {
     quantization_t *testQ = quantizationInitSymInt32(HALF_AWAY);
     convTGroupedFixture_t f;
@@ -1592,9 +1553,9 @@ void testConvT1dBackwardGroupedDxFloatPathAgreesWithinTolerance(void) {
     }
 }
 
-/* ---- Group-quant PR4 (Task 3): grouped-ASYM ConvT1d forward twin --------
+/* ---- Grouped-ASYM ConvT1d forward twin ------------------------------------
  *
- * group-quant D5 smoke at the ConvT1d layer (the UnitTestConv1d.c ASYM-twin design,
+ * Smoke test at the ConvT1d layer (the UnitTestConv1d.c ASYM-twin design,
  * transplanted to the scatter core): after the funnel's ASYM grouped-unpack
  * arm shifts the codes (code - zp[g]) the compute path IS the grouped-SYM
  * scatter on the resulting mantissas. Since the fold (linq fold T3) the twins
@@ -1681,18 +1642,18 @@ void testConvT1dForwardGroupedAsymMatchesItsImageRangeGold(void) {
 void setUp() {}
 void tearDown() {}
 
-/* ---- BFP epic PR2 (Task 7): ConvT1d ARITH_BFP forward arm ----------------
+/* ---- ConvT1d ARITH_BFP forward arm ---------------------------------------
  *
  * Every test here hand-sets forwardMath to {ARITH_BFP, HALF_AWAY} POST-build:
  * the builders take a single FLOAT32 `q`, and pinning keeps the arm selection
- * independent of the derivation (which since Task 9 yields ARITH_BFP for a BFP
+ * independent of the derivation (which yields ARITH_BFP for a BFP
  * config anyway). Weights reach BFP storage the documented user way: FLOAT32
  * init + requantizeTensorInPlace (docs/conventions/arithmetic-bfp.md). */
 
 /* Native ARITH_BFP forward against the staged-input gold (the Linear
  * sibling's design, see testLinearForwardBfpNativeMatchesKernelGold in
  * UnitTestLinear.c): BFP-stored weights are borrowed+unpacked, the FLOAT32
- * input is staged PER-TENSOR at the WEIGHTS' widths (PR2-Decision 1; m=6, lossy
+ * input is staged PER-TENSOR at the WEIGHTS' widths (m=6, lossy
  * for the fixture's X values), and the FLOAT32 wire is bit-exact -->
  * EQUAL_MEMORY against generate_expected_bfp_layer_forward.py's
  * convT1d_bfp_gather_ref output. outputPadding=1: the tail position per
@@ -1751,7 +1712,7 @@ void testConv1dTransposedForwardBfpNativeMatchesKernelGold(void) {
  * testLinearForwardBfpPowerOfTwoBitIdenticalToGroupedSymLayer; exactness
  * argument there): SAME mantissas under value-identical power-of-two grids
  * -> BIT-IDENTICAL FLOAT32 wires through the grouped-SYM SCATTER arm and
- * the BFP GATHER arm (BFP D9: same real sums, exact float regime, so the
+ * the BFP GATHER arm (same real sums, exact float regime, so the
  * formulation difference cannot show). Weight [2,2,3] mantissas grouped
  * {3,4}, all scales 0.25f; input [1,2,4] mantissas at scale 0.5f; K=3,
  * stride 2, outputPadding 1 -> outLen 10; no bias. */
@@ -1886,7 +1847,7 @@ void testConv1dTransposedForwardBfpRejectsFloat32Weights(void) {
     freeQuantization(floatQ);
 }
 
-/* ---- BFP epic PR3 (Task 4): ConvT1d ARITH_BFP backward arms --------------
+/* ---- ConvT1d ARITH_BFP backward arms -------------------------------------
  *
  * Fixture source: generate_expected_bfp_layer_forward.py's kConvTBfpBwd*
  * block -- BOTH backward operands are BFP-STORED wires (the funnel's borrow
@@ -2009,10 +1970,9 @@ void testConvT1dBackwardBfpWeightGradMatchesGold(void) {
 }
 
 /* Dilation-2 weightGrad twin: the affine out_idx = inPos*stride + k*dilation
- * is the ONLY place dilation enters the new BFP weightGrad kernel, and the
- * main fixture's dilation 1 makes a dropped factor an arithmetic identity
- * (the Conv1d backward fixture's dilation lesson) -- this gold reddens the
- * `* dilation` mutant the main gold cannot see. */
+ * is the ONLY place dilation enters the BFP weightGrad kernel, and the
+ * main fixture's dilation 1 makes a dropped factor an arithmetic identity;
+ * this gold catches a dropped `* dilation` the main gold cannot see. */
 void testConvT1dBackwardBfpWeightGradDilation2MatchesGold(void) {
     quantization_t *floatQ = quantizationInitFloat();
     layer_t *convT = buildBfpConvTBackwardLayer(floatQ, (size_t)kConvTBfpBwdDilDilation);
@@ -2035,21 +1995,19 @@ void testConvT1dBackwardBfpWeightGradDilation2MatchesGold(void) {
     TEST_ASSERT_EQUAL_MEMORY(kConvTBfpWgDilExpected, captured, sizeof(captured));
 }
 
-/* ---- #420 C1: GROUPED (+ outputPadding) BFP weightGrad ------------------
+/* ---- GROUPED (+ outputPadding) BFP weightGrad ----------------------------
  *
- * The PR3 ConvT fixtures above are conv_groups==1, leaving
+ * The ConvT fixtures above are conv_groups==1, leaving
  * Conv1dTransposed.c:weightGradKernelBfp's g/inLo/outLo nest and its
  * (ic*outChPerGroup + ocOffset) write index un-golded. This fixture runs
  * conv groups 2 over 4/4 channels (so ic != icOffset AND oc != ocOffset on
  * group 1) with outputPadding 1.
  *
- * DEVIATION from the issue text's "EXPLICIT padding >= 1": Conv1dTransposed
- * rejects every paddingType but VALID at layer init ("only VALID
- * paddingType supported in Phase 1"), so no EXPLICIT-padded ConvT fixture
- * can be constructed. outputPadding is the reachable analogue and is used
+ * Conv1dTransposed supports only VALID padding, so no EXPLICIT-padded ConvT
+ * fixture exists. outputPadding is the reachable analogue and is used
  * instead -- it lengthens gy, rebinding every gy group against the affine
  * contributor map (goldgen-asserted load-bearing), and leaves tail
- * positions only biasGrad reads. By the same Phase-1 contract the kernel's
+ * positions only biasGrad reads. Under VALID padding the kernel's
  * `outIdx >= outputLength` clip and its unvisited-contributor branch are
  * structurally unreachable here (max outIdx == outLen - outputPadding - 1),
  * which is why the tap-skip / exact-0.0-cell coverage of this pair lives
@@ -2284,7 +2242,7 @@ void testConvT1dBackwardBfpDxPowerOfTwoBitIdenticalToGroupedSym(void) {
     TEST_ASSERT_EQUAL_MEMORY(symOut, bfpOut, sizeof(symOut));
 }
 
-/* conv-groups=2 dx parity (#416): the SAME G2 weight operand as the
+/* conv-groups=2 dx parity: the SAME kBfpConvTG2* weight operand as the
  * kernel-level forward parity test (single-sourced in
  * generate_expected_bfp_convT1d.py -- hence this file's cross-directory
  * expected_bfp_convT1d.h include), pushed through the LAYER dx path:
@@ -2391,7 +2349,7 @@ void testConv1dTransposedSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
     freeConv1dTransposedLayer(layer);
 }
 
-/* #440: see testConv1dInitConfigClearsOwnsQuantizations. */
+/* See testConv1dInitConfigClearsOwnsQuantizations. */
 void testConv1dTransposedInitConfigClearsOwnsQuantizations(void) {
     kernel_t kernel;
     initKernel(&kernel, 2, VALID, 1, 1);
@@ -2408,12 +2366,12 @@ void testConv1dTransposedInitConfigClearsOwnsQuantizations(void) {
     TEST_ASSERT_EQUAL_UINT8(0, *(const unsigned char *)&cfg.ownsQuantizations);
 }
 
-/* #436: the convT kernels read every wire's batch/channels/length from its
+/* The convT kernels read every wire's batch/channels/length from its
  * physical dims and index it flat, so a produced wire and the consumed loss
  * must be dense identity-order tensors of exactly the expected shape. Fixtures
  * perturb the batch dim only (a wider channel would over-read the weight): a
  * wider produced wire is under-filled and a narrower loss on a frozen layer is
- * half-read, so an ungated call returns normally (clean RED, child exit 0). */
+ * half-read, so an ungated call returns normally (child exit 0). */
 void testConv1dTransposedForwardFloatRejectsWrongOutputShape(void) {
     layer_t *layer = buildFloatConv1dTransposedWithTrainable(TRAINABLE_DEFAULT); /* 2 -> 3, K=3 */
     size_t inputDims[] = {1, 2, 4};

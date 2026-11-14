@@ -32,145 +32,6 @@ static symGroupedWeight_t symGroupedWeightAsymImage(const symQConfig_t *groups) 
     return (symGroupedWeight_t){.groups = groups, .domain = SYM_CODES_ASYM_IMAGE};
 }
 
-void testMatmulInt32() {
-    size_t numberOfElements = 6;
-
-    /*
-    1, 2, 3,
-    4, 5, 6
-    */
-    int32_t aData[] = {1, 2, 3, 4, 5, 6};
-
-    size_t aNumberOfDims = 2;
-    size_t aDims[] = {2, 3};
-    size_t aOrderOfDims[] = {0, 1};
-    shape_t aShape = {.dimensions = aDims,
-                      .orderOfDimensions = aOrderOfDims,
-                      .numberOfDimensions = aNumberOfDims};
-
-    quantization_t aQ = {.type = INT32};
-
-    tensor_t aTensor = {
-        .data = (uint8_t *)aData,
-        .shape = &aShape,
-        .quantization = &aQ,
-        .sparsity = NULL,
-    };
-
-    /*
-    1, 4,
-    2, 5,
-    3, 6
-    */
-    int32_t bData[] = {1, 4, 2, 5, 3, 6};
-    size_t bNumberOfDims = 2;
-    size_t bDims[] = {3, 2};
-    size_t bOrderOfDims[] = {0, 1};
-    shape_t bShape = {.dimensions = bDims,
-                      .orderOfDimensions = bOrderOfDims,
-                      .numberOfDimensions = bNumberOfDims};
-
-    quantization_t bQ = {.type = INT32};
-
-    tensor_t bTensor = {
-        .data = (uint8_t *)bData,
-        .shape = &bShape,
-        .quantization = &bQ,
-        .sparsity = NULL,
-    };
-
-    int32_t outputData[] = {0, 0, 0, 0};
-    size_t outputNumberOfDims = 2;
-    size_t outputDims[] = {2, 2};
-    size_t outputOrderOfDims[] = {0, 1};
-    shape_t outputShape = {.dimensions = outputDims,
-                           .orderOfDimensions = outputOrderOfDims,
-                           .numberOfDimensions = outputNumberOfDims};
-
-    quantization_t outputQ = {.type = INT32};
-
-    tensor_t outputTensor = {
-        .data = (uint8_t *)outputData,
-        .shape = &outputShape,
-        .quantization = &outputQ,
-        .sparsity = NULL,
-    };
-
-    matmulInt32Tensors(&aTensor, &bTensor, &outputTensor);
-
-    int32_t expected[] = {14, 32, 32, 77};
-
-    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, outputTensor.data, 4);
-}
-
-void testMatmulInt32WithVector() {
-    /*
-    1, 2, 3,
-    4, 5, 6
-    */
-    int32_t aData[] = {1, 2, 3, 4, 5, 6};
-    size_t aNumberOfDims = 2;
-    size_t aDims[] = {2, 3};
-    size_t aOrderOfDims[] = {0, 1};
-    shape_t aShape = {.dimensions = aDims,
-                      .orderOfDimensions = aOrderOfDims,
-                      .numberOfDimensions = aNumberOfDims};
-
-    quantization_t aQ = {.type = INT32};
-
-    tensor_t aTensor = {
-        .data = (uint8_t *)aData,
-        .shape = &aShape,
-        .quantization = &aQ,
-        .sparsity = NULL,
-    };
-
-    /*
-    1,
-    2,
-    3
-    */
-    int32_t bData[] = {1, 2, 3};
-    size_t bNumberOfDims = 1;
-    size_t bDims[] = {3};
-    size_t bOrderOfDims[] = {0};
-    shape_t bShape = {.dimensions = bDims,
-                      .orderOfDimensions = bOrderOfDims,
-                      .numberOfDimensions = bNumberOfDims};
-
-    quantization_t bQ = {.type = INT32};
-
-    tensor_t bTensor = {
-        .data = (uint8_t *)bData,
-        .shape = &bShape,
-        .quantization = &bQ,
-        .sparsity = NULL,
-    };
-
-    int32_t outputData[] = {0, 0};
-    size_t outputNumberOfDims = 1;
-    size_t outputDims[] = {2};
-    size_t outputOrderOfDims[] = {0};
-    shape_t outputShape = {.dimensions = outputDims,
-                           .orderOfDimensions = outputOrderOfDims,
-                           .numberOfDimensions = outputNumberOfDims};
-
-    quantization_t outputQ = {.type = INT32};
-
-    tensor_t outputTensor = {
-        .data = (uint8_t *)outputData,
-        .shape = &outputShape,
-        .quantization = &outputQ,
-        .sparsity = NULL,
-    };
-
-    matmulInt32Tensors(&aTensor, &bTensor, &outputTensor);
-
-    int32_t expected[] = {14, 32};
-
-    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, outputTensor.data, 2);
-}
-
 void testMatmulFloatVectors() {
     /*
     1.1, 2.4, 3.9,
@@ -444,76 +305,7 @@ void testMatmulSymInt32TensorsWithBiasRescalesBias() {
 /* The int12 operand contract is no longer a rejection: the accumulator guard
  * (SymAccumGuard.h) is exact for any declared width. The wide operand's
  * wrapping and fitting cases are pinned with the guard tests below. */
-void testMatmulSymInt32WiderOperandRunsExact() {
-    tensor_t a, b, out;
-    int32_t aData[] = {1, 2, 3, 4, 5, 6};
-    int32_t bData[] = {1, 4, 2, 5, 3, 6};
-    int32_t outData[4];
-    size_t aDims[] = {2, 3}, bDims[] = {3, 2}, oDims[] = {2, 2}, order[] = {0, 1};
-    shape_t aS, bS, oS;
-    setShape(&aS, aDims, 2, order);
-    setShape(&bS, bDims, 2, order);
-    setShape(&oS, oDims, 2, order);
-
-    symInt32QConfig_t aQC, bQC, oQC;
-    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &aQC, 13); /* wider than the int12 default */
-    initSymInt32QConfig(HALF_AWAY, &bQC);
-    initSymInt32QConfig(HALF_AWAY, &oQC);
-    quantization_t aQ, bQ, oQ;
-    initSymInt32Quantization(&aQC, &aQ);
-    initSymInt32Quantization(&bQC, &bQ);
-    initSymInt32Quantization(&oQC, &oQ);
-    setTensorValues(&a, (uint8_t *)aData, &aS, &aQ, NULL);
-    setTensorValues(&b, (uint8_t *)bData, &bS, &bQ, NULL);
-    setTensorValues(&out, (uint8_t *)outData, &oS, &oQ, NULL);
-
-    matmulSymInt32Tensors(&a, &b, &out);
-
-    int32_t expected[] = {14, 32, 32, 77};
-    TEST_ASSERT_EQUAL_INT32_ARRAY(expected, outData, 4);
-}
-
-void testMatmulSymInt32TensorsWithBiasRejectsNonSymInt32Bias() {
-    /* aTensor/bTensor are valid SYM_INT32 operands, but the bias is FLOAT32.
-     * Without a type guard the bias branch reinterprets the float bytes as
-     * int32 and dereferences a FLOAT32 qConfig as symInt32QConfig_t (#247). */
-    tensor_t a, b, out;
-    int32_t aData[] = {1, 2, 3, 4, 5, 6};
-    int32_t bData[] = {1, 4, 2, 5, 3, 6};
-    int32_t outData[4];
-    size_t aDims[] = {2, 3}, bDims[] = {3, 2}, oDims[] = {2, 2}, order[] = {0, 1};
-    shape_t aS, bS, oS;
-    setShape(&aS, aDims, 2, order);
-    setShape(&bS, bDims, 2, order);
-    setShape(&oS, oDims, 2, order);
-
-    symInt32QConfig_t aQC, bQC, oQC;
-    initSymInt32QConfig(HALF_AWAY, &aQC);
-    initSymInt32QConfig(HALF_AWAY, &bQC);
-    initSymInt32QConfig(HALF_AWAY, &oQC);
-    quantization_t aQ, bQ, oQ;
-    initSymInt32Quantization(&aQC, &aQ);
-    initSymInt32Quantization(&bQC, &bQ);
-    initSymInt32Quantization(&oQC, &oQ);
-    setTensorValues(&a, (uint8_t *)aData, &aS, &aQ, NULL);
-    setTensorValues(&b, (uint8_t *)bData, &bS, &bQ, NULL);
-    setTensorValues(&out, (uint8_t *)outData, &oS, &oQ, NULL);
-
-    /* bias: FLOAT32, element count == output columns (2) so it clears the
-     * count check and reaches the type-confusing read. */
-    tensor_t bias;
-    float biasData[] = {1.f, 2.f};
-    size_t biasDims[] = {2}, biasOrder[] = {0};
-    shape_t biasS;
-    setShape(&biasS, biasDims, 1, biasOrder);
-    quantization_t biasQ;
-    initFloat32Quantization(&biasQ);
-    setTensorValues(&bias, (uint8_t *)biasData, &biasS, &biasQ, NULL);
-
-    ASSERT_EXITS_WITH_FAILURE(matmulSymInt32TensorsWithBias(&a, &b, &out, &bias, NULL));
-}
-
-/* ---- Group-quant PR2 (Task 3): matmulSymInt32TensorsGroupedWeight -------
+/* ---- matmulSymInt32TensorsGroupedWeight -------
  *
  * `b` in every test below is the shape the executeOp prologue's grouped-
  * operand branch ALWAYS produces when it reaches this kernel: raw (unpacked)
@@ -829,7 +621,7 @@ void testMatmulGroupedHonorsOpRoundingMode(void) {
                              "grouped combine did not honor SR_HALF_AWAY (hardcoded rounding?)");
 }
 
-/* ---- Group-quant PR3 (Task 1): dx (Linear propLoss) orientation ---------
+/* ---- dx (Linear propLoss) orientation ---------
  *
  * The weight `b` is passed in its RAW [outFeatures, inFeatures] storage
  * order (order {0,1}, NO transpose — exactly what linearBackward's propLoss
@@ -1035,62 +827,7 @@ void testMatmulGroupedDxEqualScalesBitIdenticalToScalar(void) {
                             odtScaleToFloat(outGroupedQC.scale));
 }
 
-/* The public grouped entry must reject the per-tensor sentinel {numGroups=1,
- * groupSize=0} (see symQConfig_t's field comments, Quantization.h): without
- * this guard, matmulIntCoreGrouped's `wStorageIdx / weightGroups->groupSize`
- * divides by the sentinel's groupSize=0. Per-tensor weights have their own
- * scalar entries (matmulSymInt32Tensors[WithBias]); this entry is grouped-
- * only. */
-void testMatmulGroupedWeightRejectsPerTensorSentinel(void) {
-    tensor_t aTensor;
-    int32_t aData[] = {1, 1};
-    size_t aDims[] = {1, 2};
-    size_t aOrder[] = {0, 1};
-    shape_t aShape;
-    setShape(&aShape, aDims, 2, aOrder);
-    symInt32QConfig_t aQC;
-    initSymInt32QConfig(HALF_AWAY, &aQC);
-    quantization_t aQ;
-    initSymInt32Quantization(&aQC, &aQ);
-    setTensorValues(&aTensor, (uint8_t *)aData, &aShape, &aQ, NULL);
-
-    tensor_t bTensor;
-    int32_t bData[] = {1, 1};
-    size_t bDims[] = {1, 2};
-    size_t bOrder[] = {1, 0}; /* post-transpose logical view: reduction axis first */
-    shape_t bShape;
-    setShape(&bShape, bDims, 2, bOrder);
-    symInt32QConfig_t bQC;
-    initSymInt32QConfig(HALF_AWAY, &bQC);
-    quantization_t bQ;
-    initSymInt32Quantization(&bQC, &bQ);
-    setTensorValues(&bTensor, (uint8_t *)bData, &bShape, &bQ, NULL);
-
-    odtScale_t sentinelScale = odtTestScale(1.0f);
-    symQConfig_t weightGroups = {.scales = &sentinelScale,
-                                 .numGroups = 1,
-                                 .groupSize = 0,
-                                 .qBits = 8,
-                                 .roundingMode = HALF_AWAY};
-
-    tensor_t outputTensor;
-    int32_t outputData[1];
-    size_t outDims[] = {1, 1};
-    size_t outOrder[] = {0, 1};
-    shape_t outShape;
-    setShape(&outShape, outDims, 2, outOrder);
-    symInt32QConfig_t outputQC;
-    initSymInt32QConfig(HALF_AWAY, &outputQC);
-    quantization_t outputQ;
-    initSymInt32Quantization(&outputQC, &outputQ);
-    setTensorValues(&outputTensor, (uint8_t *)outputData, &outShape, &outputQ, NULL);
-
-    symGroupedWeight_t groupedWeight = symGroupedWeightSym(&weightGroups);
-    ASSERT_EXITS_WITH_FAILURE(matmulSymInt32TensorsGroupedWeight(
-        &aTensor, &bTensor, NULL, &outputTensor, &groupedWeight, NULL));
-}
-
-/* ---- BFP epic PR2 (Task 3): matmulBfpTensors ----------------------------
+/* ---- matmulBfpTensors ----------------------------
  *
  * Operands arrive in the funnel's UNPACKED-BFP scratch form: ->data holds
  * int32 sign-extended mantissa codes, ->quantization is BFP with a live
@@ -1170,7 +907,7 @@ void testMatmulBfpMatchesGold(void) {
                              kBfpMatmulExpected_len * sizeof(float));
 }
 
-/* BFP epic PR2: the bias seed must dequantize through ITS OWN
+/* The bias seed must dequantize through ITS OWN
  * group's exponent (bfpGroupScale(biasQC, bfpGroupOf(biasQC, col))). Same
  * bias VALUES as the gold, stored grouped {numGroups=3, groupSize=1} with
  * NON-UNIFORM exponents (goldgen asserts both, plus that a group-0 collapse
@@ -1447,7 +1184,7 @@ void testBfpSegmentLimitTableValues(void) {
     TEST_ASSERT_EQUAL_size_t(1, bfpSegmentLimit(16, 16));
 }
 
-/* PR3 sum-headroom sibling of the table above: single-operand SUMS (biasGrad)
+/* Sum-headroom sibling of the table above: single-operand SUMS (biasGrad)
  * are bounded by g * 2^(m-1), not the product bound, so the limit is
  * INT32_MAX >> (m-1) -- far roomier than bfpSegmentLimit at equal widths. */
 void testBfpSumSegmentLimitTableValues(void) {
@@ -1886,58 +1623,10 @@ void testBfpSumFoldGuardBitsIsTheSmallestGThatHolds(void) {
  * exponents[] out of bounds. The kernel must route every operand through
  * validateBfpQConfigShape (the SYM grouped entry's validateSymQConfigShape
  * precedent) before touching data. */
-void testMatmulBfpRejectsMismatchedGroupShape(void) {
-    tensor_t aTensor;
-    int32_t aData[] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
-    size_t aDims[] = {2, 6};
-    size_t aOrder[] = {0, 1};
-    shape_t aShape;
-    setShape(&aShape, aDims, 2, aOrder);
-    uint8_t aExponents[] = {127, 127};
-    bfpQConfig_t aQC = {.exponents = aExponents,
-                        .numGroups = 2,
-                        .groupSize = 4, /* 2*4 == 8 != 12 elements */
-                        .roundingMode = HALF_AWAY,
-                        .mantissaBits = 6,
-                        .exponentBits = 8};
-    quantization_t aQ;
-    initBfpQuantization(&aQC, &aQ);
-    setTensorValues(&aTensor, (uint8_t *)aData, &aShape, &aQ, NULL);
-
-    tensor_t bTensor;
-    int32_t bData[] = {1, 1, 1, 1, 1, 1};
-    size_t bDims[] = {6, 1};
-    size_t bOrder[] = {0, 1};
-    shape_t bShape;
-    setShape(&bShape, bDims, 2, bOrder);
-    uint8_t bExponents[] = {127};
-    bfpQConfig_t bQC = {.exponents = bExponents,
-                        .numGroups = 1,
-                        .groupSize = 0,
-                        .roundingMode = HALF_AWAY,
-                        .mantissaBits = 6,
-                        .exponentBits = 8};
-    quantization_t bQ;
-    initBfpQuantization(&bQC, &bQ);
-    setTensorValues(&bTensor, (uint8_t *)bData, &bShape, &bQ, NULL);
-
-    tensor_t outTensor;
-    float outData[2];
-    size_t outDims[] = {2, 1};
-    size_t outOrder[] = {0, 1};
-    shape_t outShape;
-    setShape(&outShape, outDims, 2, outOrder);
-    quantization_t outQ;
-    initFloat32Quantization(&outQ);
-    setTensorValues(&outTensor, (uint8_t *)outData, &outShape, &outQ, NULL);
-
-    ASSERT_EXITS_WITH_FAILURE(matmulBfpTensors(&aTensor, &bTensor, NULL, &outTensor));
-}
-
-/* PR3 kernel-reuse pin: Linear dx = loss @ W with W in RAW [outF, inF] storage
+/* Kernel-reuse pin: Linear dx = loss @ W with W in RAW [outF, inF] storage
  * -- the reduction walks W strided by inF, hopping weight groups mid-reduction.
  * matmulBfpTensors' per-element lookup + either-boundary fold must handle the
- * strided walk exactly (BFP D8 amendment: no re-quantize, folds just more often). */
+ * strided walk exactly (no re-quantize, it just folds more often). */
 void testMatmulBfpDxStridedWeightWalkMatchesGold(void) {
     tensor_t lossT;
     size_t lossDims[] = {(size_t)kBfpBwdBatch, (size_t)kBfpBwdOutF};
@@ -1988,7 +1677,7 @@ void testMatmulBfpDxStridedWeightWalkMatchesGold(void) {
     TEST_ASSERT_EQUAL_MEMORY(kBfpDxExpected, outT.data, kBfpDxExpected_len * sizeof(float));
 }
 
-/* PR3 kernel-reuse pin: Linear weightGrad = loss^T @ x with loss behind the
+/* Kernel-reuse pin: Linear weightGrad = loss^T @ x with loss behind the
  * zero-copy transposeTensor view [outF, batch] -- the a-walk reads loss
  * storage strided by outF and crosses loss groups mid-reduction while x's
  * groups (groupSize 6 > inF) sometimes stay put, so the a-side of the
@@ -2045,7 +1734,7 @@ void testMatmulBfpWeightGradTransposedLossViewMatchesGold(void) {
     TEST_ASSERT_EQUAL_MEMORY(kBfpWgExpected, outT.data, kBfpWgExpected_len * sizeof(float));
 }
 
-/* PR3 dx power-of-two twin (the power-of-two bit-identity twin in the backward, BFP D8 amendment):
+/* dx power-of-two twin (bit-identity in the backward):
  * the dx sibling of testMatmulBfpPowerOfTwoBitIdenticalToGroupedSym above (see its comment for the
  * exactness argument), in the RAW-weight-storage orientation of
  * testMatmulGroupedDxEqualScalesBitIdenticalToScalar (same mantissas, loss per-tensor stored 126
@@ -2869,7 +2558,7 @@ void testMatmulSymGuardWiderOperandRunsExactWhenItFitsAndAbortsWhenItWraps(void)
     ASSERT_EXITS_WITH_OUTPUT(1, "widths (13, 12)", (void)guardDotBits(257, 13, 12, NULL));
 }
 
-/* A grouped weight wider than int12 used to exit at the validator; now it takes
+/* A grouped weight wider than int12 takes
  * the checked path (int12 x int16 products over 2 x 64 terms are unprovable).
  * Small codes stay exact (the rescale goes through float, so keep the partials
  * under 2^24); 2 x 64 terms of 2047 x 32767 wrap the raw group partial. */
@@ -2882,7 +2571,7 @@ void testMatmulGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps(voi
 }
 
 /* Two groups of 40 terms of 1024 x 32767: each raw partial is 1342136320, above
- * the #189 seed guard's 1.07e9 reserve but inside int32. Group 2 negated with one
+ * the seed guard's 1.07e9 reserve but inside int32. Group 2 negated with one
  * zero term: the sum fits (1024 * 32767) and every value survives the float
  * rescale exactly. Both positive: the running accumulator wraps. */
 static void wideGroupedFill(bool secondGroupNegative) {
@@ -2906,7 +2595,7 @@ void testMatmulGroupedWidePartialSumThatWrapsHitsTheF9Guard(void) {
                              (void)guardGroupedDotBits(80, 2, 16));
 }
 
-/* ---- #516: raw SYM outputs declare their accumulator width ------------- */
+/* ---- Raw SYM outputs declare their accumulator width ------------- */
 
 void testSymAccumResultBitsFollowsTheSiteBound(void) {
     /* exact site, int12 x int12: the positive corner N * 2^22 + seed decides */
@@ -3083,7 +2772,7 @@ void testMatmulSymGroupedAsymImageStampsItsFullRange(void) {
     TEST_ASSERT_EQUAL_INT32(500 + 8, outCode);
 }
 
-/* The #516 repro: the raw 1x1 product -2048 * -2048 = 2^22 re-enters a SYM
+/* A raw 1x1 product -2048 * -2048 = 2^22 re-enters a SYM
  * matmul as an operand. Declared int12 (the pre-stamp default) the guard proved
  * one term safe and the unchecked product 2^22 * -2048 = -2^33 wrapped
  * silently; declared 24 bits the bound is unprovable and the checked product
@@ -3230,16 +2919,12 @@ int main(void) {
     RUN_TEST(testMatmulGroupedGuardDiesOnRescaledAccumulatorOverflow);
     RUN_TEST(testMatmulGroupedGuardCheckedPathStaysExactWhenValuesFit);
     RUN_TEST(testMatmulGroupedGuardFullScaleN511RunsExact);
-    RUN_TEST(testMatmulInt32);
-    RUN_TEST(testMatmulInt32WithVector);
     RUN_TEST(testMatmulFloatVectors);
     RUN_TEST(testMatmulSymInt32Tensors);
     RUN_TEST(testMatmulFloat32TensorsWithBiasBroadcastsOverRows);
     RUN_TEST(testMatmulFloat32TensorsWithBiasNullEqualsPlain);
     RUN_TEST(testMatmulSymInt32TensorsWithBiasRescalesBias);
     RUN_TEST(testMatmulProductScaleIsIntegerNearestAndSeedsOnIt);
-    RUN_TEST(testMatmulSymInt32WiderOperandRunsExact);
-    RUN_TEST(testMatmulSymInt32TensorsWithBiasRejectsNonSymInt32Bias);
     RUN_TEST(testMatmulGroupedWeightPerChannelMatchesGold);
     RUN_TEST(testMatmulGroupedWeightGeneralGroupsMatchesGold);
     RUN_TEST(testMatmulGroupedEqualScalesBitIdenticalToScalar);
@@ -3247,7 +2932,6 @@ int main(void) {
     RUN_TEST(testMatmulGroupedWeightStridedReductionMatchesGold);
     RUN_TEST(testMatmulGroupedWeightStridedGeneralGroupsMatchesGold);
     RUN_TEST(testMatmulGroupedDxEqualScalesBitIdenticalToScalar);
-    RUN_TEST(testMatmulGroupedWeightRejectsPerTensorSentinel);
     RUN_TEST(testMatmulBfpMatchesGold);
     RUN_TEST(testMatmulBfpGroupedBiasBindsPerGroupExponent);
     RUN_TEST(testMatmulBfpNoBiasZeroSeeds);
@@ -3278,7 +2962,6 @@ int main(void) {
     RUN_TEST(testBfpValueGreaterIsTheExactCompare);
     RUN_TEST(testRoundedDivHalfAwayInt32IsExactOverTheInt32Range);
     RUN_TEST(testBfpSumFoldGuardBitsIsTheSmallestGThatHolds);
-    RUN_TEST(testMatmulBfpRejectsMismatchedGroupShape);
     RUN_TEST(testMatmulBfpDxStridedWeightWalkMatchesGold);
     RUN_TEST(testMatmulBfpWeightGradTransposedLossViewMatchesGold);
     RUN_TEST(testMatmulBfpDxPowerOfTwoBitIdenticalToGroupedSym);

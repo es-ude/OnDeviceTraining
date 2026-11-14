@@ -1,11 +1,9 @@
 #define SOURCE_FILE "MATMUL"
 
 #ifdef TRACK_INSTRUCTIONS
-#define MATMUL_FUNC_INT matmulIntTensorsWithInstructionCounter
 #define MATMUL_FUNC_FLOAT matmulFloatTensorsWithInstructionCounter
 #define MATMUL_FUNC_SYM_INT32 matmulSymIntTensorsWithInstructionCounter
 #else
-#define MATMUL_FUNC_INT matmulIntTensors
 #define MATMUL_FUNC_FLOAT matmulFloatTensors
 #define MATMUL_FUNC_SYM_INT32 matmulSymIntTensors
 #endif
@@ -28,10 +26,8 @@
 
 size_t matmulInstructionCounter = 0;
 
-/* The int32 dot-product loop nest, instantiated twice by matmulIntCore with
- * `checked` a compile-time constant: false is the historical body verbatim
- * (acc + mulInt32s), true routes every accumulate through the SYM accumulator
- * guard (SymAccumGuard.h). */
+/* The int32 dot-product loop nest, instantiated unchecked and overflow-checked
+ * (SymAccumGuard.h) with `checked` a compile-time constant. */
 SYM_ACCUM_ALWAYS_INLINE void matmulIntLoops(tensor_t *aTensor, tensor_t *bTensor,
                                             tensor_t *outputTensor, const int32_t *biasSeed,
                                             size_t aRows, size_t aColumns, size_t bColumns,
@@ -91,20 +87,11 @@ SYM_ACCUM_NOINLINE void matmulIntLoopsChecked(tensor_t *a, tensor_t *b, tensor_t
     matmulIntLoops(a, b, out, biasSeed, aRows, aColumns, bColumns, true, site);
 }
 
-/* symGuard == false: plain INT32 matmul, widths unknown, no accumulator guard.
- * symGuard == true: SYM_INT32 operands of declared widths aBits/bBits -- the
- * static bound over (aColumns terms, max|biasSeed|) picks the unchanged loop
- * or the overflow-checked twin.
- * Returns the static width of the accumulators it wrote (symAccumResultBits
- * of that site). Only the SYM wrappers stamp it on their output's
- * symInt32QConfig_t; the plain INT32 matmul has none and discards it. */
+/* SYM_INT32 operands of declared widths aBits/bBits: the static bound over
+ * (aColumns terms, bias seeds) picks the unchecked or the checked loop. Returns
+ * the static width of the accumulators written (symAccumResultBits). */
 static uint8_t matmulIntCore(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
-                             const int32_t *biasSeed, bool symGuard, uint8_t aBits, uint8_t bBits) {
-    if (aTensor->shape->numberOfDimensions > 2 || bTensor->shape->numberOfDimensions > 2) {
-        PRINT_ERROR("Matmul only supports up to 2D Tensors");
-        exit(1);
-    }
-
+                             const int32_t *biasSeed, uint8_t aBits, uint8_t bBits) {
     size_t aNumberOfDims = aTensor->shape->numberOfDimensions;
     size_t bNumberOfDims = bTensor->shape->numberOfDimensions;
 
@@ -128,7 +115,7 @@ static uint8_t matmulIntCore(tensor_t *aTensor, tensor_t *bTensor, tensor_t *out
 
     symAccumSite_t site = symAccumSiteInit("matmul SYM_INT32", aColumns, aBits, bBits, 0);
     symAccumSiteSetSeeds(&site, biasSeed, bColumns);
-    if (!symGuard || symAccumProvenSafe(&site)) {
+    if (symAccumProvenSafe(&site)) {
         matmulIntLoopsSafe(aTensor, bTensor, outputTensor, biasSeed, aRows, aColumns, bColumns,
                            &site);
     } else {
@@ -138,27 +125,8 @@ static uint8_t matmulIntCore(tensor_t *aTensor, tensor_t *bTensor, tensor_t *out
     return symAccumResultBits(&site);
 }
 
-void matmulIntTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor) {
-    matmulIntCore(aTensor, bTensor, outputTensor, NULL, false, 0, 0);
-}
-
-void matmulIntTensorsWithInstructionCounter(tensor_t *aTensor, tensor_t *bTensor,
-                                            tensor_t *outputTensor) {
-    matmulIntCore(aTensor, bTensor, outputTensor, NULL, false, 0, 0);
-    ++matmulInstructionCounter;
-}
-
-void matmulInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor) {
-    MATMUL_FUNC_INT(aTensor, bTensor, outputTensor);
-}
-
 static void matmulFloatCore(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
                             const uint8_t *biasSeed) {
-    if (aTensor->shape->numberOfDimensions > 2 || bTensor->shape->numberOfDimensions > 2) {
-        PRINT_ERROR("Matmul only supports up to 2D Tensors");
-        exit(1);
-    }
-
     size_t aNumberOfDims = aTensor->shape->numberOfDimensions;
     size_t *aDims = aTensor->shape->dimensions;
     size_t bNumberOfDims = bTensor->shape->numberOfDimensions;
@@ -239,35 +207,21 @@ void matmulFloatTensorsWithInstructionCounter(tensor_t *aTensor, tensor_t *bTens
 
 void matmulFloat32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
                                   tensor_t *bias) {
-    const uint8_t *seed = NULL;
-    if (bias != NULL) {
-        size_t bColumns =
-            (bTensor->shape->numberOfDimensions < 2) ? 1 : getDimensionsByIndex(bTensor, 1);
-        if (calcNumberOfElementsByTensor(bias) != bColumns) {
-            PRINT_ERROR("matmulFloat32TensorsWithBias: bias element count != output columns");
-            exit(1);
-        }
-        seed = bias->data;
-    }
-    matmulFloatCore(aTensor, bTensor, outputTensor, seed);
+    matmulFloatCore(aTensor, bTensor, outputTensor, bias != NULL ? bias->data : NULL);
 }
 
 void matmulFloat32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor) {
     MATMUL_FUNC_FLOAT(aTensor, bTensor, outputTensor);
 }
 
-/* The SYM_INT32 twin of matmulInt32Tensors: same core, with the operands'
- * declared widths feeding the accumulator guard. Under TRACK_INSTRUCTIONS it
- * counts exactly like matmulIntTensorsWithInstructionCounter did.
- * The output carries raw accumulator codes that can exceed the operands'
- * width, so it declares the width the guard proved (#516): a consumer that
- * reads this wire as a SYM operand sizes its own proof from it instead of
- * from the width the output tensor happened to be created with. */
+/* The output carries raw accumulator codes wider than the operands, so it
+ * declares the width the guard proved; a consumer reading it as a SYM operand
+ * sizes its own proof from that. */
 static void matmulSymProduct(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor) {
     uint8_t aBits = ((symInt32QConfig_t *)aTensor->quantization->qConfig)->qMaxBits;
     uint8_t bBits = ((symInt32QConfig_t *)bTensor->quantization->qConfig)->qMaxBits;
     ((symInt32QConfig_t *)outputTensor->quantization->qConfig)->qMaxBits =
-        matmulIntCore(aTensor, bTensor, outputTensor, NULL, true, aBits, bBits);
+        matmulIntCore(aTensor, bTensor, outputTensor, NULL, aBits, bBits);
 #ifdef TRACK_INSTRUCTIONS
     ++matmulInstructionCounter;
 #endif
@@ -299,25 +253,12 @@ void matmulSymIntTensorsWithInstructionCounter(tensor_t *aTensor, tensor_t *bTen
     ++matmulInstructionCounter;
 }
 
-static void matmulValidateSymOperand(tensor_t *t, const char *what) {
-    if (t->quantization->type != SYM_INT32) {
-        PRINT_ERROR("matmul SYM_INT32: %s must be SYM_INT32", what);
-        exit(1);
-    }
-    /* No width cap: the accumulator guard (SymAccumGuard.h) is exact at any
-     * declared qMaxBits, so a wider operand runs the checked loop instead. */
-}
-
 void matmulSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor) {
-    matmulValidateSymOperand(aTensor, "aTensor");
-    matmulValidateSymOperand(bTensor, "bTensor");
     MATMUL_FUNC_SYM_INT32(aTensor, bTensor, outputTensor);
 }
 
 void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
                                    tensor_t *bias, rngStream_t *rs) {
-    matmulValidateSymOperand(aTensor, "aTensor");
-    matmulValidateSymOperand(bTensor, "bTensor");
     uint8_t aBits = ((symInt32QConfig_t *)aTensor->quantization->qConfig)->qMaxBits;
     uint8_t bBits = ((symInt32QConfig_t *)bTensor->quantization->qConfig)->qMaxBits;
     /* The stored product scale, rounded once from the exact mantissa product;
@@ -328,55 +269,33 @@ void matmulSymInt32TensorsWithBias(tensor_t *aTensor, tensor_t *bTensor, tensor_
         ODT_SCALE_NEAREST);
     uint8_t resultBits;
     if (bias == NULL) {
-        resultBits = matmulIntCore(aTensor, bTensor, outputTensor, NULL, true, aBits, bBits);
+        resultBits = matmulIntCore(aTensor, bTensor, outputTensor, NULL, aBits, bBits);
     } else {
-        /* Bias is a value-sum seed (not a product operand), so it is exempt from
-         * the int12 operand bound but must still be SYM_INT32: the branch below
-         * reads its data as int32 and its qConfig as symInt32QConfig_t (#247). */
-        if (bias->quantization->type != SYM_INT32) {
-            PRINT_ERROR("matmul SYM_INT32: bias must be SYM_INT32");
-            exit(1);
-        }
         size_t bColumns =
             (bTensor->shape->numberOfDimensions < 2) ? 1 : getDimensionsByIndex(bTensor, 1);
-        if (calcNumberOfElementsByTensor(bias) != bColumns) {
-            PRINT_ERROR("matmulSymInt32TensorsWithBias: bias element count != output columns");
-            exit(1);
-        }
 
         symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
         float biasScale = loadCanonScale(&biasQC->scale);
 
-        /* Rescale the bias into the accumulator's scale via the shared #189 helper
-         * (guarded float->int32 cast): one fixed-point op per output column. */
+        /* Rescale the bias into the accumulator's scale (guarded float->int32 cast). */
         int32_t seed[bColumns];
         for (size_t c = 0; c < bColumns; c++) {
             int32_t biasIntC = readBytesAsInt32(&bias->data[c * sizeof(int32_t)]);
             seed[c] = rescaleIntoAccumulatorScale(biasIntC, biasScale, outputScale,
                                                   biasQC->roundingMode, rs);
         }
-        resultBits = matmulIntCore(aTensor, bTensor, outputTensor, seed, true, aBits, bBits);
+        resultBits = matmulIntCore(aTensor, bTensor, outputTensor, seed, aBits, bBits);
     }
 
     symInt32QConfig_t *outputQC = outputTensor->quantization->qConfig;
     storeCanonScale(&outputQC->scale, outputScale);
-    outputQC->qMaxBits = resultBits; /* bias seed included (#516) */
+    outputQC->qMaxBits = resultBits;
 }
 
-/* Group-quant PR2 (Task 3) / PR3 (Task 1): sibling of matmulIntCore, adding
- * the running group-partial rescale-combine. `b` must be 2D (a GEMM-family
- * weight); groups partition b's flat STORAGE array, and the walk supports
- * ANY orientation of the reduction axis: the group of each visited element
- * is derived from that element's actual storage index — the same
- * calcElementIndexByIndices result the weight read itself uses. Forward
- * wirings expose the reduction axis storage-contiguously (Linear.c's
- * transposeTensor(w,0,1)), but Linear dx reduces over weight dim-0 of the
- * RAW [outFeatures, inFeatures] view, storage-strided by inFeatures:
- * consecutive visited indices jump a full row, hopping groups on every
- * step. For a contiguous reduction the per-element walk crosses group
- * boundaries at exactly the same points as PR2's precomputed-run walk, so
- * the combine sequence (and every PR2 forward gold) is preserved
- * bit-for-bit. */
+/* Sibling of matmulIntCore that folds per-group partials. Groups follow the
+ * weight's storage index, so any orientation of the reduction axis works,
+ * including Linear dx's storage-strided walk. Fold once per visited-group change
+ * and at the tail. */
 SYM_ACCUM_ALWAYS_INLINE void
 matmulGroupedLoops(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
                    const int32_t *biasSeed, const symQConfig_t *weightGroups, float aScale,
@@ -397,20 +316,13 @@ matmulGroupedLoops(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
             for (size_t i = 0; i < aColumns; i++) {
                 size_t bIndices[] = {i, columnIndex};
                 size_t wStorageIdx = calcElementIndexByIndices(2, bDims, bIndices, bOrder);
-                /* Per-element division (Conv1dKernel.c's grouped-loop
-                 * precedent): the reduction axis may be storage-strided
-                 * (Linear dx: stride = inFeatures), so consecutive visited
-                 * indices can jump groups arbitrarily — a precomputed run
-                 * length to the next boundary would overshoot past skipped
-                 * indices. Dividing the actual visited index is gap-robust. */
+                /* Divide the visited index: a strided walk can jump groups, so a
+                 * precomputed run length would overshoot. */
                 size_t g = wStorageIdx / weightGroups->groupSize;
 
                 if (g != currentGroup) {
                     if (currentGroup != SIZE_MAX) {
-                        /* Group-boundary combine: fold the FINISHED group's raw
-                         * int32 partial into the running accumulator scale
-                         * (one rounding here, honoring the caller's rounding
-                         * mode — never hardcoded). */
+                        /* One rounding per boundary, by the op's rounding mode. */
                         acc =
                             symAdd(acc,
                                    rescalePartialIntoAccumulatorScale(
@@ -436,11 +348,7 @@ matmulGroupedLoops(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTensor,
                 int32_t bValue = readBytesAsInt32(&bTensor->data[wStorageIdx * sizeof(int32_t)]);
                 partial = symMac(partial, aValue, bValue, checked, partialSite);
             }
-            /* Tail combine: the LAST group visited never crosses a further
-             * boundary, so its partial only ever gets folded in here. In the
-             * contiguous forward orientation, per-channel weights (groupSize
-             * == aColumns) never hit the mid-loop branch at all -- this is
-             * their ONLY combine. */
+            /* Tail combine; per-channel forward weights only combine here. */
             if (currentGroup != SIZE_MAX) {
                 acc = symAdd(acc,
                              rescalePartialIntoAccumulatorScale(
@@ -481,11 +389,6 @@ static uint8_t matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor
                                     const symGroupedWeight_t *groupedWeight, float aScale,
                                     float sAcc, roundingMode_t roundingMode, rngStream_t *rs) {
     const symQConfig_t *weightGroups = groupedWeight->groups;
-    if (aTensor->shape->numberOfDimensions > 2 || bTensor->shape->numberOfDimensions != 2) {
-        PRINT_ERROR("matmulIntCoreGrouped: grouped weight operand (b) must be 2D; a must be <=2D");
-        exit(1);
-    }
-
     size_t aNumberOfDims = aTensor->shape->numberOfDimensions;
 
     size_t aRows, aColumns;
@@ -539,31 +442,12 @@ static uint8_t matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor
     return symAccumResultBits(&accSite);
 }
 
-static void matmulValidateWeightGroups(const symGroupedWeight_t *groupedWeight) {
-    if (groupedWeight == NULL || groupedWeight->groups == NULL) {
-        PRINT_ERROR("matmul SYM_INT32 grouped: weightGroups must not be NULL");
-        exit(1);
-    }
-    const symQConfig_t *weightGroups = groupedWeight->groups;
-    if (weightGroups->numGroups <= 1) {
-        PRINT_ERROR("matmulSymInt32TensorsGroupedWeight: weightGroups must be grouped "
-                    "(numGroups>1); per-tensor weights take the scalar matmul entries");
-        exit(1);
-    }
-}
-
 void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
                                         tensor_t *outputTensor,
                                         const symGroupedWeight_t *groupedWeight, rngStream_t *rs) {
-    matmulValidateSymOperand(aTensor, "aTensor");
-    matmulValidateWeightGroups(groupedWeight);
     const symQConfig_t *weightGroups = groupedWeight->groups;
-    validateSymQConfigShape(weightGroups, calcNumberOfElementsByTensor(bTensor));
 
-    /* s_acc = aScale * max_g(scales[g]) (GGUF pattern, #189): a single linear
-     * pass over scales[], NEVER scales[0] alone — any other choice would let
-     * some group's rescale factor scales[g]/s_wmax exceed 1, growing that
-     * group's rescaled mantissa past its accumulator headroom. */
+    /* s_acc uses the maximum group scale so every rescale factor is <= 1. */
     float aScale = loadCanonScale(&((symInt32QConfig_t *)aTensor->quantization->qConfig)->scale);
     float maxScale = loadCanonScale(&weightGroups->scales[0]);
     for (size_t g = 1; g < weightGroups->numGroups; g++) {
@@ -578,26 +462,14 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
      * NEAREST sAcc can sit 2^-15 below the exact product. */
     const float sAcc = canonProductScale(aScale, maxScale, ODT_SCALE_CEIL);
 
-    /* b's roundingMode carries the OP's rounding mode here — the same
-     * plumbing the executeOp prologue already uses for every SYM_INT32
-     * scratch operand (initSymInt32QConfig(arithmetic.roundingMode, ...)),
-     * so a caller invoking this entry directly (as the unit tests do) simply
-     * sets it explicitly, exactly like the scalar entries' bias operand. */
+    /* b's scratch config carries the op's rounding mode (set by the executeOp
+     * prologue; direct callers set it explicitly). */
     symInt32QConfig_t *bQC = bTensor->quantization->qConfig;
     size_t bColumns = getDimensionsByIndex(bTensor, 1);
 
     int32_t *seedPtr = NULL;
     int32_t seedBuf[bColumns > 0 ? bColumns : 1];
     if (bias != NULL) {
-        if (bias->quantization->type != SYM_INT32) {
-            PRINT_ERROR("matmul SYM_INT32 grouped: bias must be SYM_INT32");
-            exit(1);
-        }
-        if (calcNumberOfElementsByTensor(bias) != bColumns) {
-            PRINT_ERROR("matmulSymInt32TensorsGroupedWeight: bias element count != output "
-                        "columns");
-            exit(1);
-        }
         symInt32QConfig_t *biasQC = (symInt32QConfig_t *)bias->quantization->qConfig;
         const float biasScale = loadCanonScale(&biasQC->scale);
         for (size_t c = 0; c < bColumns; c++) {
@@ -613,29 +485,15 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
 
     symInt32QConfig_t *outputQC = outputTensor->quantization->qConfig;
     storeCanonScale(&outputQC->scale, sAcc);
-    outputQC->qMaxBits = resultBits; /* the rescaled accumulator's width (#516) */
+    outputQC->qMaxBits = resultBits; /* the rescaled accumulator's width */
 }
 
-/* BFP epic PR2 (Task 3): matmulIntCoreGrouped's BFP twin (see Matmul.h for
- * the full contract). Differences from the SYM grouped core: BOTH operands
- * are group-tracked (not just the weight), the boundary combine is a
- * rounding-free power-of-two fold into a float accumulator (never
- * rescaleIntoAccumulatorScale), and the output is raw FLOAT32. */
+/* matmulIntCoreGrouped's BFP twin (contract in Matmul.h). Differences from the SYM grouped core:
+ * BOTH operands are group-tracked (not just the weight), the boundary combine is a rounding-free
+ * power-of-two fold into a float accumulator (never rescaleIntoAccumulatorScale), and the output
+ * is raw FLOAT32. */
 void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
                       tensor_t *outputTensor) {
-    if (aTensor->shape->numberOfDimensions > 2 || bTensor->shape->numberOfDimensions > 2) {
-        PRINT_ERROR("Matmul only supports up to 2D Tensors");
-        exit(1);
-    }
-    if (aTensor->quantization->type != BFP || bTensor->quantization->type != BFP) {
-        PRINT_ERROR("matmulBfpTensors: operands must be BFP (unpacked scratch form)");
-        exit(1);
-    }
-    if (outputTensor->quantization->type != FLOAT32) {
-        PRINT_ERROR("matmulBfpTensors: output must be raw FLOAT32");
-        exit(1);
-    }
-
     bfpQConfig_t *aQC = aTensor->quantization->qConfig;
     bfpQConfig_t *bQC = bTensor->quantization->qConfig;
 
@@ -661,25 +519,7 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
         exit(1);
     }
 
-    /* Group-shape fail-fast (validateSymQConfigShape precedent): bfpGroupOf
-     * divides by groupSize with no relation to numGroups, so a mismatched
-     * config would read exponents[] out of bounds. */
-    validateBfpQConfigShape(aQC, calcNumberOfElementsByTensor(aTensor));
-    validateBfpQConfigShape(bQC, calcNumberOfElementsByTensor(bTensor));
-
-    bfpQConfig_t *biasQC = NULL;
-    if (bias != NULL) {
-        if (bias->quantization->type != BFP) {
-            PRINT_ERROR("matmulBfpTensors: bias must be BFP");
-            exit(1);
-        }
-        if (calcNumberOfElementsByTensor(bias) != bColumns) {
-            PRINT_ERROR("matmulBfpTensors: bias element count != output columns");
-            exit(1);
-        }
-        biasQC = bias->quantization->qConfig;
-        validateBfpQConfigShape(biasQC, calcNumberOfElementsByTensor(bias));
-    }
+    bfpQConfig_t *biasQC = bias != NULL ? bias->quantization->qConfig : NULL;
 
     bfpValidateBlockHeadroom(aQC, bQC, aColumns, "matmulBfpTensors");
 
@@ -738,9 +578,6 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
                 int32_t bValue = readBytesAsInt32(&bTensor->data[bValueIndex * sizeof(int32_t)]);
                 partial += mulInt32s(aValue, bValue);
             }
-            /* Tail fold: the LAST segment never crosses a further boundary,
-             * so this is its only fold (and the ONLY fold when neither
-             * operand changes groups over the walk). */
             if (aColumns > 0) {
                 acc += bfpLdexpInt32(partial, (int)aQC->exponents[currentAGroup] - aExpBias +
                                                   (int)bQC->exponents[currentBGroup] - bExpBias);

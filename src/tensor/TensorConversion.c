@@ -707,7 +707,7 @@ void unpackSignExtend(const uint8_t *src, size_t srcBits, size_t srcStartBit, in
         }
         return;
     }
-    /* clear-then-set writeByte actively zero-fills the high bits on widen,
+    /* byteConversionAppend zero-fills the high bits on widen,
      * so no memset of dst is needed. */
     byteConversionAppend((uint8_t *)src, srcBits, (uint8_t *)dst, 32, n, 0, srcStartBit);
     if (srcBits >= 32) {
@@ -3245,8 +3245,8 @@ static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTe
         symQConfig_t *inputSymQC = inputTensor->quantization->qConfig;
         symQConfig_t *outputSymQC = outputTensor->quantization->qConfig;
         /* dest->scales is a fixed numGroups-element array, so a numGroups
-         * mismatch must fail fast rather than over/under-copy (as
-         * copySymQConfigInto). groupSize is adopted from src. */
+         * mismatch must fail fast rather than over/under-copy.
+         * groupSize is adopted from src. */
         if (outputSymQC->numGroups != inputSymQC->numGroups) {
             PRINT_ERROR("convertTensorsWithSameType: SYM group-shape mismatch (dest "
                         "numGroups=%zu groupSize=%zu, src numGroups=%zu groupSize=%zu)",

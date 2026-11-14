@@ -157,8 +157,7 @@ static void dropoutMaskScaleBfp(dropoutConfig_t *cfg, tensor_t *src, tensor_t *d
      * array (or are literally the same qConfig object, which a caller that
      * reuses one quantization_t for both wires produces), pass 1 has already
      * destroyed the grid pass 2 depends on and every decoded value is wrong.
-     * Same precedent as the accumulate engines' rejectAliasedIncrement: a
-     * two-pass walk fails fast on aliasing instead of silently miscomputing.
+     * A two-pass walk fails fast on aliasing instead of silently miscomputing.
      *
      * The exponents term is unreachable through today's API: every
      * quantizationInitBfp / …Grouped allocates its own exponents block, so two

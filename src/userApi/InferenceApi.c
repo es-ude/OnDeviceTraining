@@ -147,8 +147,8 @@ static void initBufferInput(tensor_t *input, tensor_t *buffer) {
          * validate the attach-time identity numGroups*groupSize == elements
          * first — a hand-built input tensor can bypass initTensor's gate, and a
          * malformed config would otherwise be re-derived into a DIFFERENT
-         * geometry, which the copyTensor below rejects with a confusing
-         * config-mismatch message. Geometry then comes from the same
+         * geometry, which the copyTensor below would over- or
+         * under-copy: this validate is the only guard. Geometry then comes from the same
          * derive-from-element-count rule as initBufferOutput and the training
          * wires (rematBfpWireGrouping), so all of them agree by construction.
          * The exponent VALUES are copied because they ARE the input's grid

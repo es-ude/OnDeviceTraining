@@ -11,124 +11,63 @@
  * repetition), so this header needs no RNG include path. */
 typedef struct rngStream rngStream_t;
 
-/*! 1D convolution forward (FLOAT32 only). Correlation, not flipped.
- *
- *  @param input  [batch, in_channels, input_length], FLOAT32
- *  @param weight [out_channels, in_channels/groups, kernel_size], FLOAT32
- *  @param bias   [out_channels] or NULL, FLOAT32
- *  @param kernel kernel_t with size/stride/dilation/paddingType
- *  @param groups must divide in_channels and out_channels
- *  @param output [batch, out_channels, output_length], FLOAT32, pre-allocated
- */
+/* Shared contract: these are executeOp kernels. The funnel prologue hands them
+ * operands in the arithmetic's compute representation, so the kernels do not
+ * re-check dtypes or group shapes. Layouts:
+ *   input  [batch, in_channels, input_length]
+ *   weight [out_channels, in_channels/groups, kernel_size]
+ *   bias   [out_channels] or NULL
+ *   output [batch, out_channels, output_length], pre-allocated
+ * `groups` (conv groups, independent of quantization groups) must divide
+ * in_channels and out_channels. Correlation, not flipped. */
+
+/*! FLOAT32 forward. */
 void conv1dKernelFloat32(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
                          kernel_t const *kernel, size_t groups, tensor_t *output);
 
-/*! 1D convolution forward (SYM_INT32). Integer correlation: int32 accumulator,
- *  mulInt32s per MAC, per-output-channel bias seed refolded into the product
- *  scale via rescaleIntoAccumulatorScale. Output mantissas are raw accumulator
- *  range at scale s_in*s_w, and the output's qMaxBits is overwritten with the
- *  static accumulator width, up to 32 (#516; Matmul.h has the requant-before-
- *  clone rule). The funnel epilogue restores the declared operand width.
- *
- *  @param input  [batch, in_channels, input_length], SYM_INT32
- *  @param weight [out_channels, in_channels/groups, kernel_size], SYM_INT32
- *  @param bias   [out_channels] or NULL, SYM_INT32
- *  @param kernel kernel_t with size/stride/dilation/paddingType
- *  @param groups must divide in_channels and out_channels
- *  @param output [batch, out_channels, output_length], SYM_INT32, pre-allocated
- */
+/*! SYM_INT32 forward: int32 accumulator, per-output-channel bias seed rescaled
+ *  into the product scale s_in*s_w. The output holds raw accumulator codes and
+ *  its qMaxBits is set to the proven accumulator width (up to 32); the funnel
+ *  epilogue restores the declared wire width (Matmul.h: requantize before you
+ *  clone such a tensor). */
 void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
                           kernel_t const *kernel, size_t groups, tensor_t *output, rngStream_t *rs);
 
-/*! Group-quant PR2 (Task 4): grouped-weight Conv1d forward gather core.
- *  Sibling of conv1dKernelSymInt32, adding the running group-partial
- *  combine (mirrors matmulIntCoreGrouped's idiom; since linq fold T4 the
- *  combine is integer, see below).
- *
- *  `weight` holds the grouped weight's UNPACKED mantissas as raw int32 (the
- *  same scratch shape executeOp's grouped-operand prologue branch produces:
- *  SYM_INT32 dtype, scale poisoned to 1.0f -- never read here, the real
- *  per-group scales live in the separate `groupedWeight` argument, and its
- *  qConfig->roundingMode carries the OP's rounding mode, exactly like
- *  matmulSymInt32TensorsGroupedWeight's `bQC`). `groupedWeight`
- *  (SymGroupedWeight.h) carries the ORIGINAL symQConfig_t of the stored
- *  weight tensor (validated: non-NULL, numGroups > 1 -- the per-tensor
- *  sentinel {1,0} is rejected, shape matches weight's element count via
- *  validateSymQConfigShape; any qBits is accepted) and the weight's code
- *  domain, which fixes the operand range the accumulator guard proves and
- *  the output width declares (SymAccumGuard.h). `bias` is NULL-able,
- *  SYM_INT32 like the scalar entry's bias.
- *
- *  Reduction order (per (batch, outChannel, outPos)): the weight's flat
- *  storage index for (oc, icOffset, kernelIdx) is
- *  (oc*inChannelsPerGroup + icOffset)*kernelSize + kernelIdx -- the SAME
- *  index conv1dKernelSymInt32 already computes for its own weight reads --
- *  so walking (icOffset, kernelIdx) in that same nested-loop order visits
- *  weight storage MONOTONICALLY increasing, exactly like
- *  matmulIntCoreGrouped's reduction axis (no separate contiguity check is
- *  needed here: unlike Matmul's tensor_t, which may expose a transposed
- *  logical view over its storage, this kernel always indexes `weight`
- *  through the SAME direct flat-array arithmetic conv1dKernelSymInt32 uses,
- *  never through calcElementIndexByIndices/orderOfDimensions). `g` binds to
- *  that index; the running int32 partial of each group RUN is combined once,
- *  at every group-boundary crossing AND at the end of each reduction, into
- *  the accumulator scale A = {s_in.m, s_in.e + E + 15 - F} (SymGroupFold.h;
- *  E = the largest group exponent, F in [1, 8] the largest fraction count
- *  the accumulator guard proves with the bias seed):
+/*! Grouped-weight SYM_INT32 forward (gather). `weight` is the funnel's unpacked
+ *  scratch (raw int32 codes, scale 1.0f, roundingMode = the op's mode); the real
+ *  per-group scales and the code domain come from `groupedWeight`. Quantization
+ *  groups bind to flat weight storage, which the (icOffset, kernelIdx) walk
+ *  visits in increasing order, so the running int32 partial of each group run
+ *  is combined once, at each group boundary and at the end of each reduction,
+ *  into the accumulator scale A = {s_in.m, s_in.e + E + 15 - F} (SymGroupFold.h;
+ *  E = the largest group exponent, F in [1, 8] the largest fraction count the
+ *  accumulator guard proves with the bias seed):
  *      acc += round(partial * m_g * 2^-(E - e_g + 15 - F))   (symMulShiftRound,
- *  the op's rounding mode). Error: per output element |err| <= 0.5 * A *
- *  (number of combines) (HALF_AWAY; SR is unbiased). A window with no valid
- *  tap combines nothing and takes no SR draw. The bias is seeded at A before
- *  the reduction. Output scale = A, qMaxBits = the width of the site with x
- *  widened to [xMin * 2^F - 1, xMax * 2^F + 1] plus the bias seeds.
+ *  the op's rounding mode). Per output element |err| <= 0.5 * A * (number of
+ *  combines) (HALF_AWAY; SR is unbiased); a window with no valid tap combines
+ *  nothing and takes no SR draw. The bias is seeded at A before the reduction.
+ *  Output scale = A, qMaxBits = the width of the site with x widened to
+ *  [xMin * 2^F - 1, xMax * 2^F + 1] plus the bias seeds.
  *
- *  Legacy float path (inputs wider than 16 bits, no provable F >= 1, or A outside the
- *  canonical exponent range):
- *  each partial folds into sAcc = s_in * max_g(scales[g]) (never scales[0])
- *  via rescaleIntoAccumulatorScale (GGUF rescale-combine pattern, #189); bias
- *  refolded into sAcc; output scale = sAcc.
- *
- *  @param input  [batch, in_channels, input_length], SYM_INT32
- *  @param weight [out_channels, in_channels/groups, kernel_size], grouped-SYM
- *                scratch (raw int32 mantissas, scale poisoned to 1.0f)
- *  @param bias   [out_channels] or NULL, SYM_INT32
- *  @param kernel kernel_t with size/stride/dilation/paddingType
- *  @param groups must divide in_channels and out_channels (CONV groups --
- *                independent of the QUANTIZATION groups in groupedWeight)
- *  @param output [batch, out_channels, output_length], SYM_INT32, pre-allocated
- *  @param groupedWeight the stored weight's OWN symQConfig_t (group
- *                shape/scales) plus its code domain
- */
+ *  Legacy float path (inputs wider than 16 bits, no provable F >= 1, or A
+ *  outside the canonical exponent range): each partial folds into
+ *  s_acc = s_in * max_g(scales[g]) via rescaleIntoAccumulatorScale; the bias is
+ *  refolded into s_acc; output scale = s_acc. */
 void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                  tensor_t const *bias, kernel_t const *kernel, size_t groups,
                                  tensor_t *output, const symGroupedWeight_t *groupedWeight,
                                  rngStream_t *rs);
 
-/*! BFP epic PR2 (Task 4): block-floating-point Conv1d forward. Same operand
- *  contract as matmulBfpTensors (see Matmul.h for the shared BFP GEMM-family
- *  kernel contract): input/weight/bias arrive in the funnel's UNPACKED-BFP
- *  scratch form (->data int32 sign-extended mantissa codes, ->quantization a
- *  live bfpQConfig_t), output is raw FLOAT32, the kernel never rounds.
- *  Unlike the SYM grouped kernel (which tracks only the weight's groups),
- *  BOTH operands' storage indices map to group ids per visited tap
- *  (bfpGroupAt -- per-element lookup, because padding clips taps and
- *  leaves GAPS in the visited weight/input index sequences; it divides only
- *  when an index leaves the cached current group); when EITHER id
- *  changes, the finished segment's int32 partial folds into the float
- *  accumulator via ldexpf, plus a tail fold per output element. `bias` is a
- *  value-seed dequantized to float BEFORE the reduction (headroom-exempt).
- *  int32 overflow is excluded up front by bfpValidateBlockHeadroom over the
- *  full reduction length inChannels/groups * kernelSize; every operand's
- *  group shape is fail-fast-checked via validateBfpQConfigShape.
- *
- *  @param input  [batch, in_channels, input_length], BFP scratch
- *  @param weight [out_channels, in_channels/groups, kernel_size], BFP scratch
- *  @param bias   [out_channels] or NULL, BFP scratch
- *  @param kernel kernel_t with size/stride/dilation/paddingType
- *  @param groups must divide in_channels and out_channels (CONV groups --
- *                independent of the QUANTIZATION groups in the qConfigs)
- *  @param output [batch, out_channels, output_length], FLOAT32, pre-allocated
- */
+/*! BFP forward with the FLOAT32 raw; since conv1dKernelBfpRaw it serves the
+ *  backward only (the ConvT1d dx adjoint). Operands arrive as the funnel's
+ *  unpacked BFP scratch (int32 mantissa codes plus a live bfpQConfig_t); the
+ *  output is raw FLOAT32 and the kernel never rounds (operand contract:
+ *  matmulBfpTensors in Matmul.h). Both operands are group-tracked per visited
+ *  tap (bfpGroupAt), because padding leaves gaps in the index sequences; when
+ *  either group changes, the finished int32 segment folds into a float
+ *  accumulator via ldexpf. Bias is a float value seed. bfpValidateBlockHeadroom
+ *  over in_channels/groups * kernel_size rules out int32 overflow before the
+ *  loop. */
 void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
                      kernel_t const *kernel, size_t groups, tensor_t *output);
 

@@ -11,147 +11,74 @@
  * repetition), so this header needs no RNG include path. */
 typedef struct rngStream rngStream_t;
 
-/*! Transposed 1D convolution forward (FLOAT32). Scatter form: each input
- *  value is multiplied into a window region of the output.
+/* Shared contract: these are executeOp kernels. The funnel prologue hands them
+ * operands in the arithmetic's compute representation, so the kernels do not
+ * re-check dtypes or group shapes. Layouts:
+ *   input  [batch, in_channels, input_length]
+ *   weight [in_channels, out_channels/groups, kernel_size]
+ *   bias   [out_channels] or NULL
+ *   output [batch, out_channels, output_length], pre-allocated
+ * `groups` (conv groups, independent of quantization groups) must divide
+ * in_channels and out_channels.
  *
- *  Supports both VALID and SAME paddingType. SAME is used by Conv1d-backward
- *  via the adjoint identity (dL/dx of Conv1d(SAME) = convTranspose1d(lossGrad,
- *  W, NULL, kernel-with-SAME, groups, 0, propLoss) where propLoss takes the
- *  shape of the original Conv1d's input). In SAME mode, padLeft/padRight are
- *  recovered from windowGeometry1dCalc(outputLength, kernel) — that is, the
- *  forward Conv1d's geometry on the adjoint output shape.
- *
- *  VALID output length:
- *    Lout = (Lin - 1) * stride + dilation * (K - 1) + outputPadding + 1
- *  SAME output length: caller-determined; the kernel asserts that
- *    windowGeometry1dCalc(Lout, kernel).outputLength == Lin.
- *
- *  PyTorch convention: outputPadding must satisfy
- *    outputPadding == 0  ||  outputPadding < max(stride, dilation)
- *  outputPadding must be 0 in SAME mode.
- *
- *  @param input          [batch, in_channels, input_length], FLOAT32
- *  @param weight         [in_channels, out_channels/groups, kernel_size], FLOAT32
- *  @param bias           [out_channels] or NULL, FLOAT32
- *  @param kernel         kernel_t (paddingType VALID or SAME)
- *  @param groups         must divide in_channels and out_channels
- *  @param outputPadding  trailing zeros at output end (VALID only); 0 for SAME
- *  @param output         [batch, out_channels, output_length], FLOAT32, pre-allocated
- */
+ * Geometry. VALID: Lout = (Lin - 1) * stride + dilation * (K - 1)
+ * + outputPadding + 1, with outputPadding == 0 || outputPadding <
+ * max(stride, dilation) (PyTorch). SAME/EXPLICIT is the Conv1d dx adjoint:
+ * Lout is the forward input length, padding comes from
+ * windowGeometry1dCalc(Lout, kernel), whose output length must equal Lin, and
+ * outputPadding must be 0. The kernels check the length equations. */
+
+/*! FLOAT32 forward (scatter). */
 void convTranspose1dKernelFloat32(tensor_t const *input, tensor_t const *weight,
                                   tensor_t const *bias, kernel_t const *kernel, size_t groups,
                                   size_t outputPadding, tensor_t *output);
 
-/*! Transposed 1D convolution forward (SYM_INT32). Integer scatter sibling of
- *  convTranspose1dKernelFloat32: int32 accumulator, mulInt32s, per-output-channel
- *  bias seed (refold) added in a separate pass. Output mantissas are raw
- *  accumulator range at scale s_in*s_w; the output's qMaxBits is overwritten
- *  with the static accumulator width including the bias-pass seed, up to 32
- *  (#516; Matmul.h has the requant-before-clone rule). Same VALID/SAME/EXPLICIT geometry; used
- *  as Conv1d's dx adjoint with bias==NULL (SAME/EXPLICIT branch), and as
- *  Conv1dTransposed's forward in PR3.
- *
- *  @param input  [batch, in_channels, input_length], SYM_INT32
- *  @param weight [in_channels, out_channels/groups, kernel_size], SYM_INT32
- *  @param bias   [out_channels] or NULL, SYM_INT32
- */
+/*! SYM_INT32 forward (scatter): int32 accumulator; the bias seed, rescaled into
+ *  s_in*s_w, is added in a separate pass after the scatter. The output holds raw
+ *  accumulator codes and its qMaxBits is set to the proven width including the
+ *  seeds (up to 32; Matmul.h: requantize before you clone). Conv1d's dx uses it
+ *  with bias == NULL. */
 void convTranspose1dKernelSymInt32(tensor_t const *input, tensor_t const *weight,
                                    tensor_t const *bias, kernel_t const *kernel, size_t groups,
                                    size_t outputPadding, tensor_t *output, rngStream_t *rs);
 
-/*! Group-quant PR3 (Task 2): grouped-weight sibling of
- *  convTranspose1dKernelSymInt32 -- the SCATTER core. The weight's
- *  quantization groups bind to FLAT STORAGE (g = wStorageIdx /
- *  weightGroups->groupSize), and the scatter's weight read at
- *  (ic, ocOffset, k) is the direct flat index
- *  (ic*outChPerGroup + ocOffset)*kernelSize + k -- the SAME index
- *  convTranspose1dKernelSymInt32 computes, never a transposed logical view.
- *
- *  Unlike the gather cores (matmulIntCoreGrouped /
- *  conv1dKernelSymInt32Grouped), there is NO running group-partial here:
- *  consecutive products of a k-run land in DIFFERENT output elements, so no
- *  per-(target, group) run exists across which a raw int32 partial could be
- *  carried. Instead the INPUT code is folded into each group it meets
+/*! Grouped-weight SYM_INT32 forward (scatter). `weight` is the funnel's
+ *  unpacked scratch (raw int32 codes, scale 1.0f, roundingMode = the op's
+ *  mode); per-group scales and the code domain come from `groupedWeight`.
+ *  Groups bind to flat weight storage. A scatter has no per-output run to carry
+ *  a group partial across, so the INPUT code is folded into each group it meets
  *  (SymGroupFold.h): xv_g = round(xv * m_g * 2^-(E - e_g + 15 - F)), once per
- *  (input element, group run), and the products xv_g * w are plain int32
- *  MACs at the accumulator scale A = {s_in.m, s_in.e + E + 15 - F} (E = the
- *  largest group exponent, F in [1, 8] the largest fraction count the
- *  accumulator guard proves). Error: per output element
- *  |err| <= 0.5 * A * sum|w| over its contributing products (HALF_AWAY; SR is
- *  unbiased). An input code of 0 is never folded: it contributes nothing and
- *  takes no SR draw. Bias is seeded at A AFTER the scatter (same pass order
- *  and primitive as the scalar sibling). Output scale = A, qMaxBits = the
- *  fold site's width (x widened to [xMin * 2^F - 1, xMax * 2^F + 1]) with the
- *  bias seeds.
+ *  (input element, group run), and the products xv_g * w are plain int32 MACs
+ *  at the accumulator scale A = {s_in.m, s_in.e + E + 15 - F} (E = the largest
+ *  group exponent, F in [1, 8] the largest fraction count the accumulator
+ *  guard proves). Per output element |err| <= 0.5 * A * sum|w| over its
+ *  contributing products (HALF_AWAY; SR is unbiased); an input code of 0 is
+ *  never folded and takes no SR draw. Bias is seeded at A after the scatter.
+ *  Output scale = A, qMaxBits = the fold site's width (x widened to
+ *  [xMin * 2^F - 1, xMax * 2^F + 1]) with the bias seeds.
  *
- *  Legacy float path (inputs wider than 16 bits, no provable F >= 1, or A outside the
- *  canonical exponent range):
- *  each product is rescaled into sAcc = s_in * max_g(scales[g]) individually
- *  (rescaleIntoAccumulatorScale, op rounding), |err| <= 0.5*C*sAcc for C
- *  contributing products; bias refolded into sAcc; output scale = sAcc.
+ *  Legacy float path (inputs wider than 16 bits, no provable F >= 1, or A
+ *  outside the canonical exponent range): each product is rescaled into
+ *  s_acc = s_in * max_g(scales[g]) on its own, so an output element receiving
+ *  C products carries up to 0.5*C*s_acc rounding error; bias refolded into
+ *  s_acc; output scale = s_acc.
  *
- *  Same VALID/SAME/EXPLICIT geometry as the scalar sibling; Conv1d's grouped
- *  dx adjoint (PR3 Task 3) reuses this entry with bias==NULL and the
- *  [out_channels, in_channels/groups, K] layout (the group binding is to
- *  flat storage either way).
- *
- *  @param input         [batch, in_channels, input_length], SYM_INT32
- *  @param weight        [in_channels, out_channels/groups, kernel_size],
- *                       grouped-SYM scratch (raw int32 mantissas, scale
- *                       poisoned to 1.0f; roundingMode carries the OP's mode)
- *  @param bias          [out_channels] or NULL, SYM_INT32
- *  @param kernel        kernel_t (paddingType VALID or SAME/EXPLICIT adjoint)
- *  @param groups        must divide in_channels and out_channels (CONV groups
- *                       -- independent of the QUANTIZATION groups)
- *  @param outputPadding trailing zeros at output end (VALID only); 0 for SAME
- *  @param output        [batch, out_channels, output_length], SYM_INT32,
- *                       pre-allocated
- *  @param groupedWeight the stored weight's OWN symQConfig_t (group shape/
- *                       scales; must be grouped, numGroups > 1) plus its code
- *                       domain, which fixes the operand range the accumulator
- *                       guard proves and the output width declares
- *                       (SymGroupedWeight.h, SymAccumGuard.h)
- */
+ *  Conv1d's grouped dx uses it with bias == NULL and the Conv1d weight layout
+ *  (the flat-storage binding holds either way). */
 void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                           tensor_t const *bias, kernel_t const *kernel,
                                           size_t groups, size_t outputPadding, tensor_t *output,
                                           const symGroupedWeight_t *groupedWeight, rngStream_t *rs);
 
-/*! BFP epic PR2 (Task 5, D9): output-centric (gather) ConvT1d forward under
- *  ARITH_BFP -- every output element is a dot product over its contributors
- *  (convTranspose1dTapsAt), giving the int32 block-partial contract
- *  (same-exponent segments) that a scatter cannot (consecutive scatter
- *  products land in DIFFERENT output elements; the Conv1d dx scatter below
- *  aligns every product on its own instead); the SYM scatter cores above
- *  are untouched.
- *
- *  Same operand contract as matmulBfpTensors / conv1dKernelBfp: input/weight/
- *  bias arrive in the funnel's UNPACKED-BFP scratch form (->data int32
- *  sign-extended mantissa codes, ->quantization a live bfpQConfig_t), output
- *  is raw FLOAT32, the kernel never rounds. The reduction walks taps OUTER /
- *  icOffset INNER; BOTH operands' storage indices map to group ids per step
- *  (bfpGroupAt -- per-element lookup, tap hops make both index sequences
- *  non-contiguous; it divides only when an index leaves the cached current
- *  group); when EITHER id changes, the finished segment's int32
- *  partial folds into the float accumulator via bfpLdexpInt32, plus a tail fold per
- *  output element. `bias` is seeded per output element (value-seed
- *  dequantized to float BEFORE the reduction -- no separate bias pass,
- *  unlike the scatter cores); outputPadding tail positions have no
- *  contributors and stay at the bias seed. int32 overflow is excluded up
- *  front by bfpValidateBlockHeadroom over in_channels/groups * kernel_size;
- *  every operand's group shape is fail-fast-checked via
- *  validateBfpQConfigShape. Geometry (VALID, and the SAME/EXPLICIT adjoint)
- *  resolves through the same shared helper as the scatter kernels.
- *
- *  @param input          [batch, in_channels, input_length], BFP scratch
- *  @param weight         [in_channels, out_channels/groups, kernel_size], BFP scratch
- *  @param bias           [out_channels] or NULL, BFP scratch
- *  @param kernel         kernel_t (paddingType VALID or SAME/EXPLICIT adjoint)
- *  @param groups         must divide in_channels and out_channels (CONV groups
- *                        -- independent of the QUANTIZATION groups)
- *  @param outputPadding  trailing zeros at output end (VALID only); 0 for SAME
- *  @param output         [batch, out_channels, output_length], FLOAT32, pre-allocated
- */
+/*! BFP forward, gather form: each output element is a dot product over its
+ *  contributors (convTranspose1dTapsAt), because the scatter form cannot carry
+ *  an int32 block partial. Operand contract as conv1dKernelBfp: unpacked BFP
+ *  scratch in, raw FLOAT32 out, no rounding. Taps outer, icOffset inner; both
+ *  operands are group-tracked per step (bfpGroupAt) and each finished int32
+ *  segment folds into a float accumulator via bfpLdexpInt32. Bias is a float
+ *  seed per output element, so outputPadding tail positions hold only the bias.
+ *  bfpValidateBlockHeadroom over in_channels/groups * kernel_size rules out
+ *  int32 overflow before the loop. */
 void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weight,
                                     tensor_t const *bias, kernel_t const *kernel, size_t groups,
                                     size_t outputPadding, tensor_t *output);

@@ -280,7 +280,7 @@ void testConvTranspose1dKernelAdjointSameGrouped() {
     }
 }
 
-/* ---- BFP epic PR2 (Task 5): convTranspose1dKernelBfpGather (D9) ----------
+/* ---- convTranspose1dKernelBfpGather ------------------------------------
  *
  * Operands arrive in the funnel's UNPACKED-BFP scratch form: ->data holds
  * int32 sign-extended mantissa codes, ->quantization is BFP with a live
@@ -436,7 +436,7 @@ void testConvTranspose1dKernelBfpGatherNoBiasZeroSeeds(void) {
                              kBfpConvTNoBiasExpected_len * sizeof(float));
 }
 
-/* BFP epic PR2: the gather forwards kernel->dilation into
+/* The gather forwards kernel->dilation into
  * convTranspose1dTapsAt only inside the BFP arm; every other BFP fixture runs
  * dilation=1, where a hardcoded 1 is an arithmetic identity. This fixture's
  * contributor enumeration (out_len 14 = (5-1)*2 + 2*2 + 1 + 1) genuinely
@@ -499,7 +499,7 @@ void testConvTranspose1dKernelBfpGatherDilation2MatchesGold(void) {
                              kBfpConvTDilExpected_len * sizeof(float));
 }
 
-/* BFP epic PR2, the ConvT sibling of UnitTestMatmul.c's
+/* The ConvT sibling of UnitTestMatmul.c's
  * testMatmulBfpGroupedBiasBindsPerGroupExponent: same bias VALUES stored
  * grouped {numGroups=2, groupSize=1} with non-uniform exponents (goldgen
  * asserts a group-0 collapse differs), expected output bit-identical to the
@@ -675,7 +675,7 @@ void testConvTranspose1dKernelBfpGatherPowerOfTwoBitIdenticalToGroupedSym(void) 
     }
 }
 
-/* Geometry parity (BFP D9): the gather must resolve the adjoint-SAME geometry
+/* Geometry parity: the gather must resolve the adjoint-SAME geometry
  * exactly like the scatter kernels (shared convT1dResolveGeometry) -- same
  * fixture as testConvTranspose1dKernelSamePaddingSymmetric (K=3, SAME,
  * stride 1, Lin=5, padLeft recovered as 1), run BOTH the FLOAT32 scatter
@@ -861,67 +861,10 @@ void testConvTranspose1dKernelBfpGatherHeadroomGuardDies(void) {
         convTranspose1dKernelBfpGather(&inTensor, &wTensor, NULL, &kernel, 1, 0, &outTensor));
 }
 
-/* Group-shape fail-fast (Task 3/4 precedent): bfpGroupOf divides by groupSize
- * with no relation to numGroups, so a mismatched config ({numGroups=2,
- * groupSize=4} on 20 elements: 2*4 == 8 != 20) would silently read
- * exponents[] out of bounds. The kernel must route every operand through
- * validateBfpQConfigShape before touching data. */
-void testConvTranspose1dKernelBfpGatherRejectsMismatchedGroupShape(void) {
-    tensor_t inTensor;
-    int32_t inData[20] = {0};
-    size_t inDims[] = {1, 2, 10};
-    size_t inOrder[] = {0, 1, 2};
-    shape_t inShape;
-    setShape(&inShape, inDims, 3, inOrder);
-    uint8_t inExponents[] = {127, 127};
-    bfpQConfig_t inQC = {.exponents = inExponents,
-                         .numGroups = 2,
-                         .groupSize = 4, /* 2*4 == 8 != 20 elements */
-                         .roundingMode = HALF_AWAY,
-                         .mantissaBits = 6,
-                         .exponentBits = 8};
-    quantization_t inQ;
-    initBfpQuantization(&inQC, &inQ);
-    setTensorValues(&inTensor, (uint8_t *)inData, &inShape, &inQ, NULL);
-
-    tensor_t wTensor;
-    int32_t wData[6] = {0};
-    size_t wDims[] = {2, 1, 3}; /* [Cin=2, Cout/groups=1, K=3] */
-    size_t wOrder[] = {0, 1, 2};
-    shape_t wShape;
-    setShape(&wShape, wDims, 3, wOrder);
-    uint8_t wExponents[] = {127};
-    bfpQConfig_t wQC = {.exponents = wExponents,
-                        .numGroups = 1,
-                        .groupSize = 0,
-                        .roundingMode = HALF_AWAY,
-                        .mantissaBits = 4,
-                        .exponentBits = 8};
-    quantization_t wQ;
-    initBfpQuantization(&wQC, &wQ);
-    setTensorValues(&wTensor, (uint8_t *)wData, &wShape, &wQ, NULL);
-
-    tensor_t outTensor;
-    float outData[12];
-    size_t outDims[] = {1, 1, 12}; /* (10-1)*1 + 2 + 0 + 1 */
-    size_t outOrder[] = {0, 1, 2};
-    shape_t outShape;
-    setShape(&outShape, outDims, 3, outOrder);
-    quantization_t outQ;
-    initFloat32Quantization(&outQ);
-    setTensorValues(&outTensor, (uint8_t *)outData, &outShape, &outQ, NULL);
-
-    kernel_t kernel;
-    initKernel(&kernel, 3, VALID, 1, 1);
-
-    ASSERT_EXITS_WITH_FAILURE(
-        convTranspose1dKernelBfpGather(&inTensor, &wTensor, NULL, &kernel, 1, 0, &outTensor));
-}
-
-/* conv-groups=2 parity gold (#416, BFP PR3 Task 4): SPLIT channels
+/* conv-groups=2 parity gold: SPLIT channels
  * (inChPerGroup = 4, outChPerGroup = 2, not depthwise), so the gather's
- * inLo/oc_offset channel arithmetic is load-bearing -- the PR2 fixtures all
- * ran groups=1. Same stack-fixture idiom and VALID stride-2 outputPadding-1
+ * inLo/oc_offset channel arithmetic is load-bearing -- the other fixtures
+ * all run groups=1. Same stack-fixture idiom and VALID stride-2 outputPadding-1
  * geometry as testConvTranspose1dKernelBfpGatherMatchesGold, gold from
  * convT1d_bfp_gather_ref(conv_groups=2) with the full vacuity self-checks
  * under split channels (the generator's asymmetric-scaling pin keeps a
@@ -1014,10 +957,6 @@ static int32_t gCtW[CT_MAXN];
 static int32_t gCtY[CT_MAXN * 2];
 static uint8_t gCtOutBits; /* output qMaxBits after the kernel returned */
 
-/* Operand whose storage dtype ctRunOutCh swaps to FLOAT32 (dtype-validation tests). */
-typedef enum { CT_POISON_NONE, CT_POISON_X, CT_POISON_W, CT_POISON_BIAS, CT_POISON_Y } ctPoison_t;
-static ctPoison_t gCtPoison = CT_POISON_NONE;
-
 /* Code domain of the grouped weight ctRunOutCh hands the grouped kernel (a
  * stored SYM weight unless a test says ASYM image). */
 static symCodeDomain_t gCtWeightDomain = SYM_CODES_TWOS_COMPLEMENT;
@@ -1059,18 +998,6 @@ static void ctRunOutCh(size_t inCh, size_t len, size_t k, uint8_t xBits, uint8_t
     initSymInt32Quantization(&wQC, &wQ);
     initSymInt32Quantization(&yQC, &yQ);
     initSymInt32Quantization(&biasQC, &biasQ);
-    if (gCtPoison == CT_POISON_X) {
-        initFloat32Quantization(&xQ);
-    }
-    if (gCtPoison == CT_POISON_W) {
-        initFloat32Quantization(&wQ);
-    }
-    if (gCtPoison == CT_POISON_BIAS) {
-        initFloat32Quantization(&biasQ);
-    }
-    if (gCtPoison == CT_POISON_Y) {
-        initFloat32Quantization(&yQ);
-    }
     int32_t biasData[CT_MAX_OUT_CH] = {0};
     for (size_t oc = 0; biasCodes != NULL && oc < outCh; oc++) {
         biasData[oc] = biasCodes[oc];
@@ -1267,7 +1194,7 @@ void testConvTranspose1dKernelSymGroupedGuardWideWeightRunsExactWhenItFitsAndAbo
 }
 
 /* See the Matmul twin: each rescaled product is 1024 * 32767 here, so the
- * #189 reserve is not the issue; the scatter accumulates 80 of them (group 2
+ * seed reserve is not the issue; the scatter accumulates 80 of them (group 2
  * negated, one zero). The sum fits; all-positive wraps. */
 static void wideGroupedFill(bool secondGroupNegative) {
     ctFill(80, 1024, 32767, false);
@@ -1285,13 +1212,13 @@ void testConvTranspose1dKernelSymGroupedWideScatterRunsExactWhenSumFits(void) {
     TEST_ASSERT_EQUAL_INT32(1024 * 32767, gCtY[0]);
 }
 
-void testConvTranspose1dKernelSymGroupedWideScatterThatWrapsHitsTheF9Guard(void) {
+void testConvTranspose1dKernelSymGroupedWideScatterThatWrapsHitsTheAccumulatorGuard(void) {
     wideGroupedFill(false);
     ASSERT_EXITS_WITH_OUTPUT(1, "convTranspose1dKernelSymInt32Grouped",
                              ctRun(80, 1, 1, 12, 16, NULL, 2));
 }
 
-/* ---- #516: the output declares the accumulator's static width ------------ */
+/* ---- The output declares the accumulator's static width ------------ */
 
 /* int4 x int4, 3 input channels scattering into one output element: the stamp
  * is the static range [-168, 192] -> 9, never the data (3). The bias lands in
@@ -1395,34 +1322,6 @@ void testConvTranspose1dKernelSymStampCountsTheLargestBiasSeedOverChannels(void)
     TEST_ASSERT_EQUAL_INT32(3 - 1870, gCtY[1]);
     TEST_ASSERT_EQUAL_UINT8(12, gCtOutBits);
 }
-
-/* Operand dtype validation: a non-SYM_INT32 operand would be read through the
- * wrong qConfig struct, so each kernel must abort naming itself and the operand. */
-static const int32_t kCtBias = 0;
-#define CT_DTYPE_DEATH(name, poison, numGroups, bias, banner)                                      \
-    void name(void) {                                                                              \
-        ctFill(2, 3, 3, false);                                                                    \
-        gCtPoison = poison;                                                                        \
-        ASSERT_EXITS_WITH_OUTPUT(1, banner, ctRun(2, 1, 1, 12, 12, bias, numGroups));              \
-        gCtPoison = CT_POISON_NONE;                                                                \
-    }
-
-CT_DTYPE_DEATH(testConvT1dKernelSymRejectsFloatInput, CT_POISON_X, 0, NULL,
-               "convTranspose1dKernelSymInt32: input must be SYM_INT32")
-CT_DTYPE_DEATH(testConvT1dKernelSymRejectsFloatWeight, CT_POISON_W, 0, NULL,
-               "convTranspose1dKernelSymInt32: weight must be SYM_INT32")
-CT_DTYPE_DEATH(testConvT1dKernelSymRejectsFloatBias, CT_POISON_BIAS, 0, &kCtBias,
-               "convTranspose1dKernelSymInt32: bias must be SYM_INT32")
-CT_DTYPE_DEATH(testConvT1dKernelSymRejectsFloatOutput, CT_POISON_Y, 0, NULL,
-               "convTranspose1dKernelSymInt32: output must be SYM_INT32")
-CT_DTYPE_DEATH(testConvT1dKernelSymGroupedRejectsFloatInput, CT_POISON_X, 2, NULL,
-               "convTranspose1dKernelSymInt32Grouped: input must be SYM_INT32")
-CT_DTYPE_DEATH(testConvT1dKernelSymGroupedRejectsFloatWeight, CT_POISON_W, 2, NULL,
-               "convTranspose1dKernelSymInt32Grouped: weight must be SYM_INT32")
-CT_DTYPE_DEATH(testConvT1dKernelSymGroupedRejectsFloatBias, CT_POISON_BIAS, 2, &kCtBias,
-               "convTranspose1dKernelSymInt32Grouped: bias must be SYM_INT32")
-CT_DTYPE_DEATH(testConvT1dKernelSymGroupedRejectsFloatOutput, CT_POISON_Y, 2, NULL,
-               "convTranspose1dKernelSymInt32Grouped: output must be SYM_INT32")
 
 /* ---- Conv1d dx under ARITH_BFP: the integer scatter -----------------------
  * convTranspose1dKernelBfpScatter walks the FLOAT32 scatter loop, keeps an
@@ -2845,20 +2744,12 @@ void testConvTGroupedFoldUnalignedConvGroups2(void) {
 
 int main(void) {
     UNITY_BEGIN();
-    RUN_TEST(testConvT1dKernelSymRejectsFloatInput);
-    RUN_TEST(testConvT1dKernelSymRejectsFloatWeight);
-    RUN_TEST(testConvT1dKernelSymRejectsFloatBias);
-    RUN_TEST(testConvT1dKernelSymRejectsFloatOutput);
-    RUN_TEST(testConvT1dKernelSymGroupedRejectsFloatInput);
-    RUN_TEST(testConvT1dKernelSymGroupedRejectsFloatWeight);
-    RUN_TEST(testConvT1dKernelSymGroupedRejectsFloatBias);
-    RUN_TEST(testConvT1dKernelSymGroupedRejectsFloatOutput);
     RUN_TEST(testConvTranspose1dKernelSymStampsResultWidthIncludesBiasSeed);
     RUN_TEST(testConvTranspose1dKernelSymGroupedStampsFoldWidthIncludesBiasSeed);
     RUN_TEST(testConvTranspose1dKernelSymGroupedAsymImageStampsItsFullRange);
     RUN_TEST(testConvTranspose1dKernelSymStampCountsTheLargestBiasSeedOverChannels);
     RUN_TEST(testConvTranspose1dKernelSymGroupedWideScatterRunsExactWhenSumFits);
-    RUN_TEST(testConvTranspose1dKernelSymGroupedWideScatterThatWrapsHitsTheF9Guard);
+    RUN_TEST(testConvTranspose1dKernelSymGroupedWideScatterThatWrapsHitsTheAccumulatorGuard);
     RUN_TEST(
         testConvTranspose1dKernelSymGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps);
     RUN_TEST(testConvTranspose1dKernelSymGroupedGuardAsymImageWeightKeepsItsFullRange);
@@ -2893,7 +2784,6 @@ int main(void) {
     RUN_TEST(testConvTranspose1dKernelBfpGatherAdjointSameParityWithScatter);
     RUN_TEST(testConvTranspose1dKernelBfpGatherValidLengthMismatchDies);
     RUN_TEST(testConvTranspose1dKernelBfpGatherHeadroomGuardDies);
-    RUN_TEST(testConvTranspose1dKernelBfpGatherRejectsMismatchedGroupShape);
     RUN_TEST(testConvTranspose1dKernelBfpGatherConvGroups2MatchesGold);
     RUN_TEST(testConvTranspose1dKernelBfpScatterWorstCaseM16IsExact);
     RUN_TEST(testConvTranspose1dKernelBfpScatterMixedExponentsMatchesReference);

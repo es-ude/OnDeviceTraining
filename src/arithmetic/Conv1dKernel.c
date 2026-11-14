@@ -141,32 +141,9 @@ SYM_ACCUM_NOINLINE void conv1dSymLoopsChecked(const convSymView_t *v, const symA
     conv1dSymLoops(v, true, site);
 }
 
-/* Every operand is read through symInt32QConfig_t / as int32 codes, so a
- * different storage dtype must abort here instead of being reinterpreted. The
- * grouped entries pass the weight as a SYM_INT32 view too (its per-group
- * qConfig rides in weightGroups), so the same check holds for them. */
-static void conv1dValidateSymOperand(const tensor_t *t, const char *kernelName, const char *what) {
-    if (t->quantization->type != SYM_INT32) {
-        PRINT_ERROR("%s: %s must be SYM_INT32", kernelName, what);
-        exit(1);
-    }
-}
-
-static void conv1dValidateSymOperands(const tensor_t *input, const tensor_t *weight,
-                                      const tensor_t *bias, const tensor_t *output,
-                                      const char *kernelName) {
-    conv1dValidateSymOperand(input, kernelName, "input");
-    conv1dValidateSymOperand(weight, kernelName, "weight");
-    if (bias != NULL) {
-        conv1dValidateSymOperand(bias, kernelName, "bias");
-    }
-    conv1dValidateSymOperand(output, kernelName, "output");
-}
-
 void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
                           kernel_t const *kernel, size_t groups, tensor_t *output,
                           rngStream_t *rs) {
-    conv1dValidateSymOperands(input, weight, bias, output, "conv1dKernelSymInt32");
     size_t batch = input->shape->dimensions[0];
     size_t inChannels = input->shape->dimensions[1];
     size_t inputLength = input->shape->dimensions[2];
@@ -203,8 +180,7 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
     const float outputScale = canonProductScale(inScale, wScale, ODT_SCALE_NEAREST);
 
     /* Per-output-channel bias seed, refolded into the accumulator product scale
-     * via the #189 guarded helper (NULL bias -> all zero). VLA over channels
-     * (topology-bounded), mirroring matmulSymInt32TensorsWithBias's seed[bColumns]. */
+     * with the overflow-guarded rescale (NULL bias -> all zero). */
     int32_t seed[outChannels];
     if (bias != NULL) {
         int32_t const *bArr = (int32_t const *)bias->data;
@@ -247,35 +223,11 @@ void conv1dKernelSymInt32(tensor_t const *input, tensor_t const *weight, tensor_
         conv1dSymLoopsChecked(&view, &site);
     }
 
-    if (output->quantization->qConfig == NULL) {
-        PRINT_ERROR("conv1dKernelSymInt32: output qConfig is NULL but SYM_INT32 expected (#187)");
-        exit(1);
-    }
     symInt32QConfig_t *outputQC = (symInt32QConfig_t *)output->quantization->qConfig;
     storeCanonScale(&outputQC->scale, outputScale);
-    /* The output carries raw accumulator codes that can exceed the operands'
-     * width, so it declares the width the guard proved (#516): a consumer that
-     * reads this wire as a SYM operand sizes its own proof from it. */
+    /* Declare the accumulator's proven width so a downstream SYM consumer sizes
+     * its proof from it. */
     outputQC->qMaxBits = symAccumResultBits(&site);
-}
-
-/* Group-quant PR2 (Task 4): entry guards mirror matmulValidateWeightGroups
- * (Matmul.c) exactly -- non-NULL and the per-tensor sentinel
- * {numGroups=1, groupSize=0} rejected (its groupSize=0 would divide-by-zero
- * below; per-tensor weights take conv1dKernelSymInt32). */
-static void conv1dValidateWeightGroups(const symGroupedWeight_t *groupedWeight,
-                                       size_t weightElemCount) {
-    if (groupedWeight == NULL || groupedWeight->groups == NULL) {
-        PRINT_ERROR("conv1dKernelSymInt32Grouped: weightGroups must not be NULL");
-        exit(1);
-    }
-    const symQConfig_t *weightGroups = groupedWeight->groups;
-    if (weightGroups->numGroups <= 1) {
-        PRINT_ERROR("conv1dKernelSymInt32Grouped: weightGroups must be grouped (numGroups>1); "
-                    "per-tensor weights take conv1dKernelSymInt32");
-        exit(1);
-    }
-    validateSymQConfigShape(weightGroups, weightElemCount);
 }
 
 /* Channel-aligned case of conv1dSymGroupedLoops (groupSize a multiple of the
@@ -626,8 +578,8 @@ conv1dSymGroupedFoldLoops(const convSymView_t *v, const symQConfig_t *weightGrou
     }
 }
 
-/* Per-output-channel bias seed rescaled into the accumulator scale via the
- * #189 guarded helper (NULL bias -> all zero); one SR draw per channel. */
+/* Per-output-channel bias seed rescaled into the accumulator scale with the
+ * overflow-guarded rescale (NULL bias -> all zero); one SR draw per channel. */
 static void conv1dGroupedBiasSeeds(const tensor_t *bias, size_t outChannels, float accScale,
                                    rngStream_t *rs, int32_t *seed) {
     if (bias == NULL) {
@@ -645,21 +597,10 @@ static void conv1dGroupedBiasSeeds(const tensor_t *bias, size_t outChannels, flo
     }
 }
 
-/* The grouped entry's output qConfig, checked where the stamps land. */
-static symInt32QConfig_t *conv1dGroupedOutputQC(tensor_t *output) {
-    if (output->quantization->qConfig == NULL) {
-        PRINT_ERROR(
-            "conv1dKernelSymInt32Grouped: output qConfig is NULL but SYM_INT32 expected (#187)");
-        exit(1);
-    }
-    return (symInt32QConfig_t *)output->quantization->qConfig;
-}
-
 void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                  tensor_t const *bias, kernel_t const *kernel, size_t groups,
                                  tensor_t *output, const symGroupedWeight_t *groupedWeight,
                                  rngStream_t *rs) {
-    conv1dValidateSymOperands(input, weight, bias, output, "conv1dKernelSymInt32Grouped");
     size_t batch = input->shape->dimensions[0];
     size_t inChannels = input->shape->dimensions[1];
     size_t inputLength = input->shape->dimensions[2];
@@ -677,7 +618,10 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
     size_t inChPerGroup = inChannels / groups;
     size_t outChPerGroup = outChannels / groups;
 
-    conv1dValidateWeightGroups(groupedWeight, outChannels * inChPerGroup * kernelSize);
+    /* Checks the group config against the weight size implied by the runtime
+     * channels, which also catches an input-channel mismatch the layer does not
+     * check yet. */
+    validateSymQConfigShape(groupedWeight->groups, outChannels * inChPerGroup * kernelSize);
     const symQConfig_t *weightGroups = groupedWeight->groups;
 
     windowGeometry1d_t geom = windowGeometry1dCalc(inputLength, kernel);
@@ -767,16 +711,16 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
         conv1dSymGroupedFoldLoops(&view, weightGroups, &fold, wQC->roundingMode, rs, &partialSite,
                                   &accSite);
 
-        symInt32QConfig_t *outputQC = conv1dGroupedOutputQC(output);
+        symInt32QConfig_t *outputQC = (symInt32QConfig_t *)output->quantization->qConfig;
         odtScaleStore(&outputQC->scale, fold.accScale);
-        outputQC->qMaxBits = symAccumResultBits(&accSite); /* fold site + seeds (#516) */
+        outputQC->qMaxBits = symAccumResultBits(&accSite); /* fold site + seeds */
         return;
     }
 
     /* Legacy float path: each group partial rescaled into sAcc. */
     float inScale = loadCanonScale(&inQC->scale);
 
-    /* s_acc = inScale * max_g(weightGroups->scales[g]) (GGUF pattern, #189):
+    /* s_acc = inScale * max_g(weightGroups->scales[g]) (GGUF pattern):
      * a single linear pass over scales[], NEVER scales[0] alone -- see
      * matmulSymInt32TensorsGroupedWeight's identical derivation. */
     float maxScale = loadCanonScale(&weightGroups->scales[0]);
@@ -808,19 +752,16 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
                                      &partialSite, &accSite);
     }
 
-    symInt32QConfig_t *outputQC = conv1dGroupedOutputQC(output);
+    symInt32QConfig_t *outputQC = (symInt32QConfig_t *)output->quantization->qConfig;
     storeCanonScale(&outputQC->scale, sAcc);
-    outputQC->qMaxBits = symAccumResultBits(&accSite); /* the rescaled accumulator's width (#516) */
+    outputQC->qMaxBits = symAccumResultBits(&accSite); /* the rescaled accumulator's width */
 }
 
-/* BFP epic PR2 (Task 4): conv1dKernelSymInt32Grouped's BFP twin (see
- * Conv1dKernel.h for the full contract). Differences from the SYM grouped
- * kernel: BOTH operands are group-tracked (not just the weight), the
- * boundary combine is a rounding-free ldexpf fold into a float accumulator
- * (never rescaleIntoAccumulatorScale), and the output is raw FLOAT32 (no
- * output-scale write -- the funnel epilogue owns packing). Since the
- * integer-only forward (conv1dKernelBfpRaw below) this float fold serves
- * the BACKWARD only: the ConvT1d dx adjoint keeps its FLOAT32 raw. */
+/* BFP twin of conv1dKernelSymInt32Grouped: both operands are group-tracked,
+ * each same-exponent segment folds into a float accumulator via ldexpf, and the
+ * output is raw FLOAT32 (the funnel epilogue packs it). Since the integer-only
+ * forward (conv1dKernelBfpRaw below) it serves the backward only: the ConvT1d
+ * dx adjoint keeps its FLOAT32 raw. */
 void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t const *bias,
                      kernel_t const *kernel, size_t groups, tensor_t *output) {
     size_t batch = input->shape->dimensions[0];
@@ -830,14 +771,6 @@ void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t con
     size_t outputLength = output->shape->dimensions[2];
     size_t kernelSize = weight->shape->dimensions[2];
 
-    if (input->quantization->type != BFP || weight->quantization->type != BFP) {
-        PRINT_ERROR("conv1dKernelBfp: input and weight must be BFP (unpacked scratch form)");
-        exit(1);
-    }
-    if (output->quantization->type != FLOAT32) {
-        PRINT_ERROR("conv1dKernelBfp: output must be raw FLOAT32");
-        exit(1);
-    }
     if (inChannels % groups != 0 || outChannels % groups != 0) {
         PRINT_ERROR("conv1dKernelBfp: groups (%zu) must divide in_channels "
                     "(%zu) and out_channels (%zu)",
@@ -851,25 +784,7 @@ void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t con
     bfpQConfig_t *inQC = input->quantization->qConfig;
     bfpQConfig_t *wQC = weight->quantization->qConfig;
 
-    /* Group-shape fail-fast (validateSymQConfigShape precedent): bfpGroupOf
-     * divides by groupSize with no relation to numGroups, so a mismatched
-     * config would read exponents[] out of bounds. */
-    validateBfpQConfigShape(inQC, calcNumberOfElementsByShape(input->shape));
-    validateBfpQConfigShape(wQC, calcNumberOfElementsByShape(weight->shape));
-
-    bfpQConfig_t *biasQC = NULL;
-    if (bias != NULL) {
-        if (bias->quantization->type != BFP) {
-            PRINT_ERROR("conv1dKernelBfp: bias must be BFP");
-            exit(1);
-        }
-        if (calcNumberOfElementsByShape(bias->shape) != outChannels) {
-            PRINT_ERROR("conv1dKernelBfp: bias element count != out_channels");
-            exit(1);
-        }
-        biasQC = bias->quantization->qConfig;
-        validateBfpQConfigShape(biasQC, outChannels);
-    }
+    bfpQConfig_t *biasQC = bias != NULL ? bias->quantization->qConfig : NULL;
 
     bfpValidateBlockHeadroom(inQC, wQC, inChPerGroup * kernelSize, "conv1dKernelBfp");
 
@@ -944,8 +859,8 @@ void conv1dKernelBfp(tensor_t const *input, tensor_t const *weight, tensor_t con
                             } else if (inGroup != currentInGroup || wGroup != currentWGroup) {
                                 /* Boundary fold on EITHER operand's group change:
                                  * the finished same-exponent segment's raw int32
-                                 * partial enters the float accumulator via a pure
-                                 * exponent shift -- rounding-free by contract. */
+                                 * partial enters the float accumulator via ldexpf (exact; only
+                                 * the int-to-float cast rounds above 2^24). */
                                 acc += ldexpf((float)partial,
                                               (int)inQC->exponents[currentInGroup] - inExpBias +
                                                   (int)wQC->exponents[currentWGroup] - wExpBias);

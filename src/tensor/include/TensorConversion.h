@@ -14,10 +14,11 @@ typedef void (*conversionFunction_t)(tensor_t *inputTensor, tensor_t *outputTens
 void convertTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs);
 
 #define ODT_CONVERSION_CHUNK_ELEMS 256
-/* Streams `count` elements of src (FLOAT32/SYM_INT32/SYM/ASYM) starting at
- * element `elemOffset` into out[] as dequantized floats. Contract:
+/* Streams `count` elements of src (FLOAT32/SYM_INT32/SYM/ASYM/BFP) starting at
+ * element `elemOffset` into out[] as dequantized floats. Caller guarantees:
  * count <= ODT_CONVERSION_CHUNK_ELEMS, elemOffset % 8 == 0 (packed-width
- * byte alignment); violations fail fast. */
+ * byte alignment), the range lies inside src, and SYM/ASYM sources are
+ * per-tensor (only scales[0]/zeroPoints[0] are read); BFP may be grouped. */
 void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, float *out);
 
 /*! @brief SYM_INT32 -> SYM_INT32 requantization with a FRESH dynamic scale.
@@ -55,8 +56,7 @@ void requantSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStr
  * SATURATES BY DESIGN: values outside the representable range clamp to
  * qMin/qMax — this is the Deutel (IEEE TCAD 44(4) 2025) Eq. 4 analog
  * (layer-epilogue requant of errors/activations into a known target scale);
- * clamping IS the intended semantics, not an error. Covers the #187-deferred
- * symmetric scratch+convert propLoss case.
+ * clamping IS the intended semantics, not an error.
  *
  * IN-PLACE CAPABLE via a shared data buffer (two tensor_t views with their
  * own qConfigs): single same-index read-then-write pass over int32 storage.
@@ -69,12 +69,11 @@ void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor,
  * Two-pass value-domain repack: pass 1 streams the source through
  * dequantChunkToFloat (the source's OWN group scales apply per element) and
  * derives one FRESH stored exponent per TARGET group (absmax -> smallest E
- * with absmax/2^E <= qMax, BFP D6 clamps at the stored-range ends); pass 2
+ * with absmax/2^E <= qMax, clamped at the stored-range ends); pass 2
  * re-streams and packs mantissas at the target's mantissaBits with the
  * TARGET config's roundingMode. A source element that DECODES to a
- * non-finite value fails fast (#421 ruling R9) -- only a hand-built
- * non-finite-scale grid can produce one, since derived exponents cap at
- * bias + 127 and #420 G5 rejects deserialized records above that cap.
+ * non-finite value fails fast. Decoded values can overflow even when the
+ * stored scale is finite.
  * Source exponents are never copied. This one cell covers the OUT_WRITE
  * width-restore, mantissa/exponent-width changes, and re-blocking (any
  * source geometry -> any target geometry). n == 0 writes zero-state
@@ -89,17 +88,13 @@ void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor,
  * is reachable only via direct matrix dispatch (executeConvert / the
  * OUT_WRITE epilogue). */
 void requantBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs);
-/* The single BFP exponent authority (frexpf snap-up, BFP D6 clamp both ends).
-   A NON-FINITE absMax (inf or NaN -- an overflowed product in a caller's
-   pass 1) has no derivable exponent and saturates at the cap, BFP D6's high
-   regime taken to its limit: the block's mantissas then clamp to the code
-   range under the largest FINITE scale, instead of frexpf's unspecified
-   result leaking an arbitrary exponent into the emit pass.
-   The funnel's staging quantizer and (since PR2) wire OUT_WRITE epilogues
-   derive exponents through this authority; epic PR3 added the grad-accumulate
-   engines and the scale arm, and extended OUT_WRITE's reach to the backward's
-   dx wire (op-local re-blocking never happens -- the BFP D8 amendment,
-   docs/conventions/arithmetic-bfp.md §9). */
+/* The single BFP exponent authority (frexpf snap-up, clamped at both ends of
+   the stored range); every BFP quantizer, accumulate engine and the scale arm
+   derive exponents through it. A NON-FINITE absMax (an overflowed product in
+   a caller's pass 1) saturates at the cap: the block's mantissas then clamp
+   to the code range under the largest FINITE scale, instead of frexpf's
+   unspecified result leaking an arbitrary exponent. Op-local re-blocking
+   never happens (docs/conventions/arithmetic-bfp.md §9). */
 void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t maxStored,
                              uint8_t *storedOut);
 /* Quantize a float buffer into UNPACKED int32 BFP mantissa codes (no payload
@@ -108,27 +103,24 @@ void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t max
    geometry/widths/roundingMode; its exponents array must have numGroups
    entries and is overwritten. Its group shape must satisfy the
    exact-division invariant (numGroups * groupSize == n, or the per-tensor
-   {1,0} sentinel) -- validated at entry (#421 U9), because a short
+   {1,0} sentinel) -- validated at entry, because a short
    numGroups * groupSize would otherwise leave the codesOut TAIL
-   uninitialized. codesOut is caller-owned, n entries. Writing into the
-   CALLER's codesOut is exempt from the no-O(n)-internal-scratch converter
-   contract by design -- this function allocates nothing.
-   Value-domain: saturates (BFP D6), never aborts on a FINITE value -- and the
+   uninitialized. codesOut is caller-owned, n entries; this function
+   allocates nothing.
+   Value-domain: saturates, never aborts on a FINITE value -- and the
    saturating clamp runs in the FLOAT domain before the round, since at a
-   narrow exponentBits the BFP D6-capped scale can push values / scale out of
-   int32 range for entirely finite inputs (#421 U2). A NON-FINITE input value
-   is the one hard failure (#421 ruling R9, the value-side twin of the
-   accumulate engines' increment guard): BFP has no NaN/inf code, so dropping
-   the value or saturating it would lose or invent data. Reachable in
-   practice -- a diverged step's NaN loss arrives here through the funnel's
-   FLOAT32-operand staging -- and previously platform-divergent, not merely
-   undefined. */
+   narrow exponentBits the capped scale can push values / scale out of
+   int32 range for entirely finite inputs. A NON-FINITE input value
+   is the one hard failure (as for the accumulate engines' increment):
+   BFP has no NaN/inf code, so dropping the value or saturating it would
+   lose or invent data. Reachable in practice -- a diverged step's NaN loss
+   arrives here through the funnel's FLOAT32-operand staging. */
 void quantizeFloatBufferToBfpCodes(const float *values, size_t n, bfpQConfig_t *outQC,
                                    int32_t *codesOut, rngStream_t *rs);
 char *quantTypeToString(qtype_t t);
 /*! SYM_INT32 -> SYM with NO rescale: carry the input scale, pack mantissas
  *  verbatim. Exits if any mantissa exceeds the target qBits. The no-rescale
- *  partner of convertSymTensorToSymInt32Tensor (#227). Not a conversionMatrix
+ *  partner of convertSymTensorToSymInt32Tensor. Not a conversionMatrix
  *  cell (the rescale variant owns [SYM_INT32][SYM]); call directly. */
 void repackSymInt32ToSymNoRescale(tensor_t *inputTensor, tensor_t *outputTensor);
 
@@ -174,23 +166,20 @@ void accumulateTensorIntoFloat32Inplace(tensor_t *target, const tensor_t *increm
 void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *increment,
                                            rngStream_t *rs);
 
-/* BFP grad-accumulate twins (BFP epic PR3). FixedGrid = fit-preserving:
- * carries the target's per-group exponents (a fresh ALL-ZERO-code accumulator
- * first derives them from the increment, per group) and ABORTS on mantissa
- * overflow (#227 code-domain discipline, no clamp). Rescale = requant:
- * re-derives every group's exponent from the decoded-plus-increment absmax
- * (value-domain, saturates — BFP D6; since #421 this is the same walker
- * scaleBfpTensorInPlace runs, with factor = 1.f).
- * Same caller guarantees as the SYM/ASYM primitives.
- * Both modes REJECT a non-finite value in the increment (PRINT_ERROR +
- * exit(1), #421 ruling R6): a BFP grid has no NaN/inf code, so dropping the
- * value or saturating it would either lose or invent data -- unlike the
- * FLOAT32 grad path, which keeps propagating NaN because it can represent
- * it. Non-finite INTERMEDIATES from finite inputs (a grid at the exponent
- * cap) are not rejected; they saturate (BFP D6).
+/* BFP grad-accumulate twins. FixedGrid = fit-preserving: carries the target's
+ * per-group exponents (a fresh ALL-ZERO-code accumulator first derives them
+ * from the increment, per group) and ABORTS on mantissa overflow (no clamp).
+ * Rescale = requant: re-derives every group's exponent from the
+ * decoded-plus-increment absmax (value-domain, saturates; the same walker
+ * scaleBfpTensorInPlace runs, with factor = 1.f). Grouped targets are fine.
+ * Same caller guarantees as the SYM/ASYM primitives otherwise.
+ * Both modes fail fast on a non-finite value in the increment (PRINT_ERROR +
+ * exit(1)): a BFP grid has no NaN/inf code, so dropping the value or
+ * saturating it would either lose or invent data -- unlike the FLOAT32 grad
+ * path, which keeps propagating NaN because it can represent it. Non-finite
+ * INTERMEDIATES from finite inputs (a grid at the exponent cap) saturate.
  * Both modes leave an EMPTY target (n == 0) in the canonical zero state
- * (every group's stored exponent = bias), never with its previous grid
- * (#421 ruling R7). */
+ * (every group's stored exponent = bias), never with its previous grid. */
 void accumulateFloatIntoBfpTensorFixedGrid(tensor_t *target, const float *inc, size_t n,
                                            rngStream_t *rs);
 void accumulateFloatIntoBfpTensorRescale(tensor_t *target, const float *inc, size_t n,
@@ -201,15 +190,15 @@ void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment,
 /* In-place value-domain scale of a BFP tensor by an arbitrary float factor
  * (scaleOptimizerGradients's BFP arm: REDUCTION_MEAN mean-scale, clip
  * coefficients). BFP has no O(1) scale fold -- a general factor moves every
- * group's absmax off its 2^E grid -- so this is an honest O(n) two-pass
- * repack -- since #421 literally the DYNAMIC_RESCALE accumulate walker with
- * a NULL increment source: pass 1 re-derives every group's exponent from the
- * scaled absmax while the config still holds the old grid; pass 2
- * requantizes with the config's OWN storage roundingMode (storage requantization, not an op -- #282
- * target-owned convention), one roundByMode per element in element order,
- * clamped (value-domain saturation, BFP D6). A power-of-two factor is exact:
- * exponents shift, codes bit-unchanged -- except where the derived exponent
- * saturates at 0 or the cap (BFP D6), where codes shift instead. An all-zero
+ * group's absmax off its 2^E grid -- so this is an O(n) two-pass repack, the
+ * DYNAMIC_RESCALE accumulate walker with a NULL increment source: pass 1
+ * re-derives every group's exponent from the scaled absmax while the config
+ * still holds the old grid; pass 2 requantizes with the config's OWN storage
+ * roundingMode (storage requantization, not an op), one roundByMode per
+ * element in element order, clamped (value-domain saturation). A
+ * power-of-two factor is exact: exponents shift, codes bit-unchanged --
+ * except where the derived exponent saturates at 0 or the cap, where codes
+ * shift instead. An all-zero
  * group re-derives the zero state (stored = bias). A group already sitting
  * at the exponent cap has no headroom left, so even a finite factor can
  * overflow its scaled values to +-inf: those saturate to the code range

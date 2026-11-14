@@ -21,9 +21,9 @@ static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *ou
                                  const char *what, rngStream_t *rs);
 static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *outQC, uint8_t *dst,
                                  const char *what, rngStream_t *rs);
-/* Chunk reader signature for the streaming BFP pack -- dequantChunkToFloat's
- * shape, so that helper binds directly; per-dtype readers cover what it
- * denies (grouped SYM, grouped ASYM). */
+/* Chunk reader for the streaming BFP pack -- dequantChunkToFloat's signature,
+ * so that helper binds directly; grouped SYM/ASYM sources need the grouped
+ * readers because dequantChunkToFloat reads scales[0] only. */
 typedef void (*bfpSrcChunkReader_t)(const tensor_t *src, size_t elemOffset, size_t count,
                                     float *out);
 static void packStreamAsBfp(const tensor_t *src, bfpSrcChunkReader_t readChunk, size_t n,
@@ -50,20 +50,17 @@ static void unpackZeroExtendChunk(const uint8_t *srcBase, size_t srcBits, size_t
                                   size_t count, int32_t *dst);
 static void packChunkGuarded(const int32_t *codes, size_t count, uint8_t *dstBase, size_t dstBits,
                              size_t elemOffset, const char *what);
-/* Factored out of quantizeFloatToAsym verbatim, incl. the single zeroPoint
- * roundByMode draw -- called BEFORE any per-element round (bit-identity
- * invariant: exactly one roundByMode call per element, in element order). */
+/* Draws one roundByMode for the zeroPoint; must run BEFORE any per-element
+ * round so SR draws stay in a fixed order (one per element, element order). */
 static void deriveAsymGridFromMinMax(float mn, float mx, asymQConfig_t *outQC, rngStream_t *rs);
-/* Group-quant PR4 Task 2: the nudge+derive core, writing group g's grid
- * (scales[g]/zeroPoints[g]). deriveAsymGridFromMinMax is the per-tensor
- * wrapper (qBits + per-tensor gates, then g=0); quantizeFloatToAsym's
- * grouped phase 1 calls this once per group. */
+/* Writes group g's grid (scales[g]/zeroPoints[g]); deriveAsymGridFromMinMax
+ * is the per-tensor wrapper (g = 0). */
 static void deriveAsymGridForGroup(float mn, float mx, asymQConfig_t *outQC, size_t g,
                                    rngStream_t *rs);
 static void emitAsymChunk(const float *vals, size_t count, const asymQConfig_t *qc,
                           uint8_t *dstBase, size_t elemOffset, rngStream_t *rs);
-/* The scalar ASYM cells read scales[0]/zeroPoints[0] only; FLOAT32<->ASYM is
- * group-aware. */
+/* The scalar ASYM cells read scales[0]/zeroPoints[0] only; FLOAT32<->ASYM and
+ * ASYM->BFP are group-aware. */
 static void requirePerTensorAsym(const asymQConfig_t *qc, const char *what);
 static void requireFiniteBfpSource(float value, size_t index, const char *what, const char *role);
 
@@ -149,11 +146,10 @@ static void packChunkGuarded(const int32_t *codes, size_t count, uint8_t *dstBas
     const int32_t lo = -((int32_t)1 << (dstBits - 1));
     for (size_t i = 0; i < count; i++) {
         if (codes[i] < lo || codes[i] > hi) {
-            /* abort-on-overflow, process-fatal (#227 discipline —
-             * earlier chunks of dst may already be written, which is fine
-             * because exit(1) is not recoverable) */
-            PRINT_ERROR("%s: value %d does not fit %u-bit SYM range [%d, %d] (#227)", what,
-                        codes[i], (unsigned)dstBits, lo, hi);
+            /* abort-on-overflow: earlier chunks of dst may already be
+             * written, which is fine because exit(1) is not recoverable */
+            PRINT_ERROR("%s: value %d does not fit %u-bit SYM range [%d, %d]", what, codes[i],
+                        (unsigned)dstBits, lo, hi);
             exit(1);
         }
     }
@@ -196,13 +192,9 @@ void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, f
         return;
     }
     case BFP: {
-        /* Grouped-capable by construction -- unlike the grouped-SYM deny
-         * above, whose only callers are per-tensor grad paths. Native hot
-         * path since epic PR2 (OUT_WRITE re-packs a BFP wire every producer
-         * step), so the 2^E scale is derived once per group RUN
-         * (dequantGroupedSymChunkToFloat's run-walking shape) instead of
-         * ldexpf+bias per element -- same multiply per element in element
-         * order, bit-identical. */
+        /* Grouped-capable, unlike the SYM/ASYM arms. Hot path (OUT_WRITE
+         * re-packs a BFP wire every producer step), so the 2^E scale is
+         * derived once per group run instead of per element. */
         bfpQConfig_t *qc = src->quantization->qConfig;
         int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
         unpackSignExtendChunk(src->data, qc->mantissaBits, elemOffset, count, mant);
@@ -237,10 +229,11 @@ void dequantChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count, f
 
 static void requirePerTensorAsym(const asymQConfig_t *qc, const char *what) {
     if (qc->numGroups > 1) {
-        PRINT_ERROR("%s: grouped ASYM (numGroups=%zu) has no compute image in this cell -- only "
-                    "FLOAT32->ASYM and ASYM->FLOAT32 are group-aware; route through FLOAT32 "
-                    "instead",
-                    what, qc->numGroups);
+        PRINT_ERROR(
+            "%s: grouped ASYM (numGroups=%zu) has no compute image in this cell -- only the "
+            "FLOAT32<->ASYM and ASYM->BFP cells are group-aware; route through FLOAT32 "
+            "instead",
+            what, qc->numGroups);
         exit(1);
     }
 }
@@ -253,7 +246,7 @@ static void deriveAsymGridFromMinMax(float mn, float mx, asymQConfig_t *outQC, r
 static void deriveAsymGridForGroup(float mn, float mx, asymQConfig_t *outQC, size_t g,
                                    rngStream_t *rs) {
     const float qMax = powf(2, (float)outQC->qBits) - 1;
-    /* Zero-inclusion nudge (group-quant D6, TFLite-standard): extend the band to contain
+    /* Zero-inclusion nudge (TFLite-standard): extend the band to contain
      * 0 so (a) 0.0 is exactly representable (code == zp decodes to exactly
      * 0.0f) and (b) zpReal = -mn/scale is bounded into [0, qMax] BY
      * CONSTRUCTION (mn <= 0 gives zpReal >= 0; mx >= 0 gives -mn <= mx - mn
@@ -272,10 +265,8 @@ static void deriveAsymGridForGroup(float mn, float mx, asymQConfig_t *outQC, siz
         scale = odtScaleCanonFloat((mx - mn) / qMax, ODT_SCALE_CEIL);
     }
     float zpReal = -mn / scale;
-    /* Belt-and-suspenders: the nudge bounds zpReal into [0, qMax] (proof
-     * above), so this clamp only ever trims rounding at the band edges
-     * (e.g. an exact .5 tie at qMax rounding up) -- it cannot mask a
-     * genuinely out-of-band zpReal on any reachable path. */
+    /* The nudge bounds zpReal into [0, qMax], so this clamp only trims
+     * rounding at the band edges (e.g. an exact .5 tie at qMax rounding up). */
     storeCanonScale(&outQC->scales[g], scale);
     outQC->zeroPoints[g] =
         (uint16_t)clampInt32(roundByMode(zpReal, outQC->roundingMode, rs), 0, (int32_t)qMax);
@@ -288,12 +279,12 @@ static void emitAsymChunk(const float *vals, size_t count, const asymQConfig_t *
     const int32_t zp = (int32_t)qc->zeroPoints[0];
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t i = 0; i < count; i++) {
-        /* Code-domain encode (group-quant D6): round the VALUE quotient first, add the
-         * integer zp after -- NOT the old single-round round(v/scale - zp),
-         * whose HALF_AWAY ties land differently under the shift. The clamp
-         * is load-bearing at the band edges: a .5 tie at both the zp
-         * derivation and the max value (e.g. scale 1.0, band [-1.5, 5.5]@3)
-         * rounds both up, overshooting qMax by 1. */
+        /* Code-domain encode: round the VALUE quotient first, add the
+         * integer zp after -- not round(v/scale - zp), whose HALF_AWAY ties
+         * land differently under the shift. The clamp is load-bearing at
+         * the band edges: a .5 tie at both the zp derivation and the max
+         * value (e.g. scale 1.0, band [-1.5, 5.5]@3) rounds both up,
+         * overshooting qMax by 1. */
         codes[i] =
             clampInt32(roundByMode(vals[i] / scale, qc->roundingMode, rs) + zp, 0, (int32_t)qMax);
     }
@@ -301,30 +292,23 @@ static void emitAsymChunk(const float *vals, size_t count, const asymQConfig_t *
                    qc->qBits, count);
 }
 
-/* Nudged code-domain asymmetric quantization (group-quant PR4, D6; replaces
- * the #243 value-domain grid): band nudged to include 0, scale =
- * (max-min)/(2^qBits-1), zeroPoint = clamp(round(-min/scale), 0, 2^qBits-1)
- * [uint16 code domain], code = clamp(round(v/scale) + zp, 0, 2^qBits-1).
- * Dequant (elsewhere) is (code - zp)*scale. Constant tensor: after the nudge
- * min==max only for the all-zero buffer -> scale 1.f, zp 0. Grid derivation
- * scans the WHOLE buffer once (min/max, no rounding); emission then streams
- * in ODT_CONVERSION_CHUNK_ELEMS chunks so no VLA/heap scratch scales with n
- * (#296 Stage 2). numGroups > 1 (PR4 Task 2, FLOAT32 source only -- the
- * other three *ToAsymTensor converters stay per-tensor-gated): the same
- * affine applied per storage-order group (group of element i = i/groupSize),
- * packFloatBufferAsSym's grouped shape -- phase-1 per-group min/max ->
- * per-group nudged grid, phase-2 run-based sequential emit. */
+/* Nudged code-domain asymmetric quantization: band nudged to include 0,
+ * scale = (max-min)/(2^qBits-1), zeroPoint = clamp(round(-min/scale), 0,
+ * 2^qBits-1) [uint16 code domain], code = clamp(round(v/scale) + zp, 0,
+ * 2^qBits-1); dequant is (code - zp)*scale. The all-zero buffer gets scale
+ * 1.f, zp 0. Emission streams in ODT_CONVERSION_CHUNK_ELEMS chunks so no
+ * scratch scales with n. numGroups > 1 applies the same affine per
+ * storage-order group (group of element i = i/groupSize); only the FLOAT32
+ * source reaches the grouped path -- the other *ToAsymTensor converters are
+ * per-tensor-gated. */
 static void quantizeFloatToAsym(const float *values, size_t n, asymQConfig_t *outQC, uint8_t *dst,
                                 rngStream_t *rs) {
     if (n == 0) {
-        /* n == 0: no grid can be derived from an empty payload -- leave the
-         * caller's qConfig untouched, write nothing (same no-op contract as
-         * the sibling n==0 guards; the old code read values[0] here, UB). */
+        /* no grid can be derived from an empty payload -- leave the
+         * caller's qConfig untouched, write nothing */
         return;
     }
     if (outQC->numGroups == 1) {
-        /* Per-tensor fast path -- byte-identical to the pre-group-quant code
-         * (regression gate: the Task-1 re-pinned suite pins this verbatim). */
         float mn = findMinFloat((uint8_t *)values, n);
         float mx = findMaxFloat((uint8_t *)values, n);
         deriveAsymGridFromMinMax(mn, mx, outQC, rs);
@@ -336,21 +320,17 @@ static void quantizeFloatToAsym(const float *values, size_t n, asymQConfig_t *ou
         return;
     }
 
-    /* Grouped path (#groups>1). Phase 1: per-group min/max -> per-group
-     * nudged grid (never a single whole-tensor pass, or every group would
-     * collapse onto one grid). */
+    /* Phase 1: per-group min/max -> per-group nudged grid (a whole-tensor
+     * pass would collapse every group onto one grid). */
     const size_t groupSize = outQC->groupSize;
     for (size_t g = 0; g < outQC->numGroups; g++) {
         float mn = findMinFloat((uint8_t *)(values + g * groupSize), groupSize);
         float mx = findMaxFloat((uint8_t *)(values + g * groupSize), groupSize);
         deriveAsymGridForGroup(mn, mx, outQC, g, rs);
     }
-    /* Phase 2: sequential encode+pack, chunked exactly like the per-tensor
-     * path above. WITHIN a chunk, walk per-RUN -- a run is the span from the
-     * current index to min(chunkEnd, groupEnd) -- so the grid is fetched
-     * once per run (one `idx / groupSize` division), never per element
-     * (packFloatBufferAsSym's grouped shape; encode math is emitAsymChunk's
-     * verbatim, with scales[g]/zeroPoints[g] instead of element 0). */
+    /* Phase 2: chunked encode+pack. Within a chunk, walk per run (current
+     * index to min(chunkEnd, groupEnd)) so the grid is fetched once per run,
+     * not per element; encode math matches emitAsymChunk. */
     const float qMax = powf(2, (float)outQC->qBits) - 1;
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
@@ -381,10 +361,7 @@ void convertInt32TensorToAsymTensor(tensor_t *inputTensor, tensor_t *outputTenso
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     asymQConfig_t *outQC = outputTensor->quantization->qConfig;
     if (n == 0) {
-        /* No first element to seed mn/mx from; old code's vals[0] VLA read (via
-         * quantizeFloatToAsym -> findMinFloat/findMaxFloat) was UB. New code
-         * no-ops (matches the SYM_INT32/SYM -> ASYM siblings' n=0 guard; #296
-         * Stage 2). */
+        /* no first element to seed mn/mx from: no-op, qConfig untouched */
         return;
     }
     const int32_t *in = (const int32_t *)inputTensor->data;
@@ -424,7 +401,7 @@ void convertFloatTensorToInt32Tensor(tensor_t *inputTensor, tensor_t *outputTens
         /* alignment-safe staging, like readBytesAsFloatArray's whole-buffer memcpy */
         memcpy(inBuf, (const float *)inputTensor->data + off, count * sizeof(float));
         for (size_t i = 0; i < count; i++) {
-            out[off + i] = (int32_t)inBuf[i]; /* cast semantics preserved verbatim */
+            out[off + i] = (int32_t)inBuf[i];
         }
     }
 }
@@ -567,7 +544,7 @@ void requantSymInt32TensorToScale(tensor_t *inputTensor, tensor_t *outputTensor,
      * clamp saturates at qMin/qMax BY DESIGN (Deutel Eq. 4 analog). The float
      * pre-clamp keeps the cast after rounding defined; the integer clamp is the
      * grid itself: from q = 26 on the float image of the grid maximum sits one
-     * code past it (#515), and exact SR never moves an exact bound (#511) */
+     * code past it, and exact SR never moves an exact bound */
     for (size_t i = 0; i < numberOfElements; i++) {
         outputInt32[i] = clampInt32(
             roundByMode(clamp(((float)inputInt32[i] * inScale) / targetScale, qMin, qMax),
@@ -582,9 +559,7 @@ void convertSymInt32TensorToAsymTensor(tensor_t *inputTensor, tensor_t *outputTe
     symInt32QConfig_t *inQC = inputTensor->quantization->qConfig;
     asymQConfig_t *outQC = outputTensor->quantization->qConfig;
     if (n == 0) {
-        /* No first element to seed mn/mx from; old code's inputAsFloat[0] VLA
-         * read (via quantizeFloatToAsym -> findMinFloat/findMaxFloat) was UB.
-         * New code no-ops (matches packFloatBufferAsSym's n=0 no-op; #296 Stage 2). */
+        /* no first element to seed mn/mx from: no-op, qConfig untouched */
         return;
     }
     float scale = loadCanonScale(&inQC->scale);
@@ -627,8 +602,6 @@ void convertAsymTensorToInt32Tensor(tensor_t *inputTensor, tensor_t *outputTenso
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackZeroExtendChunk(inputTensor->data, inQC->qBits, off, count, codes);
         for (size_t i = 0; i < count; i++) {
-            /* code-domain mantissa image (group-quant D6): code - zp (was code + zp
-             * under the old value-domain signed zeroPoint) */
             out[off + i] = codes[i] - zp;
         }
     }
@@ -642,7 +615,6 @@ void convertAsymTensorToFloatTensor(tensor_t *inputTensor, tensor_t *outputTenso
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
 
     if (inQC->numGroups == 1) {
-        /* Per-tensor fast path -- byte-identical to the pre-group-quant code. */
         const float scale = loadCanonScale(&inQC->scales[0]);
         const int32_t zp = (int32_t)inQC->zeroPoints[0];
         for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
@@ -650,17 +622,14 @@ void convertAsymTensorToFloatTensor(tensor_t *inputTensor, tensor_t *outputTenso
                 n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
             unpackZeroExtendChunk(inputTensor->data, inQC->qBits, off, count, codes);
             for (size_t i = 0; i < count; i++) {
-                /* code-domain decode (group-quant D6): (code - zp)*scale, integer subtract
-                 * exact (both operands <= 2^16-1) */
+                /* integer subtract is exact: both operands <= 2^16-1 */
                 out[off + i] = (float)(codes[i] - zp) * scale;
             }
         }
         return;
     }
 
-    /* Grouped path (PR4 Task 2): same run-walking pattern as the grouped
-     * convertSymTensorToFloat32Tensor, with the affine decode per run --
-     * out[i] = (code - zeroPoints[g]) * scales[g], grid fetched once per run. */
+    /* Grouped: run-walk, grid fetched once per run. */
     const size_t groupSize = inQC->groupSize;
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -695,11 +664,10 @@ void convertAsymTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTe
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackZeroExtendChunk(inputTensor->data, inQC->qBits, off, count, codes);
         for (size_t i = 0; i < count; i++) {
-            /* code-domain mantissa image (group-quant D6): code - zp */
             out[off + i] = codes[i] - zp;
         }
     }
-    storeCanonScale(&outQC->scale, loadCanonScale(&inQC->scales[0])); /* scale copy unchanged */
+    storeCanonScale(&outQC->scale, loadCanonScale(&inQC->scales[0]));
     /* code - zp spans [-(2^qBits - 1), 2^qBits - 1]: one signed bit wider than
      * the stored qBits. The accumulator guard sizes its static proof from this
      * declared width. */
@@ -709,7 +677,7 @@ void convertAsymTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTe
 void unpackSignExtend(const uint8_t *src, size_t srcBits, size_t srcStartBit, int32_t *dst,
                       size_t n) {
     if (srcBits == 0) {
-        /* 1 << (srcBits - 1) below underflows size_t to SIZE_MAX -> UB shift (#247). */
+        /* 1 << (srcBits - 1) below underflows size_t to SIZE_MAX -> UB shift. */
         PRINT_ERROR("unpackSignExtend: srcBits must be > 0");
         exit(1);
     }
@@ -797,8 +765,7 @@ void convertSymTensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outputTens
     int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
 
     if (inQC->numGroups == 1) {
-        /* Per-tensor fast path -- byte-identical to the pre-group-quant code. */
-        float scale = loadCanonScale(&inQC->scales[0]); /* hoisted: no per-element array indexing */
+        float scale = loadCanonScale(&inQC->scales[0]);
         for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
             size_t count =
                 n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -810,8 +777,7 @@ void convertSymTensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outputTens
         return;
     }
 
-    /* Grouped path: same run-walking pattern as packFloatBufferAsSym's
-     * grouped path, mirrored for dequant (out[i] = mant[i] * scales[g]). */
+    /* Grouped: run-walk, scale fetched once per run. */
     const size_t groupSize = inQC->groupSize;
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -840,7 +806,7 @@ void convertSymTensorToSymInt32Tensor(tensor_t *inputTensor, tensor_t *outputTen
     if (inQC->numGroups > 1) {
         PRINT_ERROR("convertSymTensorToSymInt32Tensor: grouped SYM (numGroups=%zu) has no "
                     "scalar compute image; group-aware ops consume it via the executeOp "
-                    "grouped-operand path (later PR of this epic), dequant to FLOAT32 otherwise",
+                    "grouped-operand path, dequant to FLOAT32 otherwise",
                     inQC->numGroups);
         exit(1);
     }
@@ -862,12 +828,10 @@ void convertSymTensorToAsymTensor(tensor_t *inputTensor, tensor_t *outputTensor,
         exit(1);
     }
     if (n == 0) {
-        /* No first element to seed mn/mx from; old code's unpackSignExtend +
-         * deq[0] VLA read (via quantizeFloatToAsym) was UB. New code no-ops
-         * (matches packFloatBufferAsSym's n=0 no-op; #296 Stage 2). */
+        /* no first element to seed mn/mx from: no-op, qConfig untouched */
         return;
     }
-    float scale = loadCanonScale(&inQC->scales[0]); /* hoisted: no per-element array indexing */
+    float scale = loadCanonScale(&inQC->scales[0]);
     int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
     /* pass 1: min/max over dequantized values, chunked unpack (no O(n) scratch) */
     float mn = 0.f, mx = 0.f;
@@ -990,8 +954,6 @@ static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *ou
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
 
     if (outQC->numGroups == 1) {
-        /* Per-tensor fast path -- byte-identical to the pre-group-quant code
-         * (regression gate: the existing suite pins this verbatim). */
         float absMax = findAbsMaxFloat((uint8_t *)values, n);
         const float scale = canonFitScale(absMax, qMax);
         storeCanonScale(&outQC->scales[0], scale);
@@ -1007,21 +969,17 @@ static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *ou
         return;
     }
 
-    /* Grouped path (#groups>1): groups are groupSize consecutive elements in
-     * STORAGE order (group of element i = i / groupSize). Phase 1: per-group
-     * absmax -> scales[g], one findAbsMaxFloat call per group (never a single
-     * whole-tensor pass, or every group would collapse onto one scale). */
+    /* Grouped: groups are groupSize consecutive elements in STORAGE order.
+     * Phase 1: per-group absmax -> scales[g] (a whole-tensor pass would
+     * collapse every group onto one scale). */
     const size_t groupSize = outQC->groupSize;
     for (size_t g = 0; g < outQC->numGroups; g++) {
         float absMax = findAbsMaxFloat((uint8_t *)(values + g * groupSize), groupSize);
         storeCanonScale(&outQC->scales[g], canonFitScale(absMax, qMax));
     }
-    /* Phase 2: sequential quantize+pack, chunked exactly like the per-tensor
-     * path above (packChunkGuarded keeps its byte-alignment contract: `off`
-     * is always a multiple of ODT_CONVERSION_CHUNK_ELEMS, itself a multiple
-     * of 8). WITHIN a chunk, walk per-RUN -- a run is the span from the
-     * current index to min(chunkEnd, groupEnd) -- so the scale is derived
-     * once per run (one `idx / groupSize` division), never per element. */
+    /* Phase 2: chunked quantize+pack (`off` stays a multiple of 8 for
+     * packChunkGuarded). Within a chunk, walk per run so the scale is
+     * fetched once per run, not per element. */
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         size_t chunkEnd = off + count;
@@ -1047,18 +1005,13 @@ static void packFloatBufferAsSym(const float *values, size_t n, symQConfig_t *ou
  * two land on the boundary with no log2f rounding surprises: frexpf returns
  * ratio = frac * 2^e with frac in [0.5, 1), so ceil(log2(ratio)) is e except
  * when ratio is itself a power of two (frac == 0.5), where it is e - 1. The
- * stored-range clamp IS the BFP D6 saturation: stored > max -> the emit pass
- * clamps mantissas to +-qMax (high regime); stored < 0 -> quotients round to
- * 0 (flush-toward-zero regime). The high clamp additionally never exceeds
+ * stored-range clamp IS the saturation: stored > max -> the emit pass clamps
+ * mantissas to +-qMax (high regime); stored < 0 -> quotients round to 0
+ * (flush-toward-zero regime). The high clamp additionally never exceeds
  * bias + 127 (only reachable at exponentBits=8, where the natural top 255
  * means E=128): 2^127 is the largest FINITE float32 power of two --
  * ldexpf(1, 128) is +inf, which would quantize every code to 0 and dequantize
- * the whole group to NaN (0 * inf) instead of saturating. Public since epic
- * PR2 (TensorConversion.h): the funnel's staging quantizer and (since PR2)
- * wire OUT_WRITE epilogues derive exponents through this single authority;
- * epic PR3 added the grad-accumulate engines and the scale arm, and extended
- * OUT_WRITE's reach to the backward's dx wire -- op-local re-blocking never
- * happens (the BFP D8 amendment, docs/conventions/arithmetic-bfp.md §9). */
+ * the whole group to NaN (0 * inf) instead of saturating. */
 void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t maxStored,
                              uint8_t *storedOut) {
     if (absMax == 0.f) {
@@ -1070,13 +1023,10 @@ void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t max
         cap = (int)bias + 127; /* largest stored exponent with a finite scale */
     }
     if (!isfinite(absMax)) {
-        /* BFP D6's mantissa-saturation regime taken to its limit. frexpf(inf|NaN)
-         * has an unspecified result AND an unspecified *exp (C17 7.12.6.4), so
-         * deriving would emit an arbitrary exponent and leave the emit pass
-         * rounding a non-finite quotient (undefined). A magnitude too large
+        /* frexpf(inf|NaN) has an unspecified result AND *exp (C17 7.12.6.4),
+         * so deriving would emit an arbitrary exponent. A magnitude too large
          * for ANY grid saturates at the largest finite one -- mantissas then
-         * clamp to the code range, exactly as a merely-too-large FINITE absmax
-         * already does below. */
+         * clamp to the code range, as a too-large FINITE absmax does below. */
         *storedOut = (uint8_t)cap;
         return;
     }
@@ -1085,10 +1035,10 @@ void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t max
     int E = (frac == 0.5f) ? e - 1 : e; /* smallest E with absMax/2^E <= qMax */
     int stored = E + (int)bias;
     if (stored < 0) {
-        stored = 0; /* BFP D6: flush-toward-zero regime */
+        stored = 0; /* flush-toward-zero regime */
     }
     if (stored > cap) {
-        stored = cap; /* BFP D6: mantissa-saturation regime */
+        stored = cap; /* mantissa-saturation regime */
     }
     *storedOut = (uint8_t)stored;
 }
@@ -1097,15 +1047,11 @@ void deriveBfpStoredExponent(float absMax, float qMax, int32_t bias, uint8_t max
  * value-domain quantization, but chunked and emitting a PACKED payload. */
 static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *outQC, uint8_t *dst,
                                  const char *what, rngStream_t *rs) {
-    /* #421 U9: the fifth exponents[g] indexer, same exact-division invariant
-     * (numGroups * groupSize == n) the engines and the streaming twin already
-     * validate. Pass 2 derives g = idx / gsz with no bound against numGroups,
-     * so a violating geometry reads exponents[] OUT OF BOUNDS (< n) or
-     * silently mis-blocks (> n) -- and the route is PUBLIC:
-     * conversionMatrix[FLOAT32][BFP] takes the geometry from the TARGET while
-     * n comes from the SOURCE, so a shape-agnostic template produces the
-     * mismatch with neither tensor malformed on its own (#420 G2's rationale,
-     * verbatim). */
+    /* Exact-division invariant (numGroups * groupSize == n): pass 2 derives
+     * g = idx / gsz with no bound against numGroups, so a violating geometry
+     * reads exponents[] out of bounds (< n) or mis-blocks (> n). Checked here
+     * because the geometry comes from the TARGET and n from the SOURCE: a
+     * shape-agnostic template mismatches with neither tensor malformed. */
     validateBfpQConfigShape(outQC, n);
     const float qMax = powf(2, (float)outQC->mantissaBits - 1) - 1;
     const float qMin = -powf(2, (float)outQC->mantissaBits - 1);
@@ -1118,8 +1064,7 @@ static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *ou
         size_t start = g * gsz;
         size_t end = start + gsz > n ? n : start + gsz;
         for (size_t i = start; i < end; i++) {
-            /* #421 U10: the value-side twin of R6, in the pass that already
-             * reads every element, so no extra walk. */
+            /* in the pass that already reads every element: no extra walk */
             requireFiniteBfpSource(values[i], i, what, "input");
             float v = fabsf(values[i]);
             if (v > absMax) {
@@ -1128,22 +1073,18 @@ static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *ou
         }
         deriveBfpStoredExponent(absMax, qMax, bias, maxStored, &outQC->exponents[g]);
     }
-    /* pass 2: chunked quantize + pack; saturation via clamp BEFORE the guard
-     * (value-domain quantization saturates by design -- BFP D6; raw code packing
-     * elsewhere keeps the #227 abort). WITHIN a chunk, walk per-RUN -- span
-     * to min(chunkEnd, groupEnd) -- so the ldexpf+bias scale derivation
-     * leaves the inner loop (packFloatBufferAsSym's grouped phase-2 shape;
-     * native hot path since epic PR2). gsz = n for per-tensor keeps g = 0.
-     * One roundByMode per element in element order -- bit-identical.
-     * #421 U2: that clamp runs in the FLOAT domain first. In the BFP D6 cap
-     * regime (a narrow exponentBits pins the scale far below what the data
-     * needs) values / scale leaves int32 range for entirely FINITE inputs,
-     * and (int32_t)round(...) is undefined there (C17 6.3.1.4). Identical to
-     * clamping after the round wherever the round is defined -- in range the
-     * float clamp is the identity, outside it roundByMode is monotone -- and
-     * the clampInt32 behind it is defensive: exact SR never moves an exactly
-     * representable qMax/qMin; it stays for grids whose float bound is not
-     * exact (wide SYM grids, q >= 25). */
+    /* pass 2: chunked quantize + pack; value-domain quantization saturates via
+     * clamp BEFORE the guard (raw code packing elsewhere aborts instead).
+     * Within a chunk, walk per run so the scale derivation leaves the inner
+     * loop; gsz = n for per-tensor keeps g = 0. One roundByMode per element in
+     * element order. The clamp runs in the FLOAT domain first: at the exponent
+     * cap (a narrow exponentBits pins the scale far below what the data needs)
+     * values / scale leaves int32 range for entirely FINITE inputs, and
+     * (int32_t)round(...) is undefined there (C17 6.3.1.4). In range the float
+     * clamp is the identity and roundByMode is monotone, so the result equals
+     * clamping after the round. The clampInt32 behind it is defensive: exact SR
+     * never moves an exactly representable qMax/qMin; it stays for grids whose
+     * float bound is not exact (wide SYM grids, q >= 25). */
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -1174,12 +1115,9 @@ static void packFloatBufferAsBfp(const float *values, size_t n, bfpQConfig_t *ou
  * by design; allocates nothing. Contract details in TensorConversion.h. */
 void quantizeFloatBufferToBfpCodes(const float *values, size_t n, bfpQConfig_t *outQC,
                                    int32_t *codesOut, rngStream_t *rs) {
-    /* #421 U9: the packed sibling's guard, for the same invariant. This form
-     * never reads out of bounds (its per-group loops clip `end` to n), but a
-     * numGroups * groupSize < n geometry leaves the codesOut TAIL
-     * UNINITIALIZED -- the funnel would then hand a kernel uninitialized
-     * mantissa scratch. Its one production caller is funnel-internal staging
-     * (ExecuteOp.c), whose template is per-tensor {1,0} today. */
+    /* The packed sibling's invariant. This form never reads out of bounds (its
+     * loops clip `end` to n), but numGroups * groupSize < n leaves the codesOut
+     * TAIL uninitialized, handing a kernel garbage mantissas. */
     validateBfpQConfigShape(outQC, n);
     float qMax = (float)((1 << (outQC->mantissaBits - 1)) - 1);
     int32_t qMin = -(1 << (outQC->mantissaBits - 1));
@@ -1191,8 +1129,6 @@ void quantizeFloatBufferToBfpCodes(const float *values, size_t n, bfpQConfig_t *
         size_t end = (start + gsz > n) ? n : start + gsz;
         float absMax = 0.f;
         for (size_t i = start; i < end; i++) {
-            /* #421 U10, see the packed sibling. This entry takes no `what`
-             * label -- it IS the public entry, so it names itself. */
             requireFiniteBfpSource(values[i], i, "quantizeFloatBufferToBfpCodes", "input");
             float a = fabsf(values[i]);
             if (a > absMax) {
@@ -1202,32 +1138,23 @@ void quantizeFloatBufferToBfpCodes(const float *values, size_t n, bfpQConfig_t *
         deriveBfpStoredExponent(absMax, qMax, bias, maxStored, &outQC->exponents[g]);
         float scale = bfpGroupScale(outQC, g);
         for (size_t i = start; i < end; i++) {
-            /* #421 U2: float-domain clamp before the round -- see the packed
-             * sibling's pass-2 comment for the cap-regime rationale. */
+            /* float-domain clamp before the round: see packFloatBufferAsBfp */
             float q = clamp(values[i] / scale, (float)qMin, qMax);
             codesOut[i] = clampInt32(roundByMode(q, outQC->roundingMode, rs), qMin, (int32_t)qMax);
         }
     }
 }
 
-/* packFloatBufferAsBfp's streaming twin: identical two-pass value-domain BFP
- * pack, but the SOURCE is read chunk-wise through `readChunk` instead of a
- * contiguous float buffer -- so no O(n) dequant scratch is ever allocated.
- * packDequantStreamAsBfp below binds it to dequantChunkToFloat (any dtype
- * that helper dispatches on) for the SYM_INT32/per-tensor-SYM/per-tensor-ASYM
- * -> BFP cells; the grouped-SYM and grouped-ASYM sources bind
- * dequantGroupedSymChunkToFloat / dequantGroupedAsymChunkToFloat instead,
- * because dequantChunkToFloat denies grouped SYM and grouped ASYM by design. */
+/* packFloatBufferAsBfp's streaming twin: the SOURCE is read chunk-wise through
+ * `readChunk`, so no O(n) dequant scratch is allocated. Per-tensor sources bind
+ * dequantChunkToFloat (packDequantStreamAsBfp); grouped SYM/ASYM sources bind
+ * dequantGroupedSymChunkToFloat / dequantGroupedAsymChunkToFloat, because
+ * dequantChunkToFloat reads scales[0] only. */
 static void packStreamAsBfp(const tensor_t *src, bfpSrcChunkReader_t readChunk, size_t n,
                             bfpQConfig_t *outQC, uint8_t *dst, const char *what, rngStream_t *rs) {
-    /* #420 G2: the accumulate/scale engines' guard extended to the fourth
-     * exponents[g] indexer. Pass 1 derives exponents by index arithmetic and
-     * pass 2 reads bfpGroupScale(outQC, g), both under the exact-division
-     * invariant (numGroups * groupSize == n): a field-assigned config
-     * violating it OOB-writes the exponent array (< n) or silently
-     * mis-blocks (> n). Unlike the engines, the geometry here belongs to the
-     * TARGET while n comes from the SOURCE, so a shape-agnostic template can
-     * produce the mismatch with neither tensor malformed on its own. */
+    /* Same exact-division invariant as packFloatBufferAsBfp: a violating
+     * geometry OOB-writes the exponent array (< n) or mis-blocks (> n), and
+     * the geometry comes from the TARGET while n comes from the SOURCE. */
     validateBfpQConfigShape(outQC, n);
     const float qMax = powf(2, (float)outQC->mantissaBits - 1) - 1;
     const float qMin = -powf(2, (float)outQC->mantissaBits - 1);
@@ -1253,11 +1180,8 @@ static void packStreamAsBfp(const tensor_t *src, bfpSrcChunkReader_t readChunk, 
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         readChunk(src, off, count, buf);
         for (size_t i = 0; i < count; i++) {
-            /* #421 U10, see packFloatBufferAsBfp. The "input" here is what
-             * readChunk decodes out of the source, so a non-finite one needs
-             * a source grid whose scale is itself non-finite -- hand-built
-             * only, since deriveBfpStoredExponent caps derived exponents at
-             * bias + 127 and #420 G5 rejects deserialized records above it. */
+            /* checks the DECODED value: decoded values can overflow even
+             * when the stored scale is finite (2^127 * mantissa 2 = inf) */
             requireFiniteBfpSource(buf[i], off + i, what, "input");
             float v = fabsf(buf[i]);
             if (v > absMax) {
@@ -1270,12 +1194,8 @@ static void packStreamAsBfp(const tensor_t *src, bfpSrcChunkReader_t readChunk, 
             }
         }
     }
-    /* pass 2: chunked quantize + pack; saturation via clamp BEFORE the guard
-     * (value-domain quantization saturates by design -- BFP D6), one roundByMode
-     * per element in element order -- bit-identical under the run-walk.
-     * WITHIN a chunk, walk per-RUN so the ldexpf+bias scale derivation
-     * leaves the inner loop (packFloatBufferAsBfp's pass-2 shape; native hot
-     * path since epic PR2). gsz = n for per-tensor keeps g = 0. */
+    /* pass 2: as packFloatBufferAsBfp's pass 2 (saturating clamp before the
+     * guard, one roundByMode per element in element order, per-run scale). */
     int32_t codes[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -1289,8 +1209,6 @@ static void packStreamAsBfp(const tensor_t *src, bfpSrcChunkReader_t readChunk, 
             size_t runLen = runEnd - idx;
             const float scale = bfpGroupScale(outQC, g);
             for (size_t i = 0; i < runLen; i++) {
-                /* #421 U2: float-domain clamp before the round -- see
-                 * packFloatBufferAsBfp's pass-2 comment. */
                 float q = clamp(buf[idx - off + i] / scale, qMin, qMax);
                 codes[idx - off + i] = clampInt32(roundByMode(q, outQC->roundingMode, rs),
                                                   (int32_t)qMin, (int32_t)qMax);
@@ -1306,11 +1224,8 @@ static void packDequantStreamAsBfp(const tensor_t *src, size_t n, bfpQConfig_t *
     packStreamAsBfp(src, dequantChunkToFloat, n, outQC, dst, what, rs);
 }
 
-/* Grouped-capable SYM chunk reader for the BFP pack stream: dequantChunkToFloat
- * DENIES grouped SYM by design (its other callers are per-tensor grad paths),
- * so the SYM -> BFP cell brings its own read applying each element's own group
- * scale -- convertSymTensorToFloat32Tensor's run-walking, mirrored per chunk.
- * Only bound for numGroups > 1 (groupSize > 0, no division sentinel). */
+/* Grouped SYM chunk reader for the BFP pack stream (dequantChunkToFloat reads
+ * scales[0] only). Bind only for numGroups > 1: groupSize must be > 0. */
 static void dequantGroupedSymChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count,
                                           float *out) {
     symQConfig_t *qc = src->quantization->qConfig;
@@ -1332,13 +1247,8 @@ static void dequantGroupedSymChunkToFloat(const tensor_t *src, size_t elemOffset
     }
 }
 
-/* Grouped-capable ASYM chunk reader for the BFP pack stream (SYM twin above):
- * dequantChunkToFloat DENIES grouped ASYM by design (requirePerTensorAsym --
- * its other callers are per-tensor compute paths), so the ASYM -> BFP cell
- * brings its own read applying each element's own group grid -- the affine
- * code-domain decode (code - zeroPoints[g]) * scales[g] of
- * convertAsymTensorToFloatTensor's grouped path, run-walked per chunk.
- * Only bound for numGroups > 1 (groupSize > 0, no division sentinel). */
+/* Grouped ASYM twin of the SYM reader above. Bind only for numGroups > 1:
+ * groupSize must be > 0. */
 static void dequantGroupedAsymChunkToFloat(const tensor_t *src, size_t elemOffset, size_t count,
                                            float *out) {
     asymQConfig_t *qc = src->quantization->qConfig;
@@ -1371,20 +1281,16 @@ void convertBfpTensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outputTens
                                      rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     float *out = (float *)outputTensor->data;
-    /* no bounce buffer: each chunk dequants straight into its own span of the
-     * caller's float storage -- the staging memcpy added nothing (native hot
-     * path since epic PR2) */
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         dequantChunkToFloat(inputTensor, off, count, out + off);
     }
 }
 
-/* INT32 -> BFP is codes-in (#227 code domain): mantissas verbatim, ABORT on
- * overflow via packChunkGuarded (BFP D6 saturation is value-domain only). Every
- * group exponent is reset to the zero state (= bias, E=0, scale 1) so a
- * reused destination cannot carry a stale grid -- the BFP image of
- * convertInt32TensorToSymTensor's scales[0] = 1.f reset. */
+/* INT32 -> BFP is codes-in: mantissas verbatim, ABORT on overflow via
+ * packChunkGuarded (saturation is value-domain only). Every group exponent is
+ * reset to the zero state (= bias, E=0, scale 1) so a reused destination
+ * cannot carry a stale grid. */
 void convertInt32TensorToBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     bfpQConfig_t *outQC = outputTensor->quantization->qConfig;
@@ -1474,9 +1380,7 @@ void convertSymTensorToBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor, 
 
 /* ASYM -> BFP is value-preserving (fresh 2^E grid over the dequantized
  * absmax); grouped ASYM sources of ANY shape convert -- the grouped reader
- * applies each element's own group grid ((code - zeroPoints[g]) * scales[g],
- * group-quant PR4 code-domain decode) on BOTH pack passes, mirroring the
- * grouped-SYM arm above and convertAsymTensorToFloatTensor's group scope. */
+ * applies each element's own group grid on BOTH pack passes. */
 void convertAsymTensorToBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     asymQConfig_t *inQC = inputTensor->quantization->qConfig;
@@ -1535,14 +1439,8 @@ void convertBfpTensorToSymTensor(tensor_t *inputTensor, tensor_t *outputTensor, 
     }
 }
 
-/* BFP -> BFP requant onto the TARGET's geometry/widths: per-group exponents
- * derived FRESH from the source's dequantized VALUES (never copied) -- this
- * one cell is simultaneously the OUT_WRITE width-restore, the mantissa- and
- * exponent-width change, and the re-block point. The source is
- * read per-element with its OWN group scales (dequantChunkToFloat's
- * grouped-capable BFP arm), so any source geometry converts to any target
- * geometry. n == 0 falls through to packStreamAsBfp's zero-state arm.
- * Not in-place: pass 2 re-reads the source under its original exponents. */
+/* Contract in TensorConversion.h. Not in-place: pass 2 re-reads the source
+ * under its original exponents. */
 void requantBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     packDequantStreamAsBfp(inputTensor, n, outputTensor->quantization->qConfig, outputTensor->data,
@@ -1749,18 +1647,14 @@ void convertBfpRawTensorToFloat32Tensor(tensor_t *inputTensor, tensor_t *outputT
     }
 }
 
-/* BFP -> ASYM derives the affine grid via the canonical
- * deriveAsymGridFromMinMax (group-quant PR4 D6: nudged CODE-domain grid,
- * single grid source) -- convertSymInt32TensorToAsymTensor's two-pass shape
- * with the source read through dequantChunkToFloat's grouped-capable BFP
- * arm. Grouped ASYM targets fail-fast inside the grid helper
- * (requirePerTensorAsym), exactly like the sibling *ToAsymTensor cells. */
+/* BFP -> ASYM: grouped BFP sources are fine (dequantChunkToFloat's BFP arm is
+ * grouped-capable); grouped ASYM targets fail fast in
+ * deriveAsymGridFromMinMax, like the sibling *ToAsymTensor cells. */
 void convertBfpTensorToAsymTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(inputTensor);
     asymQConfig_t *outQC = outputTensor->quantization->qConfig;
     if (n == 0) {
-        /* No first element to seed mn/mx from -- no-op, matching the sibling
-         * *ToAsymTensor n==0 guards (#296 Stage 2). */
+        /* no first element to seed mn/mx from: no-op, qConfig untouched */
         return;
     }
     float buf[ODT_CONVERSION_CHUNK_ELEMS];
@@ -1856,12 +1750,9 @@ void repackSymInt32ToSymNoRescale(tensor_t *inputTensor, tensor_t *outputTensor)
     }
 }
 
-/* Grad-accumulate primitives (PR3, #261; streamed #296 Stage 2) -- see header
- * doc comments for the when-to-use contract. Increment source: exactly one of
- * flat / tens is non-NULL -- the float* primitives feed a flat buffer, the
- * tensor-typed entry points feed a source tensor dequantized chunk-wise, so
- * neither an O(n) increment copy nor an O(n) packed-target unpack VLA is ever
- * needed regardless of which side (target or increment) is packed/sub-byte. */
+/* Grad-accumulate increment source: exactly one of flat / tens is non-NULL.
+ * The tensor source is dequantized chunk-wise, so no O(n) increment copy or
+ * target unpack is needed whichever side is packed. */
 typedef struct {
     const float *flat;
     const tensor_t *tens;
@@ -1953,15 +1844,10 @@ static void incSrcChunk(const incSrc_t *src, size_t off, size_t count, float *ou
     dequantChunkToFloat(src->tens, off, count, out);
 }
 
-/* #421 U4 (ruling R7): the framework's "no data seen yet" BFP state, shared
- * by every empty-target path. An n == 0 tensor that kept its previous
- * exponents would carry a scale describing data it does not have,
- * indistinguishable downstream from a derived one; the canonical zero state
- * (stored = bias, scale 1.0) is what the exponent authority's absMax == 0
- * arm, optimizerZeroGrad's BFP arm and getQLike's per-tensor clone all use.
- * Past validateBfpQConfigShape, n == 0 implies the per-tensor {1,0} geometry
- * (a grouped config needs numGroups > 1 AND groupSize > 0, whose product is
- * never 0), but the loop stays shape-agnostic anyway. */
+/* The "no data seen yet" BFP state for every empty-target path. An n == 0
+ * tensor that kept its previous exponents would carry a scale describing data
+ * it does not have; the zero state (stored = bias, scale 1.0) matches the
+ * exponent authority's absMax == 0 arm, optimizerZeroGrad and getQLike. */
 static void resetBfpGridToZeroState(bfpQConfig_t *qc) {
     const uint8_t zeroStateExponent = (uint8_t)bfpExponentBias(qc);
     for (size_t g = 0; g < qc->numGroups; g++) {
@@ -1969,27 +1855,16 @@ static void resetBfpGridToZeroState(bfpQConfig_t *qc) {
     }
 }
 
-/* #421 U3 (ruling R6): a non-finite value in a BFP accumulate's INCREMENT is
- * a fail-fast, the increment-side twin of the scale path's non-finite-factor
- * guard. A BFP grid is (int32 mantissa, shared power-of-two exponent) and has
- * no NaN/inf code, so there is nothing to propagate into: mapping the value
- * to 0 would silently drop the caller's data, saturating it to +-qMax would
- * invent data. Unguarded it is not even defined -- pass 1's `v > absMax` is
- * false for NaN, so the fresh exponent ignores it, and the emit pass's
- * comparison-based float clamp cannot map NaN either, so roundByMode gets it
- * and (int32_t)round(NaN) is undefined (C17 6.3.1.4).
- * Deliberate contract asymmetry, mirroring the factor guard's: the FLOAT32
- * grad-storage path keeps propagating a NaN gradient loudly, because FLOAT32
- * CAN represent it -- only the BFP arms refuse.
- * Non-finite INTERMEDIATES are a different question and are NOT rejected: a
- * finite increment on a grid already at the exponent cap can still overflow
- * mant*oldScale*factor + inc to +-inf, and that saturates through the emit
- * clamp as BFP D6 value-domain behaviour. Only the INPUT is checked.
- * Checked in the pass that first reads each increment element, so a
- * violation in the first chunk is caught before any write; a later one
- * aborts after earlier chunks are already written, exactly as
- * packChunkGuarded's own mid-walk exit(1) does (the process is not
- * recoverable either way). */
+/* Fail-fast on a non-finite value fed into a BFP pack or accumulate. A BFP
+ * grid has no NaN/inf code: mapping the value to 0 would drop the caller's
+ * data, saturating it to +-qMax would invent data. Unguarded it is not even
+ * defined -- `v > absMax` is false for NaN and the float clamp cannot map it,
+ * so (int32_t)round(NaN) is reached (C17 6.3.1.4). FLOAT32 grad storage keeps
+ * propagating NaN because it can represent it. Non-finite INTERMEDIATES from
+ * finite inputs (a grid at the exponent cap) are not checked; they saturate.
+ * Called in the pass that first reads each element, so a violation in the
+ * first chunk aborts before any write; a later one aborts after earlier chunks
+ * are written, like packChunkGuarded's mid-walk exit(1). */
 static void requireFiniteBfpSource(float value, size_t index, const char *what, const char *role) {
     if (!isfinite(value)) {
         PRINT_ERROR("%s: non-finite %s value %f at element %zu -- BFP cannot represent "
@@ -2012,15 +1887,9 @@ static void rejectNonFiniteIncrement(const float *values, size_t count, size_t b
  * post-optimizerZeroGrad memset -> fresh, derive the grid from the increment;
  * anything else -> carry the existing grid verbatim). Codes-only by design:
  * a zeroed payload decodes to 0.0f under ANY scale/exponent, so the scan must
- * not consult the grid it is about to decide. Reads only, and bails at the
- * first nonzero code.
- * #421 U8: "mantissa 0 decodes to exactly 0.0f" presumes a FINITE scale --
- * 0 * inf is NaN, not 0. That holds for every in-contract config: derived
- * exponents never exceed deriveBfpStoredExponent's bias + 127 cap (the
- * largest finite float32 power of two), and since #420 G5 the deserializer
- * rejects stored exponents above it too, so a non-finite-scale grid can no
- * longer be ingested from an untrusted record -- only hand-built by a caller
- * assigning qConfig fields directly. */
+ * not consult the grid it is about to decide. Bails at the first nonzero code.
+ * Presumes a FINITE scale (0 * inf is NaN): derived exponents cap at
+ * bias + 127 and the deserializer rejects stored exponents above it. */
 static bool packedPayloadIsAllZero(const uint8_t *data, size_t bits, size_t n) {
     int32_t mant[ODT_CONVERSION_CHUNK_ELEMS];
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
@@ -2047,9 +1916,7 @@ static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *i
     /* phase A: all-zero scan of the packed accumulator (reads only) */
     const bool fresh = packedPayloadIsAllZero(target->data, qc->qBits, n);
     if (fresh) {
-        /* Fresh accumulator (post-initTensor zero-fill or post-optimizerZeroGrad
-         * memset): derive the grid from the increment (absmax/qMax; absmax
-         * 0 -> scale 1.f, packFloatBufferAsSym convention). */
+        /* derive the grid from the increment (absmax 0 -> scale 1.f) */
         float absMax = 0.f;
         if (inc->flat != NULL) {
             absMax = findAbsMaxFloat((uint8_t *)inc->flat, n);
@@ -2068,22 +1935,21 @@ static void accumulateIntoSymFixedGridEngine(tensor_t *target, const incSrc_t *i
         }
         storeCanonScale(&qc->scales[0], canonFitScale(absMax, (float)g.hi));
     }
-    /* else: carry the grid verbatim -- no re-derivation, no renorm (packed-grad D1/D2). */
+    /* else: carry the grid verbatim -- no re-derivation, no renorm. */
 
     /* phase B: chunked read-modify-write, one roundByMode per element in
-     * element order (SR stream identical to the old whole-tensor pass);
-     * in-place safe: chunk k is fully read before chunk k is rewritten and
-     * the code width is unchanged, so offsets never shift. */
+     * element order; in-place safe: chunk k is fully read before chunk k is
+     * rewritten and the code width is unchanged, so offsets never shift. */
     /* A carried grid is never clamped: growing past it is an overflow and
-     * packChunkGuarded aborts (packed-grad D2, #227 discipline). A fresh grid
-     * may clamp (#519): its scale is the canonical CEIL fit of this increment's
+     * packChunkGuarded aborts. A fresh grid may clamp: its scale is the
+     * canonical CEIL fit of this increment's
      * absMax / (float)g.hi (canonFitScale),
      * so every quotient sits within one float ulp of the grid's float image
      * (from q = 26 that image is itself one past the integer grid); a peak
      * that rounds or SR-lifts off the top is an artefact of the grid's own
-     * derivation, never an overflow. The integer clamp after rounding is the
-     * whole fix: a float clamp before rounding would yield the same code
-     * from the same draw at every width. */
+     * derivation, never an overflow. An integer clamp after rounding suffices:
+     * a float clamp before rounding would yield the same code from the same
+     * draw at every width. */
     float scale = loadCanonScale(&qc->scales[0]);
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
@@ -2181,14 +2047,14 @@ static void accumulateIntoAsymRescaleEngine(tensor_t *target, const incSrc_t *in
     float incBuf[ODT_CONVERSION_CHUNK_ELEMS];
     float vals[ODT_CONVERSION_CHUNK_ELEMS];
 
-    /* latch the OLD grid (element 0: per-tensor by the gate above) before
-     * deriveAsymGridFromMinMax overwrites it below. */
+    /* latch the OLD grid (element 0: caller guarantees a per-tensor target)
+     * before deriveAsymGridFromMinMax overwrites it below. */
     float oldScale = loadCanonScale(&qc->scales[0]);
     int32_t oldZeroPoint = (int32_t)qc->zeroPoints[0];
 
     /* phase A: chunked min/max of the decoded-plus-increment values (no
-     * rounding, no writes) -- fresh affine grid every call (packed-grad D4: no
-     * fit-preserving ASYM pack exists). */
+     * rounding, no writes) -- fresh affine grid every call (no fit-preserving
+     * ASYM pack exists). */
     float mn = 0.f, mx = 0.f;
     bool seeded = false;
     for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
@@ -2240,30 +2106,21 @@ void accumulateTensorIntoAsymRescale(tensor_t *target, const tensor_t *increment
     accumulateIntoAsymRescaleEngine(target, &src, n, rs);
 }
 
-/* BFP grad-accumulate engines (epic PR3): the SYM engines' shape plus
- * per-group grids. The outer walk stays chunk-aligned (the unpack/pack/
- * dequant helpers' byte-alignment contract) and group boundaries are handled
- * by the run-walk inside each chunk (dequantChunkToFloat's BFP shape) -- a
- * literal group-sequential walk would start chunks at group boundaries,
- * whose bit offsets (g*groupSize*mantissaBits) are not byte-aligned for
- * arbitrary geometries. No width guard here or in the funnel arm: BFP
- * mantissaBits is capped to [2,16] at construction (initBfpQConfigGrouped),
- * so an ODT_SYM_GRAD_QMAXBITS-style re-check would be dead code. */
+/* BFP grad-accumulate engines: the SYM engines' shape plus per-group grids.
+ * The outer walk stays chunk-aligned (the unpack/pack helpers' byte-alignment
+ * contract) and group boundaries are handled by the run-walk inside each
+ * chunk -- a group-sequential walk would start chunks at bit offsets
+ * (g*groupSize*mantissaBits) that are not byte-aligned. No width guard:
+ * mantissaBits is capped to [2,16] at construction (initBfpQConfigGrouped). */
 static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *inc, size_t n,
                                              const char *what, rngStream_t *rs) {
     bfpQConfig_t *qc = target->quantization->qConfig;
-    /* Both engines and the scale twin index exponents[g] under the
-     * exact-division invariant (numGroups * groupSize == n); a field-assigned
-     * config violating it would OOB-write the exponent array (< n) or
-     * silently mis-block (> n). Engine entry covers both wrappers once --
-     * the float* wrappers' n is caller-supplied, so it is validated here
-     * too, not just the tensor-derived one. */
+    /* exponents[g] is indexed under the exact-division invariant (numGroups *
+     * groupSize == n); a field-assigned config violating it would OOB-write
+     * the exponent array (< n) or mis-block (> n). */
     validateBfpQConfigShape(qc, n);
     if (n == 0) {
-        /* R7: the scale arm's semantic, now shared. The flat wrapper reached
-         * it by accident (an empty group's absmax is 0, which the exponent
-         * authority maps to the zero state); the streamed one skipped its
-         * derive loop entirely and kept the stale grid. */
+        /* the derive loops below never run for n == 0, so reset explicitly */
         resetBfpGridToZeroState(qc);
         return;
     }
@@ -2274,15 +2131,11 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
 
     /* phase A: all-zero scan of the packed accumulator (reads only) */
     if (packedPayloadIsAllZero(target->data, qc->mantissaBits, n)) {
-        /* Fresh accumulator (post-initTensor zero-fill or post-optimizerZeroGrad
-         * memset): derive the per-group grid from the increment alone through
-         * the exponent authority (absMax 0 -> stored = bias, the zero-state
-         * convention). */
+        /* derive the per-group grid from the increment alone */
         const float qMax = powf(2, (float)qc->mantissaBits - 1) - 1;
         const int32_t bias = bfpExponentBias(qc);
         const uint8_t maxStored = (uint8_t)((1u << qc->exponentBits) - 1u);
         if (inc->flat != NULL) {
-            /* contiguous float groups: packFloatBufferAsBfp's pass-1 shape */
             for (size_t g = 0; g < qc->numGroups; g++) {
                 size_t start = g * gsz;
                 size_t len = start + gsz > n ? n - start : gsz;
@@ -2290,8 +2143,7 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
                 deriveBfpStoredExponent(absMax, qMax, bias, maxStored, &qc->exponents[g]);
             }
         } else {
-            /* streamed increment: running absmax, groups close exactly at gsz
-             * multiples (packStreamAsBfp's pass-1 idiom) */
+            /* streamed increment: running absmax, groups close at gsz multiples */
             float absMax = 0.f;
             size_t g = 0;
             for (size_t off = 0; off < n; off += ODT_CONVERSION_CHUNK_ELEMS) {
@@ -2312,19 +2164,16 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
             }
         }
     }
-    /* else: carry the grid verbatim -- no re-derivation, no renorm (the SYM
-     * engine's packed-grad D1/D2 analog, fit-preserving). */
+    /* else: carry the grid verbatim -- no re-derivation, no renorm. */
 
     /* phase B: chunked read-modify-write, one roundByMode per element in
-     * element order; the run-walk hoists each group's 2^E scale out of the
-     * inner loop. NO saturation: packChunkGuarded aborts on overflow (#227
-     * code-domain discipline; BFP D6 saturation is value-domain only). In-place
-     * safe: chunk k is fully read before chunk k is rewritten and the code
-     * width is unchanged.
-     * #421 U2: this site's pre-clamp therefore deliberately does NOT use
-     * [qMin, qMax] like the value-domain emit passes -- pulling an
-     * overflowing accumulator back onto the grid would turn the #227 abort
-     * into silent saturation. It clamps to a band TWO codes wider on each
+     * element order. NO saturation: packChunkGuarded aborts on overflow
+     * (saturation is value-domain only). In-place safe: chunk k is fully read
+     * before chunk k is rewritten and the code width is unchanged.
+     * The pre-clamp therefore deliberately does NOT use [qMin, qMax] like the
+     * value-domain emit passes -- pulling an overflowing accumulator back onto
+     * the grid would turn the abort into silent saturation. It clamps to a band
+     * TWO codes wider on each
      * side, which is enough to make the conversion defined (a group at the
      * exponent cap can drive the quotient past int32 range, or to +-inf, for
      * entirely finite increments, and (int32_t)round(...) is undefined there
@@ -2340,12 +2189,10 @@ static void accumulateIntoBfpFixedGridEngine(tensor_t *target, const incSrc_t *i
         size_t count = n - off < ODT_CONVERSION_CHUNK_ELEMS ? n - off : ODT_CONVERSION_CHUNK_ELEMS;
         unpackSignExtendChunk(target->data, qc->mantissaBits, off, count, mant);
         incSrcChunk(inc, off, count, incBuf);
-        /* Phase B is the only pass that reads EVERY increment element in both
-         * branches (phase A reads it only for a fresh, all-zero target), so
-         * the R6 check lives here. In the fresh branch phase A has already
-         * absorbed the value into an absmax first: NaN is ignored by the
-         * comparison and inf takes the exponent authority's non-finite arm
-         * (the cap), both defined, and the abort follows immediately here. */
+        /* Phase B is the only pass that reads EVERY increment element (phase A
+         * reads it only for a fresh target), so the check lives here. Phase A's
+         * absmax handles a non-finite value defined (NaN ignored, inf -> the
+         * exponent cap) before this aborts. */
         rejectNonFiniteIncrement(incBuf, count, off, what);
         size_t chunkEnd = off + count;
         size_t idx = off;
@@ -2378,48 +2225,32 @@ void accumulateTensorIntoBfpFixedGrid(tensor_t *target, const tensor_t *incremen
     accumulateIntoBfpFixedGridEngine(target, &src, n, "accumulateTensorIntoBfpFixedGrid", rs);
 }
 
-/* Fresh-exponent ring capacity for the rescale walker (#421 U6): the live set
- * at any pass-2 chunk spans at most one chunk of groups -- at most
- * ODT_CONVERSION_CHUNK_ELEMS of them, at groupSize 1 -- so that many slots
- * are already exactly enough to keep them distinct. The extra slot is slack,
- * not a requirement. */
+/* Fresh-exponent ring capacity for the rescale walker: the live set at any
+ * pass-2 chunk spans at most ODT_CONVERSION_CHUNK_ELEMS groups (at groupSize
+ * 1); the extra slot is slack, not a requirement. */
 #define ODT_RESCALE_FRESH_WINDOW (ODT_CONVERSION_CHUNK_ELEMS + 1)
 
-/* The ONE BFP value-domain rescale walker (#421 U1): both the grad-accumulate
- * DYNAMIC_RESCALE arm and the optimizer's in-place scale arm are the same
- * two-pass repack over v = mant * oldScale * factor + inc, differing only in
- * which of the two knobs is inert --
+/* The BFP value-domain rescale walker shared by the grad-accumulate
+ * DYNAMIC_RESCALE arm and the optimizer's in-place scale arm: a two-pass
+ * repack over v = mant * oldScale * factor + inc, with
  *
  *   accumulate: inc = the increment source, factor = 1.f
  *   scale:      inc = NULL (a zero increment), factor = the scale factor
  *
- * so they are one function with two callers instead of two near-identical
- * walkers. Both degenerate cases are EXACT, not approximate: (float)mant *
- * oldScale is an integer times a power of two, so multiplying it by 1.f is
- * the identity, and x + 0.f is x for every finite x and for +-inf alike (the
- * -0.0f -> +0.0f flip an added zero can cause is invisible downstream --
- * fabsf in pass 1, and a quotient of +-0 rounds to the code 0 either way).
- * The same holds if the compiler contracts the multiply-add into an fma: the
- * mant * oldScale product is exact, so fma and mul-then-add round identically
- * here. `inc == NULL` therefore reproduces the old scale path bit for bit,
- * and `factor == 1.f` the old accumulate path.
- *
- * The SYM/ASYM engines keep their own walkers: their grids are scalars, so
- * they have neither the per-group latch nor the run-walk this shape exists
- * for. The BFP FixedGrid engine also stays separate -- its emit differs in
- * KIND, not in formula (a #227 code-domain abort on overflow instead of BFP D6
- * value-domain saturation), and it carries the target's grid instead of
- * re-deriving one. */
+ * Both inert knobs are EXACT: (float)mant * oldScale is an integer times a
+ * power of two, so * 1.f is the identity, and x + 0.f is x for every finite x
+ * and +-inf (the -0.0f -> +0.0f flip is invisible: fabsf in pass 1, and +-0
+ * rounds to code 0). An fma contraction rounds identically because the
+ * mant * oldScale product is exact. The BFP FixedGrid engine stays separate:
+ * it aborts on overflow instead of saturating and carries the target's grid. */
 static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, size_t n,
                            const char *what, rngStream_t *rs) {
     bfpQConfig_t *qc = target->quantization->qConfig;
-    /* Exact-division invariant -- see the FixedGrid twin's guard comment. Must
-     * run before the walk below, whose group indexing assumes it. */
+    /* Exact-division invariant -- the walk's group indexing assumes it. */
     validateBfpQConfigShape(qc, n);
     if (n == 0) {
-        /* R7: both passes below are element loops, so an empty target would
-         * keep whatever grid it carried. Shared with the FixedGrid twin and
-         * with the scale arm, which reaches this through its own entry. */
+        /* both passes are element loops, so an empty target would keep its
+         * stale grid */
         resetBfpGridToZeroState(qc);
         return;
     }
@@ -2437,34 +2268,19 @@ static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, 
         memset(incBuf, 0, sizeof(incBuf));
     }
 
-    /* #421 U6: the two passes are INTERLEAVED, with pass 1 running exactly
-     * one group-boundary ahead of pass 2, so the only exponents that must be
-     * held outside qc->exponents are the FRESH ones of the groups the
-     * current pass-2 chunk still touches -- at most one chunk's worth plus
-     * the group straddling its end. That is a fixed
-     * ODT_CONVERSION_CHUNK_ELEMS + 1 byte window (257 B), replacing the
-     * O(numGroups) latch VLA the whole-tensor two-pass needed (n bytes at
-     * groupSize 1); this is what closes the unbounded-stack item. The frame
-     * is deterministic rather than smaller: sharing one walker costs the
-     * SCALE arm an incBuf it never had, so at numGroups == 1 that arm's frame
-     * grows by ~1280 B (1 KB incBuf + 257 B window - the 1-byte VLA), from
-     * ~2 KB to ~3.3 KB. Accepted deliberately (a scratch split stays
-     * mechanical if MCU stack budgets ever complain).
+    /* The two passes are INTERLEAVED, pass 1 running one group boundary ahead
+     * of pass 2, so only the FRESH exponents of the groups the current pass-2
+     * chunk touches are held outside qc->exponents: a fixed
+     * ODT_RESCALE_FRESH_WINDOW-byte window instead of an O(numGroups) stack
+     * array. The window size, not n, bounds the stack frame.
      *
-     * The direction is inverted relative to that latch, which is what makes
-     * the window small: qc->exponents keeps holding the OLD grid, and pass 2
-     * publishes each group's fresh exponent into it only after consuming the
-     * group's LAST element. Both passes can therefore read the old exponent
-     * straight out of qc->exponents -- pass 1 only ever looks at groups pass
-     * 2 has not finished, and pass 2 finishes a group exactly when it
-     * publishes it.
+     * qc->exponents keeps holding the OLD grid; pass 2 publishes each group's
+     * fresh exponent only after consuming the group's LAST element. Both
+     * passes therefore read the old exponent straight from qc->exponents --
+     * pass 1 only looks at groups pass 2 has not finished.
      *
-     * Ring indexing is g % ODT_RESCALE_FRESH_WINDOW. The live set at pass-2
-     * chunk [off, chunkEnd) is exactly the groups [off / gsz,
-     * (chunkEnd - 1) / gsz], whose span is at most
-     * (ODT_CONVERSION_CHUNK_ELEMS - 1) / gsz -- at most
-     * ODT_CONVERSION_CHUNK_ELEMS distinct groups, which the ring already
-     * covers exactly at gsz == 1, with one slot of slack. */
+     * Ring index is g % ODT_RESCALE_FRESH_WINDOW; the live set at pass-2 chunk
+     * [off, chunkEnd) is the groups [off / gsz, (chunkEnd - 1) / gsz]. */
     uint8_t fresh[ODT_RESCALE_FRESH_WINDOW];
     size_t scanned = 0; /* pass-1 frontier: elements [0, scanned) are absorbed */
     float absMax = 0.f;
@@ -2522,31 +2338,18 @@ static void bfpRescaleWalk(tensor_t *target, const incSrc_t *inc, float factor, 
         /* pass 2: chunked read-modify-write -- decode at the still-unpublished
          * OLD scale, requantize at the windowed fresh one, then publish the
          * fresh exponent as each group closes; one roundByMode per element in
-         * element order; clamp before the pack guard (value-domain
-         * saturation, BFP D6 -- unlike the FixedGrid twin's abort). In-place safe:
-         * chunk k is fully read before chunk k is rewritten and the code width
-         * is unchanged.
-         * The saturation clamp runs in the FLOAT domain FIRST (Rounding.h's
-         * clamp): a group already sitting at the exponent cap has no headroom,
-         * so even entirely finite inputs push v / scale past int32 range or
-         * all the way to +-inf, and (int32_t)round(...) is undefined there
-         * (C17 6.3.1.4). Behaviour-identical to clamping after the round for
-         * every DEFINED case -- in range the float clamp is the identity, and
-         * outside it roundByMode is monotone, so both orders land on the same
-         * boundary code. The clampInt32 stays behind it as a defensive
-         * guard: exact SR never moves an exactly representable qMax/qMin, so it
-         * only matters where the float grid bound is inexact (wide SYM grids,
-         * q >= 25).
-         * NaN never reaches this clamp -- which matters because a
-         * comparison-based clamp cannot map it. Every input is finite by
-         * construction: the factor is checked at scaleBfpTensorInPlace's
-         * entry (R1) and the increment element-wise in pass 1 (R6), and
-         * mantissa * oldScale * factor + inc over finite operands is at worst
-         * +-inf, never NaN, given a FINITE oldScale -- guaranteed for
-         * in-contract configs, since deriveBfpStoredExponent caps derived
-         * exponents at bias + 127 and #420 G5 rejects deserialized records
-         * above that cap. A mantissa of 0 then decodes to exactly 0, not
-         * 0 * inf. */
+         * element order; saturating clamp before the pack guard (unlike the
+         * FixedGrid twin's abort). In-place safe: chunk k is fully read before
+         * chunk k is rewritten and the code width is unchanged.
+         * The clamp runs in the FLOAT domain first: a group at the exponent cap
+         * has no headroom, so finite inputs can push v / scale past int32 range
+         * or to +-inf, where (int32_t)round(...) is undefined (C17 6.3.1.4);
+         * see packFloatBufferAsBfp for why the result equals clamping after
+         * the round.
+         * NaN never reaches this clamp (which cannot map it): the factor is
+         * checked at scaleBfpTensorInPlace's entry and the increment in pass 1,
+         * and mant * oldScale * factor + inc over finite operands with a
+         * FINITE oldScale (exponents cap at bias + 127) is at worst +-inf. */
         unpackSignExtendChunk(target->data, qc->mantissaBits, off, count, mant);
         if (inc != NULL) {
             incSrcChunk(inc, off, count, incBuf);
@@ -2586,25 +2389,13 @@ void accumulateTensorIntoBfpRescale(tensor_t *target, const tensor_t *increment,
     bfpRescaleWalk(target, &src, 1.f, n, "accumulateTensorIntoBfpRescale", rs);
 }
 
-/* The optimizer's in-place scale arm: the SAME value-domain rescale walk the
- * DYNAMIC_RESCALE accumulate arm runs, with a NULL increment source instead
- * of one and a real factor instead of 1.f (#421 U1 -- bfpRescaleWalk's doc
- * block above carries the shared contract and the exactness argument for
- * both degenerate knobs). Only the two entry guards are the scale path's own:
- * `factor` must be finite, and the ROUNDING is the config's own STORAGE
- * roundingMode by construction -- scaling is storage requantization, not an
- * op (#282 target-owned convention), unlike the accumulate arms whose mode
- * reaches the target config via the funnel's op arithmetic. */
+/* bfpRescaleWalk with a NULL increment. Rounds with the config's own STORAGE
+ * roundingMode: scaling is storage requantization, not an op. */
 void scaleBfpTensorInPlace(tensor_t *t, float factor, rngStream_t *rs) {
-    /* A BFP grid is (int32 mantissa, shared power-of-two exponent) -- it has
-     * no NaN/inf code, so there is no propagation path a non-finite factor
-     * could take. Unguarded the walker's two passes would DISAGREE about it:
-     * pass 1's `v > absMax` is false for NaN, so the fresh exponent silently
-     * ignores it, while pass 2's float clamp passes NaN through (a
-     * comparison-based clamp cannot map it) into roundByMode, and
-     * (int32_t)round(NaN) is undefined behavior (C17 6.3.1.4). Fail fast
-     * instead of dropping the factor (masks the caller's bug) or saturating
-     * (invents data). */
+    /* BFP has no NaN/inf code, and unguarded the walker's passes disagree on a
+     * NaN factor (pass 1 ignores it, pass 2 reaches (int32_t)round(NaN), UB).
+     * Dropping the factor would mask the caller's bug, saturating would
+     * invent data. */
     if (!isfinite(factor)) {
         PRINT_ERROR("scaleBfpTensorInPlace: non-finite factor %f -- BFP cannot represent "
                     "non-finite values (no NaN/inf propagation path); refusing to silently "
@@ -2612,9 +2403,6 @@ void scaleBfpTensorInPlace(tensor_t *t, float factor, rngStream_t *rs) {
                     (double)factor);
         exit(1);
     }
-    /* Everything past the factor guard -- the geometry check, the n == 0
-     * canonical zero state (R4, unified as R7 across all three arms) and the
-     * walk itself -- lives in the shared walker. */
     size_t n = calcNumberOfElementsByTensor(t);
     bfpRescaleWalk(t, NULL, factor, n, "scaleBfpTensorInPlace", rs);
 }
@@ -3292,11 +3080,9 @@ void paramUpdateBfpInPlace(tensor_t *param, const tensor_t *update, bfpScalar_t 
                         (bfpScalar_t){.q = -lr.q, .e = lr.e}, rm, rs, "paramUpdateBfpInPlace");
 }
 
-/* SYM_INT32 -> SYM_INT32 grad accumulate: reproduces addSymInt32TensorsInplace's
- * Strategy-A semantics (dequant both -> float add -> fresh-absmax requant with
- * the TARGET's roundingMode) directly over the flat int32 mantissa arrays --
- * SYM_INT32 storage is never packed/sub-byte, so no chunk buffer is needed to
- * keep this O(1) extra memory; Add.c stays untouched (#296 Stage 2). */
+/* Dequant both, float add, fresh-absmax requant in the TARGET's roundingMode,
+ * directly over the flat int32 arrays: SYM_INT32 storage is never packed, so
+ * no chunk buffer is needed for O(1) extra memory. */
 void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *increment,
                                            rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(target);
@@ -3325,16 +3111,14 @@ void accumulateSymInt32IntoSymInt32Rescale(tensor_t *target, const tensor_t *inc
     }
 }
 
-/* FLOAT32 grad accumulate: the FLOAT32-increment fast path is unchanged
- * (addFloat32TensorsInplace, VLA-free already); a non-FLOAT32 increment is
- * dequantized chunk-wise so no O(n) scratch is ever allocated. */
+/* A non-FLOAT32 increment is dequantized chunk-wise, so no O(n) scratch. */
 void accumulateTensorIntoFloat32Inplace(tensor_t *target, const tensor_t *increment,
                                         rngStream_t *rs) {
     size_t n = calcNumberOfElementsByTensor(target);
     if (increment->quantization->type == FLOAT32) {
-        /* Flat same-index add — epilogue targets are identity-ordered
-         * grad/param tensors, so flat indexing is exact and matches the
-         * dequant branch below (severs the TensorConversion->Add cycle). */
+        /* Flat same-index add: epilogue targets are identity-ordered
+         * grad/param tensors, so flat indexing is exact. Inlined rather than
+         * calling Add, which would create a TensorConversion->Add cycle. */
         float *tg = (float *)target->data;
         const float *in = (const float *)increment->data;
         for (size_t i = 0; i < n; i++) {
@@ -3437,8 +3221,7 @@ static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTe
     if (inputBits != outputBits) {
         /* Same-type conversion is a verbatim packed-byte copy; differing widths
          * would reinterpret the packing (and overflow the output for wider inputs).
-         * Width-changing SYM/ASYM rewrites are real conversions (repack policy:
-         * PR3, #261). */
+         * Width-changing SYM/ASYM rewrites are real conversions. */
         PRINT_ERROR("Same-type conversion requires equal element widths (%zu vs %zu bits)",
                     inputBits, outputBits);
         exit(1);
@@ -3461,11 +3244,9 @@ static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTe
     case SYM: {
         symQConfig_t *inputSymQC = inputTensor->quantization->qConfig;
         symQConfig_t *outputSymQC = outputTensor->quantization->qConfig;
-        /* Group-quant PR2: dest->scales is a fixed-size (numGroups-element) heap
-         * array -- a numGroups mismatch means src's group shape doesn't fit
-         * dest's array, so this must fail fast rather than over/under-copy
-         * (mirrors copySymQConfigInto, Tensor.c ~:442-459). groupSize is
-         * adopted from src unconditionally, same precedent. */
+        /* dest->scales is a fixed numGroups-element array, so a numGroups
+         * mismatch must fail fast rather than over/under-copy (as
+         * copySymQConfigInto). groupSize is adopted from src. */
         if (outputSymQC->numGroups != inputSymQC->numGroups) {
             PRINT_ERROR("convertTensorsWithSameType: SYM group-shape mismatch (dest "
                         "numGroups=%zu groupSize=%zu, src numGroups=%zu groupSize=%zu)",
@@ -3480,9 +3261,7 @@ static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTe
     case ASYM: {
         asymQConfig_t *inputAsymQC = inputTensor->quantization->qConfig;
         asymQConfig_t *outputAsymQC = outputTensor->quantization->qConfig;
-        /* Group-quant PR4: group-faithful, mirroring the SYM arm above (and
-         * copyAsymQConfigInto, Tensor.c) -- dest's arrays are fixed-size
-         * numGroups blocks, so a shape mismatch must fail fast. */
+        /* as the SYM arm: dest's arrays are fixed numGroups blocks */
         if (outputAsymQC->numGroups != inputAsymQC->numGroups) {
             PRINT_ERROR("convertTensorsWithSameType: ASYM group-shape mismatch (dest "
                         "numGroups=%zu groupSize=%zu, src numGroups=%zu groupSize=%zu)",
@@ -3502,11 +3281,9 @@ static void convertTensorsWithSameType(tensor_t *inputTensor, tensor_t *outputTe
         /* The width guard above only sees mantissaBits; a same-type copy is
          * only meaningful between IDENTICAL BFP configs -- a numGroups/
          * groupSize mismatch re-blocks the exponents[] indexing (and can
-         * over/under-run dest's fixed-size array, the SYM precedent above)
-         * and an exponentBits mismatch shifts the bias, silently re-gridding
-         * every copied exponent. Geometry/width changes are real conversions:
-         * route them through a Quantization layer (the conversionMatrix
-         * [BFP][BFP] requant). */
+         * over/under-run dest's fixed-size array) and an exponentBits mismatch
+         * shifts the bias, silently re-gridding every copied exponent.
+         * Geometry/width changes go through conversionMatrix[BFP][BFP]. */
         if (outputBfpQC->numGroups != inputBfpQC->numGroups ||
             outputBfpQC->groupSize != inputBfpQC->groupSize ||
             outputBfpQC->mantissaBits != inputBfpQC->mantissaBits ||

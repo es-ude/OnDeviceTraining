@@ -167,8 +167,8 @@ void testConversionIntAsym() {
     tensor_t intTensor;
     setTensorValues(&intTensor, (uint8_t *)intData, &shape, &intQ, NULL);
 
-    /* Stack-fixture idiom (group-quant PR4): local backing arrays, never
-     * freed -- the converter derives the grid into them. */
+    /* Stack-fixture idiom: local backing arrays, never freed -- the
+     * converter derives the grid into them. */
     odtScale_t asymScales[1] = {odtTestScale(1.f)};
     uint16_t asymZps[1] = {0};
     asymQConfig_t asymQConfig = {.scales = asymScales,
@@ -188,11 +188,8 @@ void testConversionIntAsym() {
     uint8_t flattenedAsymData[numValues];
     byteConversion(asymTensor.data, asymQConfig.qBits, flattenedAsymData, 8, numValues);
 
-    /* Re-pinned to the nudged code-domain grid (group-quant PR4, D6): zp is
-     * now the CODE-domain +10 (old value-domain zp was -10); the codes
-     * happen to coincide with the old grid for this zero-spanning band
-     * (verified by the goldgen, not assumed). Gold: expected_asym_nudged.h
-     * f1SpanZero (same {1,2,3,4,-1,-2} values as this int fixture). */
+    /* Nudged code-domain grid: zp is the CODE-domain +10. Gold:
+     * expected_asym_nudged.h f1SpanZero (same {1,2,3,4,-1,-2} values). */
     TEST_ASSERT_EQUAL_size_t(numValues, codes_asym_nudged_f1SpanZero_len);
     for (size_t i = 0; i < numValues; i++) {
         TEST_ASSERT_EQUAL_UINT8((uint8_t)codes_asym_nudged_f1SpanZero[i], flattenedAsymData[i]);
@@ -372,10 +369,8 @@ void testConversionFloatAsym() {
     uint8_t flattenedAsymData[numValues];
     byteConversion(asymTensor.data, asymQConfig.qBits, flattenedAsymData, 8, numValues);
 
-    /* Re-pinned to the nudged code-domain grid (group-quant PR4, D6): the
-     * band {1..4, -1, -2} spans zero so the nudge is a no-op and the scale
-     * stays 6/31; zp becomes the code-domain +10 (old value-domain -10) and
-     * the codes coincide with the old grid here (goldgen-verified). */
+    /* The band {1..4, -1, -2} spans zero, so the nudge is a no-op: scale
+     * 6/31, code-domain zp +10 (goldgen-verified). */
     TEST_ASSERT_EQUAL_size_t(numValues, input_asym_nudged_f1SpanZero_len);
     for (size_t i = 0; i < numValues; i++) {
         TEST_ASSERT_EQUAL_UINT8((uint8_t)codes_asym_nudged_f1SpanZero[i], flattenedAsymData[i]);
@@ -385,17 +380,12 @@ void testConversionFloatAsym() {
 }
 
 void testConversionFloatAsymQBits16NegativeBandZeroPointAtCodeCeiling() {
-    /* Re-pinned to the nudged code-domain grid (group-quant PR4, D6). This
-     * used to be the -72817 int32-zeroPoint width pin (#246); the nudge
-     * extends the all-negative band [-B, -1] to [-B, 0], so the code-domain
-     * zp lands EXACTLY on the uint16 ceiling 2^16-1 = 65535 -- the group-quant D6
-     * boundary this fixture now pins (zpReal = -mn/scale = qMax whenever mx
-     * nudges to 0 and the grid B / 65535 is exactly dyadic, as B = 65535 * 2^-12
-     * makes it; a non-dyadic band gets a coarser CEIL grid). The old max value -1 no longer
-     * maps to code 65535 (that code now represents 0.0); the min still maps
-     * to code 0. Gold: expected_asym_nudged.h f2NegBand16.
-     * Mutation guard: dropping the nudge re-derives the old [-10,-1] band
-     * whose zpReal -72817 is outside the uint16 clamp -> zp pins RED. */
+    /* The nudge extends the all-negative band [-10, -1] to [-10, 0], so the
+     * code-domain zp lands EXACTLY on the uint16 ceiling 2^16-1 = 65535
+     * (zpReal = -mn/scale = qMax whenever mx nudges to 0). Code 65535 then
+     * represents 0.0; the min still maps to code 0. Without the nudge zpReal
+     * would be -72817, outside the uint16 range. Gold: expected_asym_nudged.h
+     * f2NegBand16. */
     size_t numValues = 6;
     size_t dims[] = {numValues};
     size_t orderOfDims[] = {0};
@@ -444,30 +434,20 @@ void testConversionFloatAsymQBits16NegativeBandZeroPointAtCodeCeiling() {
 }
 
 void testInitAsymQConfigRejectsQBitsAbove16(void) {
-    /* group-quant D6 ceiling (was [1, 30], #246): the code-domain zeroPoint is uint16,
-     * so qBits=17 has codes/zp up to 2^17-1 with no uint16 representation.
-     * Mutation guard: removing the initAsymQConfig guard lets the child exit
-     * 0 -> RED. */
+    /* The code-domain zeroPoint is uint16, so qBits=17 has codes/zp up to
+     * 2^17-1 with no uint16 representation. */
     asymQConfig_t qc;
     ASSERT_EXITS_WITH_FAILURE(initAsymQConfig(17, HALF_AWAY, &qc));
 }
 
 void testConversionFloatAsymFarNegativeBandDerivesNudgedGrid(void) {
-    /* Replaces testConversionFloatAsymZeroPointBeyondInt32Dies (group-quant
-     * group-quant PR4, D6): under the zero-inclusion nudge this data's zpReal is BOUNDED
-     * into [0, 2^b-1] by construction -- the old int32-overflow death regime
-     * (un-nudged zpReal ~ -2.55e9) is unreachable, so the death test is
-     * obsolete. The property that replaces it: the far-negative band
-     * [-5e6, -4999999.5] nudges to [-5e6, 0], derives zp = 255 (the qBits=8
-     * code ceiling) and a VALID grid whose code zp decodes to EXACTLY 0.0f
-     * (zero-representability, the nudge's raison d'etre). Gold:
-     * expected_asym_nudged.h f3NegFar.
-     * Mutation guard (i): dropping the nudge derives the old [-5e6,
-     * -4999999.5] band -> scale collapses to 0.5/255 (vs 19607.84) and the
-     * codes change -> the scale pin and code pins go RED. (The exact-zero
-     * decode alone cannot catch (i): code==zp decodes to 0 on ANY affine
-     * grid -- what the nudge buys is that zp is a VALID grid anchor, which
-     * the scale/code pins witness.) */
+    /* The zero-inclusion nudge bounds zpReal into [0, 2^b-1] even for a
+     * far-negative band (un-nudged zpReal ~ -2.55e9): [-5e6, -4999999.5]
+     * nudges to [-5e6, 0], derives zp = 255 (the qBits=8 code ceiling) and a
+     * VALID grid whose code zp decodes to EXACTLY 0.0f. Without the nudge the
+     * scale would collapse to 0.5/255 (vs 19607.84); the scale and code pins
+     * catch that, the exact-zero decode alone cannot (code == zp decodes to 0
+     * on ANY affine grid). Gold: expected_asym_nudged.h f3NegFar. */
     size_t numValues = 2;
     size_t dims[] = {numValues};
     size_t orderOfDims[] = {0};
@@ -504,8 +484,7 @@ void testConversionFloatAsymFarNegativeBandDerivesNudgedGrid(void) {
     /* zero-representability: the code equal to zp must decode to EXACTLY
      * 0.0f THROUGH THE REAL DECODE FUNNEL (not a hand-inlined formula, which
      * would be tautological): pack code == zp into the tensor and convert.
-     * Mutation guard: a (code + zp)*scale decode regression yields
-     * 2*zp*scale = 1e7, not 0. */
+     * A (code + zp)*scale decode would yield 2*zp*scale = 1e7, not 0. */
     int32_t zpCodes[2] = {(int32_t)asymQConfig.zeroPoints[0], (int32_t)asymQConfig.zeroPoints[0]};
     byteConversion((uint8_t *)zpCodes, 32, asymTensor.data, 8, numValues);
     float decoded[2];
@@ -519,12 +498,11 @@ void testConversionFloatAsymFarNegativeBandDerivesNudgedGrid(void) {
 }
 
 void testConversionFloatAsymEncodeClampAtBandEdgeTie(void) {
-    /* Encode-clamp pin (group-quant PR4, mutation guard (ii)): with scale
-     * exactly 1.0 and zpReal = 1.5 (an exact HALF_AWAY tie -> zp = 2), the
-     * band-max 5.5 ALSO rounds up (round(5.5) = 6), so the un-clamped code
-     * 6 + 2 = 8 exceeds qMax = 2^3-1 = 7 -- the ONE fixture whose emitted
-     * code depends on emitAsymChunk's clamp. Removing the clamp packs 8 into
-     * 3 bits (wraps to 0) -> the code pin goes RED. Also pins
+    /* Encode-clamp pin: with scale exactly 1.0 and zpReal = 1.5 (an exact
+     * HALF_AWAY tie -> zp = 2), the band-max 5.5 ALSO rounds up (round(5.5) =
+     * 6), so the un-clamped code 6 + 2 = 8 exceeds qMax = 2^3-1 = 7 -- the ONE
+     * fixture whose emitted code depends on emitAsymChunk's clamp (without it
+     * 8 wraps to 0 in 3 bits). Also pins
      * zero-representability on a 0.0-CONTAINING buffer: 0.0 encodes to code
      * == zp and decodes to exactly 0.0f. Gold: expected_asym_nudged.h
      * f4ClampTie. */
@@ -685,8 +663,7 @@ void testConversionSymInt32Asym() {
     uint32_t output[numValues];
     byteConversion(asymTensor.data, asymQConfig.qBits, (uint8_t *)output, 32, numValues);
 
-    /* Re-pinned to the nudged code-domain grid (group-quant PR4, D6): the
-     * scale=1 mantissas dequantize to the same {1..4,-1,-2} values as
+    /* The scale=1 mantissas dequantize to the same {1..4,-1,-2} values as
      * f1SpanZero -- zp +10 (code domain), codes goldgen-verified. */
     TEST_ASSERT_EQUAL_FLOAT(scale_asym_nudged_f1SpanZero, odtScaleToFloat(asymQConfig.scales[0]));
     TEST_ASSERT_EQUAL_UINT16((uint16_t)zp_asym_nudged_f1SpanZero, asymQConfig.zeroPoints[0]);
@@ -703,9 +680,7 @@ void testConversionAsymInt() {
     shape_t shape = {
         .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
-    /* Code-domain re-pin (group-quant PR4, D6): the old value-domain zp -11
-     * becomes code-domain +11; the mantissa image code - zp reproduces the
-     * exact same integers the old code + (-11) did. */
+    /* code-domain zp +11: the mantissa image is code - zp */
     odtScale_t asymScales[1] = {odtTestScale(0.1875f)};
     uint16_t asymZps[1] = {11};
     asymQConfig_t asymQConfig = {.scales = asymScales,
@@ -745,8 +720,7 @@ void testConversionAsymFloat() {
     shape_t shape = {
         .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
-    /* Code-domain re-pin (group-quant PR4, D6): zp -11 -> +11, decode
-     * (code - 11)*scale reproduces the old (code + (-11))*scale exactly. */
+    /* code-domain zp +11: decode is (code - 11)*scale */
     odtScale_t asymScales[1] = {odtTestScale(0.1875f)};
     uint16_t asymZps[1] = {11};
     asymQConfig_t asymQConfig = {.scales = asymScales,
@@ -786,9 +760,7 @@ void testConversionAsymSymInt32() {
     shape_t shape = {
         .dimensions = dims, .numberOfDimensions = numberOfDims, .orderOfDimensions = orderOfDims};
 
-    /* Code-domain re-pin (group-quant PR4, D6): zp -11 -> +11; the ASYM ->
-     * SYM_INT32 mantissa image is now code - zp (was code + zeroPoint),
-     * producing the same integers. */
+    /* code-domain zp +11: the ASYM -> SYM_INT32 mantissa image is code - zp */
     odtScale_t asymScales[1] = {odtTestScale(0.1875f)};
     uint16_t asymZps[1] = {11};
     asymQConfig_t asymQConfig = {.scales = asymScales,
@@ -828,13 +800,10 @@ void testConversionBoolBoolCopiesOnlyPackedBytes() {
     /* N=9 BOOL elements occupy (9+7)/8 = 2 packed bytes; the same-type copy
      * must move exactly 2 bytes. Canary: the output payload sits at the start
      * of a 16-byte guard allocation whose bytes 2..15 hold sentinel 0xAA.
-     * Before the fix, convertTensor memmoves N * calcBytesPerElement(BOOL)
-     * = 9 bytes and clobbers the sentinels with the input buffer's 0x55
-     * filler. Both buffers are oversized on purpose so the buggy 9-byte
-     * memmove stays inside owned allocations and the RED run is
-     * well-defined. initTensor is not used here because it allocates the
-     * exact packed size (2 bytes), which would make the buggy copy run out
-     * of bounds. */
+     * A copy of N * calcBytesPerElement(BOOL) = 9 bytes would clobber them
+     * with the input's 0x55 filler. Both buffers are oversized so such a
+     * copy stays inside owned allocations and the failure is well-defined
+     * (initTensor would allocate exactly 2 bytes). */
     enum { N = 9, GUARD_BYTES = 16, PAYLOAD_BYTES = 2 };
 
     size_t dims[] = {N};
@@ -878,12 +847,9 @@ void testQuantTypeToStringBool() {
 }
 
 void testConversionSymInt32SameTypeCopyPropagatesScale() {
-    /* Pins the same-type copy semantics PR C builds on: mantissas memmoved,
-     * input scale overwrites any pre-set output scale, NO rescale happens.
-     * symInt32QConfig_t is zero-initialized instead of using
-     * initSymInt32QConfig so this test references no roundingMode_t
-     * enumerator (PR A renames them in parallel); the same-type copy path
-     * never reads roundingMode. */
+    /* Same-type copy semantics: mantissas memmoved, input scale overwrites
+     * any pre-set output scale, NO rescale happens. The qConfig is
+     * zero-initialized because the copy path never reads roundingMode. */
     size_t numValues = 4;
     size_t dims[] = {4};
     size_t orderOfDims[] = {0};
@@ -943,8 +909,7 @@ void testConversionSymInt32SameTypeCopyCarriesQMaxBits() {
 
 void testConversionSymSameTypeCopyPropagatesScale() {
     /* SYM -> SYM same width is a verbatim packed copy; the output's stale default
-     * scale (1.f) must be replaced by the input's, or every later dequant is wrong.
-     * Mutation guard: dropping the new `case SYM:` leaves scale == 1.f -> RED. */
+     * scale (1.f) must be replaced by the input's, or every later dequant is wrong. */
     int32_t mantissas[] = {3, -3, 31, -32};
     size_t dims[] = {1, 4};
     size_t order[] = {0, 1};
@@ -985,8 +950,7 @@ void testConversionSymSameTypeCopyPropagatesScale() {
 void testConversionSymSameTypeWidthMismatchDies() {
     /* qBits 6 -> 4: a verbatim byte copy would reinterpret the packing (and for
      * wider inputs overflow the output buffer). Width-changing SYM rewrites are
-     * real conversions (repack policy: PR3). Mutation guard: removing the width
-     * guard lets the child exit 0 -> RED. */
+     * real conversions. */
     int32_t mantissas[] = {3, -3};
     size_t dims[] = {1, 2};
     size_t order[] = {0, 1};
@@ -1224,7 +1188,7 @@ void testRequantDynamicInPlaceAliasMatchesGold() {
 }
 
 void testRequantDynamicViaConversionMatrixDiagonal() {
-    // The Quant layer (PR D) dispatches directly over the matrix; pin the
+    // The Quant layer dispatches directly over the matrix; pin the
     // diagonal wiring and that it behaves identically to a direct call.
     conversionFunction_t conversionFn = conversionMatrix[SYM_INT32][SYM_INT32];
     TEST_ASSERT_NOT_NULL(conversionFn);
@@ -1260,7 +1224,7 @@ void testRequantDynamicViaConversionMatrixDiagonal() {
 }
 
 void testConvertTensorSymInt32SameTypeKeepsCopySemantics() {
-    // Pins the #192 D1 invariant the PR-D Quant layer relies on:
+    // The Quant layer relies on this:
     // convertTensor's same-type branch short-circuits BEFORE the matrix
     // lookup and stays memmove + scale copy — wiring the diagonal must NOT
     // change it. A requant here would yield {10922, -21845, 32767} with a
@@ -1397,9 +1361,9 @@ void testRequantToScaleSrNeverEmitsBelowQMin() {
 }
 
 void testRequantToScaleSrNeverEmitsAboveQMax() {
-    // #511: saturated to qMax = 2047, then u = 1 - 2^-24: saturated SR stays on the grid.
+    // Saturated to qMax = 2047, then u = 1 - 2^-24: saturated SR stays on the grid.
     // Under exact SR the integer clamp is defensive (an exactly representable qMax never
-    // moves), so this is a behavioural pin and no longer distinguishes clamp presence.
+    // moves), so this is a behavioural pin, not a clamp-presence test.
     TEST_ASSERT_EQUAL_INT32(2047, requantOneSrWithDraw(5000, 0xFFFFFFFFu));
 }
 
@@ -1544,7 +1508,6 @@ void testConversionSymAsymRescaleRoundTrips() {
      * Dequantized SYM: deq[i] = mant[i] * 0.5 => {5.0, -4.0, 2.0, -1.0, 3.0, -5.0}.
      *
      * ASYM qBits=5: range=10.0, qMax=2^5-1=31, asym scale=10/31≈0.32258.
-     * zeroPoint=round(-5.0/(10/31))=-16; codes={31,4,22,13,25,1} (clamped to [0,31]).
      * Codes + scale + zeroPoint are pinned exactly below; the round-trip leg is a
      * secondary sanity check (worst-case error ≈0.16, tolerance 0.35 covers clipping).
      */
@@ -1590,13 +1553,10 @@ void testConversionSymAsymRescaleRoundTrips() {
 
     /* Convert SYM -> ASYM -> FLOAT32 */
     convertTensor(&inTensor, &asymTensor, NULL);
-    /* Re-pinned to the nudged code-domain grid (group-quant PR4, D6): the
-     * dequantized band {5,-4,2,-1,3,-5} spans zero (nudge no-op), scale stays
-     * 10/31, zp becomes code-domain +16 -- and unlike f1SpanZero the CODES
-     * genuinely change here: the old single-round encode gave code 1 for
-     * -5.0 (round(-15.5 + 16) = round(0.5) = 1) while the new
-     * round-then-shift encode gives 0 (round(-15.5) = -16, +16 = 0):
-     * HALF_AWAY's "away" direction flips with the shift. Gold:
+    /* The dequantized band {5,-4,2,-1,3,-5} spans zero (nudge no-op), scale
+     * 10/31, code-domain zp +16. Pins round-then-shift encoding: -5.0 gives
+     * code 0 (round(-15.5) = -16, +16 = 0), whereas round(-15.5 + 16) would
+     * give 1 -- HALF_AWAY's "away" direction flips with the shift. Gold:
      * expected_asym_nudged.h f5SymDeq. */
     TEST_ASSERT_FLOAT_WITHIN(1e-5f, scale_asym_nudged_f5SymDeq, odtScaleToFloat(asymQC.scales[0]));
     TEST_ASSERT_EQUAL_UINT16((uint16_t)zp_asym_nudged_f5SymDeq, asymQC.zeroPoints[0]);
@@ -1776,8 +1736,7 @@ void testConversionFloatToSymRoundTripsSymmetric() {
         TEST_ASSERT_FLOAT_WITHIN(0.12f, floatData[i], rec);
     }
 
-    /* Prove symmetric range: the OLD buggy code clamped to [0, qMax-1] so
-     * negative inputs became 0; a non-zero negative code proves correct range. */
+    /* Symmetric range: a [0, qMax-1] clamp would turn negative inputs into 0. */
     TEST_ASSERT_TRUE(codes[1] < 0); /* floatData[1] = -2.5 */
     TEST_ASSERT_TRUE(codes[5] < 0); /* floatData[5] = -3.5 */
 }
@@ -1817,9 +1776,8 @@ void testConversionInt32ToSymNoRescaleScale1() {
 }
 
 void testConversionInt32ToSymRejectsOutOfRange() {
-    /* An INT32 code outside [-32, 31] for qBits=6 must exit(1).
-     * Mutation guard: if packChunkGuarded's range check is removed, the out-of-range
-     * code 40 truncates silently and the child exits 0, failing this test. */
+    /* An INT32 code outside [-32, 31] for qBits=6 must exit(1), not truncate
+     * silently. */
     size_t n = 6;
     size_t dims[] = {6};
     size_t orderOfDims[] = {0};
@@ -1850,8 +1808,7 @@ void testChunkedFloatToSymRoundTripsAtChunkBoundary(void) {
     /* Characterization: FLOAT32 -> SYM (packFloatBufferAsSym) at n=517, qBits=3,
      * straddling two ODT_CONVERSION_CHUNK_ELEMS=256 boundaries (chunks [0,256),
      * [256,512), [512,517)) must round-trip within one half quantization step
-     * per element. Pinned GREEN on the old whole-tensor VLA before the #296
-     * Stage 2 chunk-loop rewrite; must stay GREEN after. */
+     * per element. */
     size_t n = 517;
     uint8_t qBits = 3;
     float *vals = (float *)reserveMemory(n * sizeof(float));
@@ -1900,9 +1857,8 @@ void testChunkedFloatToSymRoundTripsAtChunkBoundary(void) {
 
 void testConversionSymInt32AsymConstantTensorNoDivByZero() {
     /* Constant tensor: min==max. The quantizeFloatToAsym degenerate branch must avoid
-     * divide-by-zero and recover the constant. Before the dedup,
-     * convertSymInt32TensorToAsymTensor had no min==max guard: scale=(max-min)/qMax=0,
-     * so value/scale was inf and the result was garbage (UB on the float->int cast). */
+     * divide-by-zero and recover the constant: scale=(max-min)/qMax=0 would make
+     * value/scale inf (UB on the float->int cast). */
     size_t n = 4;
     size_t dims[] = {4};
     size_t order[] = {0};
@@ -1945,10 +1901,9 @@ void testConversionSymInt32AsymConstantTensorNoDivByZero() {
         TEST_ASSERT_FLOAT_WITHIN(1e-4f, 3.875f, outF[i]);
     }
 
-    /* Group-quant PR4: under the nudge a NONZERO constant no longer reaches
-     * the mn==mx fallback (the band [0, 3.875] is non-degenerate); only the
-     * all-zero tensor does. Pin the adapted fallback: scale 1.f, zp 0,
-     * codes 0 -- the value-zero state code 0 decodes from exactly. */
+    /* Under the nudge a NONZERO constant never reaches the mn==mx fallback
+     * (the band [0, 4] is non-degenerate); only the all-zero tensor does. Pin
+     * the fallback: scale 1.f, zp 0, codes 0 -- code 0 decodes to exactly 0. */
     int32_t zeroData[] = {0, 0, 0, 0};
     tensor_t zeroTensor;
     setTensorValues(&zeroTensor, (uint8_t *)zeroData, &shape, &inQ, NULL);
@@ -1972,7 +1927,7 @@ void testConversionAsymToSymRescaleOffCenterRoundTrips() {
     size_t orderOfDims[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = orderOfDims};
 
-    /* Build ASYM input: qBits=5, scale=0.25, code-domain zeroPoint=+4 (PR4).
+    /* Build ASYM input: qBits=5, scale=0.25, code-domain zeroPoint=+4.
      * asym codes {12,16,20,24,28,14} -> reals = (code - zeroPoint)*scale = (code-4)*0.25
      * = {2.0, 3.0, 4.0, 5.0, 6.0, 2.5} — off-center all-positive band [2, 6]. */
     odtScale_t inScalesArr[1] = {odtTestScale(0.25f)};
@@ -2032,7 +1987,7 @@ void testConversionAsymToSymRescaleOffCenterRoundTrips() {
 
 void testConvertSymToInt32RejectsZeroQBits() {
     /* qBits==0 makes unpackSignExtend compute 1 << (srcBits - 1); srcBits is
-     * size_t so 0 - 1 wraps to SIZE_MAX and the shift is UB (#247). The guard
+     * size_t so 0 - 1 wraps to SIZE_MAX and the shift is UB. The guard
      * must reject it before the shift. */
     size_t dims[] = {4};
     size_t order[] = {0};
@@ -2060,7 +2015,7 @@ void testConvertSymToInt32RejectsZeroQBits() {
 void testConvertInt32ToSymRejectsZeroQBits() {
     /* qBits==0 makes packChunkGuarded compute 1 << (dstBits - 1) with dstBits as
      * size_t (0 - 1 -> SIZE_MAX): UB shift, plus a 0-width byteConversion whose
-     * memset size underflows (#247). The guard must reject it up front. */
+     * memset size underflows. The guard must reject it up front. */
     size_t dims[] = {4};
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
@@ -2084,12 +2039,10 @@ void testConvertInt32ToSymRejectsZeroQBits() {
 }
 
 void testConvertersPreserveCallerOutputShape() {
-    /* Contract (#247): converters write data + qconfig only; the CALLER owns the
-     * output tensor's shape, so the converter must NOT repoint output->shape.
-     * Pins the removal of the copyDimsAndSparsityToTensor shape-pointer steal,
-     * which double-freed heap-owned-shape outputs (see UnitTestLinear /
-     * UnitTestAdd). Distinct in/out shape structs make the steal observable as a
-     * changed pointer. */
+    /* Contract: converters write data + qconfig only; the CALLER owns the
+     * output tensor's shape, so the converter must NOT repoint output->shape
+     * (that would double-free heap-owned-shape outputs). Distinct in/out shape
+     * structs make a repoint observable as a changed pointer. */
     size_t inDims[] = {6};
     size_t inOrder[] = {0};
     shape_t inShape = {.dimensions = inDims, .numberOfDimensions = 1, .orderOfDimensions = inOrder};
@@ -2098,7 +2051,7 @@ void testConvertersPreserveCallerOutputShape() {
     shape_t outShape = {
         .dimensions = outDims, .numberOfDimensions = 1, .orderOfDimensions = outOrder};
 
-    /* FLOAT32 -> ASYM (the converter UnitTestLinear documents as the double-free) */
+    /* FLOAT32 -> ASYM */
     float floatData[6] = {1.f, 2.f, 3.f, 4.f, -1.f, -2.f};
     quantization_t floatInQ;
     initFloat32Quantization(&floatInQ);
@@ -2162,12 +2115,9 @@ void testConvertersPreserveCallerOutputShape() {
 void testAccumulateSymFixedGridFirstStoreDerivesGridThenCarries(void) {
     /* Fresh (all-zero) 4-elem SYM@6 target: first accumulate derives
      * scale = absmax(inc)/31 from the increment; second accumulate must CARRY
-     * that scale verbatim (fit-preserving). Mutation guard: swapping the
-     * fixed-grid store for packFloatBufferAsSym re-derives scale on the 2nd
-     * call -> scale assert RED.
+     * that scale verbatim (fit-preserving), not re-derive it.
      *
-     * Derivation (HALF_AWAY; cross-checked with a throwaway float32 harness
-     * mirroring the exact arithmetic below -- house style):
+     * Derivation (HALF_AWAY):
      * call1: absMax(inc1) = 3.875 = 31 * 2^-3 -> scale = 0.125, exactly
      *   dyadic, so the canonical CEIL grid keeps the -15.5 tie below.
      *   codes1[i] = round(inc1[i]/scale): round(31)=31, round(-15.5)=-16
@@ -2215,23 +2165,14 @@ void testAccumulateSymFixedGridZeroIncrementIsBitExact(void) {
      * must leave packed bytes AND scale bit-identical (on-grid values survive
      * re-round exactly: mant*scale/scale round-trips to
      * mant exactly for |mant| well under 2^15, which every 6-bit mantissa is).
-     * Mutation guard (verified by deliberately breaking the primitive and
-     * confirming this test goes RED, per house mutation-testing convention):
-     * the rescale variant re-derives scale from the (nonzero) dequantized
-     * values and re-rounds every element -> byte/scale assert RED. The seed
-     * is packed directly at a DELIBERATELY LOOSE grid (mantissas far from
-     * the +-31/-32 boundary): a first mutation attempt seeded via the
-     * derive path instead (absmax mapped onto the full +-31 range) and the
-     * rescale mutant's fresh-absmax re-derivation accidentally reproduced
-     * the same tight grid, making the test pass even under the mutation --
-     * this loose-grid seed is required for real discriminating power.
+     * The seed is packed directly at a DELIBERATELY LOOSE grid (mantissas far
+     * from the +-31/-32 boundary): a seed at the full +-31 range would make a
+     * rescaling implementation reproduce the same grid and pass anyway.
      *
-     * Seed directly: scale=0.1, mant={5,-2,3,-4} (not touching the range
-     * boundary) -> dequant={0.5,-0.2,0.3,-0.4}. Carried-grid zero-increment
-     * codes stay exactly {5,-2,3,-4}. A rescale mutant would
-     * instead re-derive from absMax(dequant)=0.5: scale'=0.5/31~=0.016129,
-     * codes'=round(dequant/scale')={31,-12,19,-25} -- a different scale AND
-     * different bytes (verified via a throwaway float32 harness). */
+     * Seed: scale=0.1, mant={5,-2,3,-4} -> dequant={0.5,-0.2,0.3,-0.4}.
+     * Carried-grid zero-increment codes stay exactly {5,-2,3,-4}. A rescale
+     * would re-derive from absMax(dequant)=0.5: scale'=0.5/31~=0.016129,
+     * codes'={31,-12,19,-25} -- a different scale AND different bytes. */
     int32_t seedMant[] = {5, -2, 3, -4};
     uint8_t data[3];
     byteConversion((uint8_t *)seedMant, 32, data, 6, 4);
@@ -2258,13 +2199,10 @@ void testAccumulateSymFixedGridZeroIncrementIsBitExact(void) {
 }
 
 void testAccumulateSymFixedGridOverflowAborts(void) {
-    /* packed-grad D2: growing past the 6-bit grid must exit(1) (#227 message), never
-     * clamp. Seed mantissa 31 (grid max) directly via byteConversion -- so
-     * the CARRIED scale (not a derived one) is under test, since the target
-     * is not all-zero -- and add +1 grid step (inc == scale): 31 -> 32,
-     * outside the 6-bit range [-32, 31].
-     * Mutation guard: clamping instead of fit-guarding lets the child exit
-     * 0 (no abort) -> RED. */
+    /* Growing past a carried 6-bit grid must exit(1), never clamp. Seed
+     * mantissa 31 (grid max) directly via byteConversion -- so the CARRIED
+     * scale is under test, since the target is not all-zero -- and add +1
+     * grid step (inc == scale): 31 -> 32, outside [-32, 31]. */
     size_t n = 1;
     size_t dims[] = {1};
     size_t order[] = {0};
@@ -2285,7 +2223,7 @@ void testAccumulateSymFixedGridOverflowAborts(void) {
     ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoSymTensorFixedGrid(&target, inc, n, NULL));
 }
 
-/* #519 fixture: the first float in [1, 2) whose fresh-grid round trip
+/* The first float in [1, 2) whose fresh-grid round trip
  * a / scale lands one ulp ABOVE the grid maximum, with the engine's own grid
  * scale = CanonFloat(a / hi, CEIL) (the canonical dyadic fit). The CEIL grid
  * removes the overshoot at q = 8 entirely (no float in [1, 2) has one), so the
@@ -2333,18 +2271,18 @@ static float accumulateFreshQ16UnderSrFirstDrawOne(const float *inc, size_t n, i
 }
 
 void testFixedGridFreshPeakOneUlpAboveQMaxDoesNotAbortUnderSr(void) {
-    /* #519: a FRESH grid's scale is fitted to this increment's absMax, so the
-     * peak's quotient absMax / scale is the grid maximum up to one float ulp
-     * -- and the division can land one ulp above it (32767 + 2^-9). Under SR
-     * (lift iff u < frac) any draw below 2^-9 then lifted it to 32768, which
-     * packChunkGuarded rejected as a #227 overflow although nothing
+    /* A FRESH grid's scale is fitted to this increment's absMax, so the peak's
+     * quotient absMax / scale is the grid maximum up to one float ulp -- and
+     * the division can land one ulp above it (32767 + 2^-9). Under SR (lift
+     * iff u < frac) any draw below 2^-9 lifts it to 32768, which
+     * packChunkGuarded would reject as an overflow although nothing
      * overflowed: the overshoot is a rounding artefact of the grid's own
-     * derivation. The fresh branch now clamps the rounded code to the grid.
+     * derivation, so the fresh branch clamps the rounded code to the grid.
      * The engine consumes one draw per element: element 0 sees u = 0 and
-     * must come out 32767 (RED without the clamp: abort); element 1 sees the
+     * must come out 32767 (without the clamp: abort); element 1 sees the
      * NEXT draw, xorshift32(1) = 270369 -> u = 1056 * 2^-24 ~= 6.3e-5 < 2^-9,
      * which lifts -(32767 + 2^-9) to -32768 -- a grid code that exists, so the
-     * clamp leaves it alone. Mutation guard: drop the fresh clamp -> abort. */
+     * clamp leaves it alone. */
     const float a = firstFloatWhoseFreshQ16QuotientOvershoots();
     TEST_ASSERT_TRUE_MESSAGE(a != 0.f, "no float in [1, 2) overshoots 32767 on this platform");
 
@@ -2362,7 +2300,7 @@ void testFixedGridFreshNegativePeakSrLiftsToGridMin(void) {
      * u = 0: quotient -(32767 + 2^-9), law t - (u < -f) = -32767 - 1 = -32768.
      * That is a legitimate SR outcome on a grid code that exists, so the
      * fresh clamp must leave it alone: its lower bound is g.lo = -32768, not
-     * -g.hi. Mutation guard: a symmetric [-32767, 32767] clamp -> -32767. */
+     * -g.hi (a symmetric [-32767, 32767] clamp would give -32767). */
     const float a = firstFloatWhoseFreshQ16QuotientOvershoots();
     TEST_ASSERT_TRUE_MESSAGE(a != 0.f, "no float in [1, 2) overshoots 32767 on this platform");
 
@@ -2374,13 +2312,12 @@ void testFixedGridFreshNegativePeakSrLiftsToGridMin(void) {
 }
 
 void testFixedGridFreshQ26PeakSaturatesAtGridMax(void) {
-    /* #519 x #515: from q = 26 the float image of g.hi is 2^(q-1), one past
+    /* From q = 26 the float image of g.hi is 2^(q-1), one past
      * the grid, so a fresh grid's scale is absMax / 2^25 and the peak's
      * quotient is exactly 2^25 = 33554432 -- on the grid's float image and
      * one past its integer grid, under plain HALF_AWAY with no SR draw at
      * all. Pins that the fresh clamp acts on the rounded CODE (a float clamp
-     * to (float)g.hi before rounding could not bring this back). Mutation
-     * guard: drop the fresh clamp -> abort. */
+     * to (float)g.hi before rounding could not bring this back). */
     size_t dims[] = {2};
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
@@ -2408,9 +2345,6 @@ void testAccumulateSymRescaleRederivesGridEachCall(void) {
     /* DYNAMIC semantics: after a second accumulate with larger values, scale
      * reflects the NEW absmax (fresh grid every store), not the carried one.
      * Also asserts dequant equivalence within one grid-step tolerance.
-     * Mutation guard: the fixed-grid variant would either abort (the carried
-     * scale=0.5 grid cannot hold mant+100) or, on a fresh all-zero target,
-     * keep an unrelated scale -> the scale1/codes1 asserts RED either way.
      *
      * Seed directly: scale=31*2^-6, mant={2,-1,0,0} -> dequant={0.96875,
      * -0.484375,0,0} (bit-exact). call1 (inc=0): absMax=0.96875=31*2^-5 ->
@@ -2478,19 +2412,14 @@ void testAccumulateSymRescaleRederivesGridEachCall(void) {
 
 void testAccumulateAsymRescaleMatchesFloatReference(void) {
     /* ASYM: decode+add+requant equals numpy-style float reference within one
-     * affine grid step; zeroPoint/scale re-derived per store (packed-grad D4).
-     * Mutation guard: carrying the OLD scale/zeroPoint (0.25/+4) instead of
-     * rederiving would leave qc.scales[0]/qc.zeroPoints[0] unchanged -> the
-     * exact asserts below RED.
+     * affine grid step; zeroPoint/scale re-derived per store (carrying the
+     * old 0.25/+4 would fail the exact asserts below).
      *
-     * Re-pinned to the nudged code-domain grid (group-quant PR4, D6) -- the
-     * nudge is LIVE here, this is a real semantics change: seed ASYM@5 codes
-     * {12,16,20,24} at scale=0.25, zp=+4 -> dequant = (code-zp)*scale =
-     * {2, 3, 4, 5} (exact integers). inc = {1.0, -0.5, 2.0, 0.25} ->
+     * The nudge is live here: seed ASYM@5 codes {12,16,20,24} at scale=0.25,
+     * zp=+4 -> dequant = {2, 3, 4, 5}. inc = {1.0, -0.5, 2.0, 0.25} ->
      * reference = {3, 2.5, 6, 5.25}: an ALL-POSITIVE band, which the nudge
-     * extends to [0, 6], so scale' = 6/31 (old un-nudged: 3.5/31) and
-     * zp' = round(0/scale') = 0 (old: 22). Gold: expected_asym_nudged.h
-     * f6AccumRef (same reference values). */
+     * extends to [0, 6], so scale' = 6/31 (un-nudged: 3.5/31) and
+     * zp' = 0 (un-nudged: 22). Gold: expected_asym_nudged.h f6AccumRef. */
     size_t n = 4;
     size_t dims[] = {4};
     size_t order[] = {0};
@@ -2535,10 +2464,7 @@ void testAccumulateAsymValueZeroAfterConfigReset(void) {
      * increment quantized fresh (0.0f + inc[i] == inc[i] exactly, no
      * rounding at the add). Reference: convertFloatTensorToAsymTensor(inc)
      * calls the identical quantizeFloatToAsym helper on the identical float
-     * array, so a match here is bit-for-bit, not tolerance-based.
-     * Mutation guard: skipping the config reset (a stale scale/zeroPoint
-     * left over from a prior store) would decode a nonzero baseline and
-     * diverge from this fresh-quantize reference. */
+     * array, so a match here is bit-for-bit, not tolerance-based. */
     size_t n = 3;
     size_t dims[] = {3};
     size_t order[] = {0};
@@ -2588,16 +2514,12 @@ void testAccumulateAsymValueZeroAfterConfigReset(void) {
 }
 
 void testAccumulateSymFixedGridMatchesReferenceAtChunkBoundary(void) {
-    /* Pin (#296 Stage 2): n=517 straddles three ODT_CONVERSION_CHUNK_ELEMS=256
-     * chunks ([0,256), [256,512), [512,517)). Target starts fresh (all-zero),
-     * so BOTH chunked phase-A scans -- the all-zero check and the grid-
-     * deriving absmax-of-increment -- must see the WHOLE array: the dominant
-     * increment value is seeded at index 400, inside the SECOND chunk. A
-     * mutation that only scans chunk 0 for either scan would derive a
-     * far-too-small scale from a truncated absmax, blowing the exact-scale
-     * assertion below. Pinned GREEN on the old whole-tensor VLA implementation
-     * before the chunked rewrite; must stay GREEN after (bit-identical: one
-     * round per element, in element order). */
+    /* n=517 straddles three ODT_CONVERSION_CHUNK_ELEMS=256 chunks ([0,256),
+     * [256,512), [512,517)). Target starts fresh (all-zero), so BOTH chunked
+     * phase-A scans -- the all-zero check and the grid-deriving
+     * absmax-of-increment -- must see the WHOLE array: the dominant increment
+     * value sits at index 400, inside the SECOND chunk. Scanning only chunk 0
+     * would derive a far-too-small scale and fail the exact-scale assertion. */
     size_t n = 517;
     uint8_t qBits = 8;
     size_t dims[] = {n};
@@ -2642,14 +2564,11 @@ void testAccumulateSymFixedGridMatchesReferenceAtChunkBoundary(void) {
 }
 
 void testAccumulateSymRescaleMatchesReferenceAtChunkBoundary(void) {
-    /* Pin (#296 Stage 2): n=517 straddles three ODT_CONVERSION_CHUNK_ELEMS=256
-     * chunks. DYNAMIC semantics rederive the grid from the decoded-plus-
-     * increment values on EVERY call; the dominant contribution comes from
-     * the increment alone at index 400 (inside the SECOND chunk), so a
-     * phase-A mutation that only scans chunk 0 misses it and derives a
-     * far-too-small scale -- blowing the exact-scale assertion below. Pinned
-     * GREEN on the old whole-tensor VLA implementation before the chunked
-     * rewrite; must stay GREEN after. */
+    /* n=517 straddles three ODT_CONVERSION_CHUNK_ELEMS=256 chunks. DYNAMIC
+     * semantics rederive the grid from the decoded-plus-increment values on
+     * EVERY call; the dominant contribution comes from the increment alone at
+     * index 400 (inside the SECOND chunk), so a phase A that only scans chunk
+     * 0 derives a far-too-small scale and fails the exact-scale assertion. */
     size_t n = 517;
     uint8_t qBits = 8;
     size_t dims[] = {n};
@@ -2713,18 +2632,13 @@ void testAccumulateSymRescaleMatchesReferenceAtChunkBoundary(void) {
 }
 
 void testAccumulateTensorIntoSymRescaleStreamsIncrementAcrossChunks(void) {
-    /* Regression (#296 Stage 2 review): incSrcChunk's TENSOR branch
-     * (dequantChunkToFloat(src->tens, off, count, out)) has no test crossing a
-     * chunk boundary with a tensor-typed increment -- mutating its `off` arg
-     * to a hardcoded 0 survives the whole suite (every chunk re-dequantizes
-     * source elements [0, count) instead of [off, off+count)). Pin: target =
-     * zero-filled packed SYM (qBits 8), n=517 (three ODT_CONVERSION_CHUNK_ELEMS
-     * =256 chunks: [0,256), [256,512), [512,517)); increment = SYM_INT32
-     * tensor with a dominant element (100.0, vs. 0.05 elsewhere) at index 400
-     * -- inside the SECOND chunk. A hardcoded-offset-0 mutant reads chunk 0's
-     * dequantized values for chunk 1 and chunk 2 alike, so index 400's true
-     * value never reaches either the absmax scan or the accumulate: the
-     * derived scale and decoded codes are both wrong -> RED. */
+    /* Pins the chunk offset of incSrcChunk's TENSOR branch: a tensor-typed
+     * increment crossing chunk boundaries must be read at [off, off+count),
+     * not [0, count). Target = zero-filled packed SYM (qBits 8), n=517 (three
+     * 256-element chunks); increment = SYM_INT32 with a dominant element
+     * (100.0, vs. 0.05 elsewhere) at index 400 -- inside the SECOND chunk.
+     * Reading chunk 0 for every chunk would lose index 400 from both the
+     * absmax scan and the accumulate. */
     size_t n = 517;
     uint8_t qBits = 8;
     size_t dims[] = {n};
@@ -2780,12 +2694,10 @@ void testAccumulateTensorIntoSymRescaleStreamsIncrementAcrossChunks(void) {
 }
 
 void testChunkedFloatToAsymMatchesReferenceAcrossChunkBoundaries(void) {
-    /* Characterization: FLOAT32 -> ASYM through convertTensor (quantizeFloatToAsym,
-     * now grid-derivation + ODT_CONVERSION_CHUNK_ELEMS=256 chunked emit, #296 Stage 2)
-     * must decode within one half quantization step at every chunk boundary shape --
-     * below/at/above the 256-element stride -- including sub-byte qBits=3 packing,
-     * where a wrong chunk byte offset would silently write into the wrong bit range
-     * and blow the tolerance below (this is the mutation guard for packedByteOffset). */
+    /* FLOAT32 -> ASYM through convertTensor (chunked emit) must decode within
+     * one half quantization step at every chunk boundary shape -- below/at/above
+     * the 256-element stride -- including sub-byte qBits=3 packing, where a wrong
+     * chunk byte offset (packedByteOffset) would write into the wrong bit range. */
     size_t sizes[] = {1, 8, 255, 256, 257, 517, 520};
     uint8_t qBitsValues[] = {3, 8, 12};
     for (size_t qi = 0; qi < sizeof(qBitsValues) / sizeof(qBitsValues[0]); qi++) {
@@ -2846,11 +2758,9 @@ void testChunkedSymInt32ToSymRoundTripsAtChunkBoundary(void) {
     /* Characterization: SYM_INT32 -> SYM (convertSymInt32TensorToSymTensor) at n=517,
      * qBits=6, straddling two ODT_CONVERSION_CHUNK_ELEMS=256 boundaries (chunks
      * [0,256), [256,512), [512,517)). The dominant (absmax) element sits at index
-     * 400 -- inside the SECOND chunk -- so a pass-1 mutation that only scans the
+     * 400 -- inside the SECOND chunk -- so a pass 1 that only scans the
      * first chunk derives a far-too-small scale, which blows both the exact-scale
-     * assertion and the round-trip tolerance below (mutation guard, #296 Stage 2).
-     * Pinned GREEN on the old whole-tensor VLA before the chunked rewrite; must
-     * stay GREEN after. */
+     * assertion and the round-trip tolerance below. */
     size_t n = 517;
     uint8_t qBits = 6;
     size_t dims[] = {n};
@@ -2911,9 +2821,7 @@ void testChunkedAsymToSymRoundTripsAtChunkBoundary(void) {
      * qBits=8 (byte-aligned so the fixture can write raw code bytes directly),
      * straddling two ODT_CONVERSION_CHUNK_ELEMS=256 boundaries. The dominant
      * (absmax) code sits at index 400 -- inside the second chunk [256,512) -- so a
-     * pass-1 mutation that only scans the first chunk misses it (mutation guard,
-     * #296 Stage 2). Pinned GREEN on the old whole-tensor VLA before the chunked
-     * rewrite; must stay GREEN after. */
+     * pass 1 that only scans the first chunk misses it. */
     size_t n = 517;
     uint8_t qBits = 6; /* SYM output */
     size_t dims[] = {n};
@@ -2921,7 +2829,7 @@ void testChunkedAsymToSymRoundTripsAtChunkBoundary(void) {
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
     odtScale_t inScalesArr[1] = {odtTestScale(1.0f)};
-    uint16_t inZpsArr[1] = {128}; /* code-domain (PR4): dequant = code - 128 */
+    uint16_t inZpsArr[1] = {128}; /* code-domain: dequant = code - 128 */
     asymQConfig_t inQC = {.scales = inScalesArr,
                           .zeroPoints = inZpsArr,
                           .numGroups = 1,
@@ -2978,11 +2886,9 @@ void testChunkedSymToAsymRoundTripsAtChunkBoundary(void) {
     /* Characterization: SYM -> ASYM (convertSymTensorToAsymTensor) at n=517, SYM
      * qBits=6 (sub-byte packed), straddling two ODT_CONVERSION_CHUNK_ELEMS=256
      * boundaries. The extreme mantissa sits at index 400 -- inside the second
-     * chunk [256,512) -- so a pass-1 mutation that only scans the first chunk
-     * derives a too-narrow grid, clipping that element on encode and blowing the
-     * round-trip tolerance below (mutation guard, #296 Stage 2). Pinned GREEN on
-     * the old whole-tensor VLA before the chunked rewrite; must stay GREEN
-     * after. */
+     * chunk [256,512) -- so a pass 1 that only scans the first chunk derives a
+     * too-narrow grid, clipping that element on encode and blowing the
+     * round-trip tolerance below. */
     size_t n = 517;
     uint8_t qBits = 6;
     size_t dims[] = {n};
@@ -3047,9 +2953,7 @@ void testChunkedSymInt32ToAsymRoundTripsAtChunkBoundary(void) {
     /* Characterization: SYM_INT32 -> ASYM (convertSymInt32TensorToAsymTensor) at
      * n=517, straddling two ODT_CONVERSION_CHUNK_ELEMS=256 boundaries in the
      * chunked emit pass. The extreme mantissa sits at index 400 (second chunk
-     * [256,512)) so any future chunking bug in the pass-1 min/max scan is caught
-     * here too. Pinned GREEN on the old whole-tensor VLA before the chunked
-     * rewrite; must stay GREEN after. */
+     * [256,512)) so a chunking bug in the pass-1 min/max scan is caught too. */
     size_t n = 517;
     size_t dims[] = {n};
     size_t order[] = {0};
@@ -3107,9 +3011,7 @@ void testChunkedSymToFloat32DequantizesAtChunkBoundary(void) {
      * qBits=3, straddling two ODT_CONVERSION_CHUNK_ELEMS=256 boundaries (chunks
      * [0,256), [256,512), [512,517)). Unpack+dequant is exact (no rounding), so
      * every element is asserted bit-for-bit -- a mutated output index (e.g.
-     * out[i] instead of out[off+i]) corrupts elements once off>0. Pinned GREEN
-     * on the old whole-tensor VLA before the #296 Stage 2 chunked rewrite; must
-     * stay GREEN after. */
+     * out[i] instead of out[off+i]) corrupts elements once off>0. */
     size_t n = 517;
     uint8_t qBits = 3;
     size_t dims[] = {n};
@@ -3155,15 +3057,14 @@ void testChunkedAsymToFloat32DequantizesAtChunkBoundary(void) {
     /* Characterization: ASYM -> FLOAT32 (convertAsymTensorToFloatTensor) at n=517,
      * qBits=5, straddling two ODT_CONVERSION_CHUNK_ELEMS=256 boundaries. Unpack is
      * zero-extend (ASYM codes are unsigned) + affine decode, exact (no rounding):
-     * every element asserted bit-for-bit. Pinned GREEN on the old whole-tensor VLA
-     * before the #296 Stage 2 chunked rewrite; must stay GREEN after. */
+     * every element asserted bit-for-bit. */
     size_t n = 517;
     size_t dims[] = {n};
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
     odtScale_t inScalesArr[1] = {odtTestScale(0.25f)};
-    uint16_t inZpsArr[1] = {4}; /* code-domain (PR4): decode = (code - 4)*0.25 */
+    uint16_t inZpsArr[1] = {4}; /* code-domain: decode = (code - 4)*0.25 */
     asymQConfig_t inQC = {.scales = inScalesArr,
                           .zeroPoints = inZpsArr,
                           .numGroups = 1,
@@ -3301,7 +3202,7 @@ void testDequantChunkToFloatSymUnpacksSignExtendedAtOffsets(void) {
 void testDequantChunkToFloatAsymUnpacksZeroExtendedAtOffsets(void) {
     /* dequantChunkToFloat direct test, ASYM cell: zero-extend unpack via
      * unpackZeroExtendChunk (unpackZeroExtend, no sign bit), then the
-     * code-domain decode (code - zp)*scale (PR4). */
+     * code-domain decode (code - zp)*scale. */
     size_t n = 264;
     size_t dims[] = {n};
     size_t order[] = {0};
@@ -3312,7 +3213,7 @@ void testDequantChunkToFloatAsymUnpacksZeroExtendedAtOffsets(void) {
         codes[i] = (int32_t)(i % 32); /* spans [0, 31]: exactly qBits=5 range */
     }
     odtScale_t qcScales[1] = {odtTestScale(0.25f)};
-    uint16_t qcZps[1] = {4}; /* code-domain (PR4): decode = (code - 4)*0.25 */
+    uint16_t qcZps[1] = {4}; /* code-domain: decode = (code - 4)*0.25 */
     asymQConfig_t qc = {.scales = qcScales,
                         .zeroPoints = qcZps,
                         .numGroups = 1,
@@ -3352,7 +3253,7 @@ void testUnpackSignExtendReadsSignedCodeAtBitOffset(void) {
     TEST_ASSERT_EQUAL_INT32(-3, got[0]);
 }
 
-/* srcStartBit == 0 keeps the legacy behavior: the full signed 3-bit range
+/* srcStartBit == 0 (byte-aligned callers): the full signed 3-bit range
  * {-4..3} packed LSB-first ({0xAC, 0x8F, 0x68}) sign-extends back exactly. */
 void testUnpackSignExtendOffsetZeroCoversFullSignedRange(void) {
     uint8_t src[3] = {0xAC, 0x8F, 0x68};
@@ -3580,28 +3481,18 @@ void testUnpackZeroExtendNIsZeroWithNullSrc(void) {
 }
 
 void testQuantizeFloatToAsymNoOpOnEmptyTensor(void) {
-    /* PR #324: n==0 must no-op, never read values[0].
-     * Before the fix, quantizeFloatToAsym's findMinFloat/findMaxFloat both
-     * unconditionally dereference values[0] regardless of n -- UB for an
-     * empty payload. Since both reads land on the same element, mn==mx
-     * unconditionally at n==0, so deriveAsymGridFromMinMax's degenerate
-     * branch fires and overwrites the output qConfig's scale/zeroPoint from
-     * whatever sits at values[0] -- even though there is nothing to
-     * quantize. Pin: pre-set sentinel scale/zeroPoint on the output qConfig
-     * and a deterministic non-zero value at the input's element 0; both must
-     * survive the n==0 call untouched.
-     * Mutation guard: dropping the n==0 guard lets deriveAsymGridFromMinMax
-     * derive from the seeded 42.f (post-nudge band [0, 42]: scale 42/31,
-     * zeroPoints[0] = 0), failing both sentinel asserts below -> RED. */
+    /* n==0 must no-op, never read values[0] (findMinFloat/findMaxFloat
+     * dereference it regardless of n) and never overwrite the output
+     * qConfig. Pin: sentinel scale/zeroPoint on the output qConfig and a
+     * non-zero value at the input's element 0; the sentinels must survive. */
     size_t dims[] = {0};
     size_t order[] = {0};
     shape_t shape = {.dimensions = dims, .numberOfDimensions = 1, .orderOfDimensions = order};
 
     quantization_t floatQ;
     initFloat32Quantization(&floatQ);
-    float floatDummy = 42.f; /* n==0: logically unreachable, but real backing
-                              * storage so a would-be values[0] read stays
-                              * inside owned memory (well-defined RED). */
+    float floatDummy = 42.f; /* real backing storage so a stray values[0]
+                              * read stays inside owned memory */
     tensor_t floatTensor;
     setTensorValues(&floatTensor, (uint8_t *)&floatDummy, &shape, &floatQ, NULL);
 
@@ -3625,10 +3516,10 @@ void testQuantizeFloatToAsymNoOpOnEmptyTensor(void) {
     TEST_ASSERT_EQUAL_UINT16(7, asymQC.zeroPoints[0]);
 }
 
-/* Group-quant PR2 (Task 2): group-aware FLOAT32<->SYM conversion cells, the
- * scalar-only-cell fail-fast net, group-faithful same-type copy, and the
- * promoted requantizeTensorInPlace API. Fixtures from expected_group_quant.h
- * (goldgen, cross-checked against torch.quantize_per_channel). */
+/* Group-aware FLOAT32<->SYM conversion cells, the scalar-only-cell fail-fast
+ * net, group-faithful same-type copy, and requantizeTensorInPlace. Fixtures
+ * from expected_group_quant.h (goldgen, cross-checked against
+ * torch.quantize_per_channel). */
 
 void testFloatToSymGroupedDerivesPerGroupScales(void) {
     /* FLOAT32 -> SYM with a grouped target derives PER-GROUP absmax scales
@@ -3747,9 +3638,8 @@ void testSymGroupedToFloatDequantsPerGroup(void) {
 
 void testGroupedSymToSymInt32Dies(void) {
     /* SYM(grouped) -> SYM_INT32 via convertTensor must fail-fast, not
-     * silently fold scales[0] onto the whole tensor (the pre-PR2 hazard: a
-     * scalar-only cell reading only scales[0] would quietly misinterpret
-     * every group but the first). */
+     * silently fold scales[0] onto the whole tensor (a scalar-only cell
+     * would quietly misinterpret every group but the first). */
     size_t n = 8;
     size_t dims[] = {n};
     size_t order[] = {0};
@@ -3806,8 +3696,8 @@ void testGroupedSymInt32ToSymTargetDies(void) {
 }
 
 void testGroupedSymToAsymDies(void) {
-    /* SYM(grouped) -> ASYM: the affine-grid derivation reads scales[0] only
-     * today; a grouped source must fail-fast rather than dequantize every
+    /* SYM(grouped) -> ASYM: the affine-grid derivation reads scales[0] only;
+     * a grouped source must fail-fast rather than dequantize every
      * group but the first at the wrong scale. */
     size_t n = 8;
     size_t dims[] = {n};
@@ -3844,7 +3734,7 @@ void testGroupedSymToAsymDies(void) {
 
 void testGroupedAsymToSymTargetDies(void) {
     /* ASYM -> SYM(grouped target): the absmax-derivation cell writes
-     * scales[0] only today; a grouped target must fail-fast. */
+     * scales[0] only; a grouped target must fail-fast. */
     size_t n = 8;
     size_t dims[] = {n};
     size_t order[] = {0};
@@ -3933,9 +3823,9 @@ void testGroupedRepackSymInt32ToSymNoRescaleTargetDies(void) {
 
 void testSameTypeSymCopyCarriesGroupArrays(void) {
     /* SYM(grouped) -> SYM(grouped) same-width same-type copy must carry the
-     * FULL scales array + groupSize, not just scales[0] (the pre-PR2 hazard:
-     * a partial copy would leave group 1's scale at the output's stale
-     * default and drop groupSize entirely). */
+     * FULL scales array + groupSize, not just scales[0] (a partial copy
+     * would leave group 1's scale at the output's stale default and drop
+     * groupSize entirely). */
     size_t n = 8;
     size_t dims[] = {n};
     size_t order[] = {0};
@@ -4004,11 +3894,9 @@ void testSameTypeSymCopyRejectsGroupShapeMismatch(void) {
 }
 
 void testRequantizeTensorInPlaceGrouped(void) {
-    /* FLOAT32 12-elem -> grouped SYM target via the PROMOTED public API
-     * (requantizeTensorInPlace, TensorApi.h); then back to FLOAT32; compare
-     * vs the round-trip-stable gold fixture. Exercises the promotion (the
-     * two example-local copies are gone, this is the single source now) AND
-     * the grouped conversion together. */
+    /* FLOAT32 12-elem -> grouped SYM target via the public
+     * requantizeTensorInPlace (TensorApi.h); then back to FLOAT32; compare
+     * vs the round-trip-stable gold fixture. */
     size_t n = kGroupQuantInput_len;
     size_t *dims = reserveMemory(sizeof(size_t));
     dims[0] = n;
@@ -4057,13 +3945,11 @@ void testRequantizeTensorInPlaceGrouped(void) {
     freeTensor(t);
 }
 
-/* ---- Group-quant PR4 Task 2: the two PRIMARY ASYM cells (FLOAT32->ASYM,
- * ASYM->FLOAT32) are group-aware now; every OTHER ASYM cell keeps its
- * per-tensor fail-fast (scalar-only guards below). Gold fixtures:
+/* ---- Group-aware ASYM cells (FLOAT32->ASYM, ASYM->FLOAT32). Gold fixtures:
  * expected_asym_nudged.h kAsymGrouped* / kAsymTorchXCheck* (per-group nudged
- * code-domain grids; generator asserts the zps are pairwise distinct and
- * every group scale differs from the whole-tensor derivation -- the collapse
- * discriminators for mutations (i)/(ii)). ---- */
+ * code-domain grids; the generator asserts the zps are pairwise distinct and
+ * every group scale differs from the whole-tensor derivation, so collapsing
+ * onto one grid or reading group 0's grid is detected). ---- */
 
 void testFloatToAsymGroupedDerivesPerGroupGrids(void) {
     /* FLOAT32 -> ASYM with a grouped target derives PER-GROUP nudged grids
@@ -4153,7 +4039,7 @@ void testAsymGroupedToFloatDequantsPerGroup(void) {
      * gold codes+grids (no conversion on the way in) and check the per-run
      * (code - zp[g]) * scales[g] dequant against the gold dequant array.
      * The generator's pairwise-distinct-zps assert makes a zeroPoints[0]
-     * lookup here diverge on groups 1..k-1 (mutation (ii) guard). */
+     * lookup here diverge on groups 1..k-1. */
     size_t n = kAsymGroupedInput_len;
     size_t dims[] = {n};
     size_t order[] = {0};
@@ -4192,10 +4078,10 @@ void testAsymGroupedToFloatDequantsPerGroup(void) {
 }
 
 void testRequantizeTensorInPlaceGroupedAsym(void) {
-    /* FLOAT32 12-elem -> grouped ASYM target built via the Task-1 public API
-     * (quantizationInitAsymGrouped), through requantizeTensorInPlace; then
+    /* FLOAT32 12-elem -> grouped ASYM target built via the public
+     * quantizationInitAsymGrouped, through requantizeTensorInPlace; then
      * back to FLOAT32; compare vs the gold codes/grids/dequant. End-to-end
-     * over BOTH new grouped cells plus the attach-time shape validation. */
+     * over BOTH grouped cells plus the attach-time shape validation. */
     size_t n = kAsymGroupedInput_len;
     size_t *dims = reserveMemory(sizeof(size_t));
     dims[0] = n;
@@ -4240,10 +4126,9 @@ void testRequantizeTensorInPlaceGroupedAsym(void) {
     freeTensor(t);
 }
 
-/* ---- Scalar-only ASYM cells: their per-tensor fail-fasts REMAIN after the
- * two primary cells went grouped -- a grouped ASYM config reaching any of
- * them must die rather than compute on group 0's grid alone. Route through
- * FLOAT32 (the two grouped cells) instead. ---- */
+/* ---- Scalar-only ASYM cells: a grouped ASYM config reaching any of them
+ * must die rather than compute on group 0's grid alone. Route through
+ * FLOAT32 (the grouped cells) instead. ---- */
 
 void testGroupedAsymTargetFromInt32Dies(void) {
     /* INT32 -> ASYM(grouped target): the grid derivation is per-tensor only
@@ -4378,8 +4263,7 @@ void testGroupedAsymSourceToInt32Dies(void) {
 
 void testGroupedAsymSourceToSymInt32Dies(void) {
     /* ASYM(grouped) -> SYM_INT32: reads scales[0]/zeroPoints[0] only -- must
-     * die on a grouped source (mutation (iii) guard: dropping this cell's
-     * fail-fast makes THIS test fail). */
+     * die on a grouped source. */
     size_t n = 8;
     size_t dims[] = {n};
     size_t order[] = {0};
@@ -4451,8 +4335,7 @@ void testGroupedAsymSourceToSymDies(void) {
 void testSameTypeAsymCopyCarriesGroupArrays(void) {
     /* ASYM(grouped) -> ASYM(grouped) same-width same-type copy must carry
      * BOTH full per-group arrays (scales AND zeroPoints) + groupSize -- the
-     * exact ASYM twin of the SYM carry test above (Task-1 landed the copy;
-     * this pins it). */
+     * ASYM twin of the SYM carry test above. */
     size_t n = 8;
     size_t dims[] = {n};
     size_t order[] = {0};
@@ -4657,7 +4540,7 @@ void testFloatToBfpGroupedIndependentExponents(void) {
 void testFloatToBfpSaturatesNarrowExponentHigh(void) {
     /* e=2 -> bias 1, stored range [0,3], E range [-1, 2], max scale 4, m=4:
      * representable |v| <= 7*4 = 28. absMax 1000 needs E=8 -> clamps to stored 3 (E=2),
-     * mantissas clamp to +-7 (BFP D6 saturation, no abort, no pack-guard trip). */
+     * mantissas clamp to +-7 (value-domain saturation, no abort, no pack-guard trip). */
     size_t n = 2;
     size_t dims[] = {2};
     size_t order[] = {0};
@@ -4952,7 +4835,7 @@ void testConversionIntoAnSrTargetWithoutAStreamExits(void) {
 }
 
 void testInt32ToBfpIsCodesInWithZeroStateExponent(void) {
-    /* INT32 -> BFP is codes-in (#227 code domain): int32 {5, -3} fits the m=4
+    /* INT32 -> BFP is codes-in (code domain): int32 {5, -3} fits the m=4
      * code range [-8, 7] verbatim. The exponent is WRITTEN to the zero state
      * (= bias 127 for e=8, scale 1.0), mirroring convertInt32TensorToSymTensor's
      * scales[0] = 1.f reset -- sentinel 9 proves the converter wrote it. */
@@ -4990,9 +4873,9 @@ void testInt32ToBfpIsCodesInWithZeroStateExponent(void) {
 }
 
 void testInt32ToBfpOverflowAborts(void) {
-    /* 200 > 7 = m=4 code max: codes-in must ABORT via packChunkGuarded (#227
-     * code-domain discipline) -- BFP D6 saturation covers value-domain quantization
-     * only, never raw code stuffing. */
+    /* 200 > 7 = m=4 code max: codes-in must ABORT via packChunkGuarded --
+     * saturation covers value-domain quantization only, never raw code
+     * stuffing. */
     size_t n = 1;
     size_t dims[] = {1};
     size_t order[] = {0};
@@ -5369,15 +5252,15 @@ void testBfpToSymGroupedTargetDenies(void) {
 }
 
 void testAsymToBfpPreservesValues(void) {
-    /* value-preserving under the PR4 code-domain decode (code - zp)*scale:
+    /* value-preserving under the code-domain decode (code - zp)*scale:
      * ASYM qBits=4 codes {15, 1, 7, 0}, zeroPoints[0]=7, scales[0]=0.5 ->
      * dequant {(15-7)*0.5, (1-7)*0.5, (7-7)*0.5, (0-7)*0.5} =
      * {4, -3, 0, -3.5}. BFP m=4 -> qMax 7; absMax 4 -> ratio 4/7 in (0.5, 1)
      * -> E=0 (stored 127, scale 1); mantissas {4, -3, 0, -4} (-3.5 HALF_AWAY
      * -> -4). Code 15 pins the zero-extended unsigned read: a sign-extending
      * misread (-1) dequants to (-1-7)*0.5 = -4 and flips mantissa[0] to -4.
-     * The stale value-domain decode (code + zp)*scale is also killed: it
-     * gives {11, 4, 7, 3.5} -> absMax 11 -> stored 128, not 127. */
+     * A (code + zp)*scale decode gives {11, 4, 7, 3.5} -> absMax 11 -> stored
+     * 128, not 127. */
     size_t n = 4;
     size_t dims[] = {4};
     size_t order[] = {0};
@@ -5482,7 +5365,7 @@ void testAsymGroupedSourceToBfpUsesPerGroupGrids(void) {
 void testBfpToAsymUsesCanonicalGrid(void) {
     /* mantissas {-1, 0, 1, 3} @ E=+2 (stored 129, scale 4) = values
      * {-4, 0, 4, 12} -- min/max run over DEQUANTIZED values incl. the
-     * negative -4. Canonical grid (deriveAsymGridFromMinMax, group-quant PR4 D6 nudged
+     * negative -4. Canonical grid (deriveAsymGridFromMinMax, nudged
      * code-domain form; the band already contains 0, so the nudge is inert)
      * at qBits=4 (qMax 15): scale = (12 - -4)/15 = 16/15, zpReal =
      * -mn/scale = 4/(16/15) = 3.74999976f (genuinely fractional: the float
@@ -5819,9 +5702,8 @@ void testRequantBfpWidthChange(void) {
     TEST_ASSERT_EQUAL_INT32(0, mant[3]);
 }
 
-/* --- Task 10 multi-chunk pins (n > ODT_CONVERSION_CHUNK_ELEMS): written to
- * pass against the PRE-rewrite conversion loops, then required bit-identical
- * after the scale-hoisting perf pass. n=520, groupSize=13 -> 40 groups; 256
+/* --- Multi-chunk pins (n > ODT_CONVERSION_CHUNK_ELEMS) for the per-run scale
+ * hoisting in the BFP loops. n=520, groupSize=13 -> 40 groups; 256
  * and 512 are NOT multiples of 13, so group 19 [247,260) straddles the first
  * chunk boundary and group 39 [507,520) the second (chunks [0,256),
  * [256,512), [512,520)). testChunkedFloatToSymRoundTripsAtChunkBoundary is
@@ -5928,8 +5810,7 @@ void testStreamPackBfpMultiChunkViaSymSource(void) {
      * [-15.625, 15.59].
      * This fixture lands ADJACENT groups on DIFFERENT exponents (groups
      * 0/12/24/36 stored 127, all others 126), so a run/group-boundary
-     * off-by-one in any Task-10 hoisted loop changes bytes here -- the
-     * designated mutation catcher.
+     * off-by-one in any hoisted loop changes bytes here.
      * Spot golds (E = smallest with absmax/2^E <= 31, stored = E + 127):
      *   group 0:  absmax = |m_0|/32   = 500/32 = 15.625
      *     -> 15.625/31 = 0.504 in [0.5,1) -> E=0 -> stored 127
@@ -6228,17 +6109,17 @@ void testDeriveBfpStoredExponentPublicBoundaries(void) {
     TEST_ASSERT_EQUAL_UINT8(128, stored);
 }
 
-/* BFP epic PR2: at exponentBits=8 the natural top of the stored
- * range (255, bias 127 -> E=128) has NO finite float32 scale -- ldexpf(1, 128)
- * is +inf, so a group landing there quantized every code to 0 and dequantized
- * the WHOLE group to NaN (0 * inf), in-range values included, instead of the
- * BFP D6 mantissa saturation. The derivation authority must therefore never emit
+/* At exponentBits=8 the natural top of the stored range (255, bias 127 ->
+ * E=128) has NO finite float32 scale -- ldexpf(1, 128) is +inf, so a group
+ * landing there would quantize every code to 0 and dequantize the WHOLE group
+ * to NaN (0 * inf) instead of saturating its mantissas. The derivation
+ * authority must therefore never emit
  * stored > bias + 127 (scale 2^127, the largest finite float32 power of two);
  * for e <= 7 the cap lies above maxStored and changes nothing. */
 void testDeriveBfpStoredExponentCapsAtLargestFiniteScale(void) {
     uint8_t stored;
     /* qMax 1 (m=2): absMax 2e38 > 2^127 naturally derives E=128 (stored 255)
-     * -- must cap at 254 so the BFP D6 saturation regime engages with a finite
+     * -- must cap at 254 so the saturation regime engages with a finite
      * scale. */
     deriveBfpStoredExponent(2e38f, 1.f, 127, 255, &stored);
     TEST_ASSERT_EQUAL_UINT8(254, stored);
@@ -6248,13 +6129,11 @@ void testDeriveBfpStoredExponentCapsAtLargestFiniteScale(void) {
     TEST_ASSERT_EQUAL_UINT8(254, stored);
 }
 
-/* Follow-up batch (PR #422): a NON-FINITE absMax has no derivable exponent --
- * frexpf(inf) leaves both its return value and *exp unspecified (C17
- * 7.12.6.4), so the stored byte was whatever the libm happened to write, and
- * one step later the emit pass fed roundByMode a non-finite quotient. BFP D6's
- * high regime already owns "this magnitude does not fit the exponent range":
- * an unrepresentably large absmax saturates at the cap -- the largest finite
- * grid -- so the block's mantissas clamp to the code range instead. Reachable
+/* A NON-FINITE absMax has no derivable exponent -- frexpf(inf) leaves both its
+ * return value and *exp unspecified (C17 7.12.6.4), so the stored byte would
+ * be whatever the libm writes. An unrepresentably large absmax saturates at
+ * the cap -- the largest finite grid -- so the block's mantissas clamp to the
+ * code range instead. Reachable
  * with an entirely finite factor: mantissa * oldScale * factor overflows
  * float32 near the exponent cap (pass 1 of the scale path and of the rescale
  * accumulate engine both feed their absmax straight in here). */
@@ -6273,7 +6152,7 @@ void testDeriveBfpStoredExponentNonFiniteAbsMaxSaturatesAtCap(void) {
 }
 
 void testQuantizeFloatBufferToBfpCodesE8HighCornerSaturatesFinite(void) {
-    /* End-to-end pin of the finding-4 window {m=2, e=8}: group absMax 2e38.
+    /* End-to-end pin at {m=2, e=8}: group absMax 2e38.
      * stored caps at 254 (scale 2^127 finite), the huge value saturates to
      * +qMax, the in-range 1.0 flushes to 0 at this group resolution -- and
      * nothing is NaN or inf anywhere. */
@@ -6295,7 +6174,7 @@ void testQuantizeFloatBufferToBfpCodesE8HighCornerSaturatesFinite(void) {
     TEST_ASSERT_EQUAL_FLOAT(ldexpf(1.f, 127), (float)codes[0] * scale);
 }
 
-/* ---- BFP grad-accumulate engines (epic PR3, funnel accumulateOut arm) ---- */
+/* ---- BFP grad-accumulate engines (funnel accumulateOut arm) ---- */
 
 void testAccumulateFloatIntoBfpRescaleRederivesExponents(void) {
     /* Grouped {2,2} m=6/e=8 target (qMax 31, bias 127), every step exact in
@@ -6309,10 +6188,8 @@ void testAccumulateFloatIntoBfpRescaleRederivesExponents(void) {
      *     -> E=0 -> stored 127, scale 1, codes {16,-4} -- the increment
      *     pushed the group's absmax over a power-of-two boundary, so the
      *     stored exponent GROWS (125 -> 127), the defining rescale move.
-     * Mutation guard (the latch): decoding the target in the requant pass at
-     * the FRESH exponent instead of the latched OLD one yields codes
-     * {12,-2,28,2} (verified via the house throwaway float32 harness) -> the
-     * codes assert goes RED. */
+     * Decoding the target in the requant pass at the FRESH exponent instead
+     * of the OLD one would yield codes {12,-2,28,2}. */
     size_t n = 4;
     size_t dims[] = {4};
     size_t order[] = {0};
@@ -6345,7 +6222,7 @@ void testAccumulateFloatIntoBfpRescaleRederivesExponents(void) {
 }
 
 void testAccumulateFloatIntoBfpRescaleClampsAtExponentCapCorner(void) {
-    /* The requantize pass's value-domain clamp (BFP D6) is load-bearing ONLY in
+    /* The requantize pass's value-domain clamp is load-bearing ONLY in
      * the deriveBfpStoredExponent cap regime -- everywhere else the freshly
      * derived grid guarantees round(v/scale) <= qMax and the clamp is inert.
      * The E8HighCornerSaturatesFinite fixture, driven through the accumulate
@@ -6354,10 +6231,9 @@ void testAccumulateFloatIntoBfpRescaleClampsAtExponentCapCorner(void) {
      * is absorbed) naturally derives E=128 (stored 255) -> capped at 254,
      * scale 2^127 (finite). Pass 2: 3.4e38 / 2^127 = 1.998 -> HALF_AWAY 2 >
      * qMax -> the clamp saturates to 1; the in-range 0+1.0 flushes to 0 at
-     * this group resolution. Mutation guard: removing the clamp hands the
-     * raw 2 to packChunkGuarded, which aborts on the 2-bit range [-2,1] ->
-     * RED by crash. (2e38 would be vacuous: ratio 1.18 rounds to 1 and the
-     * clamp never bites.) */
+     * this group resolution. Without the clamp the raw 2 reaches
+     * packChunkGuarded, which aborts on the 2-bit range [-2,1]. (2e38 would
+     * be vacuous: ratio 1.18 rounds to 1 and the clamp never bites.) */
     size_t n = 2;
     size_t dims[] = {2};
     size_t order[] = {0};
@@ -6398,9 +6274,8 @@ void testAccumulateFloatIntoBfpFixedGridFreshTargetDerivesGrid(void) {
      *     scale 1, codes {6,1};
      *   group1 inc {28,-7}: absMax 28 -> 28/7 = 4 = 2^2 (snap-up boundary)
      *     -> E=2 -> stored 129, scale 4, codes {7, -1.75 -> -2}.
-     * Mutation guard: skipping the all-zero scan (always carrying the
-     * zero-state grid, scale 1) makes group1's code 28 overflow the 4-bit
-     * range -> packChunkGuarded abort, RED by crash. */
+     * Carrying the zero-state grid (scale 1) instead would overflow group1's
+     * code 28 in 4 bits and abort. */
     size_t n = 4;
     size_t dims[] = {4};
     size_t order[] = {0};
@@ -6432,13 +6307,10 @@ void testAccumulateFloatIntoBfpFixedGridFreshTargetDerivesGrid(void) {
 }
 
 void testAccumulateFloatIntoBfpFixedGridCarriedGridAborts(void) {
-    /* #227 code-domain discipline: a NON-zero target carries its grid
-     * verbatim, and a sum past the mantissa range must exit(1), never clamp
-     * (BFP D6 saturation is value-domain quantization only -- the spec splits the
-     * regimes). Per-tensor m=4, code 7 (grid max) @ stored 127 (scale 1);
-     * inc +1 -> 8, outside [-8, 7].
-     * Mutation guard: clamping instead of pack-guarding lets the child exit
-     * 0 -> RED. */
+    /* A NON-zero target carries its grid verbatim, and a sum past the
+     * mantissa range must exit(1), never clamp (saturation is value-domain
+     * quantization only). Per-tensor m=4, code 7 (grid max) @ stored 127
+     * (scale 1); inc +1 -> 8, outside [-8, 7]. */
     size_t n = 1;
     size_t dims[] = {1};
     size_t order[] = {0};
@@ -6470,9 +6342,7 @@ void testAccumulateTensorIntoBfpRescaleMatchesFloatWrapper(void) {
      * exact dequant image: mantissas {8,4,48,-24} * scale 0.25 =
      * {2,1,12,-6} bit-identical to the float sibling's literals -- so this is
      * the RederivesExponents fixture and must reproduce its golds exactly.
-     * Mutation guard: misreading the tensor increment's raw int32 codes as
-     * float (dropping the dequant dispatch) diverges from the float twin ->
-     * RED. */
+     * Misreading the increment's raw int32 codes as float would diverge. */
     size_t n = 4;
     size_t dims[] = {4};
     size_t order[] = {0};
@@ -6532,9 +6402,7 @@ void testAccumulateTensorIntoBfpRescaleMatchesFloatWrapper(void) {
 void testAccumulateTensorIntoBfpFixedGridMatchesFloatWrapper(void) {
     /* FixedGrid tensor twin against its float sibling on the
      * FreshTargetDerivesGrid fixture: SYM_INT32 mantissas {24,4,112,-28} *
-     * scale 0.25 = {6,1,28,-7} exact -> golds {127,129} / {6,1,7,-2}.
-     * Mutation guard: same misread-as-float mutant class as the Rescale twin
-     * test above. */
+     * scale 0.25 = {6,1,28,-7} exact -> golds {127,129} / {6,1,7,-2}. */
     size_t n = 4;
     size_t dims[] = {4};
     size_t order[] = {0};
@@ -6612,9 +6480,8 @@ void testAccumulateFloatIntoBfpRescaleZeroTargetMultiChunkEqualsPack(void) {
      * FLOAT32->BFP quantization (the decode contributes 0; absmax and the
      * single per-element round see the increment alone), so it must equal
      * convertTensor's pack byte-for-byte and exponent-for-exponent.
-     * Mutation guard: resetting the running absmax at CHUNK starts instead of
-     * group closes derives group 1's exponent from only its second-chunk
-     * slice (absmax 88 -> stored 129, not 200 -> 130) -> RED. */
+     * Resetting the running absmax at CHUNK starts instead of group closes
+     * would derive group 1 from its second-chunk slice (stored 129, not 130). */
     size_t n = 480;
     size_t dims[] = {480};
     size_t order[] = {0};
@@ -6664,8 +6531,8 @@ void testAccumulateFloatIntoBfpRescaleZeroTargetMultiChunkEqualsPack(void) {
     TEST_ASSERT_EQUAL_UINT8(127, exponents[2]);
 }
 
-/* #421 U6: the discriminating shape for the rescale walker's OLD-grid latch.
- * The existing cross-chunk pin above starts from an ALL-ZERO target, so its
+/* The discriminating shape for the rescale walker's OLD-grid latch.
+ * The cross-chunk pin above starts from an ALL-ZERO target, so its
  * decode contributes nothing and the latch is inert there. This one seeds
  * NONZERO codes under three DISTINCT old exponents, with the groups
  * (gsz=160) straddling the 256-element chunk boundary, so every element's
@@ -6826,11 +6693,9 @@ void testAccumulateTensorIntoBfpFixedGridFreshMultiChunkEqualsPack(void) {
      * derives via findAbsMaxFloat and has no chunk logic to cover. An
      * all-zero-code target must also collapse to the plain value-domain pack
      * (grid from the increment alone, then one round per element; nothing
-     * overflows a grid derived from the same data). Mutation guards: (a)
-     * resetting the streamed absmax at chunk starts derives group 1 from its
-     * second-chunk slice only -> RED; (b) using group 0's scale for every run
-     * in the RMW pass mis-encodes groups 1 and 2 (distinct exponents by
-     * construction) -> RED. */
+     * overflows a grid derived from the same data). Catches resetting the
+     * streamed absmax at chunk starts, and using group 0's scale for every
+     * run in the RMW pass (groups have distinct exponents by construction). */
     size_t n = 480;
     size_t dims[] = {480};
     size_t order[] = {0};
@@ -6880,7 +6745,7 @@ void testAccumulateTensorIntoBfpFixedGridFreshMultiChunkEqualsPack(void) {
     TEST_ASSERT_EQUAL_UINT8(127, exponents[2]);
 }
 
-/* ---- scaleBfpTensorInPlace (epic PR3, scaleOptimizerGradients BFP arm) ---- */
+/* ---- scaleBfpTensorInPlace (scaleOptimizerGradients BFP arm) ---- */
 
 void testScaleBfpTensorInPlaceExactHalving(void) {
     /* Grouped {2,2} m=6/e=8 (qMax 31, bias 127) seeded on CANONICAL
@@ -6897,8 +6762,8 @@ void testScaleBfpTensorInPlaceExactHalving(void) {
      * Every step exact in float32 (integers and powers of two only), so the
      * roundByMode draw is deterministic regardless of mode: exponents drop by
      * exactly 1 and the packed payload is byte-for-byte unchanged.
-     * Mutation guard (the latch): decoding pass 2 at the FRESH exponent
-     * instead of the latched OLD one halves the codes ({8,-4,8,4}) -> RED. */
+     * Decoding pass 2 at the FRESH exponent instead of the OLD one would
+     * halve the codes ({8,-4,8,4}). */
     size_t n = 4;
     size_t dims[] = {4};
     size_t order[] = {0};
@@ -6949,8 +6814,8 @@ void testScaleBfpTensorInPlaceGeneralFactorRederives(void) {
      *     -> 1/31 in (2^-5, 2^-4) -> E=-4 -> stored 123, scale 0.0625 ->
      *     codes {16,8}.
      * All requant quotients are exact integers -> deterministic roundByMode.
-     * Mutation guard: dropping the factor from pass 1 keeps the old exponents
-     * ({127,124}) -> RED; the latch mutant shrinks the codes -> RED. */
+     * Dropping the factor from pass 1 would keep the old exponents
+     * ({127,124}); decoding at the fresh exponent would shrink the codes. */
     size_t n = 4;
     size_t dims[] = {4};
     size_t order[] = {0};
@@ -6989,10 +6854,9 @@ void testScaleBfpTensorInPlaceZeroGroupKeepsZeroState(void) {
      *   group0: codes {0,0} @ stored 127 (the zero state) -> stays {0,0} @ 127;
      *   group1: codes {16,8} @ stored 125 (values {4,2}, canonical) -> x0.5 ->
      *     values {2,1} -> E=-3 -> stored 124, codes {16,8} (halving fold).
-     * Mutation guard: the naive power-of-two fold (exponents[g] -= 1, skip the
-     * re-derivation) passes the ExactHalving test BY DESIGN (that identity is
-     * what it implements) but corrupts the zero state here: group0's exponent
-     * would leave bias (127 -> 126) with all-zero codes -> RED. */
+     * A naive power-of-two fold (exponents[g] -= 1, no re-derivation) passes
+     * the ExactHalving test but would move group0's exponent off bias
+     * (127 -> 126) with all-zero codes. */
     size_t n = 4;
     size_t dims[] = {4};
     size_t order[] = {0};
@@ -7037,10 +6901,8 @@ void testScaleBfpTensorInPlacePerTensorMultiChunkCarriesAbsMax(void) {
      * integers (deterministic roundByMode) -- the halving fold: exponent
      * drops by 1, all 300 codes bit-unchanged. Also the only test driving
      * packChunkGuarded at off=256 for this function.
-     * Mutation guard (cross-chunk carry): resetting absMax at each chunk
-     * start derives the exponent from the TAIL alone (absmax 2 -> E=-3 ->
-     * stored 124, scale 0.125) and element 0 saturates at qMax
-     * (50/0.125 = 400 -> clamp 31 != 25) -> RED. */
+     * Resetting absMax at each chunk start would derive the exponent from the
+     * TAIL alone (stored 124, scale 0.125) and saturate element 0 at 31. */
     size_t n = 300;
     size_t dims[] = {300};
     size_t order[] = {0};
@@ -7073,14 +6935,11 @@ void testScaleBfpTensorInPlacePerTensorMultiChunkCarriesAbsMax(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(seedCodes, got, n);
 }
 
-/* ---- scale-path non-finite factor (follow-up batch, PR #422) ------------
- * A BFP grid is (int32 mantissa, shared power-of-two exponent): it has no
- * code for NaN or inf, so a non-finite factor has no honest outcome here.
- * Left unguarded the two passes disagree about it -- pass 1's `v > absMax`
- * comparison is FALSE for NaN, so the fresh exponent silently ignores it,
- * and pass 2 then evaluates roundByMode(non-finite), i.e.
- * (int32_t)round(NaN|inf), which is undefined behavior (C17 6.3.1.4).
- * scaleBfpTensorInPlace fail-fasts at entry instead: a silent skip would
+/* ---- scale-path non-finite factor ---------------------------------------
+ * A BFP grid has no code for NaN or inf, so a non-finite factor has no honest
+ * outcome. Unguarded, pass 1 ignores a NaN (`v > absMax` is false) and pass 2
+ * reaches (int32_t)round(NaN|inf), undefined (C17 6.3.1.4).
+ * scaleBfpTensorInPlace fails fast at entry instead: a silent skip would
  * mask the caller's bug, saturating would invent data. */
 /* Callers run initBfpQuantization themselves, before declaring `data`, so the
  * payload can be sized by calcNumberOfBytesForData like every other fixture
@@ -7135,7 +6994,7 @@ void testScaleBfpTensorInPlaceRejectsInfiniteFactor(void) {
     ASSERT_EXITS_WITH_FAILURE(scaleBfpTensorInPlace(&t, INFINITY, NULL));
 }
 
-/* ---- scale-path overflow at the exponent cap (follow-up batch, PR #422) --
+/* ---- scale-path overflow at the exponent cap ---------------------------
  * The reachable overflow: the factor is a perfectly ordinary FINITE 2.0f,
  * but a grid already sitting AT the cap has no headroom left, so the pass-2
  * product leaves float32 entirely. Hand-derived, per-tensor m=8/e=8:
@@ -7153,15 +7012,12 @@ void testScaleBfpTensorInPlaceRejectsInfiniteFactor(void) {
  *   BEFORE roundByMode is called -- (int32_t)round(+-inf) is undefined
  *   (C17 6.3.1.4) -- and the zero element stays 0.
  * Expected: exponent 254, codes {127, -128, 127, 0}. Saturation, not a crash
- * and not garbage: BFP D6's value-domain discipline one step past the
- * finite-absmax case testQuantizeFloatBufferToBfpCodesE8HighCornerSaturates-
- * Finite already pins.
- * Mutation note: dropping the float pre-clamp is observable only where the
- * arithmetic is UNDEFINED, so the kill is platform-dependent by nature --
- * arm64's saturating fcvtzs happens to land on the same two codes, x86-64's
- * cvttsd2si yields INT32_MIN for BOTH signs (+inf -> -128 != 127 -> RED).
- * The preset-independent kill is unit_test_ubsan's float-cast-overflow,
- * which traps the pre-clamp-free conversion on every platform. */
+ * and not garbage -- one step past the finite-absmax case
+ * testQuantizeFloatBufferToBfpCodesE8HighCornerSaturatesFinite pins.
+ * A missing float pre-clamp is observable only where the arithmetic is
+ * UNDEFINED, so detection is platform-dependent: arm64's saturating fcvtzs
+ * lands on the same codes, x86-64's cvttsd2si yields INT32_MIN for both
+ * signs. unit_test_ubsan's float-cast-overflow catches it everywhere. */
 void testScaleBfpTensorInPlaceCapRegimeSaturatesOnOverflow(void) {
     size_t n = 4;
     size_t dims[] = {4};
@@ -7190,17 +7046,11 @@ void testScaleBfpTensorInPlaceCapRegimeSaturatesOnOverflow(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(expected, got, n);
 }
 
-/* Follow-up batch (PR #422): n == 0 must leave the CANONICAL zero state, not
- * a stale grid. Both passes are element loops, so an empty tensor skipped
- * them entirely and kept whatever exponent it happened to carry -- a scale
- * describing data the tensor does not have, indistinguishable to the next
- * accumulate/serialize/inspect from a derived one. Every other "no data"
- * state in this file agrees on stored = bias (scale 1.0): the exponent
- * authority's absMax == 0 arm, optimizerZeroGrad's BFP arm, getQLike's
- * per-tensor clone. (After validateBfpQConfigShape, n == 0 implies the
- * per-tensor {1,0} geometry -- a grouped config needs numGroups > 1 AND
- * groupSize > 0, whose product is never 0 -- but the reset loops over
- * numGroups anyway, so it stays correct if that ever changes.) */
+/* n == 0 must leave the CANONICAL zero state, not a stale grid. Both passes
+ * are element loops, so an empty tensor would keep whatever exponent it
+ * carried -- a scale describing data the tensor does not have. Every other
+ * "no data" state agrees on stored = bias (scale 1.0): the exponent
+ * authority's absMax == 0 arm, optimizerZeroGrad's BFP arm, getQLike. */
 void testScaleBfpTensorInPlaceEmptyTensorResetsToZeroState(void) {
     size_t n = 0;
     size_t dims[] = {0};
@@ -7216,7 +7066,7 @@ void testScaleBfpTensorInPlaceEmptyTensorResetsToZeroState(void) {
     quantization_t q;
     initBfpQuantization(&qc, &q);
     /* A 0-element payload needs no bytes; hand the tensor a valid pointer
-     * rather than a zero-length array (#160). */
+     * rather than a zero-length array. */
     uint8_t data[1] = {0};
     tensor_t t;
     setTensorValues(&t, data, &shape, &q, NULL);
@@ -7233,13 +7083,12 @@ void testScaleBfpTensorInPlaceEmptyTensorResetsToZeroState(void) {
  * exact-division invariant (numGroups * groupSize == n): a violating
  * geometry is an OOB exponent write (numGroups*gsz < n) or a silent
  * mis-blocking (> n) -- validateBfpQConfigShape at the two engine entries
- * (#421 folded the scale walk into the rescale one) rejects both, covering
- * all five public entry points exactly once. One death test per entry
+ * rejects both, covering all five public entry points. One death test per entry
  * family, on the shared fixture below. Fixture
- * direction: numGroups*gsz (12) > n (8), chosen because the guard-absent
- * state then runs to completion and exits 0 (a deterministic no-death RED);
- * the < n direction's OOB stack read feeds garbage exponents whose inf/NaN
- * fallout can vacuously abort in packChunkGuarded. */
+ * direction: numGroups*gsz (12) > n (8), because without the guard the code
+ * then runs to completion and exits 0 (a deterministic failure); the < n
+ * direction's OOB stack read feeds garbage exponents whose inf/NaN fallout
+ * can abort in packChunkGuarded and pass vacuously. */
 static void buildBadGeometryBfpTarget(tensor_t *t, uint8_t *data, shape_t *shape, quantization_t *q,
                                       bfpQConfig_t *qc, size_t n) {
     initBfpQuantization(qc, q);
@@ -7310,15 +7159,14 @@ void testScaleBfpTensorInPlaceRejectsBadGroupGeometry(void) {
     ASSERT_EXITS_WITH_FAILURE(scaleBfpTensorInPlace(&t, 0.5f, NULL));
 }
 
-/* #420 G2: packStreamAsBfp is the fourth exponents[g] indexer and had no
- * entry validation -- it derives per-group exponents by index arithmetic in
- * pass 1 and reads bfpGroupScale(outQC, g) in pass 2, both under the same
+/* packStreamAsBfp derives per-group exponents by index arithmetic in pass 1
+ * and reads bfpGroupScale(outQC, g) in pass 2, both under the same
  * exact-division invariant the engines validate. requantBfpTensor is its
  * public route (conversionMatrix[BFP][BFP]); the TARGET carries the
  * field-assigned violating geometry while n comes from the source, which is
  * exactly the mismatch a shape-agnostic layerQuant template can produce.
  * Same numGroups*gsz (12) > n (8) direction as the engine death tests above,
- * for the same deterministic-no-death-RED reason documented there. */
+ * for the reason documented there. */
 void testRequantBfpTensorRejectsBadTargetGroupGeometry(void) {
     size_t n = 8;
     size_t dims[] = {8};
@@ -7353,19 +7201,15 @@ void testRequantBfpTensorRejectsBadTargetGroupGeometry(void) {
     ASSERT_EXITS_WITH_FAILURE(requantBfpTensor(&src, &dst, NULL));
 }
 
-/* #421 U9: the last two exponents[g] indexers without entry validation.
- * packFloatBufferAsBfp's pass 2 derives g = idx / groupSize with NO bound
+/* packFloatBufferAsBfp's pass 2 derives g = idx / groupSize with NO bound
  * against numGroups, so a target whose numGroups * groupSize < n reads
  * exponents[] OUT OF BOUNDS -- and the route is PUBLIC:
  * conversionMatrix[FLOAT32][BFP] takes the target's geometry from a
- * shape-agnostic layerQuant template while n comes from the SOURCE, exactly
- * the mismatch #420 G2 closed for the streaming twin. The unpacked sibling
- * quantizeFloatBufferToBfpCodes has the same invariant with a milder failure
- * (its per-group loops leave the codesOut tail UNINITIALIZED instead of
- * reading OOB) and is non-static, so its guard is pinned by a direct call.
- * Both use G2's numGroups*gsz (12) > n (8) direction, for the same
- * deterministic-no-death-RED reason documented at the engine death tests:
- * the guard-absent code runs to completion and exits 0. */
+ * shape-agnostic layerQuant template while n comes from the SOURCE. The
+ * unpacked sibling quantizeFloatBufferToBfpCodes has the same invariant with
+ * a milder failure (an UNINITIALIZED codesOut tail instead of an OOB read) and
+ * is public, so its guard is pinned by a direct call. Both use the
+ * numGroups*gsz (12) > n (8) direction documented at the engine death tests. */
 void testFloatToBfpRejectsBadTargetGroupGeometry(void) {
     size_t n = 8;
     size_t dims[] = {8};
@@ -7408,28 +7252,21 @@ void testQuantizeFloatBufferToBfpCodesRejectsBadGroupGeometry(void) {
     ASSERT_EXITS_WITH_FAILURE(quantizeFloatBufferToBfpCodes(values, 8, &qc, codes, NULL));
 }
 
-/* ---- #421 U10 (ruling R9): a non-finite INPUT VALUE is a fail-fast --------
- * R6's value-side twin, at the three value-domain pack entries. Same
- * rationale verbatim: BFP has no NaN/inf code, so mapping the value to 0
- * drops the caller's data and saturating it to +-qMax invents data. The
- * FLOAT32 wire keeps propagating NaN loudly, because FLOAT32 can represent
- * it -- the documented asymmetry.
+/* ---- a non-finite INPUT VALUE is a fail-fast at the three value-domain
+ * pack entries. BFP has no NaN/inf code, so mapping the value to 0 drops the
+ * caller's data and saturating it to +-qMax invents data. The FLOAT32 wire
+ * keeps propagating NaN, because FLOAT32 can represent it.
  *
- * This is not theoretical. An ordinary training divergence produces a NaN
- * loss, which reaches quantizeFloatBufferToBfpCodes through the funnel's
- * FLOAT32-operand staging (ExecuteOp.c), and the behaviour there was
- * PLATFORM-DIVERGENT silent corruption rather than merely undefined: pass 1's
- * `v > absMax` comparison is false for NaN so the grid ignores it, the
- * comparison-based float clamp cannot map it either, and (int32_t)round(NaN)
- * yields 0 on arm64 (code 0) but INT32_MIN on x86-64 (clamped to qMin) -- a
- * bit-parity hazard, not just UB on paper. That arm64 zero is also why all
- * three guard-absent states exit 0, which is how these were watched RED.
+ * Reachable: a training divergence produces a NaN loss, which reaches
+ * quantizeFloatBufferToBfpCodes through the funnel's FLOAT32-operand staging
+ * (ExecuteOp.c). Unguarded the result is PLATFORM-DIVERGENT: (int32_t)round(NaN)
+ * yields 0 on arm64 but INT32_MIN on x86-64 (clamped to qMin). The arm64 zero
+ * is also why a missing guard shows as a clean exit 0 in these death tests.
  *
- * Boundary, deliberately: only INPUT values fail fast. Computed
- * INTERMEDIATES keep saturating through the emit clamp (R6), and
- * deriveBfpStoredExponent's non-finite-absMax cap branch stays live for the
- * engine callers that legitimately feed it a sum overflowed from finite
- * operands. */
+ * Only INPUT values fail fast. Computed INTERMEDIATES keep saturating
+ * through the emit clamp, and deriveBfpStoredExponent's non-finite-absMax
+ * cap branch stays live for engine callers that feed it a sum overflowed
+ * from finite operands. */
 void testFloatToBfpRejectsNonFiniteInputValue(void) {
     size_t n = 4;
     size_t dims[] = {4};
@@ -7475,9 +7312,8 @@ void testQuantizeFloatBufferToBfpCodesRejectsNonFiniteInputValue(void) {
 /* The streaming entry sees its input through readChunk, so the non-finite
  * value has to come out of the SOURCE grid: exponentBits=8 at stored 255 is
  * E = +128, whose scale ldexpf(1, 128) is +inf, so every nonzero code decodes
- * to +-inf. That grid can only be HAND-BUILT -- deriveBfpStoredExponent never
- * derives it (it caps at bias + 127) and since #420 G5 the deserializer
- * refuses to ingest it -- which is exactly the residual this guard closes. */
+ * to +-inf (a hand-built grid: derived exponents cap at bias + 127). Decoded
+ * values can overflow even when the stored scale is finite. */
 void testRequantBfpTensorRejectsNonFiniteSourceValue(void) {
     size_t n = 4;
     size_t dims[] = {4};
@@ -7516,26 +7352,22 @@ void testRequantBfpTensorRejectsNonFiniteSourceValue(void) {
     ASSERT_EXITS_WITH_FAILURE(requantBfpTensor(&src, &dst, NULL));
 }
 
-/* ---- #421 U2: clamp before the round at EVERY BFP emit site --------------
- * `scaleBfpTensorInPlace` got the float-domain pre-clamp in the PR #422
- * follow-up batch (R3); the four sibling emit passes kept rounding a
- * possibly-out-of-int32 quotient. The reachable regime needs NO inf and no
- * NaN: at a narrow `exponentBits` the derived exponent SATURATES (BFP D6), so
- * the block's scale is capped far below what its data needs and `v / scale`
- * leaves int32 range while every input is an ordinary finite float.
+/* ---- clamp before the round at EVERY BFP emit site -----------------------
+ * The reachable regime needs NO inf and no NaN: at a narrow `exponentBits`
+ * the derived exponent SATURATES, so the block's scale is capped far below
+ * what its data needs and `v / scale` leaves int32 range while every input
+ * is an ordinary finite float.
  * Shared fixture across all five: m=8 (qMax 127, qMin -128), e=2 (bias 1,
  * stored range [0,3], so E <= 2 and the scale caps at 4) and a magnitude of
  * 1e30 -- quotient 2.5e29, ~10^20 times past INT32_MAX, with 0 and a
  * small in-range value alongside to pin that the clamp is inert everywhere
  * else.
  *
- * Mutation note (the R3 precedent, verbatim): dropping a pre-clamp is
- * observable only where the arithmetic is UNDEFINED, so the kill is
- * platform-dependent by nature -- arm64's saturating fcvtzs lands on
- * INT32_MAX/INT32_MIN, which clampInt32 then maps onto the SAME two codes.
- * The preset-independent kill is unit_test_ubsan's float-cast-overflow
- * (-fno-sanitize-recover), which traps the pre-clamp-free conversion on
- * every platform. */
+ * A missing pre-clamp is observable only where the arithmetic is UNDEFINED,
+ * so detection is platform-dependent: arm64's saturating fcvtzs lands on
+ * INT32_MAX/INT32_MIN, which clampInt32 maps onto the SAME two codes.
+ * unit_test_ubsan's float-cast-overflow (-fno-sanitize-recover) catches it
+ * on every platform. */
 void testFloatToBfpCapRegimeSaturatesFiniteQuotient(void) {
     size_t n = 4;
     size_t dims[] = {4};
@@ -7563,7 +7395,7 @@ void testFloatToBfpCapRegimeSaturatesFiniteQuotient(void) {
 
     convertTensor(&src, &dst, NULL);
 
-    TEST_ASSERT_EQUAL_UINT8(3, exponents[0]); /* BFP D6 high clamp: E = 2, scale 4 */
+    TEST_ASSERT_EQUAL_UINT8(3, exponents[0]); /* high clamp: E = 2, scale 4 */
     int32_t got[4];
     unpackSignExtend(data, 8, 0, got, n);
     int32_t expected[4] = {127, -128, 0, 0}; /* 1/4 = 0.25 flushes to 0 */
@@ -7672,8 +7504,8 @@ void testAccumulateFloatIntoBfpRescaleCapRegimeSaturatesFiniteQuotient(void) {
 }
 
 /* The FIXED-grid engine is the one emit site that must NOT saturate: an
- * increment that does not fit the CARRIED grid is a #227 code-domain abort
- * (docs/conventions/arithmetic-bfp.md 5.6), not BFP D6 value-domain saturation.
+ * increment that does not fit the CARRIED grid is a code-domain abort
+ * (docs/conventions/arithmetic-bfp.md 5.6), not value-domain saturation.
  * Its pre-clamp therefore uses a band two codes wider than the legal one, so
  * an overflowing quotient still reaches packChunkGuarded out of range and
  * still aborts -- only the (int32_t)round(...) undefined conversion is
@@ -7707,22 +7539,15 @@ void testAccumulateFloatIntoBfpFixedGridCapRegimeAbortsInsteadOfUB(void) {
     ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, n, NULL));
 }
 
-/* ---- #421 U3 (ruling R6): a non-finite INCREMENT is a fail-fast ---------
- * Same rationale as the scale path's non-finite FACTOR guard (R1): a BFP
- * grid is (int32 mantissa, shared power-of-two exponent) and has no NaN/inf
- * code, so there is nothing to propagate into. Mapping the value to 0 would
- * silently drop the caller's data and saturating it to +-qMax would invent
- * data that was never there, so both engines refuse. The asymmetry is
- * deliberate and documented: a FLOAT32-stored grad keeps propagating NaN
- * loudly, because FLOAT32 CAN represent it.
+/* ---- a non-finite INCREMENT is a fail-fast -----------------------------
+ * Same rationale as the scale path's non-finite FACTOR guard: a BFP grid has
+ * no NaN/inf code, so mapping the value to 0 would drop the caller's data and
+ * saturating it to +-qMax would invent data. A FLOAT32-stored grad keeps
+ * propagating NaN, because FLOAT32 CAN represent it.
  *
- * Unguarded, both engines walk into undefined behaviour rather than
- * anything defined: pass 1's `v > absMax` comparison is false for NaN, so
- * the fresh exponent silently ignores it, and pass 2's comparison-based
- * float clamp cannot map NaN either, so roundByMode gets it and
- * (int32_t)round(NaN) is undefined (C17 6.3.1.4). On arm64 that conversion
- * happens to yield 0, so the guard-absent state exits 0 -- a deterministic
- * no-death RED, which is how these three were watched.
+ * Unguarded, pass 1 ignores a NaN and pass 2 reaches (int32_t)round(NaN),
+ * undefined (C17 6.3.1.4). On arm64 that yields 0, so a missing guard shows
+ * as a clean exit 0 in these death tests.
  *
  * NOT covered by a fourth case: a FixedGrid target with an INFINITE
  * increment would be vacuous. Its emit clamps into an abort-preserving band
@@ -7802,29 +7627,21 @@ void testAccumulateFloatIntoBfpFixedGridRejectsNaNIncrement(void) {
     ASSERT_EXITS_WITH_FAILURE(accumulateFloatIntoBfpTensorFixedGrid(&target, inc, n, NULL));
 }
 
-/* ---- #421 U4 (ruling R7): n == 0 is the canonical zero state -------------
- * The scale arm was given this semantic in the PR #422 follow-up batch (R4);
- * the two accumulate engines diverged from it and from each other. All four
- * public accumulate entries now agree with the scale arm: an empty target is
- * left in the CANONICAL zero state (every group's stored exponent = bias,
- * scale 1.0) rather than carrying a grid that describes data it does not
- * have, indistinguishable to the next accumulate/serialize/inspect from a
- * derived one. Same "no data" convention as the exponent authority's
- * absMax == 0 arm, optimizerZeroGrad's BFP arm and getQLike's per-tensor
- * clone.
+/* ---- n == 0 is the canonical zero state --------------------------------
+ * All four public accumulate entries agree with the scale arm: an empty
+ * target is left in the CANONICAL zero state (every group's stored exponent =
+ * bias, scale 1.0) rather than carrying a grid that describes data it does
+ * not have. Same "no data" convention as the exponent authority's
+ * absMax == 0 arm, optimizerZeroGrad's BFP arm and getQLike.
  *
- * Where the divergence was: the RESCALE walk's passes are element loops, so
- * n == 0 skipped them entirely and left the stale exponent (both wrappers).
- * The FIXED-grid engine split by increment kind -- the flat wrapper was
- * accidentally already correct (an empty group's findAbsMaxFloat is 0, which
- * the exponent authority maps to the zero state) while the TENSOR wrapper's
- * streamed derive loop never ran and left the stale exponent. Three of these
- * four were watched RED; the flat FixedGrid one pins behaviour that was
- * already right.
+ * The cases differ in how they could go stale: the RESCALE walk's passes and
+ * the FIXED-grid TENSOR wrapper's streamed derive loop are element loops that
+ * never run at n == 0; the flat FixedGrid wrapper reaches the zero state via
+ * findAbsMaxFloat == 0.
  *
- * #420 G3 makes the float wrappers demand n == the target's element count,
- * so this state needs a genuinely 0-element target; per #160 the payload
- * pointer is a real 1-byte buffer rather than a zero-length array. */
+ * Callers of the float wrappers must pass n == the target's element count,
+ * so this uses a genuinely 0-element target; the payload pointer is a real
+ * 1-byte buffer rather than a zero-length array. */
 static void buildEmptyBfpTarget(tensor_t *t, uint8_t *data, shape_t *shape, quantization_t *q,
                                 bfpQConfig_t *qc) {
     initBfpQuantization(qc, q);
@@ -8031,11 +7848,11 @@ void testConversionIntoFloat32NeedsNoStream(void) {
     TEST_ASSERT_EQUAL_FLOAT(-1.5f, outData[1]);
 }
 
-/* #515: from q = 26 on, 2^(q-1) - 1 has more than 24 significant bits, so the
+/* From q = 26 on, 2^(q-1) - 1 has more than 24 significant bits, so the
  * float32 image of the grid maximum rounds UP to 2^(q-1) -- one code past the
  * grid. The three emit paths below must still saturate at the integer grid
  * maximum 2^25 - 1 = 33554431. A peak of exactly 2^25 derives scale 1 either
- * way, so the scale is not what distinguishes the fixed from the broken code. */
+ * way, so the scale alone does not distinguish correct from broken code. */
 void testEncodeFloatToSymInt32Q26SaturatesAtGridMax(void) {
     float inData[] = {33554432.f, -33554432.f, 1.f};
     int32_t outData[3];
@@ -8140,12 +7957,11 @@ void testSymGridBoundsRejectsQ32(void) {
                              (void)symGridBoundsOrExit(32, "t"));
 }
 
-/* A raw SYM kernel output declares width 32 (#516): the full int32 range, an
+/* A raw SYM kernel output declares width 32: the full int32 range, an
  * operand / requant-SOURCE declaration. As a requant TARGET it has no grid
  * (2^31 does not exist in int32), so both routes into a SYM_INT32 target fail
- * fast at the #515 helper -- a pin of that helper at the target sites, not a
- * new guard. The config is field-assigned because the width init already
- * rejects 32. */
+ * fast at the grid-bounds helper. The config is field-assigned because the
+ * width init already rejects 32. */
 void testRequantSymInt32IntoWidth32TargetExits(void) {
     size_t dims[] = {2};
     size_t order[] = {0};

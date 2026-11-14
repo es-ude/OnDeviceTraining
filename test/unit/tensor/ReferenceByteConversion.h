@@ -1,11 +1,11 @@
 #ifndef REFERENCE_BYTE_CONVERSION_H
 #define REFERENCE_BYTE_CONVERSION_H
 
-/* Test-only oracle: a verbatim copy of the bit-walking byteConversionAppend
- * engine (and its helpers) that Tensor.c shipped before #505, renamed with a
- * ref prefix. The differential test in UnitTestTensor.c pins the production
- * engine to it byte for byte. Header-only because add_elastic_ai_unit_test
- * does not compile MORE_SOURCES. */
+/* Test-only oracle: a frozen, independent bit-walking copy of
+ * byteConversionAppend (and its helpers), with a ref prefix. It must NOT track
+ * production changes: the differential test in UnitTestTensor.c pins the
+ * production engine to it byte for byte. Header-only because
+ * add_elastic_ai_unit_test does not compile MORE_SOURCES. */
 
 #include <stddef.h>
 #include <stdint.h>

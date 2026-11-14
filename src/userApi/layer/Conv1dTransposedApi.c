@@ -7,6 +7,7 @@
 #include "Common.h"
 #include "Conv1dTransposed.h"
 #include "Conv1dTransposedApi.h"
+#include "ExecuteOp.h"
 #include "Kernel.h"
 #include "Layer.h"
 #include "LayerCommon.h"
@@ -106,12 +107,30 @@ static void validateConv1dTransposedInit(conv1dTransposedInit_t *init) {
         PRINT_ERROR("conv1dTransposedLayerInit: kernelSize must be > 0");
         exit(1);
     }
+    size_t stride = init->stride == 0 ? 1 : init->stride;
+    size_t dilation = init->dilation == 0 ? 1 : init->dilation;
+    size_t maxStep = stride > dilation ? stride : dilation;
+    if (init->outputPadding != 0 && init->outputPadding >= maxStep) {
+        PRINT_ERROR("conv1dTransposedLayerInit: outputPadding (%zu) must be < max(stride=%zu, "
+                    "dilation=%zu)",
+                    init->outputPadding, stride, dilation);
+        exit(1);
+    }
 }
 
-static void validateLayerQuantForConv1dTransposed(layerQuant_t *lq, bool hasBias) {
+static void validateLayerQuantForConv1dTransposed(layerQuant_t *lq, bool hasBias, bool trainable) {
     if (lq == NULL) {
         PRINT_ERROR("conv1dTransposedLayerInit: lq pointer is NULL");
         exit(1);
+    }
+    /* A frozen layer never accumulates grads, so its modes may stay unset. */
+    if (trainable) {
+        executeOpValidateAccMode(lq->weightGradAccMode,
+                                 "conv1dTransposedLayerInit: layerQuant.weightGradAccMode");
+        if (hasBias) {
+            executeOpValidateAccMode(lq->biasGradAccMode,
+                                     "conv1dTransposedLayerInit: layerQuant.biasGradAccMode");
+        }
     }
     if (lq->outputQ == NULL) {
         PRINT_ERROR("conv1dTransposedLayerInit: layerQuant.outputQ must be set");
@@ -177,8 +196,8 @@ static layer_t *buildConv1dTransposedLayerSkeleton(conv1dTransposedInit_t *init,
 layer_t *conv1dTransposedLayerInit(conv1dTransposedInit_t *init, layerQuant_t *lq) {
     validateConv1dTransposedInit(init);
     bool hasBias = resolveConv1dTransposedBias(init->bias);
-    validateLayerQuantForConv1dTransposed(lq, hasBias);
     bool trainable = resolveTrainable(init->trainable, "conv1dTransposedLayerInit");
+    validateLayerQuantForConv1dTransposed(lq, hasBias, trainable);
 
     size_t groups = init->groups == 0 ? 1 : init->groups;
 
@@ -202,8 +221,8 @@ layer_t *conv1dTransposedLayerInit(conv1dTransposedInit_t *init, layerQuant_t *l
 layer_t *conv1dTransposedLayerInitOwning(conv1dTransposedInit_t *init, layerQuant_t *lq) {
     validateConv1dTransposedInit(init);
     bool hasBias = resolveConv1dTransposedBias(init->bias);
-    validateLayerQuantForConv1dTransposed(lq, hasBias);
     bool trainable = resolveTrainable(init->trainable, "conv1dTransposedLayerInitOwning");
+    validateLayerQuantForConv1dTransposed(lq, hasBias, trainable);
 
     size_t groups = init->groups == 0 ? 1 : init->groups;
 

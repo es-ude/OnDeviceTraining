@@ -963,130 +963,20 @@ void testConv1dTransposedWeightGradFloatRejectsOutChannelMismatch() {
                              conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss, NULL));
 }
 
-void testConv1dTransposedWeightGradSymRejectsBatchMismatch() {
-    size_t weightDims[] = {4, 4, 2}; // [Cin=4, Cout/groups=4, K=2], groups=2 -> Cout=8
-    size_t inputDims[] = {2, 4, 4};  // forward batch 2
-    size_t lossDims[] = {1, 8, 5};   // lossGrad batch 1 != forward batch 2
-
-    parameter_t *weights = buildSymParam(3, weightDims, NULL);
-    tensor_t *input = buildSymTensor(3, inputDims, NULL);
-    tensor_t *lossGrad = buildSymTensor(3, lossDims, NULL);
-
-    kernel_t kernel;
-    initKernel(&kernel, 2, VALID, 1, 1);
-    conv1dTransposedConfig_t cfg;
-    quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
-    initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 2, 0, sq, sq, sq,
-                                                 sq);
-
-    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcWeightGradsSymInt32(&cfg, input, lossGrad, NULL));
-}
-
-void testConv1dTransposedWeightGradSymRejectsOutChannelMismatch() {
-    size_t weightDims[] = {4, 4, 2}; // groups=2 -> weight Cout = 8
-    size_t inputDims[] = {1, 4, 4};
-    size_t lossDims[] = {1, 10, 5}; // outChannels 10 != weight Cout 8
-
-    parameter_t *weights = buildSymParam(3, weightDims, NULL);
-    tensor_t *input = buildSymTensor(3, inputDims, NULL);
-    tensor_t *lossGrad = buildSymTensor(3, lossDims, NULL);
-
-    kernel_t kernel;
-    initKernel(&kernel, 2, VALID, 1, 1);
-    conv1dTransposedConfig_t cfg;
-    quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
-    initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 2, 0, sq, sq, sq,
-                                                 sq);
-
-    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcWeightGradsSymInt32(&cfg, input, lossGrad, NULL));
-}
-
-/* #420 G1: ConvT twin of Conv1d's float/SYM input-channel guards. The ConvT
- * weightGrad kernels index the [Cin, Cout/groups, K] grad buffer by the
- * INPUT's channel index (`ic`), so a forwardInput with more channels than
- * weight dim[0] OOB-writes it. Batch, outChannels and the transpose
- * outputLength all stay consistent, so ONLY the new channel guard can fire. */
-void testConv1dTransposedWeightGradFloatRejectsInputChannelMismatch() {
-    size_t weightDims[] = {2, 1, 2}; // [Cin=2, Cout/groups=1, K=2], groups 1 -> Cout = 1
+/* Input channels must match the stored weight's Cin (weight layout [Cin, Cout/groups, K]). */
+void testConv1dTransposedForwardRejectsInputChannelMismatch(void) {
+    size_t weightDims[] = {2, 1, 2}; // [Cin=2, Cout/groups=1, K=2]
     size_t inputDims[] = {1, 3, 3};  // inChannels 3 != weight Cin 2
     size_t outputDims[] = {1, 1, 4};
     float weightData[4] = {0};
     float inputData[9] = {0};
-    float outBuf[4] = {0};
     convT1dRunResult_t r;
     convT1dBuild(&r, weightData, weightDims, NULL, NULL, 0, inputData, inputDims, 2, 1, 1, 1, 0,
-                 outBuf, outputDims);
+                 NULL, outputDims);
 
-    size_t lossDims[] = {1, 1, 4}; // (3-1)*1 + 1*(2-1) + 0 + 1 == 4
-    float lossData[4] = {0};
-    tensor_t *lossGrad = makeFloatTensor(lossDims, 3, lossData);
-
-    ASSERT_EXITS_WITH_OUTPUT(1, "(weightGrad): forwardInput inChannels",
-                             conv1dTransposedBackward(&r.layer, r.input, lossGrad, NULL, NULL));
-}
-
-void testConv1dTransposedWeightGradSymRejectsInputChannelMismatch() {
-    size_t weightDims[] = {4, 4, 2}; // [Cin=4, Cout/groups=4, K=2], groups 2 -> Cout = 8
-    size_t inputDims[] = {1, 6, 4};  // inChannels 6 != weight Cin 4
-    size_t lossDims[] = {1, 8, 5};   // (4-1)*1 + 1*(2-1) + 0 + 1 == 5
-
-    parameter_t *weights = buildSymParam(3, weightDims, NULL);
-    tensor_t *input = buildSymTensor(3, inputDims, NULL);
-    tensor_t *lossGrad = buildSymTensor(3, lossDims, NULL);
-
-    kernel_t kernel;
-    initKernel(&kernel, 2, VALID, 1, 1);
-    conv1dTransposedConfig_t cfg;
-    quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
-    initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, NULL, 2, 0, sq, sq, sq,
-                                                 sq);
-
-    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcWeightGradsSymInt32(&cfg, input, lossGrad, NULL));
-}
-
-void testConv1dTransposedBiasGradFloatRejectsOutChannelMismatch() {
-    /* weight Cout == lossGrad outChannels so weightGrad passes; bias Cout differs
-     * so the biasGrad guard must fire. convT1dBuild runs no forward, so the
-     * inconsistent layer is safe; only backward runs, in the child. */
-    size_t weightDims[] = {1, 2, 2}; // [Cin=1, Cout/groups=2, K=2], groups=1 -> Cout=2
-    size_t biasDims[] = {1};         // bias Cout = 1 (intentionally inconsistent)
-    size_t inputDims[] = {1, 1, 3};
-    float weightData[4] = {0};
-    float biasData[1] = {0};
-    float inputData[3] = {0};
-    float outBuf[8] = {0};
-    size_t outputDims[] = {1, 2, 4};
-    convT1dRunResult_t r;
-    convT1dBuild(&r, weightData, weightDims, biasData, biasDims, 1, inputData, inputDims, 2, 1, 1,
-                 1, 0, outBuf, outputDims);
-
-    size_t lossDims[] = {1, 2, 4}; // outChannels 2 == weight Cout, != bias Cout 1
-    float lossData[8] = {0};
-    tensor_t *lossGrad = makeFloatTensor(lossDims, 3, lossData);
-    size_t propDims[] = {1, 1, 3};
-    tensor_t *propLoss = makeFloatTensor(propDims, 3, NULL);
-
-    ASSERT_EXITS_WITH_OUTPUT(1, "(biasGrad): lossGrad outChannels",
-                             conv1dTransposedBackward(&r.layer, r.input, lossGrad, propLoss, NULL));
-}
-
-void testConv1dTransposedBiasGradSymRejectsOutChannelMismatch() {
-    size_t weightDims[] = {3, 2, 2}; // K=2 satisfies the config kernel-size check
-    size_t biasDims[] = {1};         // bias Cout = 1
-    size_t lossDims[] = {1, 3, 5};   // outChannels 3 != bias Cout 1
-
-    parameter_t *weights = buildSymParam(3, weightDims, NULL);
-    parameter_t *bias = buildSymParam(1, biasDims, NULL);
-    tensor_t *lossGrad = buildSymTensor(3, lossDims, NULL);
-
-    kernel_t kernel;
-    initKernel(&kernel, 2, VALID, 1, 1);
-    conv1dTransposedConfig_t cfg;
-    quantization_t *sq = quantizationInitSymInt32(HALF_AWAY);
-    initConv1dTransposedConfigWithWeightsAndBias(&cfg, &kernel, weights, bias, 1, 0, sq, sq, sq,
-                                                 sq);
-
-    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcBiasGradsSymInt32(&cfg, lossGrad, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "Conv1dTransposed: input channels (3) must equal weight in-channels (2)",
+        layerFunctions[CONV1D_TRANSPOSED].forward(&r.layer, r.input, r.output, NULL));
 }
 
 /* #380 PR1 Task 2: create-time trainable knob (trainable_t). */
@@ -2461,102 +2351,6 @@ void testConvT1dBackwardBfpDxConvGroups2MatchesGold(void) {
     TEST_ASSERT_EQUAL_MEMORY(kBfpConvTG2DxExpected, captured, sizeof(captured));
 }
 
-/* conv1dTransposedCalcWeightGradsBfp / conv1dTransposedCalcBiasGradsBfp are
- * PUBLIC symbols (mirroring the SYM publics): called directly, they read the
- * weights' bfpQConfig_t as the staging width anchor WITHOUT passing
- * conv1dTransposedBackward's rule-1 dispatch guard -- a FLOAT32-stored
- * weight would be reinterpreted as a bfpQConfig_t (garbage widths, silent
- * wrong staging). Both wrappers therefore re-guard the BFP-weights
- * expectation at the public boundary (Conv1d.c's Task 3 precedent). Layer
- * built with FLOAT32 weights and the math slot hand-set so ONLY the wrapper
- * guard can fire. */
-static layer_t *buildFloat32WeightConvTBackwardLayer(quantization_t *floatQ) {
-    size_t weightDims[] = {(size_t)kConvTBfpInChannels, (size_t)kConvTBfpOutChannels,
-                           (size_t)kConvTBfpKernelSize};
-    tensor_t *weightsParam = makeFloatTensor(weightDims, 3, kConvTBfpWValues);
-    parameter_t *weights = parameterInit(weightsParam, gradInitFloat(weightsParam, NULL));
-
-    size_t biasDims[] = {(size_t)kConvTBfpOutChannels};
-    tensor_t *biasParam = makeFloatTensor(biasDims, 1, (float[]){0.5f, -1.0f});
-    parameter_t *bias = parameterInit(biasParam, gradInitFloat(biasParam, NULL));
-
-    kernel_t *kernel = reserveMemory(sizeof(kernel_t));
-    initKernel(kernel, (size_t)kConvTBfpKernelSize, VALID, 1, (size_t)kConvTBfpStride);
-
-    conv1dTransposedConfig_t *cfg = reserveMemory(sizeof(conv1dTransposedConfig_t));
-    initConv1dTransposedConfigWithWeightsAndBias(cfg, kernel, weights, bias, 1,
-                                                 (size_t)kConvTBfpOutputPadding, floatQ, floatQ,
-                                                 floatQ, floatQ);
-    layerConfig_t *layerCfg = reserveMemory(sizeof(layerConfig_t));
-    layerCfg->conv1dTransposed = cfg;
-    layer_t *layer = reserveMemory(sizeof(layer_t));
-    initLayer(layer, CONV1D_TRANSPOSED, layerCfg);
-    return layer;
-}
-
-void testConv1dTransposedCalcWeightGradsBfpRejectsFloat32Weights(void) {
-    quantization_t *floatQ = quantizationInitFloat();
-    layer_t *convT = buildFloat32WeightConvTBackwardLayer(floatQ);
-    convT->config->conv1dTransposed->weightGradMath =
-        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
-
-    tensor_t *forwardInput = buildBfpConvTBwdForwardInput();
-    tensor_t *lossGrad = buildBfpConvTBwdLossGrad();
-
-    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcWeightGradsBfp(convT->config->conv1dTransposed,
-                                                                 forwardInput, lossGrad, NULL));
-
-    freeConv1dTransposedLayer(convT);
-    freeTensor(lossGrad);
-    freeTensor(forwardInput);
-    freeQuantization(floatQ);
-}
-
-void testConv1dTransposedCalcBiasGradsBfpRejectsFloat32Weights(void) {
-    quantization_t *floatQ = quantizationInitFloat();
-    layer_t *convT = buildFloat32WeightConvTBackwardLayer(floatQ);
-    convT->config->conv1dTransposed->biasGradMath =
-        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
-
-    tensor_t *lossGrad = buildBfpConvTBwdLossGrad();
-
-    ASSERT_EXITS_WITH_FAILURE(
-        conv1dTransposedCalcBiasGradsBfp(convT->config->conv1dTransposed, lossGrad, NULL));
-
-    freeConv1dTransposedLayer(convT);
-    freeTensor(lossGrad);
-    freeQuantization(floatQ);
-}
-
-/* ConvT twin of Conv1d's InputChannelMismatch death test: inChPerGroup is
- * derived from the INPUT's channel dim but indexes the WEIGHT-sized grad
- * buffer ([Cin, Cout/groups, K] here, so the guard checks input channels
- * against weight dim[0]). Zero codes, valid per-tensor geometry, fixture
- * input length -- only the channel guard can fire. */
-void testConvT1dCalcWeightGradsBfpRejectsInputChannelMismatch(void) {
-    quantization_t *floatQ = quantizationInitFloat();
-    layer_t *convT = buildBfpConvTBackwardLayer(floatQ, 1);
-    convT->config->conv1dTransposed->weightGradMath =
-        (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
-
-    size_t dims[] = {(size_t)kConvTBfpBatch, (size_t)kConvTBfpInChannels + 1,
-                     (size_t)kConvTBfpBwdInputLength};
-    int32_t zeroCodes[12] = {0}; /* kConvTBfpBatch * (kConvTBfpInChannels+1) * BwdInputLength */
-    uint8_t exponents[1] = {127};
-    tensor_t *forwardInput =
-        buildBfpStoredTensor(3, dims, zeroCodes, exponents, (uint8_t)kConvTBfpBwdMantissaBits,
-                             (uint8_t)kConvTBfpBwdExponentBits, 1, 0);
-    tensor_t *lossGrad = buildBfpConvTBwdLossGrad();
-
-    ASSERT_EXITS_WITH_FAILURE(conv1dTransposedCalcWeightGradsBfp(convT->config->conv1dTransposed,
-                                                                 forwardInput, lossGrad, NULL));
-
-    freeConv1dTransposedLayer(convT);
-    freeTensor(lossGrad);
-    freeTensor(forwardInput);
-    freeQuantization(floatQ);
-}
-
 /* The SR forward rounds in the OUT_WRITE epilogue of its forward op: OP 0
  * under the FORWARD phase of the layer key. The state from the Python mirror,
  * tags as numbers (FORWARD 4, OP 7, OUT 10):
@@ -2960,12 +2754,7 @@ int main() {
     RUN_TEST(testConv1dTransposedBackwardSymDilation2);
     RUN_TEST(testConv1dTransposedWeightGradFloatRejectsBatchMismatch);
     RUN_TEST(testConv1dTransposedWeightGradFloatRejectsOutChannelMismatch);
-    RUN_TEST(testConv1dTransposedWeightGradSymRejectsBatchMismatch);
-    RUN_TEST(testConv1dTransposedWeightGradSymRejectsOutChannelMismatch);
-    RUN_TEST(testConv1dTransposedWeightGradFloatRejectsInputChannelMismatch);
-    RUN_TEST(testConv1dTransposedWeightGradSymRejectsInputChannelMismatch);
-    RUN_TEST(testConv1dTransposedBiasGradFloatRejectsOutChannelMismatch);
-    RUN_TEST(testConv1dTransposedBiasGradSymRejectsOutChannelMismatch);
+    RUN_TEST(testConv1dTransposedForwardRejectsInputChannelMismatch);
     RUN_TEST(testConv1dTransposedFactoryFrozenElidesGrads);
     RUN_TEST(testConv1dTransposedFactoryDefaultAllocatesGrads);
     RUN_TEST(testConv1dTransposedBackwardFrozenTwinPropLossIdenticalGradsZero);
@@ -2990,9 +2779,6 @@ int main() {
     RUN_TEST(testConvT1dBackwardBfpDxMatchesGold);
     RUN_TEST(testConvT1dBackwardBfpDxPowerOfTwoBitIdenticalToGroupedSym);
     RUN_TEST(testConvT1dBackwardBfpDxConvGroups2MatchesGold);
-    RUN_TEST(testConv1dTransposedCalcWeightGradsBfpRejectsFloat32Weights);
-    RUN_TEST(testConv1dTransposedCalcBiasGradsBfpRejectsFloat32Weights);
-    RUN_TEST(testConvT1dCalcWeightGradsBfpRejectsInputChannelMismatch);
     RUN_TEST(testConv1dTransposedSrForwardIsAPureFunctionOfItsForwardOpKey);
     RUN_TEST(testConv1dTransposedInitConfigClearsOwnsQuantizations);
     RUN_TEST(testConv1dTransposedForwardFloatRejectsWrongOutputShape);

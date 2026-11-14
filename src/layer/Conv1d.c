@@ -272,43 +272,12 @@ static void weightGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, te
     size_t outChannels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
     size_t kernelSize = cfg->weights->param->shape->dimensions[2];
-    size_t weightOutChannels = cfg->weights->param->shape->dimensions[0];
-
-    if (batch != lossGrad->shape->dimensions[0]) {
-        PRINT_ERROR("Conv1d backward (weightGrad): lossGrad batch (%zu) does not match "
-                    "forwardInput batch (%zu)",
-                    lossGrad->shape->dimensions[0], batch);
-        exit(1);
-    }
-    if (outChannels != weightOutChannels) {
-        PRINT_ERROR("Conv1d backward (weightGrad): lossGrad outChannels (%zu) does not match "
-                    "weight Cout (%zu)",
-                    outChannels, weightOutChannels);
-        exit(1);
-    }
-
-    /* #420 G1: inChPerGroup below is derived from the INPUT's channel dim but
-     * indexes the WEIGHT-sized grad intermediate -- a mismatch would be an OOB
-     * write, not just a wrong result (the BFP twin's guard, ported). */
-    size_t weightInChannels = cfg->weights->param->shape->dimensions[1] * cfg->groups;
-    if (inChannels != weightInChannels) {
-        PRINT_ERROR("Conv1d backward (weightGrad): forwardInput inChannels (%zu) does not match "
-                    "weight Cin-per-group * groups (%zu)",
-                    inChannels, weightInChannels);
-        exit(1);
-    }
 
     size_t groups = cfg->groups;
     size_t inChPerGroup = inChannels / groups;
     size_t outChPerGroup = outChannels / groups;
 
     windowGeometry1d_t geom = windowGeometry1dCalc(inputLength, cfg->kernel);
-    if (geom.outputLength != outputLength) {
-        PRINT_ERROR("Conv1d backward: lossGrad outputLength (%zu) does not match "
-                    "geometry derived from forwardInput (%zu)",
-                    outputLength, geom.outputLength);
-        exit(1);
-    }
 
     float const *xArr = (float const *)forwardInput->data;
     float const *gyArr = (float const *)lossGrad->data;
@@ -346,7 +315,6 @@ static void weightGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, te
 
 static void conv1dCalcWeightGradsFloat32(conv1dConfig_t *cfg, tensor_t *forwardInput,
                                          tensor_t *lossGrad, const rngKey_t *key) {
-    executeOpValidateAccMode(cfg->weightGradAccMode, "Conv1d weightGradAccMode");
     executeOp(
         &(opSpec_t){
             .kernel = weightGradKernelFloat,
@@ -364,20 +332,12 @@ static void biasGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tens
                                 const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
-    const conv1dConfig_t *cfg = ctx;
+    (void)ctx;
     tensor_t *lossGrad = ops[0];
 
     size_t batch = lossGrad->shape->dimensions[0];
     size_t outChannels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
-    size_t biasOutChannels = cfg->bias->param->shape->dimensions[0];
-
-    if (outChannels != biasOutChannels) {
-        PRINT_ERROR("Conv1d backward (biasGrad): lossGrad outChannels (%zu) does not match "
-                    "bias Cout (%zu)",
-                    outChannels, biasOutChannels);
-        exit(1);
-    }
 
     float const *gyArr = (float const *)lossGrad->data;
     float *rawArr = (float *)rawOut->data;
@@ -395,7 +355,6 @@ static void biasGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tens
 
 static void conv1dCalcBiasGradsFloat32(conv1dConfig_t *cfg, tensor_t *lossGrad,
                                        const rngKey_t *key) {
-    executeOpValidateAccMode(cfg->biasGradAccMode, "Conv1d biasGradAccMode");
     executeOp(
         &(opSpec_t){
             .kernel = biasGradKernelFloat,
@@ -478,44 +437,12 @@ static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     size_t outChannels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
     size_t kernelSize = cfg->weights->param->shape->dimensions[2];
-    size_t weightOutChannels = cfg->weights->param->shape->dimensions[0];
-
-    if (batch != lossGrad->shape->dimensions[0]) {
-        PRINT_ERROR("Conv1d backward (SYM weightGrad): lossGrad batch (%zu) does not match "
-                    "forwardInput batch (%zu)",
-                    lossGrad->shape->dimensions[0], batch);
-        exit(1);
-    }
-    if (outChannels != weightOutChannels) {
-        PRINT_ERROR("Conv1d backward (SYM weightGrad): lossGrad outChannels (%zu) does not match "
-                    "weight Cout (%zu)",
-                    outChannels, weightOutChannels);
-        exit(1);
-    }
-
-    /* #420 G1: inChPerGroup below is derived from the INPUT's channel dim but
-     * indexes the WEIGHT-sized grad intermediate -- a mismatch would be an OOB
-     * write, not just a wrong result (the BFP twin's guard, ported). */
-    size_t weightInChannels = cfg->weights->param->shape->dimensions[1] * cfg->groups;
-    if (inChannels != weightInChannels) {
-        PRINT_ERROR(
-            "Conv1d backward (SYM weightGrad): forwardInput inChannels (%zu) does not match "
-            "weight Cin-per-group * groups (%zu)",
-            inChannels, weightInChannels);
-        exit(1);
-    }
 
     size_t groups = cfg->groups;
     size_t inChPerGroup = inChannels / groups;
     size_t outChPerGroup = outChannels / groups;
 
     windowGeometry1d_t geom = windowGeometry1dCalc(inputLength, cfg->kernel);
-    if (geom.outputLength != outputLength) {
-        PRINT_ERROR("Conv1d backward (SYM weightGrad): lossGrad outputLength (%zu) does not "
-                    "match geometry derived from forwardInput (%zu)",
-                    outputLength, geom.outputLength);
-        exit(1);
-    }
 
     float inScale =
         loadCanonScale(&((symInt32QConfig_t *)forwardInput->quantization->qConfig)->scale);
@@ -550,7 +477,6 @@ static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tens
 
 void conv1dCalcWeightGradsSymInt32(conv1dConfig_t *cfg, tensor_t *forwardInput, tensor_t *lossGrad,
                                    const rngKey_t *key) {
-    executeOpValidateAccMode(cfg->weightGradAccMode, "Conv1d weightGradAccMode");
     executeOp(
         &(opSpec_t){
             .kernel = weightGradKernelSym,
@@ -651,49 +577,15 @@ static void weightGradBfpScatter(const conv1dConfig_t *cfg, tensor_t *forwardInp
     size_t outChannels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
     size_t kernelSize = cfg->weights->param->shape->dimensions[2];
-    size_t weightOutChannels = cfg->weights->param->shape->dimensions[0];
-
-    if (batch != lossGrad->shape->dimensions[0]) {
-        PRINT_ERROR("Conv1d backward (BFP weightGrad): lossGrad batch (%zu) does not match "
-                    "forwardInput batch (%zu)",
-                    lossGrad->shape->dimensions[0], batch);
-        exit(1);
-    }
-    if (outChannels != weightOutChannels) {
-        PRINT_ERROR("Conv1d backward (BFP weightGrad): lossGrad outChannels (%zu) does not match "
-                    "weight Cout (%zu)",
-                    outChannels, weightOutChannels);
-        exit(1);
-    }
-
-    /* inChPerGroup below is derived from the INPUT's channel dim but indexes
-     * the WEIGHT-sized grad intermediate -- a mismatch would be an OOB
-     * write, not just a wrong result. */
-    size_t weightInChannels = cfg->weights->param->shape->dimensions[1] * cfg->groups;
-    if (inChannels != weightInChannels) {
-        PRINT_ERROR(
-            "Conv1d backward (BFP weightGrad): forwardInput inChannels (%zu) does not match "
-            "weight Cin-per-group * groups (%zu)",
-            inChannels, weightInChannels);
-        exit(1);
-    }
 
     size_t groups = cfg->groups;
     size_t inChPerGroup = inChannels / groups;
     size_t outChPerGroup = outChannels / groups;
 
     windowGeometry1d_t geom = windowGeometry1dCalc(inputLength, cfg->kernel);
-    if (geom.outputLength != outputLength) {
-        PRINT_ERROR("Conv1d backward (BFP weightGrad): lossGrad outputLength (%zu) does not "
-                    "match geometry derived from forwardInput (%zu)",
-                    outputLength, geom.outputLength);
-        exit(1);
-    }
 
     bfpQConfig_t *xQC = forwardInput->quantization->qConfig;
     bfpQConfig_t *gyQC = lossGrad->quantization->qConfig;
-    validateBfpQConfigShape(xQC, calcNumberOfElementsByShape(forwardInput->shape));
-    validateBfpQConfigShape(gyQC, calcNumberOfElementsByShape(lossGrad->shape));
 
     for (size_t oc = 0; oc < outChannels; oc++) {
         eAccOf[oc] = 0; /* a channel without products keeps 0 */
@@ -824,18 +716,7 @@ static void weightGradKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, t
 
 void conv1dCalcWeightGradsBfp(conv1dConfig_t *cfg, tensor_t *forwardInput, tensor_t *lossGrad,
                               const rngKey_t *key) {
-    executeOpValidateAccMode(cfg->weightGradAccMode, "Conv1d weightGradAccMode");
     tensor_t *weightTensor = cfg->weights->param;
-    /* Public-boundary re-guard of the conv1dBackward dispatch rule (the
-     * BFP-weights authority there): a direct caller with FLOAT32 weights
-     * would otherwise read a bfpQConfig_t out of a float32QConfig (garbage
-     * staging widths). */
-    if (weightTensor->quantization->type != BFP) {
-        PRINT_ERROR("conv1dCalcWeightGradsBfp: requires BFP-stored weights (the width anchor "
-                    "for FLOAT32-operand staging); got dtype %d",
-                    (int)weightTensor->quantization->type);
-        exit(1);
-    }
     const bfpQConfig_t *wQC = weightTensor->quantization->qConfig;
     /* Stack template at the weights' widths (lifetime: this executeOp call);
      * the funnel owns exponent backing and rounds by .arithmetic, not the
@@ -903,20 +784,12 @@ static void biasGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
                               const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
-    const conv1dConfig_t *cfg = ctx;
+    (void)ctx;
     tensor_t *lossGrad = ops[0];
 
     size_t batch = lossGrad->shape->dimensions[0];
     size_t outChannels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
-    size_t biasOutChannels = cfg->bias->param->shape->dimensions[0];
-
-    if (outChannels != biasOutChannels) {
-        PRINT_ERROR("Conv1d backward (biasGrad): lossGrad outChannels (%zu) does not match "
-                    "bias Cout (%zu)",
-                    outChannels, biasOutChannels);
-        exit(1);
-    }
 
     int32_t const *gyArr = (int32_t const *)lossGrad->data;
     int32_t *rawArr = (int32_t *)rawOut->data;
@@ -944,7 +817,6 @@ static void biasGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
 }
 
 void conv1dCalcBiasGradsSymInt32(conv1dConfig_t *cfg, tensor_t *lossGrad, const rngKey_t *key) {
-    executeOpValidateAccMode(cfg->biasGradAccMode, "Conv1d biasGradAccMode");
     executeOp(
         &(opSpec_t){
             .kernel = biasGradKernelSym,
@@ -968,23 +840,14 @@ static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
                               const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
-    const conv1dConfig_t *cfg = ctx;
+    (void)ctx;
     tensor_t *lossGrad = ops[0];
 
     size_t batch = lossGrad->shape->dimensions[0];
     size_t outChannels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
-    size_t biasOutChannels = cfg->bias->param->shape->dimensions[0];
-
-    if (outChannels != biasOutChannels) {
-        PRINT_ERROR("Conv1d backward (biasGrad): lossGrad outChannels (%zu) does not match "
-                    "bias Cout (%zu)",
-                    outChannels, biasOutChannels);
-        exit(1);
-    }
 
     bfpQConfig_t *gyQC = lossGrad->quantization->qConfig;
-    validateBfpQConfigShape(gyQC, calcNumberOfElementsByShape(lossGrad->shape));
     bfpValidateSumHeadroom(gyQC, batch * outputLength, "conv1dCalcBiasGradsBfp");
 
     int32_t expBias = bfpExponentBias(gyQC);
@@ -1110,16 +973,7 @@ static void biasGradKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, ten
 }
 
 void conv1dCalcBiasGradsBfp(conv1dConfig_t *cfg, tensor_t *lossGrad, const rngKey_t *key) {
-    executeOpValidateAccMode(cfg->biasGradAccMode, "Conv1d biasGradAccMode");
     tensor_t *weightTensor = cfg->weights->param;
-    /* Public-boundary re-guard of the conv1dBackward dispatch rule (the
-     * BFP-weights authority there) -- see conv1dCalcWeightGradsBfp. */
-    if (weightTensor->quantization->type != BFP) {
-        PRINT_ERROR("conv1dCalcBiasGradsBfp: requires BFP-stored weights (the width anchor "
-                    "for FLOAT32-operand staging); got dtype %d",
-                    (int)weightTensor->quantization->type);
-        exit(1);
-    }
     const bfpQConfig_t *wQC = weightTensor->quantization->qConfig;
     /* Stack template at the weights' widths (lifetime: this executeOp call);
      * the funnel owns exponent backing and rounds by .arithmetic, not the
@@ -1387,6 +1241,14 @@ void conv1dCalcOutputShape(layer_t *conv1dLayer, shape_t *inputShape, shape_t *o
     }
 
     conv1dConfig_t *cfg = conv1dLayer->config->conv1d;
+    size_t inChannels = inputShape->dimensions[1];
+    size_t weightInChannels = cfg->weights->param->shape->dimensions[1] * cfg->groups;
+    if (inChannels != weightInChannels) {
+        PRINT_ERROR("Conv1d: input channels (%zu) must equal weight in-channels-per-group * "
+                    "groups (%zu)",
+                    inChannels, weightInChannels);
+        exit(1);
+    }
     size_t batchSize = inputShape->dimensions[0];
     size_t inputLength = inputShape->dimensions[2];
     size_t outChannels = cfg->weights->param->shape->dimensions[0];

@@ -5,6 +5,7 @@
 #include "ArithmeticType.h"
 #include "Conv1dTransposed.h"
 #include "Conv1dTransposedApi.h"
+#include "DeathTest.h"
 #include "Kernel.h"
 #include "Layer.h"
 #include "LayerCommon.h"
@@ -210,6 +211,8 @@ void testConv1dTransposedLayerInitKeepsFloat32Grad(void) {
         .propLossQ = bwd,
         .weightStorage = fwd,
         .biasStorage = fwd,
+        .weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE,
+        .biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE,
     };
 
     const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
@@ -354,6 +357,45 @@ void testConv1dTransposedLayerInitKaimingUniformOverrideUsesHeBound(void) {
                              "Bias must stay PyTorch default uniform regardless of weight scheme");
 }
 
+/* outputPadding must stay below max(stride, dilation); stride 2 with the
+ * default dilation 1 makes 2 the first rejected value. */
+void testConv1dTransposedLayerInitRejectsOutputPaddingAtMaxStrideDilation(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "conv1dTransposedLayerInit: outputPadding (2) must be < max(stride=2, dilation=1)",
+        (void)conv1dTransposedLayerInit(&(conv1dTransposedInit_t){.inChannels = 4,
+                                                                  .outChannels = 2,
+                                                                  .kernelSize = 3,
+                                                                  .stride = 2,
+                                                                  .outputPadding = 2,
+                                                                  .weightInit.key = &initKey},
+                                        &lq));
+    freeQuantization(q);
+}
+
+void testConv1dTransposedLayerInitRejectsInvalidBiasGradAccMode(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    lq.biasGradAccMode = OUT_WRITE;
+
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1,
+        "conv1dTransposedLayerInit: layerQuant.biasGradAccMode: not a valid grad accumulate mode",
+        (void)conv1dTransposedLayerInit(&(conv1dTransposedInit_t){.inChannels = 4,
+                                                                  .outChannels = 2,
+                                                                  .kernelSize = 3,
+                                                                  .bias = BIAS_TRUE,
+                                                                  .weightInit.key = &initKey},
+                                        &lq));
+    freeQuantization(q);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConv1dTransposedLayerInitBorrowingBuildsLayerWithCorrectShape);
@@ -365,5 +407,7 @@ int main(void) {
     RUN_TEST(testConv1dTransposedLayerInitOwningWeightGradStorageKnobOverridesFloatDefault);
     RUN_TEST(testConv1dTransposedLayerInitDefaultWeightsWithinPyTorchBound);
     RUN_TEST(testConv1dTransposedLayerInitKaimingUniformOverrideUsesHeBound);
+    RUN_TEST(testConv1dTransposedLayerInitRejectsOutputPaddingAtMaxStrideDilation);
+    RUN_TEST(testConv1dTransposedLayerInitRejectsInvalidBiasGradAccMode);
     return UNITY_END();
 }

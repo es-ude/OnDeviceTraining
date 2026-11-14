@@ -280,43 +280,9 @@ static void weightGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, te
     size_t outputLength = lossGrad->shape->dimensions[2];
     size_t kernelSize = cfg->weights->param->shape->dimensions[2];
 
-    size_t expectedOutLen =
-        convTranspose1dOutputLength(inputLength, cfg->kernel, cfg->outputPadding);
-    if (expectedOutLen != outputLength) {
-        PRINT_ERROR("Conv1dTransposed backward (weightGrad): lossGrad outputLength (%zu) does "
-                    "not match the transpose geometry from forwardInput (expected %zu)",
-                    outputLength, expectedOutLen);
-        exit(1);
-    }
-
     size_t groups = cfg->groups;
     size_t inChPerGroup = inChannels / groups;
     size_t outChPerGroup = outChannels / groups;
-
-    // Conv1dTransposed weight shape [Cin, Cout/groups, K] -> Cout = dim[1] * groups.
-    size_t weightOutChannels = cfg->weights->param->shape->dimensions[1] * groups;
-    if (batch != lossGrad->shape->dimensions[0]) {
-        PRINT_ERROR("Conv1dTransposed backward (weightGrad): lossGrad batch (%zu) does not "
-                    "match forwardInput batch (%zu)",
-                    lossGrad->shape->dimensions[0], batch);
-        exit(1);
-    }
-    if (outChannels != weightOutChannels) {
-        PRINT_ERROR("Conv1dTransposed backward (weightGrad): lossGrad outChannels (%zu) does "
-                    "not match weight Cout (%zu)",
-                    outChannels, weightOutChannels);
-        exit(1);
-    }
-
-    /* #420 G1: the weight-grad write below indexes the [Cin, Cout/groups, K]
-     * grad intermediate by the INPUT's channel index -- a mismatch would be an
-     * OOB write, not just a wrong result (the BFP twin's guard, ported). */
-    if (inChannels != cfg->weights->param->shape->dimensions[0]) {
-        PRINT_ERROR("Conv1dTransposed backward (weightGrad): forwardInput inChannels (%zu) does "
-                    "not match weight Cin (%zu)",
-                    inChannels, cfg->weights->param->shape->dimensions[0]);
-        exit(1);
-    }
 
     size_t dilation = cfg->kernel->dilation;
     size_t stride = cfg->kernel->stride;
@@ -358,7 +324,6 @@ static void weightGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, te
 static void conv1dTransposedCalcWeightGradsFloat32(conv1dTransposedConfig_t *cfg,
                                                    tensor_t *forwardInput, tensor_t *lossGrad,
                                                    const rngKey_t *key) {
-    executeOpValidateAccMode(cfg->weightGradAccMode, "Conv1dTransposed weightGradAccMode");
     executeOp(
         &(opSpec_t){
             .kernel = weightGradKernelFloat,
@@ -376,20 +341,12 @@ static void biasGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tens
                                 const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
-    const conv1dTransposedConfig_t *cfg = ctx;
+    (void)ctx;
     tensor_t *lossGrad = ops[0];
 
     size_t batch = lossGrad->shape->dimensions[0];
     size_t outChannels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
-
-    size_t biasOutChannels = cfg->bias->param->shape->dimensions[0];
-    if (outChannels != biasOutChannels) {
-        PRINT_ERROR("Conv1dTransposed backward (biasGrad): lossGrad outChannels (%zu) does not "
-                    "match bias Cout (%zu)",
-                    outChannels, biasOutChannels);
-        exit(1);
-    }
 
     float const *gyArr = (float const *)lossGrad->data;
     float *rawArr = (float *)rawOut->data;
@@ -407,7 +364,6 @@ static void biasGradKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tens
 
 static void conv1dTransposedCalcBiasGradsFloat32(conv1dTransposedConfig_t *cfg, tensor_t *lossGrad,
                                                  const rngKey_t *key) {
-    executeOpValidateAccMode(cfg->biasGradAccMode, "Conv1dTransposed biasGradAccMode");
     executeOp(
         &(opSpec_t){
             .kernel = biasGradKernelFloat,
@@ -493,44 +449,9 @@ static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     size_t outputLength = lossGrad->shape->dimensions[2];
     size_t kernelSize = cfg->weights->param->shape->dimensions[2];
 
-    size_t expectedOutLen =
-        convTranspose1dOutputLength(inputLength, cfg->kernel, cfg->outputPadding);
-    if (expectedOutLen != outputLength) {
-        PRINT_ERROR("Conv1dTransposed backward (SYM weightGrad): lossGrad outputLength (%zu) does "
-                    "not match the transpose geometry from forwardInput (expected %zu)",
-                    outputLength, expectedOutLen);
-        exit(1);
-    }
-
     size_t groups = cfg->groups;
     size_t inChPerGroup = inChannels / groups;
     size_t outChPerGroup = outChannels / groups;
-
-    // Conv1dTransposed weight shape [Cin, Cout/groups, K] -> Cout = dim[1] * groups.
-    size_t weightOutChannels = cfg->weights->param->shape->dimensions[1] * groups;
-    if (batch != lossGrad->shape->dimensions[0]) {
-        PRINT_ERROR("Conv1dTransposed backward (SYM weightGrad): lossGrad batch (%zu) does not "
-                    "match forwardInput batch (%zu)",
-                    lossGrad->shape->dimensions[0], batch);
-        exit(1);
-    }
-    if (outChannels != weightOutChannels) {
-        PRINT_ERROR("Conv1dTransposed backward (SYM weightGrad): lossGrad outChannels (%zu) does "
-                    "not match weight Cout (%zu)",
-                    outChannels, weightOutChannels);
-        exit(1);
-    }
-
-    /* #420 G1: the weight-grad write below indexes the [Cin, Cout/groups, K]
-     * grad intermediate by the INPUT's channel index -- a mismatch would be an
-     * OOB write, not just a wrong result (the BFP twin's guard, ported). */
-    if (inChannels != cfg->weights->param->shape->dimensions[0]) {
-        PRINT_ERROR(
-            "Conv1dTransposed backward (SYM weightGrad): forwardInput inChannels (%zu) does "
-            "not match weight Cin (%zu)",
-            inChannels, cfg->weights->param->shape->dimensions[0]);
-        exit(1);
-    }
 
     float inScale =
         loadCanonScale(&((symInt32QConfig_t *)forwardInput->quantization->qConfig)->scale);
@@ -566,7 +487,6 @@ static void weightGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tens
 
 void conv1dTransposedCalcWeightGradsSymInt32(conv1dTransposedConfig_t *cfg, tensor_t *forwardInput,
                                              tensor_t *lossGrad, const rngKey_t *key) {
-    executeOpValidateAccMode(cfg->weightGradAccMode, "Conv1dTransposed weightGradAccMode");
     executeOp(
         &(opSpec_t){
             .kernel = weightGradKernelSym,
@@ -602,48 +522,12 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     size_t outputLength = lossGrad->shape->dimensions[2];
     size_t kernelSize = cfg->weights->param->shape->dimensions[2];
 
-    size_t expectedOutLen =
-        convTranspose1dOutputLength(inputLength, cfg->kernel, cfg->outputPadding);
-    if (expectedOutLen != outputLength) {
-        PRINT_ERROR("Conv1dTransposed backward (BFP weightGrad): lossGrad outputLength (%zu) does "
-                    "not match the transpose geometry from forwardInput (expected %zu)",
-                    outputLength, expectedOutLen);
-        exit(1);
-    }
-
     size_t groups = cfg->groups;
     size_t inChPerGroup = inChannels / groups;
     size_t outChPerGroup = outChannels / groups;
 
-    // Conv1dTransposed weight shape [Cin, Cout/groups, K] -> Cout = dim[1] * groups.
-    size_t weightOutChannels = cfg->weights->param->shape->dimensions[1] * groups;
-    if (batch != lossGrad->shape->dimensions[0]) {
-        PRINT_ERROR("Conv1dTransposed backward (BFP weightGrad): lossGrad batch (%zu) does not "
-                    "match forwardInput batch (%zu)",
-                    lossGrad->shape->dimensions[0], batch);
-        exit(1);
-    }
-    if (outChannels != weightOutChannels) {
-        PRINT_ERROR("Conv1dTransposed backward (BFP weightGrad): lossGrad outChannels (%zu) does "
-                    "not match weight Cout (%zu)",
-                    outChannels, weightOutChannels);
-        exit(1);
-    }
-    /* inChPerGroup below is derived from the INPUT's channel dim but indexes
-     * the WEIGHT-sized grad intermediate ([Cin, Cout/groups, K]) -- a
-     * mismatch would be an OOB write, not just a wrong result. */
-    if (inChannels != cfg->weights->param->shape->dimensions[0]) {
-        PRINT_ERROR(
-            "Conv1dTransposed backward (BFP weightGrad): forwardInput inChannels (%zu) does "
-            "not match weight Cin (%zu)",
-            inChannels, cfg->weights->param->shape->dimensions[0]);
-        exit(1);
-    }
-
     bfpQConfig_t *xQC = forwardInput->quantization->qConfig;
     bfpQConfig_t *gyQC = lossGrad->quantization->qConfig;
-    validateBfpQConfigShape(xQC, calcNumberOfElementsByShape(forwardInput->shape));
-    validateBfpQConfigShape(gyQC, calcNumberOfElementsByShape(lossGrad->shape));
     /* Reduction length per gw element: at most one contributor per
      * (b, inPos) pair. */
     bfpValidateBlockHeadroom(xQC, gyQC, batch * inputLength, "conv1dTransposedCalcWeightGradsBfp");
@@ -737,18 +621,7 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
 
 void conv1dTransposedCalcWeightGradsBfp(conv1dTransposedConfig_t *cfg, tensor_t *forwardInput,
                                         tensor_t *lossGrad, const rngKey_t *key) {
-    executeOpValidateAccMode(cfg->weightGradAccMode, "Conv1dTransposed weightGradAccMode");
     tensor_t *weightTensor = cfg->weights->param;
-    /* Public-boundary re-guard of the conv1dTransposedBackward dispatch rule
-     * (the BFP-weights authority there): a direct caller with FLOAT32
-     * weights would otherwise read a bfpQConfig_t out of a float32QConfig
-     * (garbage staging widths). */
-    if (weightTensor->quantization->type != BFP) {
-        PRINT_ERROR("conv1dTransposedCalcWeightGradsBfp: requires BFP-stored weights (the "
-                    "width anchor for FLOAT32-operand staging); got dtype %d",
-                    (int)weightTensor->quantization->type);
-        exit(1);
-    }
     const bfpQConfig_t *wQC = weightTensor->quantization->qConfig;
     /* Stack template at the weights' widths (lifetime: this executeOp call);
      * the funnel owns exponent backing and rounds by .arithmetic, not the
@@ -810,20 +683,12 @@ static void biasGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
                               const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
-    const conv1dTransposedConfig_t *cfg = ctx;
+    (void)ctx;
     tensor_t *lossGrad = ops[0];
 
     size_t batch = lossGrad->shape->dimensions[0];
     size_t outChannels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
-
-    size_t biasOutChannels = cfg->bias->param->shape->dimensions[0];
-    if (outChannels != biasOutChannels) {
-        PRINT_ERROR("Conv1dTransposed backward (biasGrad): lossGrad outChannels (%zu) does not "
-                    "match bias Cout (%zu)",
-                    outChannels, biasOutChannels);
-        exit(1);
-    }
 
     int32_t const *gyArr = (int32_t const *)lossGrad->data;
     int32_t *rawArr = (int32_t *)rawOut->data;
@@ -852,7 +717,6 @@ static void biasGradKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
 
 void conv1dTransposedCalcBiasGradsSymInt32(conv1dTransposedConfig_t *cfg, tensor_t *lossGrad,
                                            const rngKey_t *key) {
-    executeOpValidateAccMode(cfg->biasGradAccMode, "Conv1dTransposed biasGradAccMode");
     executeOp(
         &(opSpec_t){
             .kernel = biasGradKernelSym,
@@ -877,23 +741,14 @@ static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
                               const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
-    const conv1dTransposedConfig_t *cfg = ctx;
+    (void)ctx;
     tensor_t *lossGrad = ops[0];
 
     size_t batch = lossGrad->shape->dimensions[0];
     size_t outChannels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
-    size_t biasOutChannels = cfg->bias->param->shape->dimensions[0];
-
-    if (outChannels != biasOutChannels) {
-        PRINT_ERROR("Conv1dTransposed backward (biasGrad): lossGrad outChannels (%zu) does not "
-                    "match bias Cout (%zu)",
-                    outChannels, biasOutChannels);
-        exit(1);
-    }
 
     bfpQConfig_t *gyQC = lossGrad->quantization->qConfig;
-    validateBfpQConfigShape(gyQC, calcNumberOfElementsByShape(lossGrad->shape));
     bfpValidateSumHeadroom(gyQC, batch * outputLength, "conv1dTransposedCalcBiasGradsBfp");
 
     int32_t expBias = bfpExponentBias(gyQC);
@@ -928,17 +783,7 @@ static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
 
 void conv1dTransposedCalcBiasGradsBfp(conv1dTransposedConfig_t *cfg, tensor_t *lossGrad,
                                       const rngKey_t *key) {
-    executeOpValidateAccMode(cfg->biasGradAccMode, "Conv1dTransposed biasGradAccMode");
     tensor_t *weightTensor = cfg->weights->param;
-    /* Public-boundary re-guard of the conv1dTransposedBackward dispatch rule
-     * (the BFP-weights authority there) -- see
-     * conv1dTransposedCalcWeightGradsBfp. */
-    if (weightTensor->quantization->type != BFP) {
-        PRINT_ERROR("conv1dTransposedCalcBiasGradsBfp: requires BFP-stored weights (the width "
-                    "anchor for FLOAT32-operand staging); got dtype %d",
-                    (int)weightTensor->quantization->type);
-        exit(1);
-    }
     const bfpQConfig_t *wQC = weightTensor->quantization->qConfig;
     /* Stack template at the weights' widths (lifetime: this executeOp call);
      * the funnel owns exponent backing and rounds by .arithmetic, not the
@@ -1204,9 +1049,16 @@ void conv1dTransposedCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_
     }
 
     conv1dTransposedConfig_t *cfg = layer->config->conv1dTransposed;
+    // Conv1dTransposed weight shape: [Cin, Cout/groups, K]
+    size_t inChannels = inputShape->dimensions[1];
+    size_t weightInChannels = cfg->weights->param->shape->dimensions[0];
+    if (inChannels != weightInChannels) {
+        PRINT_ERROR("Conv1dTransposed: input channels (%zu) must equal weight in-channels (%zu)",
+                    inChannels, weightInChannels);
+        exit(1);
+    }
     size_t batchSize = inputShape->dimensions[0];
     size_t inputLength = inputShape->dimensions[2];
-    // Conv1dTransposed weight shape: [Cin, Cout/groups, K]
     // Cout = (Cout/groups) * groups
     size_t outChannelsPerGroup = cfg->weights->param->shape->dimensions[1];
     size_t outChannels = outChannelsPerGroup * cfg->groups;

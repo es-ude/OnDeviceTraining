@@ -7,6 +7,7 @@
 #include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dApi.h"
+#include "ExecuteOp.h"
 #include "Kernel.h"
 #include "Layer.h"
 #include "LayerCommon.h"
@@ -111,10 +112,19 @@ static void validateConv1dInit(conv1dInit_t *init) {
     }
 }
 
-static void validateLayerQuantForConv1d(layerQuant_t *lq, bool hasBias) {
+static void validateLayerQuantForConv1d(layerQuant_t *lq, bool hasBias, bool trainable) {
     if (lq == NULL) {
         PRINT_ERROR("conv1dLayerInit: lq pointer is NULL");
         exit(1);
+    }
+    /* A frozen layer never accumulates grads, so its modes may stay unset. */
+    if (trainable) {
+        executeOpValidateAccMode(lq->weightGradAccMode,
+                                 "conv1dLayerInit: layerQuant.weightGradAccMode");
+        if (hasBias) {
+            executeOpValidateAccMode(lq->biasGradAccMode,
+                                     "conv1dLayerInit: layerQuant.biasGradAccMode");
+        }
     }
     if (lq->outputQ == NULL) {
         PRINT_ERROR("conv1dLayerInit: layerQuant.outputQ must be set");
@@ -154,8 +164,8 @@ static kernel_t *buildConv1dKernel(conv1dInit_t *init) {
 layer_t *conv1dLayerInit(conv1dInit_t *init, layerQuant_t *lq) {
     validateConv1dInit(init);
     bool hasBias = resolveConv1dBias(init->bias);
-    validateLayerQuantForConv1d(lq, hasBias);
     bool trainable = resolveTrainable(init->trainable, "conv1dLayerInit");
+    validateLayerQuantForConv1d(lq, hasBias, trainable);
 
     size_t groups = init->groups == 0 ? 1 : init->groups;
 
@@ -206,8 +216,8 @@ layer_t *conv1dLayerInit(conv1dInit_t *init, layerQuant_t *lq) {
 layer_t *conv1dLayerInitOwning(conv1dInit_t *init, layerQuant_t *lq) {
     validateConv1dInit(init);
     bool hasBias = resolveConv1dBias(init->bias);
-    validateLayerQuantForConv1d(lq, hasBias);
     bool trainable = resolveTrainable(init->trainable, "conv1dLayerInitOwning");
+    validateLayerQuantForConv1d(lq, hasBias, trainable);
 
     size_t groups = init->groups == 0 ? 1 : init->groups;
 

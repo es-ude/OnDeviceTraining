@@ -51,8 +51,8 @@ void conv1dCalcBiasGradsSymInt32(conv1dConfig_t *cfg, tensor_t *lossGrad, const 
 /* BFP epic PR3 (Task 3): native ARITH_BFP grad twins of the SYM publics
  * above (executeOp wrappers; accumulate into cfg->weights->grad /
  * cfg->bias->grad under the layer's acc modes). REQUIRE BFP-stored weights
- * -- the width anchor FLOAT32-stored operands stage at (fail-fast
- * otherwise); BFP-stored operands are borrowed zero-copy. */
+ * (caller guarantees; conv1dBackward checks) -- the width anchor FLOAT32-stored
+ * operands stage at; BFP-stored operands are borrowed zero-copy. */
 void conv1dCalcWeightGradsBfp(conv1dConfig_t *cfg, tensor_t *forwardInput, tensor_t *lossGrad,
                               const rngKey_t *key);
 void conv1dCalcBiasGradsBfp(conv1dConfig_t *cfg, tensor_t *lossGrad, const rngKey_t *key);

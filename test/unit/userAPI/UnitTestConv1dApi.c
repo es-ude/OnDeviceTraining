@@ -5,6 +5,7 @@
 #include "ArithmeticType.h"
 #include "Conv1d.h"
 #include "Conv1dApi.h"
+#include "DeathTest.h"
 #include "Kernel.h"
 #include "Layer.h"
 #include "LayerCommon.h"
@@ -244,6 +245,8 @@ void testConv1dLayerInitKeepsFloat32GradEvenWithSymInt32BackwardMath(void) {
         .propLossQ = bwd,
         .weightStorage = fwd,
         .biasStorage = fwd,
+        .weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE,
+        .biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE,
     };
 
     const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
@@ -397,6 +400,22 @@ void testConv1dLayerInitKaimingUniformOverrideUsesHeBound(void) {
                              "Bias must stay PyTorch default uniform regardless of weight scheme");
 }
 
+void testConv1dLayerInitRejectsInvalidWeightGradAccMode(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    lq.weightGradAccMode = OUT_WRITE;
+
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "conv1dLayerInit: layerQuant.weightGradAccMode: not a valid grad accumulate mode",
+        (void)conv1dLayerInit(
+            &(conv1dInit_t){
+                .inChannels = 1, .outChannels = 2, .kernelSize = 3, .weightInit.key = &initKey},
+            &lq));
+    freeQuantization(q);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConv1dLayerInitBorrowingBuildsLayerWithCorrectShape);
@@ -409,5 +428,6 @@ int main(void) {
     RUN_TEST(testConv1dLayerInitOwningWeightGradStorageKnobOverridesFloatDefault);
     RUN_TEST(testConv1dLayerInitDefaultWeightsWithinPyTorchBound);
     RUN_TEST(testConv1dLayerInitKaimingUniformOverrideUsesHeBound);
+    RUN_TEST(testConv1dLayerInitRejectsInvalidWeightGradAccMode);
     return UNITY_END();
 }

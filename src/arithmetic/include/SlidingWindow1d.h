@@ -19,9 +19,7 @@ windowGeometry1d_t windowGeometry1dCalc(size_t inputLength, kernel_t const *kern
 
 /*! VALID-mode transposed-conv forward output length:
  *    Lout = (inputLength - 1)*stride + dilation*(kernelSize - 1) + outputPadding + 1
- *  Uses kernel->size as the kernel tap count (enforced == weight kernelSize at
- *  layer init, see initConv1dConfigWithWeightsAndBias /
- *  initConv1dTransposedConfigWithWeightsAndBias). SAME/EXPLICIT transpose geometry
+ *  SAME/EXPLICIT transpose geometry
  *  is NOT this — it is recovered via windowGeometry1dCalc(outputLength, kernel). */
 size_t convTranspose1dOutputLength(size_t inputLength, kernel_t const *kernel,
                                    size_t outputPadding);
@@ -51,12 +49,12 @@ void windowTapOutputRange1d(windowGeometry1d_t const *geometry, size_t k, size_t
 void convTValidTapRange(size_t inPos, size_t stride, size_t dilation, size_t padLeft,
                         size_t outputLength, size_t kernelSize, size_t *kLo, size_t *kHi);
 
-/*! BFP epic PR2 (D9): enumerate the contributors of ConvT1d output position
+/*! Enumerate the contributors of ConvT1d output position
  *  outPos: kernel taps k with (outPos + padLeft - k*dilation) % stride == 0 and
  *  inPos = (outPos + padLeft - k*dilation) / stride in [0, inputLength).
  *  taps must hold kernelSize entries; returns the count (taps are emitted in
- *  ascending kernelIdx order). PR3's gather-formulated ConvT backward ops
- *  reuse this. */
+ *  ascending kernelIdx order). Used by the gather-formulated ConvT1d forward
+ *  and backward. */
 typedef struct convTransposeTap {
     size_t inPos;
     size_t kernelIdx;

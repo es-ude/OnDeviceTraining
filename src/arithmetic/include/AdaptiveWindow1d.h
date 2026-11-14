@@ -13,8 +13,8 @@ typedef struct adaptiveWindow1d {
 } adaptiveWindow1d_t;
 
 /*! Compute the [start, start+count) input slice averaged into output position
- *  outputPos. Preconditions: inputLength >= 1, outputLength >= 1,
- *  outputPos < outputLength. The returned window is always within [0, inputLength). */
+ *  outputPos < outputLength (caller guarantees). An empty input exits. The returned window is
+ * always within [0, inputLength). */
 adaptiveWindow1d_t adaptiveWindow1dAt(size_t inputLength, size_t outputLength, size_t outputPos);
 
 #endif // ODT_ADAPTIVE_WINDOW_1D_H

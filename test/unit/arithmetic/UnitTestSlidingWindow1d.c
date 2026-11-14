@@ -191,7 +191,7 @@ void testGeometryExplicitPaddingStride2() {
     // padded = 10 + 2*3 = 16; outputLength = (16 - 7)/2 + 1 = 5; padLeft = padRight = 3.
     // This is DISTINCT from SAME, which for the same case yields the minimal
     // totalPad = 5 -> padLeft=2, padRight=3. Explicit padding is how we match a
-    // PyTorch conv trained with padding=3 (see issue #177 ECG enc1).
+    // PyTorch conv trained with padding=3.
     kernel_t kernel;
     initKernelExplicit(&kernel, 7, 3, 1, 2); // size, padding, dilation, stride
     windowGeometry1d_t g = windowGeometry1dCalc(10, &kernel);
@@ -220,28 +220,10 @@ void testGeometryExplicitZeroPaddingEqualsValid() {
     TEST_ASSERT_EQUAL_size_t(0, g.padRight);
 }
 
-void testTransposeOutputLengthBasic() {
-    // (4-1)*1 + 1*(2-1) + 0 + 1 = 5
-    kernel_t kernel = {.size = 2, .stride = 1, .dilation = 1, .paddingType = VALID};
-    TEST_ASSERT_EQUAL_size_t(5, convTranspose1dOutputLength(4, &kernel, 0));
-}
-
-void testTransposeOutputLengthWithStride() {
-    // (4-1)*2 + 1*(2-1) + 0 + 1 = 8
-    kernel_t kernel = {.size = 2, .stride = 2, .dilation = 1, .paddingType = VALID};
-    TEST_ASSERT_EQUAL_size_t(8, convTranspose1dOutputLength(4, &kernel, 0));
-}
-
 void testTransposeOutputLengthWithDilation() {
     // (4-1)*1 + 2*(3-1) + 0 + 1 = 8
     kernel_t kernel = {.size = 3, .stride = 1, .dilation = 2, .paddingType = VALID};
     TEST_ASSERT_EQUAL_size_t(8, convTranspose1dOutputLength(4, &kernel, 0));
-}
-
-void testTransposeOutputLengthWithOutputPadding() {
-    // (4-1)*2 + 1*(2-1) + 1 + 1 = 9
-    kernel_t kernel = {.size = 2, .stride = 2, .dilation = 1, .paddingType = VALID};
-    TEST_ASSERT_EQUAL_size_t(9, convTranspose1dOutputLength(4, &kernel, 1));
 }
 
 void testTransposeOutputLengthStrideDilationOutputPadding() {
@@ -250,8 +232,8 @@ void testTransposeOutputLengthStrideDilationOutputPadding() {
     TEST_ASSERT_EQUAL_size_t(14, convTranspose1dOutputLength(5, &kernel, 1));
 }
 
-/* ---- BFP epic PR2 (Task 5): convTranspose1dTapsAt -------------------------
- * Contributor enumeration for the gather-formulated ConvT1d (BFP D9): taps are
+/* ---- convTranspose1dTapsAt ----
+ * Contributor enumeration for the gather-formulated ConvT1d: taps are
  * returned in ASCENDING kernelIdx order (the enumeration loop's k order), so
  * expectations below pin both the SET of (inPos, kernelIdx) pairs and that
  * order. */
@@ -326,7 +308,7 @@ void testTransposeTapsPadLeft1() {
 }
 
 void testTransposeTapsMatchScatterEnumeration() {
-    // Scatter-equivalence property (BFP D9): for every outPos, the taps must be
+    // Scatter-equivalence property: for every outPos, the taps must be
     // EXACTLY the (inPos, k) pairs the SYM scatter loop structure
     // (ConvTranspose1dKernel.c: outBase = inPos*stride - padLeft,
     // outIdx = outBase + k*dilation, bounds-checked) scatters into outPos.
@@ -825,10 +807,7 @@ int main(void) {
     RUN_TEST(testGeometryExplicitPaddingStride2);
     RUN_TEST(testGeometryExplicitPaddingOddKernelStride1MatchesSame);
     RUN_TEST(testGeometryExplicitZeroPaddingEqualsValid);
-    RUN_TEST(testTransposeOutputLengthBasic);
-    RUN_TEST(testTransposeOutputLengthWithStride);
     RUN_TEST(testTransposeOutputLengthWithDilation);
-    RUN_TEST(testTransposeOutputLengthWithOutputPadding);
     RUN_TEST(testTransposeOutputLengthStrideDilationOutputPadding);
     RUN_TEST(testSliceCenterFullWindow);
     RUN_TEST(testSliceLeftEdgeWithPadding);

@@ -370,6 +370,24 @@ states_t **initMomentStates(optimizer_t *optim, size_t statesPerParameter,
     return states;
 }
 
+/* Scaling and zeroGrad touch only group 0, so a grouped SYM/ASYM grad would be silently
+ * corrupted. gradInit never builds one; this catches a hand-built parameter. */
+static void requirePerTensorGradAt(const tensor_t *grad, const char *factoryName, size_t slot) {
+    const quantization_t *q = grad->quantization;
+    size_t numGroups = 1;
+    if (q->type == SYM) {
+        numGroups = ((const symQConfig_t *)q->qConfig)->numGroups;
+    } else if (q->type == ASYM) {
+        numGroups = ((const asymQConfig_t *)q->qConfig)->numGroups;
+    }
+    if (numGroups > 1) {
+        PRINT_ERROR("%s: trainable parameter slot %zu has a grouped gradient (numGroups=%zu); "
+                    "gradients must be per-tensor",
+                    factoryName, slot, numGroups);
+        exit(1);
+    }
+}
+
 void validateOptimizerGradStorage(optimizer_t *optim, const char *factoryName) {
     for (size_t s = 0; s < optim->sizeStates; s++) {
         tensor_t *grad = optim->parameter[s]->grad;
@@ -380,6 +398,7 @@ void validateOptimizerGradStorage(optimizer_t *optim, const char *factoryName) {
                         factoryName, s);
             exit(1);
         }
+        requirePerTensorGradAt(grad, factoryName, s);
         qtype_t gradType = grad->quantization->type;
         if (gradType != FLOAT32 && gradType != SYM_INT32 && gradType != SYM && gradType != ASYM &&
             gradType != BFP) {

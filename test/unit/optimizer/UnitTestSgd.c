@@ -2995,6 +2995,33 @@ static void stepNoParametersUnderAKey(void) {
     optimizerStep(&optim, &updateKey);
 }
 
+/* A grad built outside gradInit can be grouped; scaling and zeroGrad would touch only
+ * group 0, so the factory rejects it. */
+void testSgdCreateRejectsAGroupedSymGrad(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    lq.weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
+    lq.biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    layer_t *layer = linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = BIAS_FALSE, .weightInit.key = &initKey},
+        &lq);
+    quantization_t *grouped = quantizationInitSymGrouped(8, HALF_AWAY, 2, 3);
+    requantizeTensorInPlace(layer->config->linear->weights->grad, grouped);
+    layer_t *model[] = {layer};
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "gradients must be per-tensor",
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 1), NULL,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY}));
+
+    freeLinearLayer(layer);
+    freeQuantization(grouped);
+    freeQuantization(q);
+}
+
 void testOptimizerStepOverNoParametersUnderAKeyDoesNotExit(void) {
     ASSERT_EXITS_WITH_OUTPUT(0, "", stepNoParametersUnderAKey());
 }
@@ -3569,6 +3596,7 @@ int main() {
     RUN_TEST(testOptimizerStepExitsWhenAParameterIndexExceedsUint32Max);
 #endif
     RUN_TEST(testOptimizerStepOverNoParametersUnderAKeyDoesNotExit);
+    RUN_TEST(testSgdCreateRejectsAGroupedSymGrad);
     RUN_TEST(testSgdBfpGradAndBfpStateRunTheIntegerMomentumStore);
     RUN_TEST(testSgdBfpMomentumStoreRejectsWeightDecayAndMomentumAboveOne);
     RUN_TEST(testSgdMCreateOptimRejectsAnUnimplementedBfpMomentumStore);

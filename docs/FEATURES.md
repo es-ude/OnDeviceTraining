@@ -244,8 +244,7 @@ Notes on the qualified cells:
   Task 7) is per-tensor-only, same carrier gate and rationale as the grad-storage knob
   above — `initMomentStates` rejects a grouped BFP `momentQuant` template.
   `updateMath` is
-  FLOAT32-only, fail-fast at both create time and every `adamWStep` call (the #310
-  pattern). `stepCount` (bias-correction exponent `t`) is **not** checkpointed — no
+  FLOAT32-only, fail-fast at create time. `stepCount` (bias-correction exponent `t`) is **not** checkpointed — no
   optimizer state is persisted anywhere (SGD momentum, AdamW `m`/`v`, `stepCount`;
   the ODTS model format covers params/grads/buffers only, `StateDictApi` is
   load-only), so a resumed run restarts bias correction at `t=1` (#350). The `m`-update's `lerp` bit-parity holds only for

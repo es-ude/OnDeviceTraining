@@ -77,7 +77,8 @@ void exponentialLrInit(lrScheduler_t *sched, optimizer_t *optimizer, float gamma
  *  (torch CosineAnnealingLR closed form; periodic past tMax) */
 void cosineAnnealingLrInit(lrScheduler_t *sched, optimizer_t *optimizer, size_t tMax, float etaMin);
 
-/*! Warm up from baseLr*startFactor to baseLr, then evaluate mainSched at the local
+/*! lr = baseLr * (startFactor + (1 - startFactor) * lastEpoch / warmupEpochs) during warmup.
+ *  Warm up from baseLr*startFactor to baseLr, then evaluate mainSched at the local
  *  post-warmup epoch (lastEpoch - warmupEpochs), or hold baseLr when NULL (torch
  *  SequentialLR(LinearLR, mainSched) parity). Requires warmupEpochs >= 1, finite
  *  startFactor in (0, 1], and mainSched wired to the same optimizer. Initialize mainSched

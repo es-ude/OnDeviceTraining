@@ -255,7 +255,5 @@ trace-exclude CrossEntropy.c      crossEntropyForwardFloat  the loss VALUE's flo
 trace-exclude Softmax.c           softmaxValuesFloat        the float head's FLOAT32 Softmax: inside the softmaxForwardKernel island root
 trace-exclude TensorConversion.c  packFloatBufferAsBfp      FLOAT32 -> BFP packing: inside the float head's convertFloatTensorToBfpTensor boundary root
 trace-exclude TensorConversion.c  deriveBfpStoredExponent   FLOAT32 -> BFP block exponent: inside the float head's convertFloatTensorToBfpTensor boundary root
-trace-exclude Rounding.c          roundByMode               FLOAT32 -> BFP rounding: inside the float head's convertFloatTensorToBfpTensor boundary root
 trace-exclude RNG.c               rngNextUnitFloat          the SR draw of FLOAT32 -> BFP rounding: inside the float head's convertFloatTensorToBfpTensor boundary root
-trace-exclude Rounding.c          clamp                     FLOAT32 -> BFP code clamp: inside the float head's convertFloatTensorToBfpTensor boundary root
 trace-exclude Quantization.c      bfpGroupScale             the float scale of a block: only the float head's FLOAT32 <-> BFP boundary roots and dequantChunkToFloat reach it

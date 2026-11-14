@@ -27,7 +27,7 @@ scheme and is out of scope.
 
 ## Rounding modes, the SYM_INT32 grid, encode and requant
 
-**Rounding modes** (`src/arithmetic/Rounding.c`, `roundByMode`; the BFP doc
+**Rounding modes** (`src/arithmetic/include/Rounding.h`, `roundByMode`; the BFP doc
 uses the same two). `HALF_AWAY` is `roundHalfAway` = C `round()` on the float:
 nearest integer, an exact `.5` goes away from zero (`round(-2.5) = -3`), result
 converted to `int32_t`. `SR_HALF_AWAY` is stochastic rounding (Connolly, Higham & Mary, SIAM J. Sci.

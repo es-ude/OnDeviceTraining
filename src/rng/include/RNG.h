@@ -67,8 +67,15 @@ typedef struct rngStream {
 rngStream_t rngOpen(rngKey_t key);
 
 /* The next draw: one xorshift32 step (shifts 13, 17, 5); the draw is the new
- * state. */
-uint32_t rngNextU32(rngStream_t *stream);
+ * state. Static inline: the rounding and mask loops draw once per element. */
+static inline uint32_t rngNextU32(rngStream_t *stream) {
+    uint32_t y = stream->state;
+    y ^= y << 13;
+    y ^= y >> 17;
+    y ^= y << 5;
+    stream->state = y;
+    return y;
+}
 
 /* A float in [0, 1) from the next draw: its top 24 bits over 2^24. */
 float rngNextUnitFloat(rngStream_t *stream);

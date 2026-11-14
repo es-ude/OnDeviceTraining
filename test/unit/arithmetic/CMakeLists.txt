@@ -99,6 +99,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Arithmetic
         MORE_LIBS
+        Rounding
         Tensor
         Quantization
         odt_test_assert
@@ -153,6 +154,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Comparison
         MORE_LIBS
+        Rounding
         Arithmetic
         Tensor
         m
@@ -176,6 +178,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Div
         MORE_LIBS
+        Rounding
         odt_test_scale
         DyadicScale
         Arithmetic
@@ -237,6 +240,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Mul
         MORE_LIBS
+        Rounding
         odt_test_scale
         DyadicScale
         Arithmetic
@@ -292,6 +296,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Sub
         MORE_LIBS
+        Rounding
         Arithmetic
         Tensor
 )
@@ -420,6 +425,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         PointwiseFused
         MORE_LIBS
+        Rounding
         Tensor
         Common
         odt_test_death
@@ -431,6 +437,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         SymAccumGuard
         MORE_LIBS
+        Rounding
         Common
         odt_test_death
 )
@@ -450,6 +457,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         SymGroupedWeight
         MORE_LIBS
+        Rounding
         odt_test_scale
         DyadicScale
         Common

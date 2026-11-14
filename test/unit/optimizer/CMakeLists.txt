@@ -38,13 +38,15 @@ add_elastic_ai_unit_test(
         LrScheduler
         MORE_LIBS
         LossType
+        Rounding
         Optimizer
         Sgd
         ArithmeticType
         # #327: PRIVATE-everywhere convention - Optimizer.h/ArithmeticType.h
-        # transitively need Layer.h/Tensor.h (Quantization.h/Rounding.h ride
-        # along via their shared include dirs), so the test binary must list
-        # the header-owning targets explicitly too.
+        # transitively need Layer.h/Tensor.h (Quantization.h rides along via
+        # its shared include dir; Rounding is listed above because Rounding.h
+        # needs RNG.h), so the test binary must list the header-owning targets
+        # explicitly too.
         Layer
         Tensor
         Common
@@ -58,6 +60,7 @@ add_elastic_ai_unit_test(
         BsScheduler
         MORE_LIBS
         LossType
+        Rounding
         Optimizer
         Sgd
         DataLoader

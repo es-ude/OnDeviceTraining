@@ -80,6 +80,7 @@ target_link_libraries(LrScheduler PRIVATE
         Layer
         Tensor
         Arithmetic
+        Rounding
         Common
         m
 )
@@ -97,6 +98,7 @@ target_link_libraries(BsScheduler PRIVATE
         Layer
         Tensor
         Arithmetic
+        Rounding
         Common
         m
 )

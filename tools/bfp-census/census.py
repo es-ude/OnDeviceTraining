@@ -779,9 +779,11 @@ def negative_controls(build, roots, allow):
     gate(graft(build, ("Relu.c", "reluForward"), ("Relu.c", "reviewProbe"), ["__aeabi_fmul"]),
          roots, "Relu.c:reluForward -> new reviewProbe -> __aeabi_fmul, not traced", True,
          "Relu.c:reviewProbe is called directly by the self root Relu.c:reluForward")
-    # Translation-unit identity (counterexample 2): a second, static clampInt32
-    # in Relu.c with a float call is not covered by Rounding.c's root -- neither
-    # from the self root, nor through the trace, nor inside a walked root.
+    # Translation-unit identity (counterexample 2): clampInt32 is header static
+    # inline, so a compiler-emitted out-of-line copy is a per-TU static such as
+    # Relu.c:clampInt32 that no shared root covers; one with a float call must
+    # be caught on its own -- from the self root, through the trace, and inside
+    # a walked root.
     dup = ("Relu.c", "clampInt32")
     gate(graft(build, ("Relu.c", "reluForward"), dup, ["__aeabi_fmul"]), roots,
          "static Relu.c:clampInt32 (fmul) called by reluForward", True,

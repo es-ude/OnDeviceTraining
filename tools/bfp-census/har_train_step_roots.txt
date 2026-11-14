@@ -94,7 +94,6 @@ Relu.c                      requireBfpWire
 AvgPool1d.c                 bfpWireAnchor
 MaxPool1d.c                 bfpWireAnchor
 Softmax.c                   bfpWireAnchor
-Rounding.c                  clampInt32
 # - the funnel's raw-output setup (executeOp self) and the parameter accessors;
 Quantization.c              initBfpRawQuantization
 Quantization.c              initBfpQConfigGrouped

@@ -40,15 +40,6 @@ rngStream_t rngOpen(rngKey_t key) {
     return (rngStream_t){state};
 }
 
-uint32_t rngNextU32(rngStream_t *stream) {
-    uint32_t y = stream->state;
-    y ^= y << 13;
-    y ^= y >> 17;
-    y ^= y << 5;
-    stream->state = y;
-    return y;
-}
-
 /* The top 24 bits fit a float's mantissa exactly, so the result never rounds
  * up to 1. */
 float rngNextUnitFloat(rngStream_t *stream) {

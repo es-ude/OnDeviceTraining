@@ -1,6 +1,10 @@
 #ifndef ROUNDING_H
 #define ROUNDING_H
+#include <math.h>
 #include <stdint.h>
+#include <string.h>
+
+#include "RNG.h"
 
 /*! @brief Describes rounding
  * HALF_AWAY = round half away from zero (C roundf(), C17 7.12.9.6)
@@ -12,11 +16,78 @@
  */
 typedef enum roundingMode { HALF_AWAY, SR_HALF_AWAY } roundingMode_t;
 
-/* Pointer-only use: the identical typedef lives in RNG.h (C11 allows the
- * repetition), so this header needs no RNG include path. */
-typedef struct rngStream rngStream_t;
+/* The per-element helpers below are static inline: the encode loops and requant kernels call them
+ * once per element across translation units, and without LTO an out-of-line call (and the mode
+ * switch) costs more than the rounding itself on Cortex-M. */
 
-int32_t roundByMode(float input, roundingMode_t roundingMode, rngStream_t *rs);
+/* Stops the program: SR rounding was asked for without a stream. Out of line so the inline fast
+ * path stays small. */
+_Noreturn void roundByModeMissingStream(void);
+
+/* C roundf(): rounds half away from zero (C17 7.12.9.6); float, not double, keeps soft-float MCUs
+ * off the double path */
+static inline int32_t roundHalfAway(const float input) {
+    return roundf(input);
+}
+
+/* Stochastic rounding: lift iff u < frac (law: roundingMode_t above and
+ * docs/conventions/arithmetic-sym.md), decided on the float's bits so a soft-float MCU makes no
+ * float call. Bit-identical to the float form
+ *   t = trunc(x), f = x - t, f < 0 ? t - (u < -f) : t + (u < f):
+ * u = k * 2^-24 with integer k, so u < |f| <=> k < |f| * 2^24 <=> k < c = ceil(|f| * 2^24),
+ * which the branches compute exactly from the mantissa (c < 2^24 fits uint32, no int64).
+ * A negative x gives -(|t| + lift), the float form's t - lift; the negation runs in uint32 so
+ * x = -2^31 cannot overflow. Exactly one draw per call, whatever x is; the caller guarantees a
+ * finite x in [-2^31, 2^31) (+2^31 would wrap to INT32_MIN). Call it through roundByMode: it
+ * does not check rs, which must be a non-NULL stream. */
+static inline int32_t roundSRHalfAway(const float input, rngStream_t *rs) {
+    const uint32_t k = rngNextU32(rs) >> 8;
+    uint32_t bits;
+    memcpy(&bits, &input, sizeof bits);
+    const uint32_t biased = (bits >> 23) & 0xFFu;
+    const uint32_t mantissa = bits & 0x7FFFFFu;
+    uint32_t t = 0u;
+    uint32_t c;
+    if (biased == 0u) {
+        c = mantissa != 0u; /* zero: c = 0; subnormal: 0 < |f| < 2^-24, so c = 1 */
+    } else {
+        const uint32_t m = mantissa | 0x800000u;
+        const int32_t e = (int32_t)biased - 127;
+        if (e >= 23) {
+            t = m << (e - 23);
+            c = 0u;
+        } else if (e >= 0) {
+            const uint32_t dropped = (uint32_t)(23 - e);
+            t = m >> dropped;
+            c = (m & ((1u << dropped) - 1u)) << (e + 1);
+        } else {
+            const uint32_t sh = (uint32_t)(-(e + 1)); /* |f| * 2^24 = m / 2^sh */
+            if (sh == 0u) {
+                c = m;
+            } else if (sh >= 24u) {
+                c = 1u;
+            } else {
+                c = (m >> sh) + ((m & ((1u << sh) - 1u)) != 0u);
+            }
+        }
+    }
+    const uint32_t r = t + (k < c);
+    return (bits >> 31) ? (int32_t)(0u - r) : (int32_t)r;
+}
+
+static inline int32_t roundByMode(const float input, const roundingMode_t roundingMode,
+                                  rngStream_t *rs) {
+    switch (roundingMode) {
+    case HALF_AWAY:
+        return roundHalfAway(input);
+    case SR_HALF_AWAY:
+        if (rs == NULL) {
+            roundByModeMissingStream();
+        }
+        return roundSRHalfAway(input, rs);
+    }
+    return 0;
+}
 
 /*! @brief Rescale a SYM_INT32 parameter mantissa from its own scale into an
  * accumulator's product-scale, returning the int32 seed to add into the
@@ -44,8 +115,24 @@ int32_t rescaleIntoAccumulatorScale(int32_t paramQ, float paramScale, float accu
 int32_t rescalePartialIntoAccumulatorScale(int32_t paramQ, float paramScale, float accumulatorScale,
                                            roundingMode_t roundingMode, rngStream_t *rs);
 
-int32_t clampInt32(int32_t input, int32_t min, int32_t max);
+static inline int32_t clampInt32(int32_t input, int32_t min, int32_t max) {
+    if (input < min) {
+        return min;
+    }
+    if (input > max) {
+        return max;
+    }
+    return input;
+}
 
-float clamp(float input, float min, float max);
+static inline float clamp(float input, float min, float max) {
+    if (input < min) {
+        return min;
+    }
+    if (input > max) {
+        return max;
+    }
+    return input;
+}
 
 #endif // ROUNDING_H

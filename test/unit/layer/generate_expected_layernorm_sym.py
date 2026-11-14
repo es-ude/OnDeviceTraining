@@ -32,7 +32,7 @@ Self-checks:
 
 Biased variance (/N) via explicit emulation + F.layer_norm; NEVER torch.var
 (ddof=1 default). Rounding: the framework's roundByMode(HALF_AWAY) is C
-round() = half-AWAY-from-zero (Rounding.c, roundHalfAway; renamed in #188),
+round() = half-AWAY-from-zero (Rounding.h, roundHalfAway),
 so all rounding here uses round_half_away — NEVER torch.round (true
 half-to-even, which diverges on ties like 16382.5).
 Run via `uv run` (CMake wires this automatically).
@@ -62,7 +62,7 @@ QMIN = -2048.0
 
 def round_half_away(x: torch.Tensor) -> torch.Tensor:
     """Match the C kernel: roundByMode(HALF_AWAY) is C round() =
-    half-away-from-zero (Rounding.c, roundHalfAway; renamed in #188).
+    half-away-from-zero (Rounding.h, roundHalfAway).
     torch.round would be true half-to-even and silently diverge on .5 ties."""
     return torch.sign(x) * torch.floor(torch.abs(x) + 0.5)
 

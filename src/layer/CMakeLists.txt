@@ -212,6 +212,7 @@ target_link_libraries(Layer PRIVATE
         LayerNorm
         GroupNorm
         BatchNorm1d
+        Rounding
 )
 
 add_library(Model Model.c)
@@ -298,6 +299,7 @@ target_link_libraries(Relu PRIVATE
         Comparison
         Layer
         Common
+        Rounding
 )
 
 add_library(Softmax Softmax.c)
@@ -326,6 +328,7 @@ target_link_libraries(Flatten PRIVATE
         Arithmetic
         Layer
         Common
+        Rounding
 )
 
 add_library(CommonLayerLibs INTERFACE)

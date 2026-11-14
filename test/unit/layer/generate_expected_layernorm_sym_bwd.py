@@ -23,7 +23,7 @@ Self-checks:
  - the var~eps fixture really sits in the eps-visible regime (0.5 < var/eps < 2).
 
 Rounding: the framework's roundByMode(HALF_AWAY) is C round() =
-half-AWAY-from-zero (Rounding.c, roundHalfAway; renamed in #188) — emulate
+half-AWAY-from-zero (Rounding.h, roundHalfAway) — emulate
 with sign(x)*floor(|x|+0.5), NEVER torch.round (true half-to-even, silently
 diverges on ties).
 Run via `uv run` (CMake wires this automatically).
@@ -58,7 +58,7 @@ QMIN_GRAD = -32768.0
 
 def round_half_away(x: torch.Tensor) -> torch.Tensor:
     """Match the C kernel: roundByMode(HALF_AWAY) is C round() =
-    half-away-from-zero (Rounding.c, roundHalfAway; renamed in #188)."""
+    half-away-from-zero (Rounding.h, roundHalfAway)."""
     return torch.sign(x) * torch.floor(torch.abs(x) + 0.5)
 
 

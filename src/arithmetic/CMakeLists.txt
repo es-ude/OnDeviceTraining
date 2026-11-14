@@ -8,6 +8,7 @@ target_link_libraries(Add PRIVATE
         Arithmetic
         TensorConversion
         Common
+        Rounding
 )
 
 add_library(Arithmetic Arithmetic.c)
@@ -22,6 +23,7 @@ target_link_libraries(Arithmetic PRIVATE
         Square
         Sub
         Common
+        Rounding
 )
 
 add_library(ArithmeticType ArithmeticType.c)
@@ -38,6 +40,7 @@ target_link_libraries(Axpby PRIVATE
         DTypes
         Arithmetic
         Common
+        Rounding
 )
 
 add_library(BfpSoftmaxExp BfpSoftmaxExp.c)
@@ -56,6 +59,7 @@ target_link_libraries(Comparison PRIVATE
         TensorConversion
         Quantization
         Common
+        Rounding
 )
 
 add_library(Distributions Distributions.c)
@@ -77,6 +81,7 @@ target_link_libraries(Div PRIVATE
         DTypes
         Arithmetic
         Common
+        Rounding
 )
 
 add_library(JacobiEig JacobiEig.c)
@@ -89,6 +94,7 @@ target_link_libraries(JacobiEig PRIVATE
         Quantization
         Reduce
         MinMax
+        Rounding
 )
 
 add_library(Kernel Kernel.c)
@@ -134,6 +140,7 @@ target_link_libraries(Mul PRIVATE
         DTypes
         Arithmetic
         Common
+        Rounding
 )
 
 add_library(MinMax MinMax.c)
@@ -155,13 +162,14 @@ target_link_libraries(RowBroadcast PRIVATE
         Tensor
         DTypes
         Quantization
+        Rounding
 )
 
 add_library(Rounding Rounding.c)
 target_include_directories(Rounding PUBLIC include)
-target_link_libraries(Rounding PRIVATE
+# RNG PUBLIC (as on Distributions): Rounding.h inlines the SR draw, so every includer needs RNG.h
+target_link_libraries(Rounding PUBLIC RNG PRIVATE
         m
-        RNG
         Common
 )
 
@@ -182,6 +190,7 @@ target_link_libraries(Sub PRIVATE
         DTypes
         Arithmetic
         Common
+        Rounding
 )
 
 add_library(Sum Sum.c)
@@ -260,6 +269,7 @@ target_link_libraries(PointwiseFused PRIVATE
         Tensor
         Common
         m
+        Rounding
 )
 # Rounding order is the torch-parity contract. The in-source pragma is NOT
 # enough: GCC ignores `#pragma STDC FP_CONTRACT` and its default

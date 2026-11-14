@@ -15,24 +15,16 @@ typedef struct linearInit {
     trainable_t trainable;   /* zero-init → TRAINABLE_DEFAULT (trainable) */
 } linearInit_t;
 
-/*! Borrowing variant — factory stores the four quantization_t* pointers from
- *  `lq` directly. Caller retains ownership of `lq` and the quantizations;
- *  `lq` itself can be a compound literal that dies after the call.
- *  Use when: the quantizations are shared/long-lived (e.g. reused across
- *  several layers) and the caller manages their lifetime — they must
- *  outlive the layer. */
+/*! Borrowing variant: borrows outputQ and propLossQ; they must outlive the layer. Parameter
+ *  and gradient tensors own their quantization configs; `lq` itself need not outlive the
+ *  call. */
 layer_t *linearLayerInit(linearInit_t *init, layerQuant_t *lq);
 
-/*! Owning variant — factory deep-copies everything reachable from `lq`.
- *  Caller can free `lq` and all four quantization_t* immediately after
- *  the factory returns. free*Layer will tear down the copies.
- *  Use when: the quantizations are stack-locals or one-off configs and you
- *  want fire-and-forget teardown (freeLinearLayer tears them down too). */
+/*! Owning variant: copies outputQ and propLossQ; caller configs may be released after
+ *  return. */
 layer_t *linearLayerInitOwning(linearInit_t *init, layerQuant_t *lq);
 
-/*! Tears down everything the factory allocated (parameters, kernel if any,
- *  internal config, layer). Reads config->ownsQuantizations to decide
- *  whether to also tear down the four quantization_t* and their qConfigs. */
+/*! Frees parameters and layer storage, including owned outputQ/propLossQ. */
 void freeLinearLayer(layer_t *linearLayer);
 
 #endif // ODT_LINEAR_H

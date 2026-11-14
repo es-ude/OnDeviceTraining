@@ -46,8 +46,6 @@ typedef enum layerType {
     LAYER_TYPE_COUNT
 } layerType_t;
 
-typedef enum layerQType { FLOAT_LAYER, ASYM_LAYER } layerQType_t;
-
 /* How a step touches one operand wire. WRITE opens a wire (a node's dx at its buffer's first
  * contribution); ACC adds into an already open one. READ also marks a slot that writes nothing. */
 typedef enum opMode { OP_MODE_READ = 0, OP_MODE_META, OP_MODE_WRITE, OP_MODE_ACC } opMode_t;
@@ -81,11 +79,8 @@ typedef struct layerExec layerExec_t;
 /* exec: the layer's execution context (LayerExec.h); NULL = no randomness. */
 typedef void (*forwardFn_t)(layer_t *layer, tensor_t *inputTensor, tensor_t *outputTensor,
                             const layerExec_t *exec);
-/*! propLoss == NULL is a grads-only call, valid ONLY for the six param-layer
- *  backwards (Linear/Conv1d/Conv1dTransposed/LayerNorm/GroupNorm/BatchNorm1d,
- *  #380 PR2, #460): they compute weight/bias (resp. gamma/beta) grads exactly
- *  as with a real propLoss and touch no dx memory. Non-param layers (Relu, Softmax, Pool,
- *  ...) require a non-NULL propLoss. */
+/*! Parameter-layer backwards accept NULL propLoss for gradients only. Other backwards require
+ *  a buffer unless their own contract explicitly permits NULL. */
 typedef void (*backwardFn_t)(layer_t *layer, tensor_t *forwardInput, tensor_t *loss,
                              tensor_t *propLoss, const layerExec_t *exec);
 typedef void (*calcOutputShapeFn_t)(layer_t *layer, shape_t *inputShape, shape_t *outputShape);
@@ -100,10 +95,9 @@ extern layerFunctions_t layerFunctions[];
 
 void initLayer(layer_t *layer, layerType_t layerType, layerConfig_t *config);
 
-/*! Whether `layer` was frozen at create time (#380): true for LINEAR/CONV1D/
+/*! Whether `layer` was frozen at create time: true for LINEAR/CONV1D/
  *  CONV1D_TRANSPOSED/LAYERNORM/GROUPNORM/BATCHNORM1D configs with
- *  `frozen == true`, false for every other layer type (no trainable params,
- *  or not yet wired). */
+ *  `frozen == true`, false for every other layer type. */
 bool layerIsFrozen(const layer_t *layer);
 
 /*! The two parameters of a param layer: weight/bias (Linear, Conv1d,
@@ -112,5 +106,10 @@ bool layerIsFrozen(const layer_t *layer);
  *  false and leave both outputs untouched -- including a non-affine
  *  BatchNorm1d, which is config-bearing but has no gamma/beta. */
 bool layerParameters(const layer_t *layer, parameter_t **weightOut, parameter_t **biasOut);
+
+/*! Index of the deepest (closest-to-input) layer whose parameters train:
+ *  backward truncates there, since nothing below consumes dx.
+ *  Returns modelSize when no layer trains. */
+size_t deepestTrainableIndex(layer_t **model, size_t modelSize);
 
 #endif

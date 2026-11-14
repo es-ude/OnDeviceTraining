@@ -457,7 +457,9 @@ void testSgdZeroGradOnSymInt32GradZeroesMantissasAndResetsScale(void) {
                        .weightStorage = fwd,
                        .biasStorage = fwd,
                        .weightGradStorage = bwd,
-                       .biasGradStorage = bwd};
+                       .biasGradStorage = bwd,
+                       .weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE,
+                       .biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE};
     const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInit(
         &(linearInit_t){
@@ -529,7 +531,9 @@ void testSgdZeroGradBfpResetsExponentsToZeroState(void) {
                        .weightStorage = fwd,
                        .biasStorage = fwd,
                        .weightGradStorage = bwd,
-                       .biasGradStorage = bwd};
+                       .biasGradStorage = bwd,
+                       .weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE,
+                       .biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE};
     const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInit(
         &(linearInit_t){

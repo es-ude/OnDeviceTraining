@@ -7,9 +7,7 @@
 #include "Common.h"
 #include "Tensor.h"
 
-/* Op-entry shape guards shared by the layers. Header-only static inline -- no
- * new library; every layer target already reaches src/layer/include and links
- * Common, Tensor and Arithmetic. */
+/* Shared runtime wire-entry guards. */
 
 static inline void layerRequireRank(const tensor_t *t, const shape_t *expected, const char *where,
                                     const char *what) {

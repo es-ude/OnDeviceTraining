@@ -157,9 +157,8 @@ typedef struct opSpec {
 
 void executeOp(const opSpec_t *spec, tensor_t *target);
 
-/* weightGradAccMode/biasGradAccMode have no "unset" value and OUT_WRITE is the
- * zero-init, so a config that forgot them would silently overwrite a grad. Call
- * at each grad executeOp site; `context` names the layer and field. */
+/* Validate consumed gradient accumulation modes at factory entry; OUT_WRITE is the
+ * zero-initialized value. `context` names the factory and field. */
 static inline void executeOpValidateAccMode(outputMode_t mode, const char *context) {
     if (mode != OUT_ACC_DYNAMIC_RESCALE && mode != OUT_ACC_FIXED_SCALE) {
         PRINT_ERROR("%s: not a valid grad accumulate mode (got %d) -- config field never set?",

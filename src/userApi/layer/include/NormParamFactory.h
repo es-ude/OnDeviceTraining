@@ -14,19 +14,6 @@
 /* Factory-side helpers GroupNormApi and LayerNormApi share. `who` names the factory in
  * every message. */
 
-/* Heap-owned shape with default order; ownership transfers to the tensor built on it. */
-static inline shape_t *normBuildOwnedShape(const size_t *srcDims, size_t numberOfDims) {
-    size_t *dims = reserveMemory(numberOfDims * sizeof(size_t));
-    for (size_t i = 0; i < numberOfDims; i++) {
-        dims[i] = srcDims[i];
-    }
-    size_t *order = reserveMemory(numberOfDims * sizeof(size_t));
-    setOrderOfDimsForNewTensor(numberOfDims, order);
-    shape_t *shape = reserveMemory(sizeof(shape_t));
-    setShape(shape, dims, numberOfDims, order);
-    return shape;
-}
-
 /* tensorFillFromFloatBuffer quantizes the constant into the param's own storage dtype;
  * initDistribution would not do, it is FLOAT32-only. */
 static inline void normFillParamWithConstant(tensor_t *paramTensor, float value) {
@@ -71,7 +58,7 @@ static inline parameter_t *normAllocAffineParam(const size_t *dims, size_t numbe
                                                 float value, quantization_t *storageQ,
                                                 quantization_t *gradQ, bool trainable,
                                                 const char *who) {
-    shape_t *shape = normBuildOwnedShape(dims, numberOfDims);
+    shape_t *shape = buildOwnedShape(dims, numberOfDims);
     size_t count = calcNumberOfElementsByShape(shape);
     tensor_t *paramTensor = initTensor(shape, normParamQLike(storageQ, count, who), NULL);
     normFillParamWithConstant(paramTensor, value);

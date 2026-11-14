@@ -253,8 +253,8 @@ static layerQuant_t symLayerQuant(symQuant_t *sq) {
         .weightGradStorage = NULL,   /* FLOAT32 grad default */
         .biasGradStorage = NULL,     /* FLOAT32 grad default */
         /* FLOAT32 grad target: accumulateOut adds in float regardless of mode,
-         * but the mode must still be a valid ACC value (executeOpValidateAccMode
-         * rejects the OUT_WRITE==0 zero-init on a hand-wired config). */
+         * but the factory still requires a valid ACC value (executeOpValidateAccMode
+         * rejects the OUT_WRITE==0 zero-init). */
         .weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE,
         .biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE,
     };

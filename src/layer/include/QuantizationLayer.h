@@ -10,10 +10,7 @@ typedef struct layerExec layerExec_t;
 
 typedef struct quantizationConfig {
     quantization_t *outputQ;   /* forward output target: dtype + qConfig for the layer output */
-    quantization_t *propLossQ; /* Declared backward propLoss target (dtype + qConfig for the
-                                * dy requant). The training loop derives this layer's dx-wire
-                                * header from it (the remat wire table, via backwardWireQ,
-                                * #221). */
+    quantization_t *propLossQ; /* propLossQ determines backward output storage. */
     bool ownsQuantizations;    /* true → freeQuantLayer tears down outputQ/propLossQ (Owning
                                 * factory); false → caller owns them (Borrowing). */
 } quantizationConfig_t;

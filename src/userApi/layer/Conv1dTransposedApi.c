@@ -31,18 +31,6 @@ static bool resolveConv1dTransposedBias(bias_t b) {
     }
 }
 
-static shape_t *buildOwnedShape(const size_t *srcDims, size_t numberOfDims) {
-    size_t *dims = reserveMemory(numberOfDims * sizeof(size_t));
-    for (size_t i = 0; i < numberOfDims; i++) {
-        dims[i] = srcDims[i];
-    }
-    size_t *order = reserveMemory(numberOfDims * sizeof(size_t));
-    setOrderOfDimsForNewTensor(numberOfDims, order);
-    shape_t *shape = reserveMemory(sizeof(shape_t));
-    setShape(shape, dims, numberOfDims, order);
-    return shape;
-}
-
 static parameter_t *allocateConv1dTransposedWeights(size_t inChannels, size_t outChannels,
                                                     size_t groups, size_t kernelSize,
                                                     weightInit_t weightInit,
@@ -107,6 +95,7 @@ static void validateConv1dTransposedInit(conv1dTransposedInit_t *init) {
         PRINT_ERROR("conv1dTransposedLayerInit: kernelSize must be > 0");
         exit(1);
     }
+    conv1dTransposedRequireValidPadding(init->padding, "conv1dTransposedLayerInit");
     size_t stride = init->stride == 0 ? 1 : init->stride;
     size_t dilation = init->dilation == 0 ? 1 : init->dilation;
     size_t maxStep = stride > dilation ? stride : dilation;
@@ -161,6 +150,8 @@ static kernel_t *buildConv1dTransposedKernel(conv1dTransposedInit_t *init) {
 
 static layer_t *buildConv1dTransposedLayerSkeleton(conv1dTransposedInit_t *init, layerQuant_t *lq,
                                                    bool hasBias, size_t groups, bool trainable) {
+    validateRandomInit(init->weightInit, lq->weightStorage, hasBias ? lq->biasStorage : NULL,
+                       "conv1dTransposedLayerInit");
     layer_t *layer = reserveMemory(sizeof(layer_t));
     layer->type = CONV1D_TRANSPOSED;
 

@@ -1649,10 +1649,9 @@ static void runLinearKernelWeightGrad(const runCtx_t *ctx) {
 
 /* Hand-wired Linear layer (test/unit/support/include/BorrowedLayer.h pattern):
  * borrowed parameter_t's, every math slot = spec.arith, the produced wires =
- * the given storage configs, the packed-grad D1 accumulate modes at
- * linearInitConfig's defaults (dynamic-rescale weights, fixed-scale bias --
- * on FLOAT32 grads both are the exact float add). ownsQuantizations=false:
- * the caller frees the configs. */
+ * the given storage configs, dynamic-rescale weight and fixed-scale bias
+ * accumulation (on FLOAT32 grads both are the exact float add).
+ * ownsQuantizations=false: the caller frees the configs. */
 static void wireLinearLayer(layer_t *layer, layerConfig_t *layerCfg, linearConfig_t *cfg,
                             parameter_t *weights, parameter_t *bias, arithmetic_t arith,
                             quantization_t *outputQ, quantization_t *propLossQ) {

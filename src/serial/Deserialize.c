@@ -853,6 +853,8 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
     case CONV1D_TRANSPOSED: {
         conv1dTransposedConfig_t *conv1dTransposedConfig = layer->config->conv1dTransposed;
         deserializeKernel(conv1dTransposedConfig->kernel, f);
+        conv1dTransposedRequireValidPadding(conv1dTransposedConfig->kernel->paddingType,
+                                            "deserializeModel: CONV1D_TRANSPOSED");
         conv1dTransposedConfig->groups = (size_t)serialReadU32LE(f);
         conv1dTransposedConfig->outputPadding = (size_t)serialReadU32LE(f);
         deserializeParameter(conv1dTransposedConfig->weights, f);

@@ -57,7 +57,7 @@ target_link_libraries(MaxPool1d PRIVATE
         Common
         Kernel
         SlidingWindow1d
-        # #152 PR3b: the forward grows argmaxIndices on demand (reserveMemory).
+        # Forward grows argmaxIndices on demand using reserveMemory.
         StorageApi
         m
 )
@@ -244,7 +244,6 @@ target_include_directories(Linear PUBLIC include)
 target_link_libraries(Linear PRIVATE
         DyadicScale
         Matmul
-        Add
         SymAccumGuard
         SymGroupedWeight
         LayerExec
@@ -255,7 +254,6 @@ target_link_libraries(Linear PRIVATE
         ArithmeticType
         ExecuteOp
         Quantization
-        TensorConversion
         Layer
         Common
 )

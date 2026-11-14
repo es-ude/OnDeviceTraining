@@ -31,20 +31,6 @@ static bool resolveConv1dBias(bias_t b) {
     }
 }
 
-/*! Build a heap-owned shape_t with the given dims; the tensor that this shape
- *  is passed to takes ownership and freeTensor cascades into freeShape. */
-static shape_t *buildOwnedShape(const size_t *srcDims, size_t numberOfDims) {
-    size_t *dims = reserveMemory(numberOfDims * sizeof(size_t));
-    for (size_t i = 0; i < numberOfDims; i++) {
-        dims[i] = srcDims[i];
-    }
-    size_t *order = reserveMemory(numberOfDims * sizeof(size_t));
-    setOrderOfDimsForNewTensor(numberOfDims, order);
-    shape_t *shape = reserveMemory(sizeof(shape_t));
-    setShape(shape, dims, numberOfDims, order);
-    return shape;
-}
-
 static parameter_t *allocateConv1dWeights(size_t outChannels, size_t inChannels, size_t groups,
                                           size_t kernelSize, weightInit_t weightInit,
                                           quantization_t *storageQ, quantization_t *gradQ,
@@ -157,6 +143,8 @@ static kernel_t *buildConv1dKernel(conv1dInit_t *init) {
 
 static layer_t *buildConv1dLayerSkeleton(conv1dInit_t *init, layerQuant_t *lq, bool hasBias,
                                          size_t groups, bool trainable) {
+    validateRandomInit(init->weightInit, lq->weightStorage, hasBias ? lq->biasStorage : NULL,
+                       "conv1dLayerInit");
     layer_t *layer = reserveMemory(sizeof(layer_t));
     layer->type = CONV1D;
 

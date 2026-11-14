@@ -2,6 +2,7 @@
 #define ODT_NORM_CONFIG_GUARD_H
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #include "ArithmeticType.h"
@@ -18,12 +19,10 @@ static inline bool normIsBfpOperand(qtype_t type) {
     return type == FLOAT32 || type == BFP;
 }
 
-/* OUT_WRITE is the zero value, so an unset mode would overwrite the grads. */
 static inline void normRequireAccMode(outputMode_t mode, const char *who, const char *field) {
-    if (mode != OUT_ACC_DYNAMIC_RESCALE && mode != OUT_ACC_FIXED_SCALE) {
-        PRINT_ERROR("%s: %s must be a grad accumulate mode (got %d)", who, field, (int)mode);
-        exit(1);
-    }
+    char context[128];
+    snprintf(context, sizeof context, "%s: %s", who, field);
+    executeOpValidateAccMode(mode, context);
 }
 
 /* The arithmetic/storage rules GroupNorm and LayerNorm share: supported maths, param and

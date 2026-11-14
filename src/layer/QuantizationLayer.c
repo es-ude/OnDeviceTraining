@@ -10,14 +10,26 @@
 #include "LayerExec.h"
 #include "QuantizationLayer.h"
 
-/* The Quantization layer is a pure conversion node (#266): no arithmetic, no
- * kernel — executeConvert dispatches straight through the conversionMatrix
- * (same-dtype SYM_INT32 and BFP route through their diagonals: SYM_INT32 is
- * the sanctioned requant, BFP the sanctioned re-block/width-change point).
- * Any other same-dtype pair stays a config error: a Quantization layer that
- * neither changes dtype nor requantizes is a misconfigured no-op. The one
- * exception is the forward of a BFP input already in the output wire's
- * storage format, which passes straight through (quantizationForward). */
+/* Conversion walks flat storage, so the produced wire must have the consumed wire's physical
+ * dims and order; a matching transposed view is fine. */
+static void quantizationRequireSameLayout(const tensor_t *from, const tensor_t *to,
+                                          const char *where) {
+    const shape_t *a = from->shape;
+    const shape_t *b = to->shape;
+    bool same = a->numberOfDimensions == b->numberOfDimensions;
+    for (size_t d = 0; same && d < a->numberOfDimensions; d++) {
+        same = a->dimensions[d] == b->dimensions[d] &&
+               a->orderOfDimensions[d] == b->orderOfDimensions[d];
+    }
+    if (!same) {
+        PRINT_ERROR("%s", where);
+        exit(1);
+    }
+}
+
+/* Pure storage conversion; same-dtype SYM_INT32 requantizes and BFP reblocks. Any other
+ * same-dtype pair would be a no-op node, except a BFP forward input already in the output
+ * wire's storage format, which quantizationForward passes straight through. */
 static void dispatchQuantization(tensor_t *input, tensor_t *output, rngStream_t *convert) {
     qtype_t inputDType = input->quantization->type;
     qtype_t outputDType = output->quantization->type;
@@ -76,9 +88,10 @@ BFP_WALK_NOINLINE void quantizationForwardConvert(tensor_t *inputTensor, tensor_
 
 void quantizationForward(layer_t *layer, tensor_t *inputTensor, tensor_t *outputTensor,
                          const layerExec_t *exec) {
-    (void)layer; /* dtype dispatch reads the tensors; config->quantization->outputQ
-                  * already determined outputTensor's dtype when its header was
-                  * derived (the remat wire table's bind / initBufferOutput). */
+    (void)layer; /* the wires carry the dtypes */
+    quantizationRequireSameLayout(inputTensor, outputTensor,
+                                  "Quantization forward: output must have the input's dims and "
+                                  "order");
     if (bfpSameStorageFormat(inputTensor, outputTensor)) {
         passThroughBfp(inputTensor, outputTensor);
         return;
@@ -137,10 +150,10 @@ static void quantizationBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *ra
 void quantizationBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss,
                           tensor_t *propLoss, const layerExec_t *exec) {
     (void)layer;
-    (void)forwardInput; /* straight-through: dy does not depend on x. Both forward
-                         * and backward requant map their own absmax exactly onto
-                         * qMax, so neither pass saturates and no STE clipping mask
-                         * is needed (#192 D3). */
+    (void)forwardInput; /* Backward converts dy directly and does not use forwardInput. */
+    quantizationRequireSameLayout(loss, propLoss,
+                                  "Quantization backward: propLoss must have the loss's dims and "
+                                  "order");
     if (loss->quantization->type == BFP && propLoss->quantization->type == BFP) {
         /* BFP -> BFP: the integer re-block, rounded by the target template's
          * mode (the conversion cell's rule), its SR draws from this op's OUT

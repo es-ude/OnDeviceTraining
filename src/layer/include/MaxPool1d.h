@@ -10,21 +10,9 @@
 #include "Layer.h"
 #include "Tensor.h"
 
-/* argmaxIndices: INT32 [B, C, Lout] index state written by every forward and
- * read by the matching backward. The factory sizes it for B = 1; the forward
- * grows it to the largest B seen, keeps capacity on smaller batches and
- * rewrites dims[0] only when B changes. Its ->data must come from reserveMemory
- * because a growing forward frees and replaces it.
- * argmaxCapacity is valid only while argmaxCapacityData == argmaxIndices->data;
- * any other buffer (zero-initialised config, argmax swapped in by hand) is
- * adopted at its own element count on the next forward.
- * When replacing argmaxIndices by hand, set argmaxCapacityData = NULL (or re-run
- * initMaxPool1dConfig): a replacement that reuses the freed address would
- * otherwise inherit the stale capacity.
- *
- * Serialize access per layer instance: no two concurrent forwards, and no
- * forward concurrent with its backward. Concurrent forwards need separate
- * layer instances. */
+/* Forward writes INT32 [B,C,Lout] argmax state and grows reserveMemory-backed storage as
+ * needed. Capacity is tied to argmaxCapacityData; clear that pointer when replacing
+ * argmaxIndices. Serialize forwards and matching backwards per instance. */
 typedef struct maxPool1dConfig {
     kernel_t *kernel;
     tensor_t *argmaxIndices;           // INT32 [B, C, Lout]; see the block comment above

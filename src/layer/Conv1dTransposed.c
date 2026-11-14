@@ -30,10 +30,7 @@ void initConv1dTransposedConfigWithWeightsAndBias(
         PRINT_ERROR("Conv1dTransposed: groups must be >= 1");
         exit(1);
     }
-    if (kernel->paddingType != VALID) {
-        PRINT_ERROR("Conv1dTransposed: only VALID paddingType supported in Phase 1");
-        exit(1);
-    }
+    conv1dTransposedRequireValidPadding(kernel->paddingType, "Conv1dTransposed");
     if (outputPadding != 0 &&
         outputPadding >=
             ((kernel->stride > kernel->dilation) ? kernel->stride : kernel->dilation)) {

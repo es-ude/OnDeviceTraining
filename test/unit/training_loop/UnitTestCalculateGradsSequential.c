@@ -364,9 +364,7 @@ static layer_t *buildSymLinearLayer(parameter_t *weights, parameter_t *bias, qua
     cfg->propLossMath = arithmeticFromQuantization(propLossQ);
     cfg->outputQ = mathQ;
     cfg->propLossQ = propLossQ;
-    /* packed-grad D1: today's per-callsite hardcodes (linearBackward); hand-wired
-     * here since this helper builds the config directly instead of going
-     * through linearInitConfig/a layerQuant_t factory. */
+    /* Hand-wired configs skip the factory's mode validation, so set valid modes here. */
     cfg->weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
     cfg->biasGradAccMode = OUT_ACC_FIXED_SCALE;
     cfg->ownsQuantizations = false;

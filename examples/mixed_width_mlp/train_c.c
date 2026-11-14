@@ -163,11 +163,10 @@ static void buildModel(layer_t **model, mixedWidthQuant_t *mq, const trainingRng
      * weightGradAccMode/biasGradAccMode are both set explicitly to
      * OUT_ACC_FIXED_SCALE: lqLinear is a hand-written literal (not built via
      * layerQuantInitUniform), so these fields have no implicit default —
-     * leaving them at the zero-init OUT_WRITE would trip the PR3 hazard
-     * guard (executeOpValidateAccMode) at the first grad accumulate. Setting
-     * both to FIXED_SCALE (the fit-preserving carried-grid scheme,
-     * packed-grad D1) rather than the Linear.c hardcode split
-     * (weight=DYNAMIC_RESCALE/bias=FIXED_SCALE) is this acceptance run's
+     * leaving them at the zero-init OUT_WRITE would make linearLayerInit
+     * reject the profile (executeOpValidateAccMode). Setting both to
+     * FIXED_SCALE (the fit-preserving carried-grid scheme) rather than the
+     * weight=DYNAMIC_RESCALE/bias=FIXED_SCALE split is this acceptance run's
      * deliberate choice: it exercises the new packed-target FIXED_SCALE path
      * on both weight and bias grads at once.
      *

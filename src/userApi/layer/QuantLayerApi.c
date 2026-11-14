@@ -41,9 +41,6 @@ layer_t *quantLayerInit(layerQuant_t *lq) {
     layer_t *layer = quantLayerInitCommon();
     quantizationConfig_t *cfg = layer->config->quantization;
 
-    /* Borrowing: store the two storage quant pointers verbatim. The caller owns
-     * outputQ/propLossQ and frees them; freeQuantLayer leaves them
-     * untouched (ownsQuantizations=false). */
     cfg->outputQ = lq->outputQ;
     cfg->propLossQ = lq->propLossQ;
     cfg->ownsQuantizations = false;
@@ -55,10 +52,7 @@ layer_t *quantLayerInitOwning(layerQuant_t *lq) {
     layer_t *layer = quantLayerInitCommon();
     quantizationConfig_t *cfg = layer->config->quantization;
 
-    /* Owning: deep-copy each storage quantization so the caller can drop its
-     * pointers immediately. Always two separate copies, even if both lq slots
-     * point at the same instance — keeps freeQuantLayer simple. Mirrors
-     * linearLayerInitOwning / layerNormLayerInitOwning. */
+    /* Owns two independent quantization copies, even when the source pointers alias. */
     cfg->outputQ = deepCopyQuantization(lq->outputQ);
     cfg->propLossQ = deepCopyQuantization(lq->propLossQ);
     cfg->ownsQuantizations = true;
@@ -71,16 +65,9 @@ void freeQuantLayer(layer_t *quantLayer) {
     }
     quantizationConfig_t *cfg = quantLayer->config->quantization;
 
-    /* Owning-variant only — tear down the two math quantization_t (qConfig +
-     * struct). Dedup guard exactly like freeLayerNormLayer: free propLossQ only
-     * if it is a distinct allocation from outputQ. */
     if (cfg->ownsQuantizations) {
-        if (cfg->outputQ != NULL) {
-            freeQuantization(cfg->outputQ);
-        }
-        if (cfg->propLossQ != NULL && cfg->propLossQ != cfg->outputQ) {
-            freeQuantization(cfg->propLossQ);
-        }
+        freeQuantization(cfg->outputQ);
+        freeQuantization(cfg->propLossQ);
     }
 
     freeReservedMemory(cfg);

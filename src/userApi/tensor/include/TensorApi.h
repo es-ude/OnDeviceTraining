@@ -147,12 +147,11 @@ quantization_t *getQLike(quantization_t *quantization);
  * \returns Pointer to tensor with matching shape, sparsity and quantization
  */
 tensor_t *getTensorLike(tensor_t *tensor);
-/*! Gets shape that matches a given shape.
- *
- * \param shape: Pointer to shape
- *
- * \returns Pointer to shape with matching numberOfDims, dims, and orderOfDims
- */
+/*! Heap-allocates a shape with a copy of `dims` and identity order. Ownership passes to the
+ *  tensor built on it: freeTensor frees the shape. */
+shape_t *buildOwnedShape(const size_t *dims, size_t numberOfDims);
+/*! buildOwnedShape of `shape`'s physical dims: a transposed view comes back dense, in
+ *  storage order. */
 shape_t *getShapeLike(shape_t *shape);
 /*! Gets data array by quantization and number of values.
  *

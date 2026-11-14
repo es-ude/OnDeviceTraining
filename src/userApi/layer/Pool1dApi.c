@@ -105,18 +105,6 @@ static void validateLayerQuantForMaxPool1d(layerQuant_t *lq) {
     validatePoolMath(lq, "maxPool1dLayerInit");
 }
 
-static shape_t *buildOwnedShape(const size_t *srcDims, size_t numberOfDims) {
-    size_t *dims = reserveMemory(numberOfDims * sizeof(size_t));
-    for (size_t i = 0; i < numberOfDims; i++) {
-        dims[i] = srcDims[i];
-    }
-    size_t *order = reserveMemory(numberOfDims * sizeof(size_t));
-    setOrderOfDimsForNewTensor(numberOfDims, order);
-    shape_t *shape = reserveMemory(sizeof(shape_t));
-    setShape(shape, dims, numberOfDims, order);
-    return shape;
-}
-
 static tensor_t *buildMaxPool1dArgmax(size_t inputChannels, size_t outputLength) {
     /* Created for batch=1: [1, inputChannels, outputLength]. maxPool1dForward
      * grows it on demand to the largest batch it is called with, e.g. a

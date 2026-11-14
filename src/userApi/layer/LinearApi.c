@@ -5,6 +5,7 @@
 
 #include "ArithmeticType.h"
 #include "Common.h"
+#include "ExecuteOp.h"
 #include "Layer.h"
 #include "LayerCommon.h"
 #include "LayerQuant.h"
@@ -14,10 +15,6 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
-
-/* ============================================================================
- * New factory API — layerQuant_t profile + linearInit_t struct (PR 1).
- * ========================================================================== */
 
 static bool resolveLinearBias(bias_t b) {
     switch (b) {
@@ -33,32 +30,13 @@ static bool resolveLinearBias(bias_t b) {
     }
 }
 
-/*! Build a heap-owned shape_t with the given dims; the tensor that this shape
- *  is passed to takes ownership and freeTensor cascades into freeShape. */
-static shape_t *buildOwnedShape(const size_t *srcDims, size_t numberOfDims) {
-    size_t *dims = reserveMemory(numberOfDims * sizeof(size_t));
-    for (size_t i = 0; i < numberOfDims; i++) {
-        dims[i] = srcDims[i];
-    }
-    size_t *order = reserveMemory(numberOfDims * sizeof(size_t));
-    setOrderOfDimsForNewTensor(numberOfDims, order);
-    shape_t *shape = reserveMemory(sizeof(shape_t));
-    setShape(shape, dims, numberOfDims, order);
-    return shape;
-}
-
 static parameter_t *allocateLinearWeights(size_t inFeatures, size_t outFeatures,
                                           weightInit_t weightInit, quantization_t *storageQ,
                                           quantization_t *gradQ, bool trainable) {
-    /* Weight tensor: shape [outFeatures, inFeatures]. The tensor takes ownership
-     * of `shape` and `quantization`, so we clone the borrowed storageQ via
-     * getQLike to avoid tying the tensor's lifetime to the caller's quant. */
     shape_t *shape = buildOwnedShape((size_t[]){outFeatures, inFeatures}, 2);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
 
-    /* Linear: fan_in = inFeatures, fan_out = outFeatures (PyTorch
-     * _calculate_fan_in_and_fan_out for a 2-D weight). Default scheme is
-     * PyTorch parity: uniform(+/- 1/sqrt(fan_in)). */
+    /* PyTorch's fan_in/fan_out for a 2-D weight. */
     initWeightTensor(paramTensor, weightInit, inFeatures, outFeatures);
 
     tensor_t *gradTensor = trainable ? gradInit(paramTensor, gradQ, NULL) : NULL;
@@ -68,8 +46,7 @@ static parameter_t *allocateLinearWeights(size_t inFeatures, size_t outFeatures,
 static parameter_t *allocateLinearBias(size_t outFeatures, size_t fanIn, quantization_t *storageQ,
                                        quantization_t *gradQ, bool trainable,
                                        const rngKey_t *initKey) {
-    /* Bias tensor: shape [outFeatures]. PyTorch draws bias from
-     * uniform(+/- 1/sqrt(fan_in)) using the WEIGHT's fan_in (= inFeatures). */
+    /* PyTorch draws the bias bound from the weight's fan_in. */
     shape_t *shape = buildOwnedShape((size_t[]){outFeatures}, 1);
     tensor_t *paramTensor = initTensor(shape, getQLike(storageQ), NULL);
     initBiasTensor(paramTensor, fanIn, initKey);
@@ -93,10 +70,32 @@ static void validateLinearInit(linearInit_t *init) {
     }
 }
 
-static void validateLayerQuantForLinear(layerQuant_t *lq, bool hasBias) {
+static void validateLinearArithmetic(arithmetic_t math, const char *slot) {
+    if (math.type != ARITH_FLOAT32 && math.type != ARITH_SYM_INT32 && math.type != ARITH_BFP) {
+        PRINT_ERROR("linearLayerInit: layerQuant.%s must be ARITH_FLOAT32, ARITH_SYM_INT32 or "
+                    "ARITH_BFP (got %d)",
+                    slot, (int)math.type);
+        exit(1);
+    }
+}
+
+static void validateLayerQuantForLinear(layerQuant_t *lq, bool hasBias, bool trainable) {
     if (lq == NULL) {
         PRINT_ERROR("linearLayerInit: lq pointer is NULL");
         exit(1);
+    }
+    validateLinearArithmetic(lq->forwardMath, "forwardMath");
+    validateLinearArithmetic(lq->weightGradMath, "weightGradMath");
+    validateLinearArithmetic(lq->biasGradMath, "biasGradMath");
+    validateLinearArithmetic(lq->propLossMath, "propLossMath");
+    /* A frozen layer never accumulates grads, so its modes may stay unset. */
+    if (trainable) {
+        executeOpValidateAccMode(lq->weightGradAccMode,
+                                 "linearLayerInit: layerQuant.weightGradAccMode");
+        if (hasBias) {
+            executeOpValidateAccMode(lq->biasGradAccMode,
+                                     "linearLayerInit: layerQuant.biasGradAccMode");
+        }
     }
     if (lq->outputQ == NULL) {
         PRINT_ERROR("linearLayerInit: layerQuant.outputQ must be set");
@@ -116,11 +115,16 @@ static void validateLayerQuantForLinear(layerQuant_t *lq, bool hasBias) {
     }
 }
 
-layer_t *linearLayerInit(linearInit_t *init, layerQuant_t *lq) {
+/* The one construction path; the public factories differ only in whether outputQ and
+ * propLossQ are borrowed or copied. `who` names the public factory. */
+static layer_t *linearLayerBuild(linearInit_t *init, layerQuant_t *lq, bool owning,
+                                 const char *who) {
     validateLinearInit(init);
     bool hasBias = resolveLinearBias(init->bias);
-    validateLayerQuantForLinear(lq, hasBias);
-    bool trainable = resolveTrainable(init->trainable, "linearLayerInit");
+    bool trainable = resolveTrainable(init->trainable, who);
+    validateLayerQuantForLinear(lq, hasBias, trainable);
+    validateRandomInit(init->weightInit, lq->weightStorage, hasBias ? lq->biasStorage : NULL,
+                       "linearLayerInit");
 
     layer_t *layer = reserveMemory(sizeof(layer_t));
     layer->type = LINEAR;
@@ -130,10 +134,7 @@ layer_t *linearLayerInit(linearInit_t *init, layerQuant_t *lq) {
     layerCfg->linear = cfg;
     layer->config = layerCfg;
 
-    /* Grad storage knob (#261, PR1c): NULL falls back to a hard-pinned FLOAT32
-     * default (parameter grads are persistent state — SYM_INT32 is a compute
-     * format, not storage); a non-NULL weightGradStorage/biasGradStorage
-     * overrides it explicitly to opt back into SYM_INT32 (or another dtype). */
+    /* Parameter tensors own cloned storage configs. Gradient storage defaults to FLOAT32. */
     quantization_t *floatGradQ = quantizationInitFloat();
     quantization_t *weightGradQ =
         lq->weightGradStorage != NULL ? lq->weightGradStorage : floatGradQ;
@@ -145,70 +146,25 @@ layer_t *linearLayerInit(linearInit_t *init, layerQuant_t *lq) {
                         : NULL;
     freeQuantization(floatGradQ);
 
-    /* Borrowing: store the forward-wire/dx-wire storage configs verbatim, no copy.
-     * Arithmetic slots are plain by-value copies of the profile's declared math. */
     cfg->forwardMath = lq->forwardMath;
     cfg->weightGradMath = lq->weightGradMath;
     cfg->biasGradMath = lq->biasGradMath;
     cfg->propLossMath = lq->propLossMath;
-    cfg->outputQ = lq->outputQ;
-    cfg->propLossQ = lq->propLossQ;
+    cfg->outputQ = owning ? deepCopyQuantization(lq->outputQ) : lq->outputQ;
+    cfg->propLossQ = owning ? deepCopyQuantization(lq->propLossQ) : lq->propLossQ;
     cfg->weightGradAccMode = lq->weightGradAccMode;
     cfg->biasGradAccMode = lq->biasGradAccMode;
-    cfg->ownsQuantizations = false;
+    cfg->ownsQuantizations = owning;
     cfg->frozen = !trainable;
-
     return layer;
 }
 
+layer_t *linearLayerInit(linearInit_t *init, layerQuant_t *lq) {
+    return linearLayerBuild(init, lq, false, "linearLayerInit");
+}
+
 layer_t *linearLayerInitOwning(linearInit_t *init, layerQuant_t *lq) {
-    validateLinearInit(init);
-    bool hasBias = resolveLinearBias(init->bias);
-    validateLayerQuantForLinear(lq, hasBias);
-    bool trainable = resolveTrainable(init->trainable, "linearLayerInitOwning");
-
-    layer_t *layer = reserveMemory(sizeof(layer_t));
-    layer->type = LINEAR;
-
-    layerConfig_t *layerCfg = reserveMemory(sizeof(layerConfig_t));
-    linearConfig_t *cfg = reserveMemory(sizeof(linearConfig_t));
-    layerCfg->linear = cfg;
-    layer->config = layerCfg;
-
-    /* Allocate parameters using lq->weightStorage / lq->biasStorage as the
-     * SOURCE of the tensor's owned quantization.  The allocator helpers (from
-     * T12) internally clone via getQLike, so the parameter tensors hold their
-     * own quantization_t copies — the caller can immediately drop the lq's
-     * weightStorage/biasStorage pointers without breaking the parameters.
-     * Grad storage knob (#261, PR1c): NULL falls back to a hard-pinned FLOAT32
-     * default (parameter grads are persistent state — SYM_INT32 is a compute
-     * format, not storage); a non-NULL weightGradStorage/biasGradStorage
-     * overrides it explicitly to opt back into SYM_INT32 (or another dtype). */
-    quantization_t *floatGradQ = quantizationInitFloat();
-    quantization_t *weightGradQ =
-        lq->weightGradStorage != NULL ? lq->weightGradStorage : floatGradQ;
-    quantization_t *biasGradQ = lq->biasGradStorage != NULL ? lq->biasGradStorage : floatGradQ;
-    cfg->weights = allocateLinearWeights(init->inFeatures, init->outFeatures, init->weightInit,
-                                         lq->weightStorage, weightGradQ, trainable);
-    cfg->bias = hasBias ? allocateLinearBias(init->outFeatures, init->inFeatures, lq->biasStorage,
-                                             biasGradQ, trainable, init->weightInit.key)
-                        : NULL;
-    freeQuantization(floatGradQ);
-
-    /* Owning: same arithmetic as Borrowing; deep-copy the two storage configs
-     * (outputQ, propLossQ) into fresh allocations — 2 allocs, not 3. */
-    cfg->forwardMath = lq->forwardMath;
-    cfg->weightGradMath = lq->weightGradMath;
-    cfg->biasGradMath = lq->biasGradMath;
-    cfg->propLossMath = lq->propLossMath;
-    cfg->outputQ = deepCopyQuantization(lq->outputQ);
-    cfg->propLossQ = deepCopyQuantization(lq->propLossQ);
-    cfg->weightGradAccMode = lq->weightGradAccMode;
-    cfg->biasGradAccMode = lq->biasGradAccMode;
-    cfg->ownsQuantizations = true;
-    cfg->frozen = !trainable;
-
-    return layer;
+    return linearLayerBuild(init, lq, true, "linearLayerInitOwning");
 }
 
 void freeLinearLayer(layer_t *linearLayer) {
@@ -217,27 +173,14 @@ void freeLinearLayer(layer_t *linearLayer) {
     }
     linearConfig_t *cfg = linearLayer->config->linear;
 
-    /* Tear down weight parameter (param tensor + grad tensor + their data + shape).
-     * freeParameter handles the NULL-grad case post-#106. */
-    if (cfg->weights != NULL) {
-        freeParameter(cfg->weights);
-    }
+    freeParameter(cfg->weights);
     if (cfg->bias != NULL) {
         freeParameter(cfg->bias);
     }
-
+    /* freeQuantization, not a plain free: grouped and BFP copies own backing arrays. */
     if (cfg->ownsQuantizations) {
-        /* freeQuantization, not freeReservedMemory(qConfig) + freeReservedMemory(q):
-         * deepCopyQuantization gives SYM/ASYM/BFP copies their own inner heap
-         * blocks (scales / scales+zeroPoints / exponents), and only
-         * freeQuantization frees those (BFP epic PR2 Task 8). The same swap is
-         * applied at every Owning teardown across src/userApi/layer/. */
-        if (cfg->outputQ != NULL) {
-            freeQuantization(cfg->outputQ);
-        }
-        if (cfg->propLossQ != NULL && cfg->propLossQ != cfg->outputQ) {
-            freeQuantization(cfg->propLossQ);
-        }
+        freeQuantization(cfg->outputQ);
+        freeQuantization(cfg->propLossQ);
     }
 
     freeReservedMemory(cfg);

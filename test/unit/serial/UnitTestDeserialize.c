@@ -7,6 +7,8 @@
 #include "ArithmeticType.h"
 #include "BatchNorm1d.h"
 #include "BatchNorm1dApi.h"
+#include "Conv1dTransposed.h"
+#include "Conv1dTransposedApi.h"
 #include "DagFixtures.h"
 #include "DeathTest.h"
 #include "Deserialize.h"
@@ -23,6 +25,7 @@
 #include "Model.h"
 #include "OdtAssert.h"
 #include "QuantizationApi.h"
+#include "RNG.h"
 #include "Relu.h"
 #include "ReluApi.h"
 #include "Serialize.h"
@@ -2893,6 +2896,32 @@ static void testDeserializeDropoutRejectsAnOutOfRangeP(void) {
     freeQuantization(floatQ);
 }
 
+/* The CONV1D_TRANSPOSED record overwrites the kernel, and the ConvTranspose kernels
+ * implement VALID geometry only. */
+static void testDeserializeConv1dTransposedRejectsNonValidPadding(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    conv1dTransposedInit_t init = {
+        .inChannels = 2, .outChannels = 2, .kernelSize = 3, .weightInit.key = &initKey};
+    layer_t *layer = conv1dTransposedLayerInitOwning(&init, &lq);
+    layer->config->conv1dTransposed->kernel->paddingType = SAME;
+    layer_t *model[] = {layer};
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(&MODEL_CHAIN(model, 1), f);
+    fclose(f);
+    layer->config->conv1dTransposed->kernel->paddingType = VALID;
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "deserializeModel: CONV1D_TRANSPOSED: only VALID paddingType is supported",
+        deserializeModel(&MODEL_CHAIN(model, 1), f));
+    fclose(f);
+    freeConv1dTransposedLayer(layer);
+    freeQuantization(floatQ);
+}
+
 #define BN_OFFSET_PROP_LOSS_MATH_TYPE (BN_OFFSET_FORWARD_MATH_TYPE + 2)
 
 static void testDeserializeBatchNormRejectsNonFloat32PropLossMath(void) {
@@ -3331,6 +3360,7 @@ int main(void) {
     RUN_TEST(testDeserializeLayerNormRejectsNormalizedShapeGammaMismatch);
     RUN_TEST(testDeserializeSoftmaxRejectsBfpMathOverANonBfpWire);
     RUN_TEST(testDeserializeDropoutRejectsAnOutOfRangeP);
+    RUN_TEST(testDeserializeConv1dTransposedRejectsNonValidPadding);
     RUN_TEST(testReadTensorRecordHeaderFloat32);
     RUN_TEST(testReadTensorRecordHeaderGroupedSym);
     RUN_TEST(testReadTensorRecordHeaderGroupedAsym);

@@ -5291,15 +5291,16 @@ void testPlanCostsADagNodeOnItsWiredInput(void) {
     freeAddLayer(model[2]);
 }
 
-/* Layer 0's input width raised in its weights' shape, which only the cost
- * reads (the table and the grammar read the output width): with SIZE_MAX / 4,
- * Linear 2->4 costs 4 * (SIZE_MAX / 4) = SIZE_MAX - 3, and ReLU's 4 more
- * cannot be added. */
+/* Layer 0's input width raised in its weights' shape and in the table's input
+ * key, which only the cost reads (the table and the grammar read the output
+ * width): with SIZE_MAX / 4, Linear 2->4 costs 4 * (SIZE_MAX / 4) =
+ * SIZE_MAX - 3, and ReLU's 4 more cannot be added. */
 static void buildMlp3PlanWithLayer0Width(const rematPlanSpec_t *spec, size_t inFeatures) {
     layer_t *model[MLP3_N];
     inputLike_t in;
     rematWireTable_t *t = initMlp3Table(model, &in);
     model[0]->config->linear->weights->param->shape->dimensions[1] = inFeatures;
+    t->inputDims[1] = inFeatures;
     rematPlan_t *p = NULL;
     (void)rematPlanBuild(&p, t, &MODEL_CHAIN(model, t->modelSize), spec);
 }

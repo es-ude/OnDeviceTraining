@@ -5,6 +5,7 @@
 #include <stdlib.h>
 
 #include "ArithmeticType.h"
+#include "Common.h"
 #include "ExecuteOp.h"
 #include "Kernel.h"
 #include "Layer.h"
@@ -35,6 +36,15 @@ typedef struct conv1dTransposedConfig {
                     and backward weight/bias-grad ops skip this layer, but input gradients
                     still propagate */
 } conv1dTransposedConfig_t;
+
+/* The ConvTranspose kernels implement VALID geometry only. Check it wherever the kernel is
+ * set: the factory, the config initialiser and the deserializer. */
+static inline void conv1dTransposedRequireValidPadding(paddingType_t paddingType, const char *who) {
+    if (paddingType != VALID) {
+        PRINT_ERROR("%s: only VALID paddingType is supported", who);
+        exit(1);
+    }
+}
 
 void initConv1dTransposedConfigWithWeightsAndBias(
     conv1dTransposedConfig_t *cfg, kernel_t *kernel, parameter_t *weights, parameter_t *bias,

@@ -39,20 +39,6 @@ static void validateStateStorage(const quantization_t *q, const char *field) {
     }
 }
 
-static shape_t *buildOwnedShape(const size_t *srcDims, size_t numberOfDims) {
-    size_t *dims = reserveMemory(numberOfDims * sizeof(size_t));
-    size_t *order = reserveMemory(numberOfDims * sizeof(size_t));
-    for (size_t i = 0; i < numberOfDims; i++) {
-        dims[i] = srcDims[i];
-        order[i] = i;
-    }
-    shape_t *shape = reserveMemory(sizeof(shape_t));
-    shape->dimensions = dims;
-    shape->orderOfDimensions = order;
-    shape->numberOfDimensions = numberOfDims;
-    return shape;
-}
-
 ppcaReplay_t *ppcaReplayCreate(const ppcaReplayConfig_t *cfg) {
     if (cfg->dim == 0 || cfg->rank == 0 || cfg->rank >= cfg->dim) {
         PRINT_ERROR("ppcaReplayCreate: need 0 < rank < dim (dim=%zu rank=%zu)", cfg->dim,

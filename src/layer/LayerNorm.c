@@ -487,7 +487,7 @@ void layerNormForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
                           "LayerNorm forward");
 
     if (cfg->forwardMath.type == ARITH_BFP) {
-        const bfpQConfig_t *anchor = bfpWireAnchor(cfg->outputQ, "LayerNorm forward");
+        const bfpQConfig_t *anchor = cfg->outputQ->qConfig;
         bfpQConfig_t stage = {.exponents = NULL,
                               .numGroups = 1,
                               .groupSize = 0,
@@ -967,7 +967,7 @@ void layerNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
     case ARITH_BFP: {
         /* propLossQ anchors ALL THREE backward ops' staging, even when
          * the propLoss TENSOR is NULL (the grad ops still stage at it). */
-        const bfpQConfig_t *anchor = bfpWireAnchor(cfg->propLossQ, "LayerNorm backward");
+        const bfpQConfig_t *anchor = cfg->propLossQ->qConfig;
         bfpQConfig_t stage = {.exponents = NULL,
                               .numGroups = 1,
                               .groupSize = 0,

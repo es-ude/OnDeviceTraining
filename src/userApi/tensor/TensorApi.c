@@ -236,20 +236,18 @@ tensor_t *gradInitSym(tensor_t *param, uint8_t qBits, roundingMode_t roundingMod
 
 // getLike
 
+shape_t *buildOwnedShape(const size_t *dims, size_t numberOfDims) {
+    size_t *ownedDims = reserveMemory(numberOfDims * sizeof(size_t));
+    memcpy(ownedDims, dims, numberOfDims * sizeof(size_t));
+    size_t *order = reserveMemory(numberOfDims * sizeof(size_t));
+    setOrderOfDimsForNewTensor(numberOfDims, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, ownedDims, numberOfDims, order);
+    return shape;
+}
+
 shape_t *getShapeLike(shape_t *shape) {
-    shape_t *likeShape = reserveMemory(sizeof(shape_t));
-
-    size_t numberOfDims = shape->numberOfDimensions;
-
-    size_t *likeDims = reserveMemory(numberOfDims * sizeof(size_t));
-    memcpy(likeDims, shape->dimensions, numberOfDims * sizeof(size_t));
-
-    size_t *likeOrder = reserveMemory(numberOfDims * sizeof(size_t));
-    setOrderOfDimsForNewTensor(numberOfDims, likeOrder);
-
-    setShape(likeShape, likeDims, numberOfDims, likeOrder);
-
-    return likeShape;
+    return buildOwnedShape(shape->dimensions, shape->numberOfDimensions);
 }
 
 quantization_t *getQLike(quantization_t *quantization) {

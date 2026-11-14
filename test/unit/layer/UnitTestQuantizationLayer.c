@@ -92,7 +92,7 @@ void testQuantizationForwardSymToSymMatchesDirectRequant(void) {
 
     tensor_t *actual = buildSym2D(2, 3);
     layer_t qLayer = {.type = QUANTIZATION, .config = NULL}; /* kernel reads only tensors */
-    quantizationForward(&qLayer, input, actual, NULL);
+    layerFunctions[QUANTIZATION].forward(&qLayer, input, actual, NULL);
 
     int32_t expectedMantissas[6];
     int32_t actualMantissas[6];
@@ -220,7 +220,7 @@ void testQuantizationBackwardRequantsDyMantissasLikeDirectRequant(void) {
     tensor_t *forwardInput = buildSym2D(2, 3); /* unused: straight-through backward */
     tensor_t *propLoss = buildSym2D(2, 3);
     layer_t qLayer = {.type = QUANTIZATION, .config = NULL};
-    quantizationBackward(&qLayer, forwardInput, loss, propLoss, NULL);
+    layerFunctions[QUANTIZATION].backward(&qLayer, forwardInput, loss, propLoss, NULL);
 
     int32_t expectedMantissas[6];
     int32_t actualMantissas[6];
@@ -355,7 +355,7 @@ void testQuantizationCalcOutputShapeIdentityIncludingPermutedOrder(void) {
         .dimensions = outDims, .numberOfDimensions = 0, .orderOfDimensions = outOrder};
 
     layer_t qLayer = {.type = QUANTIZATION, .config = NULL};
-    quantizationCalcOutputShape(&qLayer, &inputShape, &outputShape);
+    layerFunctions[QUANTIZATION].calcOutputShape(&qLayer, &inputShape, &outputShape);
 
     TEST_ASSERT_EQUAL_UINT(2, outputShape.numberOfDimensions);
     TEST_ASSERT_EQUAL_UINT(2, outputShape.dimensions[0]);
@@ -364,29 +364,71 @@ void testQuantizationCalcOutputShapeIdentityIncludingPermutedOrder(void) {
     TEST_ASSERT_EQUAL_UINT(0, outputShape.orderOfDimensions[1]);
 }
 
-void testLayerFunctionsVtableHasQuantizationRow(void) {
-    TEST_ASSERT_EQUAL_PTR((void *)quantizationForward,
-                          (void *)layerFunctions[QUANTIZATION].forward);
-    TEST_ASSERT_EQUAL_PTR((void *)quantizationBackward,
-                          (void *)layerFunctions[QUANTIZATION].backward);
-    TEST_ASSERT_EQUAL_PTR((void *)quantizationCalcOutputShape,
-                          (void *)layerFunctions[QUANTIZATION].calcOutputShape);
+/* Conversion walks flat storage, so the produced wire needs the consumed wire's physical dims
+ * and order. Every fixture holds the same element count, so an ungated call converts cleanly. */
+void testQuantizationRejectsAWireOfAnotherLayout(void) {
+    layer_t qLayer = {.type = QUANTIZATION, .config = NULL};
+    tensor_t *input = buildFloat2D(2, 3);
+    tensor_t *output = buildSym2D(3, 2);
+    ASSERT_EXITS_WITH_OUTPUT(1, "Quantization forward: output must have the input's dims and order",
+                             quantizationForward(&qLayer, input, output, NULL));
+    freeTensor(output);
+    freeTensor(input);
+
+    input = buildFloat2D(2, 2);
+    output = buildSym2D(2, 2);
+    transposeTensor(output, 0, 1);
+    ASSERT_EXITS_WITH_OUTPUT(1, "Quantization forward: output must have the input's dims and order",
+                             quantizationForward(&qLayer, input, output, NULL));
+    freeTensor(output);
+    freeTensor(input);
+
+    size_t flatDims[1] = {6};
+    size_t flatOrder[1] = {0};
+    shape_t flatShape = {
+        .numberOfDimensions = 1, .dimensions = flatDims, .orderOfDimensions = flatOrder};
+    float flatData[6] = {0};
+    quantization_t flatQ;
+    initFloat32Quantization(&flatQ);
+    tensor_t flat;
+    setTensorValues(&flat, (uint8_t *)flatData, &flatShape, &flatQ, NULL);
+    output = buildSym2D(6, 1);
+    ASSERT_EXITS_WITH_OUTPUT(1, "Quantization forward: output must have the input's dims and order",
+                             quantizationForward(&qLayer, &flat, output, NULL));
+    freeTensor(output);
+
+    tensor_t *loss = buildSym2D(2, 3);
+    tensor_t *propLoss = buildFloat2D(3, 2);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "Quantization backward: propLoss must have the loss's dims and order",
+                             quantizationBackward(&qLayer, NULL, loss, propLoss, NULL));
+    freeTensor(propLoss);
+    freeTensor(loss);
 }
 
-void testQuantizationConfigUnionMemberRoundTrip(void) {
-    quantization_t *fq = quantizationInitSymInt32(HALF_AWAY);
-    quantization_t *bq = quantizationInitSymInt32(HALF_AWAY);
-    quantizationConfig_t cfg = {.outputQ = fq, .propLossQ = bq, .ownsQuantizations = false};
-    layerConfig_t lc = {.quantization = &cfg};
-    layer_t layer;
-    initLayer(&layer, QUANTIZATION, &lc);
+/* A transposed view converts as stored when the output carries the same permutation, which
+ * is what quantizationCalcOutputShape hands the wire allocator. */
+void testQuantizationForwardConvertsAMatchingPermutedLayout(void) {
+    const float values[6] = {1.5f, -2.f, 0.25f, 3.f, -0.5f, 2.f};
+    tensor_t *input = buildFloat2D(2, 3);
+    memcpy(input->data, values, sizeof(values));
+    tensor_t *expected = buildSym2D(2, 3);
+    convertTensor(input, expected, NULL);
+    transposeTensor(input, 0, 1);
+    tensor_t *actual = buildSym2D(2, 3);
+    transposeTensor(actual, 0, 1);
+    layer_t qLayer = {.type = QUANTIZATION, .config = NULL};
 
-    TEST_ASSERT_EQUAL_INT(QUANTIZATION, layer.type);
-    TEST_ASSERT_EQUAL_PTR(fq, layer.config->quantization->outputQ);
-    TEST_ASSERT_EQUAL_PTR(bq, layer.config->quantization->propLossQ);
+    quantizationForward(&qLayer, input, actual, NULL);
 
-    freeQuantization(bq);
-    freeQuantization(fq);
+    int32_t expectedMantissas[6];
+    int32_t actualMantissas[6];
+    memcpy(expectedMantissas, expected->data, sizeof(expectedMantissas));
+    memcpy(actualMantissas, actual->data, sizeof(actualMantissas));
+    freeTensor(actual);
+    freeTensor(expected);
+    freeTensor(input);
+    TEST_ASSERT_EQUAL_INT32_ARRAY(expectedMantissas, actualMantissas, 6);
 }
 
 void testQuantLayerInitBorrowingStoresQuantPointersVerbatim(void) {
@@ -411,36 +453,24 @@ void testQuantLayerInitBorrowingStoresQuantPointersVerbatim(void) {
     freeQuantization(fq);
 }
 
+/* The owning copies outlive the caller's config, including a grouped BFP backing array, and
+ * aliased source slots still give two copies (the ASan gate catches a use after free or a
+ * double free at teardown). */
 void testQuantLayerInitOwningDeepCopiesQuantizations(void) {
-    quantization_t *q = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *q = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 3);
     layerQuant_t lq = {.outputQ = q, .propLossQ = q};
 
     layer_t *layer = quantLayerInitOwning(&lq);
+    freeQuantization(q);
 
     quantizationConfig_t *cfg = layer->config->quantization;
     TEST_ASSERT_TRUE(cfg->ownsQuantizations);
-    TEST_ASSERT_NOT_EQUAL(q, cfg->outputQ);
-    TEST_ASSERT_NOT_EQUAL(q, cfg->propLossQ);
-    TEST_ASSERT_NOT_EQUAL(cfg->outputQ, cfg->propLossQ); /* two separate copies */
-    TEST_ASSERT_EQUAL_INT(SYM_INT32, cfg->outputQ->type);
-    TEST_ASSERT_EQUAL_INT(SYM_INT32, cfg->propLossQ->type);
+    TEST_ASSERT_NOT_EQUAL(cfg->outputQ, cfg->propLossQ);
+    TEST_ASSERT_EQUAL_INT(BFP, cfg->outputQ->type);
+    TEST_ASSERT_EQUAL_size_t(2, ((bfpQConfig_t *)cfg->outputQ->qConfig)->numGroups);
+    TEST_ASSERT_EQUAL_size_t(3, ((bfpQConfig_t *)cfg->propLossQ->qConfig)->groupSize);
 
     freeQuantLayer(layer);
-    freeQuantization(q);
-}
-
-void testQuantLayerInitOwningFreesAllAllocationsWithoutLeak(void) {
-    /* Build + free 5 layers — leak-checked by the CI valgrind/LSan sweep
-     * (UnitTestLinear testLinearLayerInitOwningFreesAllAllocationsWithoutLeak
-     * precedent). */
-    for (int i = 0; i < 5; i++) {
-        quantization_t *q = quantizationInitSymInt32(HALF_AWAY);
-        layerQuant_t lq = {.outputQ = q, .propLossQ = q};
-        layer_t *layer = quantLayerInitOwning(&lq);
-        freeQuantLayer(layer);
-        freeQuantization(q);
-    }
-    TEST_PASS();
 }
 
 /* ---- the layer converts with its CONVERT stream ---- */
@@ -640,11 +670,10 @@ int main(void) {
     RUN_TEST(testQuantizationBackwardRequantsDyMantissasLikeDirectRequant);
     RUN_TEST(testQuantizationBackwardBfpToBfpReblocksInIntegers);
     RUN_TEST(testQuantizationCalcOutputShapeIdentityIncludingPermutedOrder);
-    RUN_TEST(testLayerFunctionsVtableHasQuantizationRow);
-    RUN_TEST(testQuantizationConfigUnionMemberRoundTrip);
+    RUN_TEST(testQuantizationRejectsAWireOfAnotherLayout);
+    RUN_TEST(testQuantizationForwardConvertsAMatchingPermutedLayout);
     RUN_TEST(testQuantLayerInitBorrowingStoresQuantPointersVerbatim);
     RUN_TEST(testQuantLayerInitOwningDeepCopiesQuantizations);
-    RUN_TEST(testQuantLayerInitOwningFreesAllAllocationsWithoutLeak);
     RUN_TEST(testQuantizationForwardConvertsWithItsForwardConvertStream);
     RUN_TEST(testQuantizationBackwardConvertsWithItsBackwardConvertStream);
     RUN_TEST(testQuantizationForwardWithoutAContextConvertsWithoutAStream);

@@ -93,6 +93,8 @@ void testLinearAccessorsMatchConfig(void) {
         .propLossQ = qB,
         .weightStorage = qStorage,
         .biasStorage = qStorage,
+        .weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE,
+        .biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE,
     };
     const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
     layer_t *layer = linearLayerInit(

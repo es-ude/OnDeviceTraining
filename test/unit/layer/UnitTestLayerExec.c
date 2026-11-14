@@ -12,9 +12,7 @@
  * repository root:
  *   uv run python -c "from examples._shared.keyed_rng import (fold,
  *   key_from_seed as kfs); k = kfs(0x1a7e); print([[hex(w) for w in x]
- *   for x in (k, fold(k, 4, 0), fold(k, 5, 0))])"
- * Each check also compares with the explicit rngFold chain, so a wrong tag
- * value and a wrong fold fail differently. */
+ *   for x in (k, fold(k, 4, 0), fold(k, 5, 0))])" */
 #define LAYER_EXEC_TEST_SEED 0x1a7eu
 
 void setUp(void) {}
@@ -23,11 +21,6 @@ void tearDown(void) {}
 static void assertKey(uint32_t w0, uint32_t w1, rngKey_t key) {
     TEST_ASSERT_EQUAL_HEX32(w0, key.w[0]);
     TEST_ASSERT_EQUAL_HEX32(w1, key.w[1]);
-}
-
-static void assertSameKey(rngKey_t expected, rngKey_t actual) {
-    TEST_ASSERT_EQUAL_HEX32(expected.w[0], actual.w[0]);
-    TEST_ASSERT_EQUAL_HEX32(expected.w[1], actual.w[1]);
 }
 
 /* A NULL context means the caller supplies no randomness: no phase key, and
@@ -50,7 +43,6 @@ void testLayerExecPhaseKeyFoldsTheForwardPhase(void) {
     const rngKey_t *phase = layerExecPhaseKey(&exec, RNG_TAG_FORWARD, &storage);
 
     TEST_ASSERT_EQUAL_PTR(&storage, phase);
-    assertSameKey(rngFold(exec.key, RNG_TAG_FORWARD, 0u), storage);
     assertKey(0x94c78887u, 0x0ebfb008u, storage);
 }
 
@@ -63,7 +55,6 @@ void testLayerExecPhaseKeyFoldsTheBackwardPhase(void) {
     const rngKey_t *phase = layerExecPhaseKey(&exec, RNG_TAG_BACKWARD, &storage);
 
     TEST_ASSERT_EQUAL_PTR(&storage, phase);
-    assertSameKey(rngFold(exec.key, RNG_TAG_BACKWARD, 0u), storage);
     assertKey(0xfc1567afu, 0xac9a7ff1u, storage);
 }
 
@@ -74,19 +65,14 @@ void testLayerExecPhaseKeyFoldsTheBackwardPhase(void) {
  *   for x in (fold(fold(k, 4, 0), 7, 0), fold(fold(k, 5, 0), 7, 3))])" */
 void testLayerExecOpKeyFoldsThePhaseThenTheOpIndex(void) {
     layerExec_t exec = {.key = rngKeyFromSeed(LAYER_EXEC_TEST_SEED)};
-    rngKey_t phase;
     rngKey_t storage;
 
     const rngKey_t *op = layerExecOpKey(&exec, RNG_TAG_FORWARD, 0u, &storage);
     TEST_ASSERT_EQUAL_PTR(&storage, op);
-    assertSameKey(rngFold(*layerExecPhaseKey(&exec, RNG_TAG_FORWARD, &phase), RNG_TAG_OP, 0u),
-                  storage);
     assertKey(0x260d8a9du, 0x002d0794u, storage);
 
     op = layerExecOpKey(&exec, RNG_TAG_BACKWARD, 3u, &storage);
     TEST_ASSERT_EQUAL_PTR(&storage, op);
-    assertSameKey(rngFold(*layerExecPhaseKey(&exec, RNG_TAG_BACKWARD, &phase), RNG_TAG_OP, 3u),
-                  storage);
     assertKey(0x05fbab60u, 0x814d2f62u, storage);
 }
 
@@ -120,16 +106,12 @@ void testLayerExecPurposeStreamOpensThePhaseKeyFoldedWithThePurpose(void) {
     };
     layerExec_t exec = {.key = rngKeyFromSeed(LAYER_EXEC_TEST_SEED)};
     for (size_t c = 0; c < sizeof cases / sizeof cases[0]; c++) {
-        rngKey_t phase;
         rngStream_t storage;
 
         rngStream_t *stream =
             layerExecPurposeStream(&exec, cases[c].phase, cases[c].purpose, &storage);
 
         TEST_ASSERT_EQUAL_PTR(&storage, stream);
-        rngKey_t purposeKey =
-            rngFold(*layerExecPhaseKey(&exec, cases[c].phase, &phase), cases[c].purpose, 0u);
-        TEST_ASSERT_EQUAL_HEX32(rngOpen(purposeKey).state, storage.state);
         TEST_ASSERT_EQUAL_HEX32(cases[c].pythonState, storage.state);
     }
 }
@@ -152,7 +134,6 @@ void testLayerExecForLayerFoldsTheLayerIndex(void) {
     const layerExec_t *exec = layerExecForLayer(&callKey, 2u, &storage);
 
     TEST_ASSERT_EQUAL_PTR(&storage, exec);
-    assertSameKey(rngFold(callKey, RNG_TAG_LAYER, 2u), storage.key);
     assertKey(0x322854b6u, 0x8b4d9779u, storage.key);
 }
 

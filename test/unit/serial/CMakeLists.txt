@@ -36,6 +36,8 @@ add_elastic_ai_unit_test(
         SoftmaxApi
         Dropout
         DropoutApi
+        Conv1dTransposed
+        Conv1dTransposedApi
         LayerQuant
         ArithmeticType
 

@@ -413,6 +413,24 @@ void testConv1dLayerInitRejectsInvalidWeightGradAccMode(void) {
     freeQuantization(q);
 }
 
+/* The scheme is checked at the factory entry, before any parameter is allocated. */
+void testConv1dLayerInitRejectsAnUnknownInitScheme(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "conv1dLayerInit: invalid weightInit.scheme (got 9)",
+        (void)conv1dLayerInit(
+            &(conv1dInit_t){.inChannels = 1,
+                            .outChannels = 2,
+                            .kernelSize = 3,
+                            .weightInit = {.scheme = (initScheme_t)9, .key = &initKey}},
+            &lq));
+    freeQuantization(q);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConv1dLayerInitBorrowingBuildsLayerWithCorrectShape);
@@ -426,5 +444,6 @@ int main(void) {
     RUN_TEST(testConv1dLayerInitDefaultWeightsWithinPyTorchBound);
     RUN_TEST(testConv1dLayerInitKaimingUniformOverrideUsesHeBound);
     RUN_TEST(testConv1dLayerInitRejectsInvalidWeightGradAccMode);
+    RUN_TEST(testConv1dLayerInitRejectsAnUnknownInitScheme);
     return UNITY_END();
 }

@@ -3711,10 +3711,12 @@ void testFactoryRejectsUnsetGradAccModeUnderQuantizedBackward(void) {
 
     layerQuantInitUniform(&lq, symQ);
     lq.weightGradAccMode = OUT_WRITE;
-    ASSERT_EXITS_WITH_OUTPUT(1, "weightGradAccMode must be", layerNormLayerInit(&init, &lq));
+    ASSERT_EXITS_WITH_OUTPUT(1, "weightGradAccMode: not a valid grad accumulate mode",
+                             layerNormLayerInit(&init, &lq));
     layerQuantInitUniform(&lq, symQ);
     lq.biasGradAccMode = OUT_WRITE;
-    ASSERT_EXITS_WITH_OUTPUT(1, "biasGradAccMode must be", layerNormLayerInit(&init, &lq));
+    ASSERT_EXITS_WITH_OUTPUT(1, "biasGradAccMode: not a valid grad accumulate mode",
+                             layerNormLayerInit(&init, &lq));
 
     lq.weightGradAccMode = OUT_WRITE;
     init.trainable = TRAINABLE_FALSE;

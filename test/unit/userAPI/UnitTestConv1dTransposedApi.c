@@ -395,6 +395,43 @@ void testConv1dTransposedLayerInitRejectsInvalidBiasGradAccMode(void) {
     freeQuantization(q);
 }
 
+/* Random init draws floats; SYM params come from FLOAT32-init + requantizeTensorInPlace. */
+void testConv1dTransposedLayerInitRequiresFloat32WeightStorage(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    lq.weightStorage = symQ;
+
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "conv1dTransposedLayerInit: random init requires FLOAT32 layerQuant.weightStorage",
+        (void)conv1dTransposedLayerInit(
+            &(conv1dTransposedInit_t){
+                .inChannels = 4, .outChannels = 2, .kernelSize = 3, .weightInit.key = &initKey},
+            &lq));
+    freeQuantization(symQ);
+    freeQuantization(floatQ);
+}
+
+/* The ConvTranspose kernels implement VALID geometry only. */
+void testConv1dTransposedLayerInitRejectsNonValidPadding(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "conv1dTransposedLayerInit: only VALID paddingType is supported",
+        (void)conv1dTransposedLayerInit(&(conv1dTransposedInit_t){.inChannels = 4,
+                                                                  .outChannels = 2,
+                                                                  .kernelSize = 3,
+                                                                  .padding = SAME,
+                                                                  .weightInit.key = &initKey},
+                                        &lq));
+    freeQuantization(q);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testConv1dTransposedLayerInitBorrowingBuildsLayerWithCorrectShape);
@@ -408,5 +445,7 @@ int main(void) {
     RUN_TEST(testConv1dTransposedLayerInitKaimingUniformOverrideUsesHeBound);
     RUN_TEST(testConv1dTransposedLayerInitRejectsOutputPaddingAtMaxStrideDilation);
     RUN_TEST(testConv1dTransposedLayerInitRejectsInvalidBiasGradAccMode);
+    RUN_TEST(testConv1dTransposedLayerInitRequiresFloat32WeightStorage);
+    RUN_TEST(testConv1dTransposedLayerInitRejectsNonValidPadding);
     return UNITY_END();
 }

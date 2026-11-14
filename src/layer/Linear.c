@@ -5,7 +5,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "Add.h"
 #include "Arithmetic.h"
 #include "ArithmeticType.h"
 #include "BfpKernelSupport.h"
@@ -20,31 +19,6 @@
 #include "ScaleCanon.h"
 #include "SymAccumGuard.h"
 #include "SymGroupedWeight.h"
-#include "TensorConversion.h"
-
-void linearInitConfig(linearConfig_t *linearConfig, parameter_t *weights, parameter_t *bias,
-                      quantization_t *forwardQ, quantization_t *backwardMath,
-                      quantization_t *propLossQ) {
-    linearConfig->weights = weights;
-    linearConfig->bias = bias;
-    linearConfig->forwardMath = arithmeticFromQuantizationOrDefault(forwardQ);
-    linearConfig->weightGradMath = arithmeticFromQuantizationOrDefault(backwardMath);
-    linearConfig->biasGradMath = arithmeticFromQuantizationOrDefault(backwardMath);
-    linearConfig->propLossMath = arithmeticFromQuantizationOrDefault(backwardMath);
-    linearConfig->outputQ = forwardQ;
-    linearConfig->propLossQ = propLossQ;
-    linearConfig->ownsQuantizations = false;
-
-    /* Today's per-callsite hardcodes (linearBackward, below), now carried on
-     * the config so every caller of this init function -- factory-built or
-     * hand-wired directly (test/unit/layer/UnitTestLinear.c) -- gets the
-     * historical behavior without having to know about the PR3 knob. A
-     * layerQuant_t-driven factory overrides these right after this call
-     * (LinearApi.c) if the caller opted into a different mode. */
-    linearConfig->weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
-    linearConfig->biasGradAccMode = OUT_ACC_FIXED_SCALE;
-    linearConfig->frozen = false;
-}
 
 void linearForwardFloat(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output) {
     transposeTensor(w, 0, 1);
@@ -59,12 +33,8 @@ void linearForwardSymInt32(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *
     transposeTensor(w, 0, 1);
 }
 
-/* Group-quant PR2 (Task 3): `w` here is the executeOp prologue's grouped
- * scratch (unpacked mantissas, poisoned scale=1.0f — matmulSymInt32Tensors-
- * GroupedWeight ignores it, reading real per-group scales and the weight's
- * code range from `groupedWeight` instead). Same transpose dance as
- * linearForwardSymInt32: groups bind to STORAGE order, which transposeTensor
- * exposes as the physically-innermost (contiguous) axis for the reduction. */
+/* Grouped scratch uses groupedWeight's scales and code range; groups follow physical storage
+ * across the transpose. */
 void linearForwardSymInt32Grouped(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output,
                                   const symGroupedWeight_t *groupedWeight, rngStream_t *rs) {
     transposeTensor(w, 0, 1);
@@ -142,20 +112,8 @@ void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output,
     linearCalcOutputShape(linearLayer, input->shape, &outExpected);
     layerRequireDenseWire(output, &outExpected, "Linear forward", "output");
 
-    /* BFP epic PR2 (Task 7), ARITH_BFP arm — identical layer-side rules in
-     * Conv1d.c/Conv1dTransposed.c (arm parity):
-     *  1. BFP-stored weights REQUIRED (fail-fast below): the weight is the
-     *     operand whose widths every FLOAT32 operand stages at, so a
-     *     FLOAT32 weight has no width source (and would silently fake-quant).
-     *  2. bfpStage wiring (BFP PR2-Decision 1/2): FLOAT32-stored input/bias get
-     *     the stack geometry TEMPLATE below — per-tensor {1,0} at the
-     *     WEIGHTS' widths, rounded by the op (the funnel owns exponent
-     *     backing and reads roundingMode from .arithmetic, not the
-     *     template); BFP-stored operands get NULL (borrowed zero-copy).
-     *     Weights are always NULL by rule 1.
-     *  3. groupedSymOperandPos = 0: that gate is a SYM/ASYM-carrier detail —
-     *     BFP blocking is per-operand-legal under ARITH_BFP (ExecuteOp.h),
-     *     so nothing is declared. */
+    /* BFP-stored weights anchor FLOAT32 operand staging widths. The stack template lives
+     * through executeOp; executeOp owns exponents and applies each operation's rounding. */
     if (linearConfig->forwardMath.type == ARITH_BFP) {
         if (weights->quantization->type != BFP) {
             PRINT_ERROR("Linear: ARITH_BFP forward requires BFP-stored weights (FLOAT32-init + "
@@ -165,7 +123,6 @@ void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output,
             exit(1);
         }
         const bfpQConfig_t *wQC = weights->quantization->qConfig;
-        /* Stack template: lifetime covers the executeOp call (same frame). */
         bfpQConfig_t stage = {.exponents = NULL,
                               .numGroups = 1,
                               .groupSize = 0,
@@ -192,17 +149,8 @@ void linearForward(layer_t *linearLayer, tensor_t *input, tensor_t *output,
         return;
     }
 
-    /* Group-quant PR2 (+PR4: grouped ASYM via the symQConfig-shaped view,
-     * see symGroupedWeightOrNull): a stored grouped weight routes the SYM
-     * kernel adapter to the grouped matmul entry (the symGroupedWeight_t
-     * carried via ctx) AND opts the funnel's prologue into unpacking the
-     * grouped operand (groupedSymOperandPos) — always together, never
-     * independently (an unpack without the routing has nowhere group-shaped
-     * to go; the routing without the unpack would hand the kernel a
-     * still-packed tensor). Per-tensor SYM/ASYM (numGroups==1) and SYM_INT32
-     * weights are untouched — ctx stays NULL, exactly like before this PR.
-     * weights is always inputs[1] (bias present or not, see the .inputs
-     * literal below), so the declared position is a constant 2 (i+1 for i=1). */
+    /* Grouped weights require both grouped-kernel routing and prologue unpacking. The weight
+     * is operand 1, encoded as groupedSymOperandPos = 2. */
     symQConfig_t asymWeightView; /* lifetime: this frame (SymGroupedWeight.h view doc) */
     symGroupedWeight_t groupedWeightCtx;
     const symGroupedWeight_t *groupedWeight =
@@ -235,7 +183,7 @@ void linearCalcBiasGradsFloat32(tensor_t *loss, tensor_t *biasGrad) {
     /* Raw emit: per-feature batch sums of loss values; the executeOp epilogue adds. */
     size_t numFeatures = calcNumberOfElementsByTensor(biasGrad);
     size_t numLoss = calcNumberOfElementsByTensor(loss);
-    size_t batch = (numFeatures == 0) ? 0 : numLoss / numFeatures;
+    size_t batch = numLoss / numFeatures;
     float *bg = (float *)biasGrad->data;
     float *l = (float *)loss->data;
     for (size_t f = 0; f < numFeatures; f++) {
@@ -291,18 +239,11 @@ void linearCalcBiasGradsSymInt32(tensor_t *biasGrads, tensor_t *loss) {
      * grad's existing scale and integer-adds (Deutel-adjacent ODT scheme). */
     size_t numFeatures = calcNumberOfElementsByTensor(biasGrads);
     size_t numLoss = calcNumberOfElementsByTensor(loss);
-    if (numFeatures == 0 || numLoss % numFeatures != 0) {
-        PRINT_ERROR("linearCalcBiasGradsSymInt32: loss elements %zu not divisible by features %zu",
-                    numLoss, numFeatures);
-        exit(1);
-    }
     size_t batch = numLoss / numFeatures;
     int32_t *bg = (int32_t *)biasGrads->data;
     int32_t *l = (int32_t *)loss->data;
-    /* int32 accumulator (NO int64 in SYM paths). The loss wire's declared
-     * qMaxBits bounds each code, so N * 2^(q-1) <= INT32_MAX proves the batch
-     * sum safe (16-bit wire: batch <= 65535); a wider wire or longer batch runs
-     * the checked twin, which aborts on the first real overflow. */
+    /* int32 accumulator. N * 2^(qMaxBits-1) <= INT32_MAX proves the batch sum safe; otherwise
+     * the checked twin aborts on the first real overflow. */
     uint8_t lossBits = ((symInt32QConfig_t *)loss->quantization->qConfig)->qMaxBits;
     symAccumSite_t site = symAccumSiteInitSum("linearCalcBiasGradsSymInt32", batch, lossBits);
     if (symAccumProvenSafe(&site)) {
@@ -310,9 +251,8 @@ void linearCalcBiasGradsSymInt32(tensor_t *biasGrads, tensor_t *loss) {
     } else {
         linearBiasGradSumLoopsChecked(l, bg, numFeatures, batch, &site);
     }
-    /* Raw output: the loss scale and the static width of the sum (#516). On a
-     * user tensor (not the funnel scratch) this output can re-enter a SYM op
-     * as an operand, whose guard sizes its proof from the declared width. */
+    /* Stamp the loss scale and the sum's static width: on a user tensor this output can
+     * re-enter a SYM op, whose overflow proof reads the declared width. */
     symInt32QConfig_t *bgQC = biasGrads->quantization->qConfig;
     storeCanonScale(&bgQC->scale,
                     loadCanonScale(&((symInt32QConfig_t *)loss->quantization->qConfig)->scale));
@@ -323,23 +263,16 @@ void linearCalcPropLossSymInt32(tensor_t *weights, tensor_t *loss, tensor_t *pro
     matmulSymInt32Tensors(loss, weights, propLoss);
 }
 
-/* Group-quant PR3 (Task 1): unlike the forward's transpose dance
- * (linearForwardSymInt32Grouped), dx consumes the weight AS STORED — the
- * reduction runs over dim-0 (outFeatures), storage-strided by inFeatures.
- * The unified matmulIntCoreGrouped binds each visited element's group to its
- * actual storage index, so no orientation fix-up is needed (or possible:
- * groups partition flat storage, not the logical view). dx has no bias. */
+/* dx uses stored weights without transposition; group lookup follows each visited storage
+ * index. */
 void linearCalcPropLossSymInt32Grouped(tensor_t *weights, tensor_t *loss, tensor_t *propLoss,
                                        const symGroupedWeight_t *groupedWeight, rngStream_t *rs) {
     matmulSymInt32TensorsGroupedWeight(loss, weights, NULL, propLoss, groupedWeight, rs);
 }
 
-/* BFP epic PR3: backward cores on the PR2 fold contract (BFP D8 amendment) --
- * operands arrive as the funnel's unpacked-BFP scratch; matmulBfpTensors /
- * matmulBfpRawTensors are orientation-agnostic (per-element group lookup
- * honors orderOfDimensions), so weightGrad/propLoss are thin transpose-view
- * wrappers. The float-fold weightGrad serves FLOAT32 grads and the fixed
- * grid; the integer ones BFP grads under DYNAMIC_RESCALE and every dx. */
+/* BFP matmul honors transpose views; restore the shared shape after weight-gradient
+ * computation. The float-fold weightGrad serves FLOAT32 grads and the fixed grid; the integer
+ * ones BFP grads under DYNAMIC_RESCALE and every dx. */
 void linearCalcWeightGradsBfp(tensor_t *loss, tensor_t *forwardInput, tensor_t *weightGrads) {
     transposeTensor(loss, 0, 1);
     matmulBfpTensors(loss, forwardInput, NULL, weightGrads);
@@ -361,20 +294,10 @@ void linearCalcPropLossBfp(tensor_t *loss, tensor_t *weights, tensor_t *propLoss
  * step), lossless power-of-two fold on group change + tail. Sum headroom via
  * bfpValidateSumHeadroom (the product bound does not apply to sums). */
 void linearCalcBiasGradsBfp(tensor_t *loss, tensor_t *biasGrad) {
-    if (loss->quantization->type != BFP) {
-        PRINT_ERROR("linearCalcBiasGradsBfp: loss must be BFP (unpacked scratch form)");
-        exit(1);
-    }
     size_t numFeatures = calcNumberOfElementsByTensor(biasGrad);
     size_t numLoss = calcNumberOfElementsByTensor(loss);
-    if (numFeatures == 0 || numLoss % numFeatures != 0) {
-        PRINT_ERROR("linearCalcBiasGradsBfp: loss elements %zu not divisible by features %zu",
-                    numLoss, numFeatures);
-        exit(1);
-    }
     size_t batch = numLoss / numFeatures;
     const bfpQConfig_t *qC = loss->quantization->qConfig;
-    validateBfpQConfigShape(qC, numLoss);
     bfpValidateSumHeadroom(qC, batch, "linearCalcBiasGradsBfp");
     int32_t expBias = bfpExponentBias(qC);
     bfpGroupRange_t qRange = {0};
@@ -581,29 +504,14 @@ static bool linearGradIntAcc(arithmetic_t math, const tensor_t *grad, outputMode
            mode == OUT_ACC_DYNAMIC_RESCALE;
 }
 
-/* Backward kernel dispatch: native per-slot arms for FLOAT32/SYM_INT32/BFP
- * (epic PR3). Any future arithmetic enum member must still die HERE, not in
- * the funnel: for BFP-STORED operands the funnel's backward gate
- * (FLOAT32-stored + NULL bfpStage) never fires, and a fall-through ternary
- * would hand the FLOAT kernel unpacked int32 mantissa scratch through a
- * float* cast — silent wrong arithmetic rather than a crash (same hazard the
- * LayerNorm backward dispatch documents; Conv1d/ConvT1d guard their slots the
- * same way). */
+/* The factory and the deserializer admit only these three arithmetic types. */
 static opKernelFn_t linearBackwardKernelForArithmetic(arithmetic_t math, opKernelFn_t floatKernel,
                                                       opKernelFn_t symKernel,
-                                                      opKernelFn_t bfpKernel,
-                                                      const char *slotName) {
-    switch (math.type) {
-    case ARITH_FLOAT32:
-        return floatKernel;
-    case ARITH_SYM_INT32:
+                                                      opKernelFn_t bfpKernel) {
+    if (math.type == ARITH_SYM_INT32) {
         return symKernel;
-    case ARITH_BFP:
-        return bfpKernel;
-    default:
-        PRINT_ERROR("Linear backward (%s): quantization type not implemented", slotName);
-        exit(1);
     }
+    return math.type == ARITH_BFP ? bfpKernel : floatKernel;
 }
 
 void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss,
@@ -628,20 +536,15 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
         layerRequireDenseWire(propLoss, &inExpected, "Linear backward", "propLoss");
     }
 
-    /* BFP epic PR3, backward mirror of the forward's ARITH_BFP rules (see
-     * linearForward): BFP-stored weights are the width anchor every
-     * FLOAT32-stored operand stages at, and the stack template below covers
-     * all three backward executeOp calls (per-tensor {1,0} at the weights'
-     * widths; the funnel owns exponent backing and rounds by each op's own
-     * arithmetic.roundingMode, not the template's). Zero-init keeps the
-     * template inert when no slot runs ARITH_BFP: the .bfpStage ternaries
-     * below wire &stage unconditionally on FLOAT32-stored operands
-     * (ExecuteOp.h: entries are ignored under other arithmetics), so &stage
-     * must never point at uninitialized stack. */
-    bool anyBfpBackward = cfg->weightGradMath.type == ARITH_BFP ||
-                          cfg->biasGradMath.type == ARITH_BFP ||
-                          cfg->propLossMath.type == ARITH_BFP;
-    bfpQConfig_t stage = {0}; /* lifetime: this frame, covers all three executeOp calls */
+    /* BFP-stored weights anchor FLOAT32 operand staging widths; only ops that run need them.
+     * The stack template lives through all three executeOp calls; executeOp owns exponents
+     * and applies each operation's rounding. Zero-init keeps it inert when no running op is
+     * ARITH_BFP, since the .bfpStage entries below point at it unconditionally. */
+    bool runsGrads = !cfg->frozen;
+    bool anyBfpBackward = (runsGrads && cfg->weightGradMath.type == ARITH_BFP) ||
+                          (runsGrads && cfg->bias != NULL && cfg->biasGradMath.type == ARITH_BFP) ||
+                          (propLoss != NULL && cfg->propLossMath.type == ARITH_BFP);
+    bfpQConfig_t stage = {0};
     if (anyBfpBackward) {
         if (weights->quantization->type != BFP) {
             PRINT_ERROR("Linear backward: ARITH_BFP math slots require BFP-stored weights (the "
@@ -660,15 +563,14 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
                                .exponentBits = wQC->exponentBits};
     }
 
-    if (!cfg->frozen) {
-        executeOpValidateAccMode(cfg->weightGradAccMode, "Linear weightGradAccMode");
+    if (runsGrads) {
         tensor_t *weightGrad = getGradFromParameter(cfg->weights);
         bool wIntAcc = linearGradIntAcc(cfg->weightGradMath, weightGrad, cfg->weightGradAccMode);
         executeOp(
             &(opSpec_t){
                 .kernel = linearBackwardKernelForArithmetic(
                     cfg->weightGradMath, weightGradKernelFloat, weightGradKernelSym,
-                    wIntAcc ? weightGradKernelBfpRaw : weightGradKernelBfp, "weightGrad"),
+                    wIntAcc ? weightGradKernelBfpRaw : weightGradKernelBfp),
                 .inputs = (tensor_t *[]){loss, forwardInput},
                 .nInputs = 2,
                 .arithmetic = cfg->weightGradMath,
@@ -681,14 +583,13 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
             weightGrad);
 
         if (cfg->bias != NULL) {
-            executeOpValidateAccMode(cfg->biasGradAccMode, "Linear biasGradAccMode");
             tensor_t *biasGrad = getGradFromParameter(cfg->bias);
             bool bIntAcc = linearGradIntAcc(cfg->biasGradMath, biasGrad, cfg->biasGradAccMode);
             executeOp(
                 &(opSpec_t){
                     .kernel = linearBackwardKernelForArithmetic(
                         cfg->biasGradMath, biasGradKernelFloat, biasGradKernelSym,
-                        bIntAcc ? biasGradKernelBfpRaw : biasGradKernelBfp, "biasGrad"),
+                        bIntAcc ? biasGradKernelBfpRaw : biasGradKernelBfp),
                     .inputs = (tensor_t *[]){loss},
                     .nInputs = 1,
                     .arithmetic = cfg->biasGradMath,
@@ -701,15 +602,10 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
         }
     }
 
-    /* propLoss == NULL (#380 PR2): grads-only call -- skip the dx write
-     * entirely rather than dereference the absent buffer. */
+    /* NULL propLoss requests parameter gradients only. */
     if (propLoss != NULL) {
-        /* Group-quant PR3 (Task 1) + PR4 (grouped ASYM via the view): same
-         * detection + always-together wiring as linearForward (see the
-         * comment there) — ctx routes the SYM kernel adapter to the grouped
-         * matmul entry, groupedSymOperandPos opts the funnel prologue into
-         * unpacking (SYM arm) / group-aware dequant (FLOAT32 arm) of the
-         * weight at inputs[1] (position 2). */
+        /* Grouped weights require both grouped-kernel routing and prologue unpacking. The
+         * weight is operand 1, encoded as groupedSymOperandPos = 2. */
         symQConfig_t asymWeightView; /* lifetime: this frame (SymGroupedWeight.h view doc) */
         symGroupedWeight_t groupedWeightCtx;
         const symGroupedWeight_t *groupedWeight =
@@ -719,8 +615,7 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
         executeOp(
             &(opSpec_t){
                 .kernel = linearBackwardKernelForArithmetic(cfg->propLossMath, propLossKernelFloat,
-                                                            propLossKernelSym, propLossKernelBfp,
-                                                            "propLoss"),
+                                                            propLossKernelSym, propLossKernelBfp),
                 .ctx = groupedWeight,
                 .inputs = (tensor_t *[]){loss, weights},
                 .nInputs = 2,
@@ -728,8 +623,7 @@ void linearBackward(layer_t *linearLayer, tensor_t *forwardInput, tensor_t *loss
                 .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, LINEAR_OP_PROP_LOSS, &opKey),
                 .mode = OUT_WRITE,
                 .groupedSymOperandPos = grouped ? 2 : 0,
-                /* weights operand: always BFP-stored under ARITH_BFP (rule-1
-                 * mirror above) -> borrowed zero-copy, never staged. */
+                /* Under ARITH_BFP the weights are BFP-stored (gate above): borrowed. */
                 .bfpStage = {loss->quantization->type == FLOAT32 ? &stage : NULL, NULL, NULL},
                 /* ARITH_BFP dx is integer end to end: the BFP_RAW, re-blocked
                  * into a BFP dx wire (or dequantized into a FLOAT32 one). */
@@ -754,6 +648,13 @@ void linearCalcOutputShape(layer_t *linearLayer, shape_t *inputShape, shape_t *o
     linearConfig_t *cfg = linearLayer->config->linear;
     shape_t *weightShape = cfg->weights->param->shape;
     size_t outFeatures = weightShape->dimensions[0];
+    size_t inFeatures = weightShape->dimensions[1];
+    size_t gotFeatures = getDimensionsByIndex(&inputView, 1);
+    if (gotFeatures != inFeatures) {
+        PRINT_ERROR("Linear: input must have %zu features (logical dim 1), got %zu", inFeatures,
+                    gotFeatures);
+        exit(1);
+    }
 
     outputShape->dimensions[0] = batchSize;
     outputShape->dimensions[1] = outFeatures;

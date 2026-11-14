@@ -109,7 +109,7 @@ Notes on the qualified cells:
 - **`QUANTIZATION`** is a pure storage-to-storage conversion node (`executeConvert`,
   conversionMatrix), not an arithmetic layer — it deliberately changes dtype/scale.
 - **Quant params** — trainable weight/bias storage. The Linear/Conv factories allocate
-  FLOAT32 params only (`requireFloat32` init gate, by design — #270): random init is
+  FLOAT32 params only (`validateRandomInit` factory gate, by design — #270): random init is
   defined on floats, so non-FLOAT32 params on the GEMM family are reached by FLOAT32
   init followed by an in-place requantize (`requantizeTensorInPlace()`) — hence "~".
   That route reaches SYM_INT32 (`examples/mixed_width_mlp`), packed SYM/ASYM per-tensor
@@ -118,7 +118,7 @@ Notes on the qualified cells:
   carrier positions) and BFP (`train_c_har_classifier_bfp`; required, since an
   `ARITH_BFP` GEMM op fail-fasts on non-BFP weights). **LayerNorm
   and GroupNorm** take the constant-fill route instead: gamma/beta may be allocated
-  SYM_INT32 or BFP directly (no requireFloat32 gate — #270 covers RANDOM init, and the
+  SYM_INT32 or BFP directly (no random-init gate — #270 covers RANDOM init, and the
   constant fills gamma = 1 / beta = 0 are exact grid points on any BFP grid), but
   SYM/ASYM are rejected by factory validation — hence "partial". BFP gamma/beta
   geometry is PR2-Decision-5-derived (BFP epic PR5): the factory honors the storage

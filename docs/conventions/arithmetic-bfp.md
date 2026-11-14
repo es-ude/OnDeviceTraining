@@ -386,11 +386,13 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
   inert.) This is the **rule-1 mirror**: `ARITH_BFP` forward requires
   BFP-stored weights because the weight is the only width source a
   FLOAT32-stored operand can stage at (§5.2); the SAME requirement applies to
-  backward, independently — ANY of the three backward math slots deriving
-  `ARITH_BFP` fails fast unless that layer's OWN weights are BFP-stored,
-  checked once per backward call before the staging template is even built
-  (`Linear backward: ARITH_BFP math slots require BFP-stored weights ...`,
-  and the Conv1d/Conv1dTransposed twins of that message). The forward gate
+  backward, independently — a backward call fails fast unless that layer's
+  OWN weights are BFP-stored, checked once before the staging template is
+  even built (`Linear backward: ARITH_BFP math slots require BFP-stored
+  weights ...`, and the Conv1d/Conv1dTransposed twins of that message).
+  Linear checks only the `ARITH_BFP` ops that run (no grad ops on a frozen
+  layer, no bias grad without a bias, no dx for a NULL propLoss);
+  Conv1d/Conv1dTransposed still check every declared backward slot. The forward gate
   (§5.2) and this backward gate are independent checks on the SAME
   underlying fact (BFP-stored weights are the only width source a
   FLOAT32-stored operand can stage at) — whichever side of a layer's graph

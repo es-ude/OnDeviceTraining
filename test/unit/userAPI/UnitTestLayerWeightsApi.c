@@ -7,6 +7,7 @@
 #include "Conv1dApi.h"
 #include "Conv1dTransposed.h"
 #include "Conv1dTransposedApi.h"
+#include "DeathTest.h"
 #include "DyadicScale.h"
 #include "LayerCommon.h"
 #include "LayerNorm.h"
@@ -342,6 +343,43 @@ void testLayerLoadWeightsLayerNormQuantizesForSymStorage(void) {
     TEST_ASSERT_EQUAL_INT(-2047, b[2]);
 }
 
+static layer_t *makeLinear3x2(bias_t bias, layerQuant_t *lq) {
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    return linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = 3, .outFeatures = 2, .bias = bias, .weightInit.key = &initKey},
+        lq);
+}
+
+/* The documented misuse cases at the public entry; LayerNorm stands for the
+ * layers whose beta is always required. */
+void testLayerLoadWeightsRejectsBuffersThatDoNotFitTheLayer(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *biased = makeLinear3x2(BIAS_TRUE, &lq);
+    layer_t *biasFree = makeLinear3x2(BIAS_FALSE, &lq);
+    size_t normShape[] = {2};
+    layer_t *norm = layerNormLayerInit(
+        &(layerNormInit_t){.normalizedShape = normShape, .numNormDims = 1, .eps = 1e-5f}, &lq);
+    float w[6] = {0};
+    float b[2] = {0};
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "layerLoadWeights: layer is NULL", layerLoadWeights(NULL, w, b));
+    ASSERT_EXITS_WITH_OUTPUT(1, "weightData is NULL", layerLoadWeights(biased, NULL, b));
+    ASSERT_EXITS_WITH_OUTPUT(1, "layer has a bias/beta but biasData is NULL",
+                             layerLoadWeights(biased, w, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "layer has a bias/beta but biasData is NULL",
+                             layerLoadWeights(norm, w, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "layer has no bias but biasData is non-NULL",
+                             layerLoadWeights(biasFree, w, b));
+
+    freeLayerNormLayer(norm);
+    freeLinearLayer(biasFree);
+    freeLinearLayer(biased);
+    freeQuantization(q);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLayerLoadWeightsLinearOverwritesWeightAndBiasTensors);
@@ -352,5 +390,6 @@ int main(void) {
     RUN_TEST(testLayerLoadWeightsConv1dTransposedOverwritesWeightAndBiasTensors);
     RUN_TEST(testLayerLoadWeightsLayerNormOverwritesGammaAndBeta);
     RUN_TEST(testLayerLoadWeightsLayerNormQuantizesForSymStorage);
+    RUN_TEST(testLayerLoadWeightsRejectsBuffersThatDoNotFitTheLayer);
     return UNITY_END();
 }

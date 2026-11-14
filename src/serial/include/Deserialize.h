@@ -4,39 +4,17 @@
 #include "Layer.h"
 #include "Model.h"
 
-/*! Deserializes tensor from a given file.
- *
- * \param tensor: Pointer to tensor to write deserialized data to
- * \param f: Pointer of file to deserialize from
- */
+/* Readers for the ODTS format. Each loads into an existing compatible
+ * skeleton and fails fast on a record that does not fit it. */
 void deserializeTensor(tensor_t *tensor, FILE *f);
 
-/*! Deserializes parameter from a given file.
- *
- *  Grad-presence TOLERANT (#380 PR3): the file's per-parameter hasGrad byte
- *  may legitimately disagree with the skeleton's construction for a
- *  full-model checkpoint that mixes frozen and trainable layers. File
- *  hasGrad=1 into a frozen skeleton (parameter->grad == NULL) parses and
- *  discards the grad record (no allocation; the stream stays positionally
- *  in sync for the next record). File hasGrad=0 into a trainable skeleton
- *  leaves the skeleton's already-zero-initialized grad untouched
- *  (optimizerZeroGrad re-zeros it before every batch regardless). The
- *  discard path requires a seekable stream (fseek/ftell).
- *
- * \param parameter: Pointer to parameter to write deserialized data to
- * \param f: Pointer of file to deserialize from
- */
+/*! Present gradients are discarded for frozen parameters; absent gradients
+ *  leave destination gradients unchanged. Discarding gradients requires a
+ *  seekable stream. */
 void deserializeParameter(parameter_t *parameter, FILE *f);
 
-/*! Deserializes model from a given file.
- *
- *  Requires a seekable stream (fseek/ftell) — see deserializeParameter's
- *  grad-presence tolerance (#380 PR3), which discards a mismatched grad
- *  record via fseek rather than allocating a scratch buffer for it.
- *
- * \param m: Model whose layers receive the deserialized data
- * \param f: Pointer of file to deserialize from
- */
+/*! m must match the file's layer count and wiring. Requires a seekable stream
+ *  whenever a grad record is discarded (see deserializeParameter). */
 void deserializeModel(const model_t *m, FILE *f);
 
 #endif // DESERIALIZE_H

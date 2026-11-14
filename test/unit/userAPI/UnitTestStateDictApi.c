@@ -1,5 +1,6 @@
 #define SOURCE_FILE "UNIT_TEST_STATE_DICT_API"
 
+#include "DeathTest.h"
 #include "LayerCommon.h"
 #include "LayerNorm.h"
 #include "LayerNormApi.h"
@@ -63,10 +64,50 @@ void testModelLoadStateDictLoadsTwoLinearLayersSkippingRelu(void) {
     freeLinearLayer(model[2]);
 }
 
-void testModelLoadStateDictCountMismatchIsCoveredByDesign(void) {
-    /* Count-mismatch fires PRINT_ERROR + exit; Unity cannot catch.
-     * This test exists as a marker. */
-    TEST_IGNORE_MESSAGE("Count mismatch path fires exit() — covered by design contract.");
+static layer_t *makeLinear(size_t in, size_t out, uint32_t keyIndex, layerQuant_t *lq) {
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, keyIndex);
+    return linearLayerInit(
+        &(linearInit_t){
+            .inFeatures = in, .outFeatures = out, .bias = BIAS_TRUE, .weightInit.key = &initKey},
+        lq);
+}
+
+void testModelLoadStateDictRejectsEntryCountMismatch(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *model[] = {makeLinear(3, 2, 0u, &lq), reluLayerInit(&lq), makeLinear(2, 1, 2u, &lq)};
+    float w[6] = {0};
+    float b[2] = {0};
+    stateDictEntry_t entries[] = {{.name = "fc1", .weightData = w, .biasData = b}};
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "model has 2 param layers but 1 entries provided",
+                             modelLoadStateDict(&MODEL_CHAIN(model, 3), entries, 1));
+
+    freeLinearLayer(model[0]);
+    freeReluLayer(model[1]);
+    freeLinearLayer(model[2]);
+    freeQuantization(q);
+}
+
+/* A bad entry is reported by its name. */
+void testModelLoadStateDictRejectsEntryWithoutWeightData(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    layer_t *model[] = {makeLinear(3, 2, 0u, &lq), makeLinear(2, 1, 2u, &lq)};
+    float w0[6] = {0};
+    float b0[2] = {0};
+    float b1[1] = {0};
+    stateDictEntry_t entries[] = {{.name = "fc1", .weightData = w0, .biasData = b0},
+                                  {.name = "fc2", .weightData = NULL, .biasData = b1}};
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "entry 'fc2' (#1): weightData is NULL",
+                             modelLoadStateDict(&MODEL_CHAIN(model, 2), entries, 2));
+
+    freeLinearLayer(model[0]);
+    freeLinearLayer(model[1]);
+    freeQuantization(q);
 }
 
 void testModelLoadStateDictTreatsLayerNormAsParameterLayer(void) {
@@ -100,7 +141,8 @@ void testModelLoadStateDictTreatsLayerNormAsParameterLayer(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testModelLoadStateDictLoadsTwoLinearLayersSkippingRelu);
-    RUN_TEST(testModelLoadStateDictCountMismatchIsCoveredByDesign);
+    RUN_TEST(testModelLoadStateDictRejectsEntryCountMismatch);
+    RUN_TEST(testModelLoadStateDictRejectsEntryWithoutWeightData);
     RUN_TEST(testModelLoadStateDictTreatsLayerNormAsParameterLayer);
     return UNITY_END();
 }

@@ -251,7 +251,7 @@ void testRoundTripPacked(void) {
 /*! Group-quant PR2 (Task 5): a GROUPED SYM basis (numGroups=3, groupSize=4)
  *  deserialized into a PER-TENSOR skeleton (numGroups=1, groupSize=0, from
  *  packedConfig) round-trips via the same reallocation relax
- *  testDeserializeGroupedSymIntoPerTensorSkeleton pins directly at the
+ *  testDeserializeQConfigAcceptsNumGroupsMismatchViaReallocation pins directly at the
  *  Deserialize.c layer -- exercised here through PPCA's OWN peek-parser,
  *  whose numGroups-equality fail-fast this task drops. Pre-Task-5 this dies
  *  in peekValidateThenDeserializeTensor's SYM arm (file numGroups=3 !=

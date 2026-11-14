@@ -3,40 +3,17 @@
 #include "StateDictApi.h"
 #include "BatchNorm1d.h"
 #include "Common.h"
-#include "LayerWeightsApi.h"
+#include "LayerWeightsInternal.h"
 #include <math.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
 static bool layerHasParameters(layer_t *layer) {
-    switch (layer->type) {
-    case LINEAR:
-    case CONV1D:
-    case CONV1D_TRANSPOSED:
-    case LAYERNORM:
-    case GROUPNORM:
-        return true;
-    case BATCHNORM1D:
-        return layer->config->batchNorm1d->affine;
-    case RELU:
-    case SOFTMAX:
-    case FLATTEN:
-    case MAXPOOL1D:
-    case AVGPOOL1D:
-    case ADAPTIVE_AVGPOOL1D:
-    case DROPOUT:
-    case QUANTIZATION:
-    case ADD:
-        return false;
-    default:
-        PRINT_ERROR("layerHasParameters: unknown layer type %d", (int)layer->type);
-        exit(1);
-    }
+    return layerLoadTargets(layer).weights != NULL;
 }
 
 void modelLoadStateDict(const model_t *m, stateDictEntry_t *entries, size_t numEntries) {
-    /* First pass: count param layers and verify entry count matches. */
     size_t numParamLayers = 0;
     for (size_t i = 0; i < m->numLayers; i++) {
         if (layerHasParameters(m->layers[i])) {
@@ -49,23 +26,34 @@ void modelLoadStateDict(const model_t *m, stateDictEntry_t *entries, size_t numE
         exit(1);
     }
 
-    /* Second pass: load each param layer in order. */
+    /* Every entry's buffers are checked before the first write. */
     size_t entryIdx = 0;
     for (size_t i = 0; i < m->numLayers; i++) {
-        if (!layerHasParameters(m->layers[i])) {
+        layerLoadTargets_t targets = layerLoadTargets(m->layers[i]);
+        if (targets.weights == NULL) {
             continue;
         }
-        stateDictEntry_t *e = &entries[entryIdx];
-        if (e->weightData == NULL) {
+        const stateDictEntry_t *e = &entries[entryIdx];
+        const char *problem = layerLoadTargetsProblem(targets, e->weightData, e->biasData);
+        if (problem != NULL) {
             if (e->name != NULL) {
-                PRINT_ERROR("modelLoadStateDict: entry '%s' (#%zu): weightData is NULL", e->name,
-                            entryIdx);
+                PRINT_ERROR("modelLoadStateDict: entry '%s' (#%zu): %s", e->name, entryIdx,
+                            problem);
             } else {
-                PRINT_ERROR("modelLoadStateDict: entry #%zu: weightData is NULL", entryIdx);
+                PRINT_ERROR("modelLoadStateDict: entry #%zu: %s", entryIdx, problem);
             }
             exit(1);
         }
-        layerLoadWeights(m->layers[i], e->weightData, e->biasData);
+        entryIdx++;
+    }
+
+    entryIdx = 0;
+    for (size_t i = 0; i < m->numLayers; i++) {
+        layerLoadTargets_t targets = layerLoadTargets(m->layers[i]);
+        if (targets.weights == NULL) {
+            continue;
+        }
+        layerLoadTargetsFill(targets, entries[entryIdx].weightData, entries[entryIdx].biasData);
         entryIdx++;
     }
 }
@@ -85,7 +73,6 @@ static void failBufferEntry(const stateDictBuffers_t *e, size_t idx, const char 
 
 void modelLoadStateDictBuffers(const model_t *m, const stateDictBuffers_t *entries,
                                size_t numEntries) {
-    /* First pass: count buffer-bearing layers and verify entry count matches. */
     size_t numBufferLayers = 0;
     for (size_t i = 0; i < m->numLayers; i++) {
         if (layerHasRunningBuffers(m->layers[i])) {
@@ -99,7 +86,6 @@ void modelLoadStateDictBuffers(const model_t *m, const stateDictBuffers_t *entri
         exit(1);
     }
 
-    /* Second pass: load each buffer-bearing layer in order. */
     size_t entryIdx = 0;
     for (size_t i = 0; i < m->numLayers; i++) {
         if (!layerHasRunningBuffers(m->layers[i])) {

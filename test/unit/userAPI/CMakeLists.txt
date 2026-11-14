@@ -44,6 +44,7 @@ add_elastic_ai_unit_test(
         Tensor
         TensorApi
         DyadicScale
+        odt_test_death
         odt_test_layer_builders
 )
 
@@ -69,6 +70,7 @@ add_elastic_ai_unit_test(
         LayerNorm
         Tensor
         TensorApi
+        odt_test_death
 )
 
 

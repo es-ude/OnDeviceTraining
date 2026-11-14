@@ -1,7 +1,6 @@
 #define SOURCE_FILE "SERIALIZE"
 
-#include <stdlib.h>
-
+#include "Serialize.h"
 #include "AdaptiveAvgPool1d.h"
 #include "AddLayer.h"
 #include "ArithmeticType.h"
@@ -23,109 +22,49 @@
 #include "Relu.h"
 #include "Rounding.h"
 #include "SerialWire.h"
-#include "Serialize.h"
 #include "SerializeInternal.h"
 #include "Softmax.h"
 #include "Tensor.h"
 #include "TensorRecord.h"
 
-/* v9 (linq S4): every stored SYM / SYM_INT32 / ASYM scale is written as its
- * integer dyadic fields, `u16 m` then `i16 e` (both LE, value m * 2^e,
- * DyadicScale.h), in place of v8's `f32` scale -- the same 4 bytes, so every
- * record keeps its size. A non-canonical in-memory scale fails fast here
- * instead of reaching the file. The tensor record changes with it
- * (ODTS_TENSOR_RECORD_VERSION 9). The v8 wiring is unchanged; every other byte
- * is unchanged; v8 files fail at the version check (no v8 compatibility shim).
- * v8: a `u8 wiringKind` follows `u32 layerCount`, ahead of the first layer
- * record. 0 = chain: node j reads the output of node j - 1, for every model
- * modelIsChain accepts, so a chain the graph builder spelled as an explicit
- * CSR writes the same bytes as a MODEL_CHAIN. 1 = graph wiring: the model's
- * CSR follows, `u16 inputStart[layerCount + 1]` then `u16
- * inputIds[inputStart[layerCount]]` (LE). The reader requires the file's
- * kind and CSR to equal the skeleton's. New ADD record (tag 14), laid out
- * like RELU: `arithmetic forwardMath, arithmetic propLossMath, quantization
- * outputQ, quantization propLossQ`. Every other layer record is unchanged;
- * v7 files fail at the version check.
- * v7 (#391): the LINEAR record gains `u8 hasBias` between the weights and
- * bias parameter records (bias record omitted when 0) -- the same presence
- * byte CONV1D/CONV1D_TRANSPOSED already carried -- so a BIAS_FALSE Linear
- * (bias == NULL) no longer NULL-derefs here. Every other record is
- * unchanged; v6 files fail at the version check (no back-compat shim).
- * v6 (#460): new BATCHNORM1D record (tag 13) -- `u32 numChannels, f32 eps,
- * u8 momentumMode (1 VALUE | 2 CUMULATIVE), f32 momentum, u8 affine, u8
- * track, [gamma, beta parameters iff affine], [f32 runningMean[C],
- * f32 runningVar[C], u64 numBatchesTracked iff track], arithmetic
- * forwardMath, arithmetic propLossMath, quantization outputQ, quantization
- * propLossQ`. Every other record is unchanged; v5 files fail at the version
- * check (no back-compat shim, established policy).
- * Locked format v2 (#370): magic "ODTS" + u32 version + u32 layerCount, then
- * one Record per layer (u8 tag + payload). Every count/dim/kernel field is u32
- * little-endian and every scalar goes through the checked SerialWire
- * primitives, so a model written on a 64-bit host loads bit-identically on
- * 32-bit MCU targets.
- * v3: parameter records carry a grad-presence byte (#380). Frozen layers
- * (parameter->grad == NULL, layer freezing epic) write hasGrad=0 and skip the
- * grad tensor entirely; deserialize is TOLERANT of a presence/skeleton
- * mismatch (#380 PR3) -- grads are skipped into frozen skeletons or left
- * zeroed when absent, never NULL-dereferenced; see Deserialize.c.
- * v4 (group-quant PR1/PR2): the SYM
- * qConfig record grows `u32 numGroups`, `u32 groupSize` ahead of the scales
- * array -- `f32 scales[numGroups]` -- then the unchanged `u8 qBits`/`u8
- * rounding` tail. The writer is group-GENERAL and always has been: it writes
- * symQC->numGroups/groupSize verbatim and every group's scale (not just
- * scales[0]), whatever shape the in-memory config holds -- see
- * testGoldenBytesModelReluSymGroupedOutputV5 (UnitTestSerialize.c), the
- * numGroups>1 golden that pins this. PR1 shipped with no producer able to
- * BUILD a numGroups>1 config yet, so every PR1-era file happened to carry
- * numGroups=1, groupSize=0 (the per-tensor sentinel, Quantization.h); PR2's
- * initSymQConfigGrouped (Task 1) and the Deserialize.c read-side relax
- * (Task 5) are what actually exercise a numGroups>1 record end to end. v4's
- * ASYM record was left on an INTRA-BRANCH BRIDGE (old per-tensor v4 shape,
- * scale/qBits/rounding/i32-zeroPoint, but with the i32 slot repurposed to
- * carry a code-domain uint16 value, #246/group-quant D6) -- superseded by v5
- * below. v5 is a COORDINATED single bump (BFP D12,
- * docs/conventions/arithmetic-bfp.md) carrying two independent
- * additions that landed together:
- * (a) group-quant PR4, Task 4: the
- * ASYM qConfig record adopts the SAME numGroups/groupSize-prefixed,
- * group-general layout the v4 SYM record introduced, PLUS a second per-group
- * array: `u16 zeroPoints[numGroups]` (LE) placed after
- * `f32 scales[numGroups]`, group-quant D6's code-domain zp made possible by the
- * qBits<=16 ceiling. Full ASYM record: `u32 numGroups`, `u32 groupSize`,
- * `f32 scales[numGroups]`, `u16 zeroPoints[numGroups]`, `u8 qBits`,
- * `u8 rounding` -- replacing the bridge above entirely (no migration path
- * from a v4 ASYM record: its value decoded WRONG under the code-domain grid
- * by design of that interim state, so v4 files -- INCLUDING ones the
- * group-quant branch's own earlier tasks produced -- now fail cleanly at the
- * version check below, consistent with the v1->v4 no-back-compat-shim
- * policy).
- * (b) BFP epic PR1, Task 7: new
- * BFP qConfig record -- `u32 numGroups`, `u32 groupSize`, `u8
- * exponents[numGroups]`, then `u8 mantissaBits`, `u8 exponentBits`, `u8
- * roundingMode` -- mirrors the SYM v4 arm field-for-field (group shape ahead
- * of the per-group data, then a fixed-width tail), group-general from day
- * one (writes whatever numGroups/groupSize the in-memory config holds). BFP
- * is a purely additive wire dtype: a pre-BFP v5 reader hitting the BFP tag
- * fails fast on the unknown tag, never misparses.
- * SYM/SYM_INT32/FLOAT32/INT32/BOOL records, layer arms, and the v3
- * grad-presence byte are untouched by this bump.
- * SERIALIZE_FORMAT_VERSION itself is defined once in TensorRecord.h. */
+/* ODTS layout, version SERIALIZE_FORMAT_VERSION (TensorRecord.h):
+ *   file:         "ODTS", u32 version, u32 layerCount, u8 wiringKind, then per
+ *                 layer a u8 tag (layerType_t position, append-only) and that
+ *                 layer's record
+ *   wiringKind:   0 = chain (node j reads node j - 1; every model modelIsChain
+ *                 accepts), 1 = graph, followed by the model's CSR:
+ *                 u16 inputStart[layerCount + 1], u16 inputIds[inputStart[layerCount]];
+ *                 the reader requires kind and CSR to equal the skeleton's
+ *   tensor:       u32 rank, u32 dimensions[rank], u32 orderOfDimensions[rank],
+ *                 quantization, packed payload (calcNumberOfBytesForData bytes)
+ *   parameter:    u8 hasGrad, param tensor, grad tensor iff hasGrad
+ *   scale:        u16 m, i16 e (value m * 2^e, DyadicScale.h); a non-canonical
+ *                 in-memory scale fails fast at the writer
+ *   quantization: u8 dtype, then by dtype
+ *     SYM_INT32   scale, u8 rounding, u8 qMaxBits
+ *     SYM         u32 numGroups, u32 groupSize, scale scales[numGroups], u8 qBits, u8 rounding
+ *     ASYM        u32 numGroups, u32 groupSize, scale scales[numGroups],
+ *                 u16 zeroPoints[numGroups], u8 qBits, u8 rounding
+ *     BFP         u32 numGroups, u32 groupSize, u8 exponents[numGroups],
+ *                 u8 mantissaBits, u8 exponentBits, u8 rounding
+ *   arithmetic:   u8 type, u8 rounding
+ * Layer records follow serializeLayer's field order; a layer with an optional
+ * bias writes u8 hasBias before it. Scalars are little-endian through the
+ * checked SerialWire primitives, so a file written on a 64-bit host loads
+ * bit-identically on a 32-bit MCU. */
 #define SERIALIZE_MAGIC "ODTS"
 
 void serializeTensor(tensor_t *tensor, FILE *f) {
     size_t numberOfValues = calcNumberOfElementsByTensor(tensor);
-    /* Data payload = packed size (calcNumberOfBytesForData) -- byte-identical to
-     * N * elementSize for byte-aligned dtypes, packed-tight for sub-byte (#172). */
     size_t dataBytes = calcNumberOfBytesForData(tensor->quantization, numberOfValues);
 
     serializeShape(tensor->shape, f);
     serializeQuantization(tensor->quantization, f);
     serialWriteBytes(tensor->data, dataBytes, f);
-    serializeSparsity();
 }
 
 void serializeParameter(parameter_t *parameter, FILE *f) {
-    /* v3 (#380): frozen layers carry no grad tensor - presence byte first. */
+    /* Frozen layers carry no grad tensor. */
     uint8_t hasGrad = parameter->grad != NULL ? 1u : 0u;
     serialWriteU8(hasGrad, f);
     serializeTensor(parameter->param, f);
@@ -152,8 +91,6 @@ void serializeModel(const model_t *m, FILE *f) {
     }
 
     for (size_t i = 0; i < m->numLayers; i++) {
-        /* The tag byte is the layerType_t enum position -- append-only wire
-         * contract, pinned in test/unit/serial/UnitTestSerialize.c. */
         serialWriteU8((uint8_t)m->layers[i]->type, f);
         serializeLayer(m->layers[i], f);
     }
@@ -215,13 +152,6 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
     }
     case SYM: {
         symQConfig_t *symQC = q->qConfig;
-        /* v4 (group-quant PR1/PR2): numGroups/groupSize precede the scales
-         * array so a reader can size its group-aware handling before
-         * touching any per-group data. Group-general: writes whatever shape
-         * the in-memory config holds, numGroups==1 (scales[0] carries
-         * exactly the float the deleted scalar `scale` field used to hold)
-         * or numGroups>1 (initSymQConfigGrouped, PR2 Task 1) alike -- see
-         * the top-of-file v4 comment. */
         serialWriteSizeAsU32LE(symQC->numGroups, f);
         serialWriteSizeAsU32LE(symQC->groupSize, f);
         for (size_t g = 0; g < symQC->numGroups; g++) {
@@ -233,15 +163,6 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
     }
     case ASYM: {
         asymQConfig_t *asymQC = q->qConfig;
-        /* v5 (group-quant PR4 Task 4): the ASYM twin of the SYM arm above --
-         * numGroups/groupSize precede the per-group arrays, THEN a second
-         * per-group array (zeroPoints, u16 LE) after scales, THEN the
-         * unchanged qBits/rounding tail. Group-general like the SYM arm: it
-         * writes asymQC->numGroups/groupSize verbatim and every group's
-         * scale/zeroPoint, whatever shape the in-memory config holds -- see
-         * testGoldenBytesModelReluAsymGroupedPropLossV5 (UnitTestSerialize.c)
-         * for the numGroups>1 golden. Replaces Task 1's v4 bridge (which
-         * capped numGroups at 1) entirely. */
         serialWriteSizeAsU32LE(asymQC->numGroups, f);
         serialWriteSizeAsU32LE(asymQC->groupSize, f);
         for (size_t g = 0; g < asymQC->numGroups; g++) {
@@ -256,11 +177,6 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
     }
     case BFP: {
         bfpQConfig_t *bfpQC = q->qConfig;
-        /* v5 (BFP epic PR1): numGroups/groupSize precede the exponents array,
-         * mirroring the SYM v4 arm above -- group-general since day one,
-         * writes bfpQC->numGroups/groupSize verbatim and every group's
-         * exponent (not just exponents[0]), whatever shape the in-memory
-         * config holds. See the top-of-file v5 comment. */
         serialWriteSizeAsU32LE(bfpQC->numGroups, f);
         serialWriteSizeAsU32LE(bfpQC->groupSize, f);
         serialWriteBytes(bfpQC->exponents, bfpQC->numGroups, f);
@@ -269,23 +185,26 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
         serialWriteU8((uint8_t)bfpQC->roundingMode, f);
         break;
     }
-    default:
-        PRINT_ERROR("Unknown qType!");
-        exit(1);
     }
 }
 
-// TODO
-static void serializeSparsity() {}
-
-/* BIAS_FALSE layers carry bias == NULL (header-sanctioned): presence byte
- * first, bias record only when present. */
+/* BIAS_FALSE layers carry bias == NULL: presence byte first, bias record
+ * only when present. */
 static void serializeOptionalBias(parameter_t *bias, FILE *f) {
     uint8_t hasBias = bias != NULL ? 1u : 0u;
     serialWriteU8(hasBias, f);
     if (hasBias) {
         serializeParameter(bias, f);
     }
+}
+
+/* The record tail most layers share, in wire order. */
+static void serializeLayerTail(arithmetic_t *forwardMath, arithmetic_t *propLossMath,
+                               quantization_t *outputQ, quantization_t *propLossQ, FILE *f) {
+    serializeArithmetic(forwardMath, f);
+    serializeArithmetic(propLossMath, f);
+    serializeQuantization(outputQ, f);
+    serializeQuantization(propLossQ, f);
 }
 
 static void serializeLayer(layer_t *layer, FILE *f) {
@@ -304,10 +223,8 @@ static void serializeLayer(layer_t *layer, FILE *f) {
     }
     case RELU: {
         reluConfig_t *reluConfig = layer->config->relu;
-        serializeArithmetic(&reluConfig->forwardMath, f);
-        serializeArithmetic(&reluConfig->propLossMath, f);
-        serializeQuantization(reluConfig->outputQ, f);
-        serializeQuantization(reluConfig->propLossQ, f);
+        serializeLayerTail(&reluConfig->forwardMath, &reluConfig->propLossMath, reluConfig->outputQ,
+                           reluConfig->propLossQ, f);
         break;
     }
     case ADD: {
@@ -350,27 +267,21 @@ static void serializeLayer(layer_t *layer, FILE *f) {
     case MAXPOOL1D: {
         maxPool1dConfig_t *maxPool1dConfig = layer->config->maxPool1d;
         serializeKernel(maxPool1dConfig->kernel, f);
-        serializeArithmetic(&maxPool1dConfig->forwardMath, f);
-        serializeArithmetic(&maxPool1dConfig->propLossMath, f);
-        serializeQuantization(maxPool1dConfig->outputQ, f);
-        serializeQuantization(maxPool1dConfig->propLossQ, f);
+        serializeLayerTail(&maxPool1dConfig->forwardMath, &maxPool1dConfig->propLossMath,
+                           maxPool1dConfig->outputQ, maxPool1dConfig->propLossQ, f);
         break;
     }
     case AVGPOOL1D: {
         avgPool1dConfig_t *avgPool1dConfig = layer->config->avgPool1d;
         serializeKernel(avgPool1dConfig->kernel, f);
-        serializeArithmetic(&avgPool1dConfig->forwardMath, f);
-        serializeArithmetic(&avgPool1dConfig->propLossMath, f);
-        serializeQuantization(avgPool1dConfig->outputQ, f);
-        serializeQuantization(avgPool1dConfig->propLossQ, f);
+        serializeLayerTail(&avgPool1dConfig->forwardMath, &avgPool1dConfig->propLossMath,
+                           avgPool1dConfig->outputQ, avgPool1dConfig->propLossQ, f);
         break;
     }
     case SOFTMAX: {
         softmaxConfig_t *softmaxConfig = layer->config->softmax;
-        serializeArithmetic(&softmaxConfig->forwardMath, f);
-        serializeArithmetic(&softmaxConfig->propLossMath, f);
-        serializeQuantization(softmaxConfig->outputQ, f);
-        serializeQuantization(softmaxConfig->propLossQ, f);
+        serializeLayerTail(&softmaxConfig->forwardMath, &softmaxConfig->propLossMath,
+                           softmaxConfig->outputQ, softmaxConfig->propLossQ, f);
         break;
     }
     case FLATTEN:
@@ -385,19 +296,16 @@ static void serializeLayer(layer_t *layer, FILE *f) {
     case ADAPTIVE_AVGPOOL1D: {
         adaptiveAvgPool1dConfig_t *adaptiveAvgPool1dConfig = layer->config->adaptiveAvgPool1d;
         serialWriteSizeAsU32LE(adaptiveAvgPool1dConfig->outputSize, f);
-        serializeArithmetic(&adaptiveAvgPool1dConfig->forwardMath, f);
-        serializeArithmetic(&adaptiveAvgPool1dConfig->propLossMath, f);
-        serializeQuantization(adaptiveAvgPool1dConfig->outputQ, f);
-        serializeQuantization(adaptiveAvgPool1dConfig->propLossQ, f);
+        serializeLayerTail(&adaptiveAvgPool1dConfig->forwardMath,
+                           &adaptiveAvgPool1dConfig->propLossMath, adaptiveAvgPool1dConfig->outputQ,
+                           adaptiveAvgPool1dConfig->propLossQ, f);
         break;
     }
     case DROPOUT: {
         dropoutConfig_t *dropoutConfig = layer->config->dropout;
         serialWriteF32LE(dropoutConfig->p, f);
-        serializeArithmetic(&dropoutConfig->forwardMath, f);
-        serializeArithmetic(&dropoutConfig->propLossMath, f);
-        serializeQuantization(dropoutConfig->outputQ, f);
-        serializeQuantization(dropoutConfig->propLossQ, f);
+        serializeLayerTail(&dropoutConfig->forwardMath, &dropoutConfig->propLossMath,
+                           dropoutConfig->outputQ, dropoutConfig->propLossQ, f);
         break;
     }
     case LAYERNORM: {
@@ -409,10 +317,8 @@ static void serializeLayer(layer_t *layer, FILE *f) {
         serialWriteF32LE(layerNormConfig->eps, f);
         serializeParameter(layerNormConfig->gamma, f);
         serializeParameter(layerNormConfig->beta, f);
-        serializeArithmetic(&layerNormConfig->forwardMath, f);
-        serializeArithmetic(&layerNormConfig->propLossMath, f);
-        serializeQuantization(layerNormConfig->outputQ, f);
-        serializeQuantization(layerNormConfig->propLossQ, f);
+        serializeLayerTail(&layerNormConfig->forwardMath, &layerNormConfig->propLossMath,
+                           layerNormConfig->outputQ, layerNormConfig->propLossQ, f);
         break;
     }
     case GROUPNORM: {
@@ -422,10 +328,8 @@ static void serializeLayer(layer_t *layer, FILE *f) {
         serialWriteF32LE(groupNormConfig->eps, f);
         serializeParameter(groupNormConfig->gamma, f);
         serializeParameter(groupNormConfig->beta, f);
-        serializeArithmetic(&groupNormConfig->forwardMath, f);
-        serializeArithmetic(&groupNormConfig->propLossMath, f);
-        serializeQuantization(groupNormConfig->outputQ, f);
-        serializeQuantization(groupNormConfig->propLossQ, f);
+        serializeLayerTail(&groupNormConfig->forwardMath, &groupNormConfig->propLossMath,
+                           groupNormConfig->outputQ, groupNormConfig->propLossQ, f);
         break;
     }
     case BATCHNORM1D: {
@@ -451,14 +355,8 @@ static void serializeLayer(layer_t *layer, FILE *f) {
             }
             serialWriteU64LE(c->numBatchesTracked, f);
         }
-        serializeArithmetic(&c->forwardMath, f);
-        serializeArithmetic(&c->propLossMath, f);
-        serializeQuantization(c->outputQ, f);
-        serializeQuantization(c->propLossQ, f);
+        serializeLayerTail(&c->forwardMath, &c->propLossMath, c->outputQ, c->propLossQ, f);
         break;
     }
-    default:
-        PRINT_ERROR("Unsupported layer type!\n");
-        exit(1);
     }
 }

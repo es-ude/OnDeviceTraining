@@ -7,132 +7,41 @@
 #include "Conv1dTransposed.h"
 #include "GroupNorm.h"
 #include "LayerNorm.h"
+#include "LayerWeightsInternal.h"
 #include "Linear.h"
 #include "Tensor.h"
 #include "TensorApi.h"
 #include <stdlib.h>
 
-void layerLoadWeights(layer_t *layer, float *weightData, float *biasData) {
-    if (layer == NULL) {
-        PRINT_ERROR("layerLoadWeights: layer is NULL");
-        exit(1);
-    }
-    if (weightData == NULL) {
-        PRINT_ERROR("layerLoadWeights: weightData is NULL");
-        exit(1);
-    }
-
+layerLoadTargets_t layerLoadTargets(layer_t *layer) {
+    layerLoadTargets_t targets = {.weights = NULL, .bias = NULL};
     switch (layer->type) {
-    case LINEAR: {
-        linearConfig_t *cfg = layer->config->linear;
-        if (cfg->weights == NULL) {
-            PRINT_ERROR("layerLoadWeights LINEAR: layer has no weight parameter");
-            exit(1);
-        }
-        tensor_t *weightTensor = cfg->weights->param;
-        size_t numWeightElements = calcNumberOfElementsByTensor(weightTensor);
-        tensorFillFromFloatBuffer(weightTensor, weightData, numWeightElements);
-
-        if (cfg->bias != NULL) {
-            if (biasData == NULL) {
-                PRINT_ERROR("layerLoadWeights LINEAR: layer has bias but biasData is NULL");
-                exit(1);
-            }
-            tensor_t *biasTensor = cfg->bias->param;
-            size_t numBiasElements = calcNumberOfElementsByTensor(biasTensor);
-            tensorFillFromFloatBuffer(biasTensor, biasData, numBiasElements);
-        } else if (biasData != NULL) {
-            PRINT_ERROR("layerLoadWeights LINEAR: layer has no bias but biasData is non-NULL");
-            exit(1);
+    case LINEAR:
+        targets.weights = layer->config->linear->weights;
+        targets.bias = layer->config->linear->bias;
+        break;
+    case CONV1D:
+        targets.weights = layer->config->conv1d->weights;
+        targets.bias = layer->config->conv1d->bias;
+        break;
+    case CONV1D_TRANSPOSED:
+        targets.weights = layer->config->conv1dTransposed->weights;
+        targets.bias = layer->config->conv1dTransposed->bias;
+        break;
+    case LAYERNORM:
+        targets.weights = layer->config->layerNorm->gamma;
+        targets.bias = layer->config->layerNorm->beta;
+        break;
+    case GROUPNORM:
+        targets.weights = layer->config->groupNorm->gamma;
+        targets.bias = layer->config->groupNorm->beta;
+        break;
+    case BATCHNORM1D:
+        if (layer->config->batchNorm1d->affine) {
+            targets.weights = layer->config->batchNorm1d->gamma;
+            targets.bias = layer->config->batchNorm1d->beta;
         }
         break;
-    }
-    case CONV1D: {
-        conv1dConfig_t *cfg = layer->config->conv1d;
-        if (cfg->weights == NULL) {
-            PRINT_ERROR("layerLoadWeights CONV1D: layer has no weight parameter");
-            exit(1);
-        }
-        tensor_t *weightTensor = cfg->weights->param;
-        size_t numWeightElements = calcNumberOfElementsByTensor(weightTensor);
-        tensorFillFromFloatBuffer(weightTensor, weightData, numWeightElements);
-
-        if (cfg->bias != NULL) {
-            if (biasData == NULL) {
-                PRINT_ERROR("layerLoadWeights CONV1D: layer has bias but biasData is NULL");
-                exit(1);
-            }
-            tensor_t *biasTensor = cfg->bias->param;
-            size_t numBiasElements = calcNumberOfElementsByTensor(biasTensor);
-            tensorFillFromFloatBuffer(biasTensor, biasData, numBiasElements);
-        } else if (biasData != NULL) {
-            PRINT_ERROR("layerLoadWeights CONV1D: layer has no bias but biasData is non-NULL");
-            exit(1);
-        }
-        break;
-    }
-    case LAYERNORM: {
-        layerNormConfig_t *cfg = layer->config->layerNorm;
-        if (cfg->gamma == NULL) {
-            PRINT_ERROR("layerLoadWeights LAYERNORM: layer has no gamma parameter");
-            exit(1);
-        }
-        tensor_t *gammaTensor = cfg->gamma->param;
-        size_t numGamma = calcNumberOfElementsByTensor(gammaTensor);
-        tensorFillFromFloatBuffer(gammaTensor, weightData, numGamma);
-
-        if (cfg->beta == NULL) {
-            PRINT_ERROR("layerLoadWeights LAYERNORM: layer has no beta parameter");
-            exit(1);
-        }
-        if (biasData == NULL) {
-            PRINT_ERROR("layerLoadWeights LAYERNORM: beta required but biasData is NULL");
-            exit(1);
-        }
-        tensor_t *betaTensor = cfg->beta->param;
-        size_t numBeta = calcNumberOfElementsByTensor(betaTensor);
-        tensorFillFromFloatBuffer(betaTensor, biasData, numBeta);
-        break;
-    }
-    case GROUPNORM: {
-        groupNormConfig_t *cfg = layer->config->groupNorm;
-        if (cfg->gamma == NULL) {
-            PRINT_ERROR("layerLoadWeights GROUPNORM: layer has no gamma parameter");
-            exit(1);
-        }
-        tensor_t *gammaTensor = cfg->gamma->param;
-        size_t numGamma = calcNumberOfElementsByTensor(gammaTensor);
-        tensorFillFromFloatBuffer(gammaTensor, weightData, numGamma);
-
-        if (cfg->beta == NULL) {
-            PRINT_ERROR("layerLoadWeights GROUPNORM: layer has no beta parameter");
-            exit(1);
-        }
-        if (biasData == NULL) {
-            PRINT_ERROR("layerLoadWeights GROUPNORM: beta required but biasData is NULL");
-            exit(1);
-        }
-        tensor_t *betaTensor = cfg->beta->param;
-        size_t numBeta = calcNumberOfElementsByTensor(betaTensor);
-        tensorFillFromFloatBuffer(betaTensor, biasData, numBeta);
-        break;
-    }
-    case BATCHNORM1D: {
-        batchNorm1dConfig_t *cfg = layer->config->batchNorm1d;
-        if (!cfg->affine) {
-            PRINT_ERROR("layerLoadWeights BATCHNORM1D: layer has no gamma/beta (noAffine)");
-            exit(1);
-        }
-        if (biasData == NULL) {
-            PRINT_ERROR("layerLoadWeights BATCHNORM1D: beta required but biasData is NULL");
-            exit(1);
-        }
-        tensorFillFromFloatBuffer(cfg->gamma->param, weightData,
-                                  calcNumberOfElementsByTensor(cfg->gamma->param));
-        tensorFillFromFloatBuffer(cfg->beta->param, biasData,
-                                  calcNumberOfElementsByTensor(cfg->beta->param));
-        break;
-    }
     case RELU:
     case SOFTMAX:
     case FLATTEN:
@@ -142,37 +51,52 @@ void layerLoadWeights(layer_t *layer, float *weightData, float *biasData) {
     case DROPOUT:
     case QUANTIZATION:
     case ADD:
-        PRINT_ERROR("layerLoadWeights: layer type %d has no parameters to load", (int)layer->type);
-        exit(1);
-    case CONV1D_TRANSPOSED: {
-        conv1dTransposedConfig_t *cfg = layer->config->conv1dTransposed;
-        if (cfg->weights == NULL) {
-            PRINT_ERROR("layerLoadWeights CONV1D_TRANSPOSED: layer has no weight parameter");
-            exit(1);
-        }
-        tensor_t *weightTensor = cfg->weights->param;
-        size_t numWeightElements = calcNumberOfElementsByTensor(weightTensor);
-        tensorFillFromFloatBuffer(weightTensor, weightData, numWeightElements);
-
-        if (cfg->bias != NULL) {
-            if (biasData == NULL) {
-                PRINT_ERROR("layerLoadWeights CONV1D_TRANSPOSED: layer has bias but biasData "
-                            "is NULL");
-                exit(1);
-            }
-            tensor_t *biasTensor = cfg->bias->param;
-            size_t numBiasElements = calcNumberOfElementsByTensor(biasTensor);
-            tensorFillFromFloatBuffer(biasTensor, biasData, numBiasElements);
-        } else if (biasData != NULL) {
-            PRINT_ERROR("layerLoadWeights CONV1D_TRANSPOSED: layer has no bias but biasData "
-                        "is non-NULL");
-            exit(1);
-        }
         break;
     }
-    default:
-        PRINT_ERROR("layerLoadWeights: dispatch not implemented for layer type %d",
-                    (int)layer->type);
+    return targets;
+}
+
+const char *layerLoadTargetsProblem(layerLoadTargets_t targets, const float *weightData,
+                                    const float *biasData) {
+    if (weightData == NULL) {
+        return "weightData is NULL";
+    }
+    if (targets.bias != NULL && biasData == NULL) {
+        return "layer has a bias/beta but biasData is NULL";
+    }
+    if (targets.bias == NULL && biasData != NULL) {
+        return "layer has no bias but biasData is non-NULL";
+    }
+    return NULL;
+}
+
+static void fillParameter(parameter_t *parameter, const float *data) {
+    tensorFillFromFloatBuffer(parameter->param, data,
+                              calcNumberOfElementsByTensor(parameter->param));
+}
+
+void layerLoadTargetsFill(layerLoadTargets_t targets, const float *weightData,
+                          const float *biasData) {
+    fillParameter(targets.weights, weightData);
+    if (targets.bias != NULL) {
+        fillParameter(targets.bias, biasData);
+    }
+}
+
+void layerLoadWeights(layer_t *layer, float *weightData, float *biasData) {
+    if (layer == NULL) {
+        PRINT_ERROR("layerLoadWeights: layer is NULL");
         exit(1);
     }
+    layerLoadTargets_t targets = layerLoadTargets(layer);
+    if (targets.weights == NULL) {
+        PRINT_ERROR("layerLoadWeights: layer type %d has no parameters to load", (int)layer->type);
+        exit(1);
+    }
+    const char *problem = layerLoadTargetsProblem(targets, weightData, biasData);
+    if (problem != NULL) {
+        PRINT_ERROR("layerLoadWeights: layer type %d: %s", (int)layer->type, problem);
+        exit(1);
+    }
+    layerLoadTargetsFill(targets, weightData, biasData);
 }

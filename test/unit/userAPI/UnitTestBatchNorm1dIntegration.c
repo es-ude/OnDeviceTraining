@@ -119,7 +119,7 @@ static void loadWeightsIntoNoAffine(void) {
 }
 
 void testLayerLoadWeightsRejectsNoAffine(void) {
-    ASSERT_EXITS_WITH_FAILURE(loadWeightsIntoNoAffine());
+    ASSERT_EXITS_WITH_OUTPUT(1, "has no parameters to load", loadWeightsIntoNoAffine());
 }
 
 /* layerHasParameters == affine: a no-affine BN takes no StateDict entry. */

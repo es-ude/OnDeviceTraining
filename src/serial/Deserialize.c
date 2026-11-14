@@ -32,99 +32,25 @@
 #include "Tensor.h"
 #include "TensorRecord.h"
 
-/* v9 (linq S4): a stored SYM / SYM_INT32 / ASYM scale is read as `u16 m`,
- * `i16 e` (Serialize.c's v9 comment) and stored only in canonical form:
- * m outside [ODT_SCALE_M_MIN, ODT_SCALE_M_MAX] or e outside
- * [ODT_SCALE_E_MIN, ODT_SCALE_E_MAX] fails fast (deserializeScale). The v8
- * float scale had the same width, so a v8 record would misparse silently; a
- * v8 file fails cleanly at the version check below (no v8 compatibility
- * shim).
- * v8: the `u8 wiringKind` after the layer count (0 = chain, 1 = CSR, see
- * Serialize.c) and a kind-1 file's CSR must equal the skeleton's, so a file
- * never loads into a model whose layers read different buffers. The CSR is
- * compared as it streams in, nothing is allocated. The ADD record must carry
- * FLOAT32 arithmetic, as addLayerInit requires. No migration path from v7.
- * v7 (#391): the LINEAR record gains the `u8 hasBias` presence byte the
- * CONV1D/CONV1D_TRANSPOSED records already carried (bias record skipped when
- * 0), so a BIAS_FALSE Linear round-trips. All three arms now fail fast when
- * the byte is not 0/1 or disagrees with the skeleton's bias presence
- * (deserializeOptionalBias). No migration path from v6: a v6 file fails
- * cleanly at the version check below (no back-compat shim, established
- * policy).
- * v6 (#460): new BATCHNORM1D record (tag 13), read by a deserializeLayer arm
- * mirroring Serialize.c's write order exactly -- `u32 numChannels, f32 eps,
- * u8 momentumMode, f32 momentum, u8 affine, u8 track` are read first and
- * numChannels/affine/track are checked to EQUAL the skeleton's (the
- * skeleton owns the gamma/beta/runningMean/runningVar buffers, so a
- * mismatch would write past them); momentumMode must be 1 (VALUE) or 2
- * (CUMULATIVE); eps/momentum/every runningMean/runningVar value are
- * re-validated against the factory's own invariants (finite eps > 0, VALUE
- * momentum finite in [0, 1], every runningMean finite, every runningVar
- * finite and >= 0) before being written into the skeleton -- a failing
- * check exits before any partial overwrite. `frozen`/`training` are
- * runtime/create-time state, never serialized. No migration path from v5:
- * a v5 file fails cleanly at the version check below (no back-compat shim,
- * established policy).
- * Mirrors Serialize.c's locked format v2 constants (#370): fixed-width
- * little-endian scalars via the checked SerialWire primitives; no v1
- * back-compat shim — v1 files were host-local artifacts.
- * v3: parameter records carry a grad-presence byte (#380). The reader is
- * TOLERANT of a presence/skeleton mismatch (#380 PR3, superseding PR1's
- * fail-fast): see deserializeParameter / skipSerializedTensor below.
- * v4 (group-quant PR1/PR2): the SYM
- * qConfig record grows `u32 numGroups`, `u32 groupSize` ahead of the scales
- * array. A file whose numGroups does not match the skeleton's own (PR1:
- * always 1, from initSymQConfig) REALLOCATES the skeleton's scales[] to the
- * file's numGroups (PR2, Task 5) rather than failing fast; the #316
- * no-silent-misparse discipline now lives in validateSymQConfigShape's
- * post-reallocation divisibility check (Quantization.h) instead. The
- * sentinel invariant (numGroups==1 <=> groupSize==0, Quantization.h) is
- * checked on the FILE's values and is untouched by the relax; a violation is
- * a corrupt or from-the-future record. v4's ASYM record was an INTRA-BRANCH
- * BRIDGE (old per-tensor shape, i32 zeroPoint slot repurposed to carry a
- * code-domain uint16 value) -- superseded by v5 below.
- * v5 is a coordinated single bump (see Serialize.c's v5 comment for the
- * full record layouts) carrying two additions:
- * (a) group-quant PR4, Task 4: the ASYM qConfig record gets the SAME
- * numGroups/groupSize-prefixed, reallocate-on-mismatch treatment the v4 SYM
- * record (and PR2/Task 5's relax) already gave SYM, PLUS a second per-group
- * array -- `u16 zeroPoints[numGroups]` (LE) after `f32 scales[numGroups]` --
- * both reallocated together whenever the file's numGroups differs from the
- * skeleton's own. No migration path from v4: that record's ASYM value
- * decoded WRONG under the code-domain grid by design of the interim bridge,
- * so a v4 file (including ones the group-quant branch's own earlier tasks
- * produced) now fails cleanly at the version check below -- consistent with
- * the v1->v4 no-back-compat-shim policy.
- * (b) BFP epic PR1, Task 7: new
- * BFP qConfig record, read by a deserializeQConfig arm mirroring the SYM v4
- * arm's discipline exactly -- a file numGroups differing from the
- * skeleton's own REALLOCATES the skeleton's exponents[] to the file's shape
- * (same relax as SYM's, same validateBfpQConfigShape choke point
- * afterwards) rather than failing fast. The sentinel invariant
- * (numGroups==1 <=> groupSize==0) and the shared SERIAL_MAX_QCONFIG_GROUPS
- * sanity cap are checked on the FILE's values, exactly as for SYM/ASYM.
- * SERIALIZE_FORMAT_VERSION itself is defined once in TensorRecord.h. */
+/* Reads the ODTS layout documented in Serialize.c into a factory-built
+ * skeleton. Only SERIALIZE_FORMAT_VERSION (TensorRecord.h) is accepted. Every
+ * file field that sizes an access or must agree with the skeleton is checked
+ * as it arrives, so a rejected file can leave the skeleton partially
+ * overwritten. A scale is accepted only in canonical form (deserializeScale);
+ * a kind-1 wiring must equal the skeleton's CSR, compared as it streams in. */
 #define SERIALIZE_MAGIC "ODTS"
 
 void deserializeTensor(tensor_t *tensor, FILE *f) {
-    /* #316: capture the skeleton's expected payload size BEFORE the shape /
-     * quantization overwrites. tensor->data was sized by initTensor from this
-     * build-time shape + quantization; a file record with a larger element count
-     * or packed width (which the dtype check alone cannot see) would otherwise
-     * fread past that allocation. */
+    /* Captured before the shape/quantization overwrite: tensor->data was sized
+     * from it, and a record with more elements or a wider packing (which the
+     * dtype check cannot see) would otherwise read past that allocation. */
     size_t expectedBytes =
         calcNumberOfBytesForData(tensor->quantization, calcNumberOfElementsByShape(tensor->shape));
 
     deserializeShape(tensor->shape, f);
-    /* Group-quant PR2 (Task 5): computed here (not after deserializeQuantization,
-     * as before) because a SYM record's divisibility validate needs it — shape
-     * already holds the FILE's dimensions at this point (deserializeShape wrote
-     * them), so this is the tensor's true element count, not the skeleton's
-     * pre-overwrite one. */
     size_t numberOfValues = calcNumberOfElementsByShape(tensor->shape);
     deserializeQuantization(tensor->quantization, f, numberOfValues);
 
-    /* Mirrors Serialize.c: payload length is the packed size. */
     size_t dataBytes = calcNumberOfBytesForData(tensor->quantization, numberOfValues);
 
     if (dataBytes != expectedBytes) {
@@ -135,7 +61,6 @@ void deserializeTensor(tensor_t *tensor, FILE *f) {
     }
 
     serialReadBytes(tensor->data, dataBytes, f);
-    deserializeSparsity();
 }
 
 /* Gradients are per-tensor (gradInit's rule), but a SYM/ASYM record may regroup the skeleton's
@@ -158,18 +83,20 @@ static void requirePerTensorGrad(const tensor_t *grad) {
 
 void deserializeParameter(parameter_t *parameter, FILE *f) {
     uint8_t hasGrad = serialReadU8(f);
+    if (hasGrad > 1u) {
+        PRINT_ERROR("deserializeParameter: hasGrad byte %u is neither 0 nor 1", (unsigned)hasGrad);
+        exit(1);
+    }
     deserializeTensor(parameter->param, f);
     if (hasGrad && parameter->grad != NULL) {
         deserializeTensor(parameter->grad, f);
         requirePerTensorGrad(parameter->grad);
     } else if (hasGrad) {
-        /* Frozen skeleton, full checkpoint: grads are transient
-         * (zeroed before every batch) and a frozen layer allocates none -
-         * parse past the record so the stream stays synced. */
+        /* Frozen skeleton: it holds no grad, and grads are transient anyway.
+         * Parse past the record so the stream stays in sync. */
         skipSerializedTensor(f);
     }
-    /* hasGrad == 0 with a trainable skeleton: grads stay as built (zeroed);
-     * optimizerZeroGrad re-zeros before every batch anyway. */
+    /* hasGrad == 0 into a trainable skeleton leaves its grad unchanged. */
 }
 
 static void requireWiringEntry(const char *field, size_t index, uint16_t file, uint16_t skeleton) {
@@ -223,8 +150,6 @@ void deserializeModel(const model_t *m, FILE *f) {
     }
 
     for (size_t i = 0; i < m->numLayers; i++) {
-        /* Tag byte = layerType_t enum position (append-only wire contract; see
-         * Layer.h and the pins in test/unit/serial/UnitTestSerialize.c). */
         uint8_t tag = serialReadU8(f);
         if (tag != (uint8_t)m->layers[i]->type) {
             PRINT_ERROR("deserializeModel: record tag %u does not match expected layer type "
@@ -238,12 +163,34 @@ void deserializeModel(const model_t *m, FILE *f) {
 
 // Helper Functions
 
+/* orderOfDimensions indexes dimensions[], so it must be a permutation of
+ * 0..rank-1: an entry >= rank reads past the array, and a repeat leaves a
+ * dimension unreachable. Quadratic scan: the rank is capped. */
+static void deserializeAxisOrder(size_t *order, size_t rank, FILE *f, const char *what) {
+    for (size_t d = 0; d < rank; d++) {
+        uint32_t axis = serialReadU32LE(f);
+        if ((size_t)axis >= rank) {
+            PRINT_ERROR("%s: orderOfDimensions[%zu] = %u is out of range for rank %zu", what, d,
+                        (unsigned)axis, rank);
+            exit(1);
+        }
+        for (size_t prev = 0; prev < d; prev++) {
+            if (order[prev] == (size_t)axis) {
+                PRINT_ERROR("%s: orderOfDimensions[%zu] = %u repeats an earlier entry (not a "
+                            "permutation of 0..%zu)",
+                            what, d, (unsigned)axis, rank - 1);
+                exit(1);
+            }
+        }
+        order[d] = (size_t)axis;
+    }
+}
+
 static void deserializeShape(shape_t *shape, FILE *f) {
     uint32_t fileRank = serialReadU32LE(f);
-    /* The skeleton's dimensions/orderOfDimensions arrays were sized by the
-     * build-time rank; a mismatched record would otherwise write file dims
-     * past them (and an equal-element-count rank change would slip past the
-     * #316 payload-size check below). */
+    /* The skeleton's dimension arrays were sized by its rank; a mismatch would
+     * write past them, and an equal-element-count rank change would pass the
+     * payload-size check. */
     if ((size_t)fileRank != shape->numberOfDimensions) {
         PRINT_ERROR("deserializeShape: file rank %u does not match the skeleton rank %zu",
                     (unsigned)fileRank, shape->numberOfDimensions);
@@ -252,50 +199,23 @@ static void deserializeShape(shape_t *shape, FILE *f) {
     for (size_t d = 0; d < shape->numberOfDimensions; d++) {
         shape->dimensions[d] = (size_t)serialReadU32LE(f);
     }
-    /* orderOfDimensions indexes dimensions[], so it must be a permutation of
-     * 0..rank-1: an entry >= rank reads past the array, and a repeat leaves a
-     * dimension unreachable. Quadratic scan: the rank is the skeleton's own. */
-    for (size_t d = 0; d < shape->numberOfDimensions; d++) {
-        uint32_t axis = serialReadU32LE(f);
-        if ((size_t)axis >= shape->numberOfDimensions) {
-            PRINT_ERROR("deserializeShape: orderOfDimensions[%zu] = %u is out of range for rank "
-                        "%zu",
-                        d, (unsigned)axis, shape->numberOfDimensions);
-            exit(1);
-        }
-        for (size_t prev = 0; prev < d; prev++) {
-            if (shape->orderOfDimensions[prev] == (size_t)axis) {
-                PRINT_ERROR("deserializeShape: orderOfDimensions[%zu] = %u repeats an earlier "
-                            "entry (not a permutation of 0..%zu)",
-                            d, (unsigned)axis, shape->numberOfDimensions - 1);
-                exit(1);
-            }
-        }
-        shape->orderOfDimensions[d] = (size_t)axis;
-    }
+    deserializeAxisOrder(shape->orderOfDimensions, shape->numberOfDimensions, f,
+                         "deserializeShape");
 }
 
 static void deserializeQuantization(quantization_t *q, FILE *f, size_t numberOfElements) {
     uint8_t type = serialReadU8(f);
-    /* #316: the skeleton was built with a fixed dtype whose qConfig struct (or
-     * NULL, for FLOAT32/INT32/BOOL) is fixed. A file record claiming a different
-     * dtype would make deserializeQConfig write scale/qBits/... through a
-     * mismatched or NULL qConfig — segfault on host, silent low-address writes on
-     * an MMU-less MCU. Reject the mismatch before the overwrite; running here (not
-     * in deserializeQConfig) forecloses the NULL-qConfig deref. */
+    /* The skeleton's qConfig struct (NULL for FLOAT32/INT32/BOOL) is fixed by
+     * its dtype; another file dtype would write through a mismatched or NULL
+     * qConfig. */
     if ((qtype_t)type != q->type) {
         PRINT_ERROR("deserializeQuantization: file dtype %u does not match the skeleton dtype %u",
                     (unsigned)type, (unsigned)q->type);
         exit(1);
     }
-    q->type = (qtype_t)type;
     deserializeQConfig(q, f, numberOfElements);
 }
 
-/* BFP epic PR2 (Task 1): the wire tag was a bare cast until now -- an
- * out-of-range value silently aliased to whatever future enum member gets
- * appended next, misinterpreting the record's compute representation instead
- * of failing fast at the trust boundary where it first arrives off the wire. */
 static void deserializeArithmetic(arithmetic_t *arithmetic, FILE *f) {
     uint8_t typeTag = serialReadU8(f);
     if (typeTag > (uint8_t)ARITH_BFP) {
@@ -321,32 +241,47 @@ static void deserializeKernel(kernel_t *kernel, FILE *f) {
     kernel->padding = (size_t)serialReadU32LE(f);
 }
 
-/* Sanity cap on the untrusted wire
- * fileNumGroups (SYM qConfig record) read below, mirroring
- * ODTS_TENSOR_RECORD_MAX_RANK's role for the untrusted wire rank (TensorRecord.h) --
- * generous against any real model (a group count is bounded by the element
- * count of the largest parameter tensor it groups, never in the tens of
- * thousands), so this is headroom, not a real limit. It exists purely to
- * foreclose the allocation-size trust boundary a raw u32 * sizeof(float)
- * would otherwise cross: on a 32-bit size_t (MCU target), a value like
- * 0x40000001 makes fileNumGroups * sizeof(float) wrap around to 4 before it
- * ever reaches reserveMemory, handing back a 1-float buffer while the
- * scales-read loop below still iterates the file's full (unwrapped) count --
- * a heap overflow; on a 64-bit host the multiply does not wrap, but a
- * multi-gigabyte request makes reserveMemory's calloc return NULL, and nothing
- * downstream expects that. The cap bounds the allocation at 256 KiB and rules
- * out both.
- * group-quant PR4 (Task 4): renamed from SERIAL_MAX_SYM_GROUPS -- the v5
- * ASYM arm below reuses this exact cap for its own untrusted fileNumGroups
- * (same rationale, same value; ASYM's second array (zeroPoints, u16) is even
- * smaller per-group than SYM's, so the 256 KiB sizing headroom above is
- * conservative for it too). BFP epic PR1 (Task 7): the v5 BFP arm reuses it
- * as well -- it sizes a reserveMemory(fileNumGroups * sizeof(uint8_t))
- * allocation and an fread of that many bytes, so an unbounded value still
- * invites a multi-gigabyte request (calloc-NULL) even though the
- * byte-per-element multiplier makes the 32-bit size_t-wrap risk above moot
- * for it. */
+/* Bound untrusted group counts before allocation; the cap limits each scales
+ * array to 256 KiB and prevents allocation-size overflow on 32-bit targets. */
 #define SERIAL_MAX_QCONFIG_GROUPS 65536u
+
+typedef struct {
+    size_t numGroups;
+    size_t groupSize;
+} groupShape_t;
+
+/* Reads and validates the group shape that precedes every grouped qConfig's
+ * arrays, before the caller sizes any allocation from it. numberOfElements == 0
+ * means no tensor geometry is available (layer wire configs): only the cap and
+ * the per-tensor sentinel apply there. */
+static groupShape_t deserializeGroupShape(FILE *f, size_t numberOfElements, const char *dtype) {
+    groupShape_t shape;
+    shape.numGroups = (size_t)serialReadU32LE(f);
+    if (shape.numGroups == 0 || shape.numGroups > SERIAL_MAX_QCONFIG_GROUPS) {
+        PRINT_ERROR("deserializeQConfig: %s file numGroups %zu is zero or exceeds the %u-group "
+                    "sanity cap",
+                    dtype, shape.numGroups, (unsigned)SERIAL_MAX_QCONFIG_GROUPS);
+        exit(1);
+    }
+    if (numberOfElements != 0 && shape.numGroups > numberOfElements) {
+        PRINT_ERROR("deserializeQConfig: %s file numGroups %zu exceeds the %zu-element tensor it "
+                    "attaches to",
+                    dtype, shape.numGroups, numberOfElements);
+        exit(1);
+    }
+    shape.groupSize = (size_t)serialReadU32LE(f);
+    if ((shape.numGroups == 1) != (shape.groupSize == 0)) {
+        PRINT_ERROR("deserializeQConfig: %s file violates the numGroups==1<=>groupSize==0 "
+                    "sentinel invariant (numGroups=%zu, groupSize=%zu)",
+                    dtype, shape.numGroups, shape.groupSize);
+        exit(1);
+    }
+    if (numberOfElements != 0) {
+        validateGroupShape(shape.numGroups, shape.groupSize, numberOfElements,
+                           "deserializeQConfig");
+    }
+    return shape;
+}
 
 /* v9 scale field: `u16 m`, `i16 e`, read into locals (never through a cast
  * of the stream buffer). Only the canonical form is accepted: a non-canonical
@@ -382,67 +317,18 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
     }
     case SYM: {
         symQConfig_t *symQC = q->qConfig;
-        /* v4 (group-quant PR1/PR2): symQC->scales must already point at a
-         * valid (>=1-element) array -- callers build the skeleton via
-         * initSymQConfig/initSymQConfigGrouped or the stack-fixture idiom
-         * before deserializing into it. A file numGroups that differs from
-         * the skeleton's own is no longer a fail-fast (PR1's #316
-         * no-silent-misparse discipline): REALLOCATE the scales array to the
-         * file's shape instead -- the resulting shape is validated below
-         * (validateSymQConfigShape), which is the discipline's PR2 form. */
-        size_t fileNumGroups = (size_t)serialReadU32LE(f);
-        /* fileNumGroups is untrusted wire input
-         * about to size an allocation -- bound it BEFORE touching
-         * symQC->scales at all. Zero is never valid (numGroups==1 is the
-         * per-tensor floor; the sentinel check below would catch it too, but
-         * only after a pointless free+realloc(0) round trip), and
-         * SERIAL_MAX_QCONFIG_GROUPS forecloses the size_t-wrap-on-32-bit /
-         * NULL-calloc-on-64-bit pair a multi-GB value would otherwise invite
-         * (see the macro's own comment above). */
-        if (fileNumGroups == 0 || fileNumGroups > SERIAL_MAX_QCONFIG_GROUPS) {
-            PRINT_ERROR("deserializeQConfig: SYM file numGroups %zu is zero or exceeds the "
-                        "%u-group sanity cap",
-                        fileNumGroups, (unsigned)SERIAL_MAX_QCONFIG_GROUPS);
-            exit(1);
-        }
-        /* Whenever a live tensor backs this config (numberOfElements != 0 --
-         * readTensorRecordHeader passes its record's own count too), a
-         * config cannot have more groups than elements; reject that here, before the realloc, so
-         * the later validateSymQConfigShape call downstream keeps its own job (divisibility)
-         * uncomplicated by an out-of-range numGroups it would otherwise have to multiply against.
-         * numberOfElements == 0 (the layer outputQ/propLossQ wire-config call sites) has no tensor
-         * to bound against -- SERIAL_MAX_QCONFIG_GROUPS above is the only guard there, and is sized
-         * generously enough to cover it alone. */
-        if (numberOfElements != 0 && fileNumGroups > numberOfElements) {
-            PRINT_ERROR("deserializeQConfig: SYM file numGroups %zu exceeds the %zu-element "
-                        "tensor it attaches to",
-                        fileNumGroups, numberOfElements);
-            exit(1);
-        }
-        if (fileNumGroups != symQC->numGroups) {
+        groupShape_t shape = deserializeGroupShape(f, numberOfElements, "SYM");
+        if (shape.numGroups != symQC->numGroups) {
             freeReservedMemory(symQC->scales);
-            symQC->scales = reserveMemory(fileNumGroups * sizeof(*symQC->scales));
-            symQC->numGroups = fileNumGroups;
+            symQC->scales = reserveMemory(shape.numGroups * sizeof(*symQC->scales));
+            symQC->numGroups = shape.numGroups;
         }
-        size_t fileGroupSize = (size_t)serialReadU32LE(f);
-        /* Sentinel invariant (Quantization.h): numGroups == 1 <=> groupSize
-         * == 0. Checked on the FILE values -- a violation means a corrupt
-         * record or one written by a future (group-aware) format this build
-         * cannot interpret. Untouched by the reallocation relax above. */
-        if ((fileNumGroups == 1) != (fileGroupSize == 0)) {
-            PRINT_ERROR("deserializeQConfig: SYM file violates the numGroups==1<=>groupSize==0 "
-                        "sentinel invariant (numGroups=%zu, groupSize=%zu)",
-                        fileNumGroups, fileGroupSize);
-            exit(1);
-        }
-        symQC->groupSize = fileGroupSize;
-        for (size_t g = 0; g < fileNumGroups; g++) {
+        symQC->groupSize = shape.groupSize;
+        for (size_t g = 0; g < shape.numGroups; g++) {
             odtScaleStore(&symQC->scales[g], deserializeScale(f));
         }
         uint8_t fileQBits = serialReadU8(f);
-        /* #479: unconditional, like the ASYM arm -- the wire-config sites (numberOfElements == 0)
-         * never reach validateSymQConfigShape below. 31 is the SYM storage ceiling; 1 has
-         * qMax == 0 (inf scale, NaN dequant). */
+        /* 31 is the SYM storage ceiling; 1 has qMax == 0 (inf scale, NaN dequant). */
         if (fileQBits < 2 || fileQBits > 31) {
             PRINT_ERROR("deserializeQConfig: SYM file qBits %u outside [2, 31]",
                         (unsigned)fileQBits);
@@ -450,160 +336,48 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
         }
         symQC->qBits = fileQBits;
         symQC->roundingMode = (roundingMode_t)serialReadU8(f);
-        /* numberOfElements == 0 marks ONLY the layer outputQ/propLossQ
-         * wire-config call sites in deserializeLayer -- no live tensor backs
-         * q there (group-quant PR2's carrier gate keeps those per-tensor
-         * anyway, so skipping this validate there costs nothing). Every
-         * other caller reaches this validate, INCLUDING readTensorRecordHeader's
-         * scratch parse (it threads the real element
-         * count it just parsed off the wire, not 0) -- a grouped grad record
-         * whose numGroups*groupSize does not divide its own element count is
-         * corrupt whether or not the resulting scratch qConfig ever attaches
-         * to a live tensor, so it fails fast here too. This is the choke
-         * point that turns "the reallocation succeeded" into "the resulting
-         * shape actually describes this record's own element count". */
-        if (numberOfElements != 0) {
-            validateSymQConfigShape(symQC, numberOfElements);
-        }
         break;
     }
     case ASYM: {
         asymQConfig_t *asymQC = q->qConfig;
-        /* v5 (group-quant PR4, Task 4): the ASYM twin of the SYM arm above --
-         * same caps-before-allocation discipline, same reallocate-on-mismatch
-         * relax, PLUS a second array (zeroPoints) reallocated in lockstep
-         * with scales. Replaces Task 1's v4 bridge (which rejected any
-         * grouped skeleton outright) entirely. */
-        size_t fileNumGroups = (size_t)serialReadU32LE(f);
-        /* Untrusted wire input about to size TWO allocations -- bound it
-         * BEFORE touching asymQC's arrays at all (mirrors the SYM arm's
-         * bound). */
-        if (fileNumGroups == 0 || fileNumGroups > SERIAL_MAX_QCONFIG_GROUPS) {
-            PRINT_ERROR("deserializeQConfig: ASYM file numGroups %zu is zero or exceeds the "
-                        "%u-group sanity cap",
-                        fileNumGroups, (unsigned)SERIAL_MAX_QCONFIG_GROUPS);
-            exit(1);
-        }
-        /* Whenever a live tensor backs this config (numberOfElements != 0),
-         * a config cannot have more groups than elements; reject before the
-         * realloc, mirroring the SYM arm's identical guard. */
-        if (numberOfElements != 0 && fileNumGroups > numberOfElements) {
-            PRINT_ERROR("deserializeQConfig: ASYM file numGroups %zu exceeds the %zu-element "
-                        "tensor it attaches to",
-                        fileNumGroups, numberOfElements);
-            exit(1);
-        }
-        if (fileNumGroups != asymQC->numGroups) {
-            /* Both arrays are reallocated together -- a mismatch always
-             * resizes the whole config, never just one array (the mutation
-             * this guards against: sizing only scales[] leaves zeroPoints[]
-             * stale, an ASan-visible heap-buffer-overflow the moment the
-             * zeroPoints loop below writes past it). */
+        groupShape_t shape = deserializeGroupShape(f, numberOfElements, "ASYM");
+        if (shape.numGroups != asymQC->numGroups) {
             freeReservedMemory(asymQC->scales);
             freeReservedMemory(asymQC->zeroPoints);
-            asymQC->scales = reserveMemory(fileNumGroups * sizeof(*asymQC->scales));
-            asymQC->zeroPoints = reserveMemory(fileNumGroups * sizeof(uint16_t));
-            asymQC->numGroups = fileNumGroups;
+            asymQC->scales = reserveMemory(shape.numGroups * sizeof(*asymQC->scales));
+            asymQC->zeroPoints = reserveMemory(shape.numGroups * sizeof(uint16_t));
+            asymQC->numGroups = shape.numGroups;
         }
-        size_t fileGroupSize = (size_t)serialReadU32LE(f);
-        /* Sentinel invariant (Quantization.h): numGroups == 1 <=> groupSize
-         * == 0. Checked on the FILE values, mirroring the SYM arm. */
-        if ((fileNumGroups == 1) != (fileGroupSize == 0)) {
-            PRINT_ERROR("deserializeQConfig: ASYM file violates the numGroups==1<=>groupSize==0 "
-                        "sentinel invariant (numGroups=%zu, groupSize=%zu)",
-                        fileNumGroups, fileGroupSize);
-            exit(1);
-        }
-        asymQC->groupSize = fileGroupSize;
-        /* scales THEN zeroPoints, matching Serialize.c's write order exactly
-         * (the mutation this order guards against: swapping the two loops
-         * decodes every scale as a zeroPoint's bit pattern and vice versa --
-         * an immediate golden-bytes and round-trip failure, never a silent
-         * pass). */
-        for (size_t g = 0; g < fileNumGroups; g++) {
+        asymQC->groupSize = shape.groupSize;
+        for (size_t g = 0; g < shape.numGroups; g++) {
             odtScaleStore(&asymQC->scales[g], deserializeScale(f));
         }
-        for (size_t g = 0; g < fileNumGroups; g++) {
+        for (size_t g = 0; g < shape.numGroups; g++) {
             asymQC->zeroPoints[g] = serialReadU16LE(f);
         }
         uint8_t fileQBits = serialReadU8(f);
+        /* uint16 code-domain zero points cap qBits at 16. */
         if (fileQBits == 0 || fileQBits > 16) {
-            /* group-quant D6: uint16 code-domain zp requires qBits <= 16; a wider record
-             * is corrupt or written by an incompatible/future build. Checked
-             * unconditionally (independent of numberOfElements) since it
-             * does not depend on a live tensor's element count -- same
-             * immediacy as the pre-v5 bridge's inline check. */
             PRINT_ERROR("deserializeQConfig: ASYM file qBits %u outside [1, 16]",
                         (unsigned)fileQBits);
             exit(1);
         }
         asymQC->qBits = fileQBits;
         asymQC->roundingMode = (roundingMode_t)serialReadU8(f);
-        /* numberOfElements == 0 marks ONLY the layer outputQ/propLossQ
-         * wire-config call sites (mirrors the SYM arm's identical note). */
-        if (numberOfElements != 0) {
-            validateAsymQConfigShape(asymQC, numberOfElements);
-        }
         break;
     }
     case BFP: {
         bfpQConfig_t *bfpQC = q->qConfig;
-        /* BFP epic PR1 (Task 7): mirrors the SYM v4 arm's discipline exactly
-         * -- bfpQC->exponents must already point at a valid (>=1-element)
-         * array (callers build the skeleton via initBfpQConfig/
-         * initBfpQConfigGrouped or the stack-fixture idiom first). A file
-         * numGroups differing from the skeleton's own REALLOCATES the
-         * exponents array to the file's shape instead of failing fast -- the
-         * resulting shape is validated below (validateBfpQConfigShape). */
-        size_t fileNumGroups = (size_t)serialReadU32LE(f);
-        /* Same untrusted-wire-input rationale as the SYM arm's cap: bound
-         * fileNumGroups BEFORE it sizes any allocation (shared
-         * SERIAL_MAX_QCONFIG_GROUPS cap, see its comment). */
-        if (fileNumGroups == 0 || fileNumGroups > SERIAL_MAX_QCONFIG_GROUPS) {
-            PRINT_ERROR("deserializeQConfig: BFP file numGroups %zu is zero or exceeds the "
-                        "%u-group sanity cap",
-                        fileNumGroups, (unsigned)SERIAL_MAX_QCONFIG_GROUPS);
-            exit(1);
-        }
-        /* Mirrors the SYM arm: a live tensor (numberOfElements != 0) cannot
-         * have more groups than elements. numberOfElements == 0 (layer
-         * outputQ/propLossQ wire-config call sites) has no tensor to bound
-         * against -- SERIAL_MAX_QCONFIG_GROUPS above is the only guard there. */
-        if (numberOfElements != 0 && fileNumGroups > numberOfElements) {
-            PRINT_ERROR("deserializeQConfig: BFP file numGroups %zu exceeds the %zu-element "
-                        "tensor it attaches to",
-                        fileNumGroups, numberOfElements);
-            exit(1);
-        }
-        if (fileNumGroups != bfpQC->numGroups) {
+        groupShape_t shape = deserializeGroupShape(f, numberOfElements, "BFP");
+        if (shape.numGroups != bfpQC->numGroups) {
             freeReservedMemory(bfpQC->exponents);
-            bfpQC->exponents = reserveMemory(fileNumGroups * sizeof(uint8_t));
-            bfpQC->numGroups = fileNumGroups;
+            bfpQC->exponents = reserveMemory(shape.numGroups * sizeof(uint8_t));
+            bfpQC->numGroups = shape.numGroups;
         }
-        size_t fileGroupSize = (size_t)serialReadU32LE(f);
-        /* Sentinel invariant (Quantization.h): numGroups == 1 <=> groupSize
-         * == 0. Checked on the FILE values, mirroring the SYM arm. */
-        if ((fileNumGroups == 1) != (fileGroupSize == 0)) {
-            PRINT_ERROR("deserializeQConfig: BFP file violates the numGroups==1<=>groupSize==0 "
-                        "sentinel invariant (numGroups=%zu, groupSize=%zu)",
-                        fileNumGroups, fileGroupSize);
-            exit(1);
-        }
-        bfpQC->groupSize = fileGroupSize;
-        serialReadBytes(bfpQC->exponents, fileNumGroups, f);
-        /* mantissaBits/exponentBits are untrusted wire bytes
-         * about to be written verbatim into the skeleton's qConfig -- unlike
-         * every field validated above, these two had NO range check, so a
-         * corrupt v5 record reaches undefined behavior downstream the moment
-         * anything quantizes against it: exponentBits==0 makes
-         * bfpExponentBias compute `1 << -1`; exponentBits>31 makes
-         * `1u << exponentBits` UB in packFloatBufferAsBfp; mantissaBits==1
-         * (or 0) drives qMax to 0, a div-by-zero. exponentBits never affects
-         * calcNumberOfBytesForData, so no byte-count check catches it
-         * either. The caps mirror initBfpQConfigGrouped's own construction-time
-         * caps (Quantization.c) -- a wire value this build's own factories
-         * could never produce is corrupt or from-the-future, exactly like the
-         * sentinel-invariant check above. */
+        bfpQC->groupSize = shape.groupSize;
+        serialReadBytes(bfpQC->exponents, shape.numGroups, f);
+        /* Validate widths before deriving the exponent bias: they are the
+         * factory caps, and outside them the bias shift and qMax are undefined. */
         uint8_t fileMantissaBits = serialReadU8(f);
         if (fileMantissaBits < 2 || fileMantissaBits > 16) {
             PRINT_ERROR("deserializeQConfig: BFP file mantissaBits (%u) outside [2, 16]",
@@ -618,27 +392,13 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
         }
         bfpQC->mantissaBits = fileMantissaBits;
         bfpQC->exponentBits = fileExponentBits;
-        /* #420 G5, third member of the untrusted-wire-input family above (and
-         * placed here because the exponent bytes are read BEFORE exponentBits,
-         * so this is the earliest point their bias is known): a stored
-         * exponent above bias + 127 has NO finite float32 scale --
-         * ldexpf(1.f, stored - bias) is +inf, so the first dequant turns every
-         * zero code into 0 * inf == NaN, which walks past every runtime guard
-         * instead of saturating the way an out-of-range VALUE does.
-         * deriveBfpStoredExponent caps its own output at exactly bias + 127
-         * (BFP D6, docs/conventions/arithmetic-bfp.md §2), so a file byte above it
-         * is one this build's own quantizer could never have written --
-         * corrupt or from-the-future, exactly like the width caps. Checked
-         * against the record's OWN bias, so a narrow-exponentBits record
-         * carrying a wide byte is caught too, not just the exponentBits == 8 /
-         * stored == 255 case the canonical range can reach. The byte must also
-         * fit the record's exponent WIDTH: at narrow widths bias + 127 lies far
-         * above 2^e - 1 (128 vs 3 at e2), and a wider byte encodes a scale no
-         * exponentBits-wide field can hold. */
+        /* Reject stored exponents whose scale would exceed the finite float32
+         * range (0 * inf dequantizes to NaN, past every runtime guard) or the
+         * record's exponent width (at narrow widths bias + 127 lies above 2^e - 1). */
         int32_t maxFiniteStored = bfpExponentBias(bfpQC) + 127;
         int32_t maxWidthStored = (int32_t)((1u << fileExponentBits) - 1u);
         int32_t maxStored = maxFiniteStored < maxWidthStored ? maxFiniteStored : maxWidthStored;
-        for (size_t g = 0; g < fileNumGroups; g++) {
+        for (size_t g = 0; g < shape.numGroups; g++) {
             if ((int32_t)bfpQC->exponents[g] > maxStored) {
                 PRINT_ERROR("deserializeQConfig: BFP file exponent[%zu] (%u) exceeds the largest "
                             "valid stored exponent at exponentBits %u (min(2^e - 1, bias + 127) "
@@ -649,16 +409,8 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
             }
         }
         bfpQC->roundingMode = (roundingMode_t)serialReadU8(f);
-        /* numberOfElements == 0 marks ONLY the layer outputQ/propLossQ
-         * wire-config call sites -- mirrors the SYM arm's validate gate. */
-        if (numberOfElements != 0) {
-            validateBfpQConfigShape(bfpQC, numberOfElements);
-        }
         break;
     }
-    default:
-        PRINT_ERROR("Unknown qType!");
-        exit(1);
     }
 }
 
@@ -673,11 +425,8 @@ void readTensorRecordHeader(tensorRecordHeader_t *header, FILE *f) {
     for (uint32_t d = 0; d < numDims; d++) {
         header->dimensions[d] = (size_t)serialReadU32LE(f);
     }
-    /* orderOfDimensions is positional only; read (not seeked) so a truncated
-     * record fails at the short read. */
-    for (uint32_t d = 0; d < numDims; d++) {
-        (void)serialReadU32LE(f);
-    }
+    size_t order[ODTS_TENSOR_RECORD_MAX_RANK];
+    deserializeAxisOrder(order, numDims, f, "readTensorRecordHeader");
     shape_t wireShape = {
         .numberOfDimensions = numDims, .dimensions = header->dimensions, .orderOfDimensions = NULL};
     header->numberOfElements = calcNumberOfElementsByShape(&wireShape);
@@ -685,10 +434,9 @@ void readTensorRecordHeader(tensorRecordHeader_t *header, FILE *f) {
     uint8_t type = serialReadU8(f);
     header->quantization.type = (qtype_t)type;
     header->quantization.qConfig = NULL;
+    /* Zeroed storage: group arrays start NULL with numGroups 0, so
+     * deserializeQConfig reserves them at the file's group count. */
     memset(&header->qConfigStorage, 0, sizeof(header->qConfigStorage));
-    /* The per-group arrays start heap-backed (1 element): deserializeQConfig
-     * frees and re-reserves them when the file's numGroups differs, which
-     * would be undefined behavior on a stack array. */
     switch (header->quantization.type) {
     case INT32:
     case FLOAT32:
@@ -697,28 +445,15 @@ void readTensorRecordHeader(tensorRecordHeader_t *header, FILE *f) {
     case SYM_INT32:
         header->quantization.qConfig = &header->qConfigStorage.symInt32;
         break;
-    case SYM: {
-        symQConfig_t *sym = &header->qConfigStorage.sym;
-        sym->scales = reserveMemory(sizeof(*sym->scales));
-        sym->numGroups = 1;
-        header->quantization.qConfig = sym;
+    case SYM:
+        header->quantization.qConfig = &header->qConfigStorage.sym;
         break;
-    }
-    case ASYM: {
-        asymQConfig_t *asym = &header->qConfigStorage.asym;
-        asym->scales = reserveMemory(sizeof(*asym->scales));
-        asym->zeroPoints = reserveMemory(sizeof(uint16_t));
-        asym->numGroups = 1;
-        header->quantization.qConfig = asym;
+    case ASYM:
+        header->quantization.qConfig = &header->qConfigStorage.asym;
         break;
-    }
-    case BFP: {
-        bfpQConfig_t *bfp = &header->qConfigStorage.bfp;
-        bfp->exponents = reserveMemory(sizeof(uint8_t));
-        bfp->numGroups = 1;
-        header->quantization.qConfig = bfp;
+    case BFP:
+        header->quantization.qConfig = &header->qConfigStorage.bfp;
         break;
-    }
     default:
         PRINT_ERROR("readTensorRecordHeader: unknown qtype %u", (unsigned)type);
         exit(1);
@@ -752,7 +487,7 @@ void freeTensorRecordHeader(tensorRecordHeader_t *header) {
 static void skipSerializedTensor(FILE *f) {
     if (ftell(f) < 0) {
         PRINT_ERROR("skipSerializedTensor: stream not seekable (grad-record skip requires "
-                    "fseek/ftell support, #380 PR3)");
+                    "fseek/ftell support)");
         exit(1);
     }
 
@@ -772,11 +507,9 @@ static void skipSerializedTensor(FILE *f) {
         PRINT_ERROR("skipSerializedTensor: seek past payload failed");
         exit(1);
     }
-    /* deserializeSparsity() is a zero-byte TODO stub -- nothing to skip. */
-
     /* fseek past a truncated file's real end succeeds silently (POSIX allows
      * seeking beyond EOF), so only comparing against the on-disk size
-     * catches it (mirrors the ODTR/PPCA ftell precedent, #316 wave). */
+     * catches it. */
     long recordEnd = ftell(f);
     if (recordEnd < 0 || fseek(f, 0, SEEK_END) != 0) {
         PRINT_ERROR("skipSerializedTensor: position query failed after skip");
@@ -793,12 +526,9 @@ static void skipSerializedTensor(FILE *f) {
     }
 }
 
-// TODO
-static void deserializeSparsity() {}
-
-/* #391: unlike the tolerated grad byte, the hasBias byte must MATCH the
- * skeleton -- file=1 into a BIAS_FALSE skeleton would deserialize into a NULL
- * parameter, file=0 into a biased skeleton would silently keep its init bias. */
+/* Unlike the tolerated grad byte, hasBias must match the skeleton: 1 into a
+ * bias-free skeleton would write through a NULL parameter, 0 into a biased one
+ * would silently keep its init bias. */
 static void deserializeOptionalBias(parameter_t *skeletonBias, const char *layerName, FILE *f) {
     uint8_t hasBias = serialReadU8(f);
     if (hasBias > 1u || (hasBias == 1u) != (skeletonBias != NULL)) {
@@ -820,6 +550,15 @@ static void requireAddFloat32Math(arithmetic_t a, const char *field) {
     }
 }
 
+/* The record tail most layers share, in wire order. */
+static void deserializeLayerTail(arithmetic_t *forwardMath, arithmetic_t *propLossMath,
+                                 quantization_t *outputQ, quantization_t *propLossQ, FILE *f) {
+    deserializeArithmetic(forwardMath, f);
+    deserializeArithmetic(propLossMath, f);
+    deserializeQuantization(outputQ, f, 0);
+    deserializeQuantization(propLossQ, f, 0);
+}
+
 static void deserializeLayer(layer_t *layer, FILE *f) {
     switch (layer->type) {
     case LINEAR: {
@@ -836,10 +575,8 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
     }
     case RELU: {
         reluConfig_t *reluConfig = layer->config->relu;
-        deserializeArithmetic(&reluConfig->forwardMath, f);
-        deserializeArithmetic(&reluConfig->propLossMath, f);
-        deserializeQuantization(reluConfig->outputQ, f, 0);
-        deserializeQuantization(reluConfig->propLossQ, f, 0);
+        deserializeLayerTail(&reluConfig->forwardMath, &reluConfig->propLossMath,
+                             reluConfig->outputQ, reluConfig->propLossQ, f);
         reluValidateConfig(reluConfig, "deserializeModel: RELU");
         break;
     }
@@ -889,27 +626,21 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
     case MAXPOOL1D: {
         maxPool1dConfig_t *maxPool1dConfig = layer->config->maxPool1d;
         deserializeKernel(maxPool1dConfig->kernel, f);
-        deserializeArithmetic(&maxPool1dConfig->forwardMath, f);
-        deserializeArithmetic(&maxPool1dConfig->propLossMath, f);
-        deserializeQuantization(maxPool1dConfig->outputQ, f, 0);
-        deserializeQuantization(maxPool1dConfig->propLossQ, f, 0);
+        deserializeLayerTail(&maxPool1dConfig->forwardMath, &maxPool1dConfig->propLossMath,
+                             maxPool1dConfig->outputQ, maxPool1dConfig->propLossQ, f);
         break;
     }
     case AVGPOOL1D: {
         avgPool1dConfig_t *avgPool1dConfig = layer->config->avgPool1d;
         deserializeKernel(avgPool1dConfig->kernel, f);
-        deserializeArithmetic(&avgPool1dConfig->forwardMath, f);
-        deserializeArithmetic(&avgPool1dConfig->propLossMath, f);
-        deserializeQuantization(avgPool1dConfig->outputQ, f, 0);
-        deserializeQuantization(avgPool1dConfig->propLossQ, f, 0);
+        deserializeLayerTail(&avgPool1dConfig->forwardMath, &avgPool1dConfig->propLossMath,
+                             avgPool1dConfig->outputQ, avgPool1dConfig->propLossQ, f);
         break;
     }
     case SOFTMAX: {
         softmaxConfig_t *softmaxConfig = layer->config->softmax;
-        deserializeArithmetic(&softmaxConfig->forwardMath, f);
-        deserializeArithmetic(&softmaxConfig->propLossMath, f);
-        deserializeQuantization(softmaxConfig->outputQ, f, 0);
-        deserializeQuantization(softmaxConfig->propLossQ, f, 0);
+        deserializeLayerTail(&softmaxConfig->forwardMath, &softmaxConfig->propLossMath,
+                             softmaxConfig->outputQ, softmaxConfig->propLossQ, f);
         softmaxValidateConfig(softmaxConfig, "deserializeModel: SOFTMAX");
         break;
     }
@@ -925,19 +656,16 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
     case ADAPTIVE_AVGPOOL1D: {
         adaptiveAvgPool1dConfig_t *adaptiveAvgPool1dConfig = layer->config->adaptiveAvgPool1d;
         adaptiveAvgPool1dConfig->outputSize = (size_t)serialReadU32LE(f);
-        deserializeArithmetic(&adaptiveAvgPool1dConfig->forwardMath, f);
-        deserializeArithmetic(&adaptiveAvgPool1dConfig->propLossMath, f);
-        deserializeQuantization(adaptiveAvgPool1dConfig->outputQ, f, 0);
-        deserializeQuantization(adaptiveAvgPool1dConfig->propLossQ, f, 0);
+        deserializeLayerTail(
+            &adaptiveAvgPool1dConfig->forwardMath, &adaptiveAvgPool1dConfig->propLossMath,
+            adaptiveAvgPool1dConfig->outputQ, adaptiveAvgPool1dConfig->propLossQ, f);
         break;
     }
     case DROPOUT: {
         dropoutConfig_t *dropoutConfig = layer->config->dropout;
         dropoutConfig->p = serialReadF32LE(f);
-        deserializeArithmetic(&dropoutConfig->forwardMath, f);
-        deserializeArithmetic(&dropoutConfig->propLossMath, f);
-        deserializeQuantization(dropoutConfig->outputQ, f, 0);
-        deserializeQuantization(dropoutConfig->propLossQ, f, 0);
+        deserializeLayerTail(&dropoutConfig->forwardMath, &dropoutConfig->propLossMath,
+                             dropoutConfig->outputQ, dropoutConfig->propLossQ, f);
         dropoutValidateConfig(dropoutConfig, "deserializeModel: DROPOUT");
         break;
     }
@@ -959,10 +687,8 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         layerNormConfig->eps = serialReadF32LE(f);
         deserializeParameter(layerNormConfig->gamma, f);
         deserializeParameter(layerNormConfig->beta, f);
-        deserializeArithmetic(&layerNormConfig->forwardMath, f);
-        deserializeArithmetic(&layerNormConfig->propLossMath, f);
-        deserializeQuantization(layerNormConfig->outputQ, f, 0);
-        deserializeQuantization(layerNormConfig->propLossQ, f, 0);
+        deserializeLayerTail(&layerNormConfig->forwardMath, &layerNormConfig->propLossMath,
+                             layerNormConfig->outputQ, layerNormConfig->propLossQ, f);
         layerNormValidateConfig(layerNormConfig, "deserializeModel: LAYERNORM");
         break;
     }
@@ -973,10 +699,8 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         groupNormConfig->eps = serialReadF32LE(f);
         deserializeParameter(groupNormConfig->gamma, f);
         deserializeParameter(groupNormConfig->beta, f);
-        deserializeArithmetic(&groupNormConfig->forwardMath, f);
-        deserializeArithmetic(&groupNormConfig->propLossMath, f);
-        deserializeQuantization(groupNormConfig->outputQ, f, 0);
-        deserializeQuantization(groupNormConfig->propLossQ, f, 0);
+        deserializeLayerTail(&groupNormConfig->forwardMath, &groupNormConfig->propLossMath,
+                             groupNormConfig->outputQ, groupNormConfig->propLossQ, f);
         groupNormValidateConfig(groupNormConfig, "deserializeModel: GROUPNORM");
         break;
     }
@@ -1037,8 +761,7 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
             }
             c->numBatchesTracked = serialReadU64LE(f);
         }
-        deserializeArithmetic(&c->forwardMath, f);
-        deserializeArithmetic(&c->propLossMath, f);
+        deserializeLayerTail(&c->forwardMath, &c->propLossMath, c->outputQ, c->propLossQ, f);
         /* Mirror the factory rule (validateLayerQuantForBatchNorm1d): forward and backward
          * trust a FLOAT32-only config. */
         if (c->forwardMath.type != ARITH_FLOAT32) {
@@ -1053,12 +776,7 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
                         (int)c->propLossMath.type);
             exit(1);
         }
-        deserializeQuantization(c->outputQ, f, 0);
-        deserializeQuantization(c->propLossQ, f, 0);
         break;
     }
-    default:
-        PRINT_ERROR("Unsupported layer type!\n");
-        exit(1);
     }
 }

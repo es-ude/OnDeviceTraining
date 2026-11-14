@@ -12,7 +12,8 @@ typedef struct stateDictEntry {
 } stateDictEntry_t;
 
 /*! Load weights/biases from entries[] into the parameter layers of model,
- *  in the order they appear. Param-less layers are skipped.
+ *  in the order they appear. Param-less layers are skipped. The errors below
+ *  are checked for every entry before the first write.
  *
  *  Errors (PRINT_ERROR + exit):
  *   - numEntries != count of param layers in model

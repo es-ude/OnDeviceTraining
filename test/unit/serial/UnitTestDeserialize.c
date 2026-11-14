@@ -49,7 +49,7 @@
  * the version check instead of at the guard it targets (a vacuous pass). */
 #define ODTS_VERSION 9u
 
-/* Fixture writer for hand-crafted v2 files: explicit little-endian bytes, so
+/* Fixture writer for hand-crafted files: explicit little-endian bytes, so
  * the fixtures stay valid even on a big-endian test host. */
 static void writeU32LE(FILE *f, uint32_t value) {
     uint8_t bytes[4] = {(uint8_t)value, (uint8_t)(value >> 8), (uint8_t)(value >> 16),
@@ -182,127 +182,25 @@ static void testDeserializeRejectsBadMagic(void) {
     freeFlattenLayer(layer);
 }
 
-static void testDeserializeRejectsWrongVersion(void) {
-    FILE *f = fopen(FILE_PATH, "wb");
-    fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 1); /* v1 files are host-local artifacts; no back-compat shim */
-    writeU32LE(f, 1); /* layerCount */
-    uint8_t tag = (uint8_t)FLATTEN;
-    fwrite(&tag, sizeof(uint8_t), 1, f);
-    fclose(f);
-
+/* Only the current version is accepted: an older layout would misparse, a
+ * newer one is unknown to this build. */
+static void testDeserializeRejectsUnsupportedVersions(void) {
+    const uint32_t versions[] = {ODTS_VERSION - 1u, ODTS_VERSION + 1u};
     layer_t *layer = flattenLayerInit();
     layer_t *model[] = {layer};
+    for (size_t v = 0; v < sizeof(versions) / sizeof(versions[0]); v++) {
+        FILE *f = fopen(FILE_PATH, "wb");
+        fwrite("ODTS", 1, 4, f);
+        writeU32LE(f, versions[v]);
+        writeU32LE(f, 1); /* layerCount */
+        fputc(FLATTEN, f);
+        fclose(f);
 
-    f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: unsupported format version 1 ",
-                             deserializeModel(&MODEL_CHAIN(model, 1), f));
-    fclose(f);
-
-    freeFlattenLayer(layer);
-}
-
-/*! group-quant PR1: v3 was a REAL shipped format (pre-group-quant SYM record:
- *  scale/qBits/rounding only, no numGroups/groupSize) -- distinct from the
- *  arbitrary-old-version case above (v1). A v3 file must fail cleanly at the
- *  version check now that SERIALIZE_FORMAT_VERSION is 5, exactly like any
- *  other stale version (no back-compat shim, established policy). */
-static void testDeserializeRejectsV3Version(void) {
-    FILE *f = fopen(FILE_PATH, "wb");
-    fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 3); /* v3: pre-group-quant SYM record layout */
-    writeU32LE(f, 1); /* layerCount */
-    uint8_t tag = (uint8_t)FLATTEN;
-    fwrite(&tag, sizeof(uint8_t), 1, f);
-    fclose(f);
-
-    layer_t *layer = flattenLayerInit();
-    layer_t *model[] = {layer};
-
-    f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: unsupported format version 3 ",
-                             deserializeModel(&MODEL_CHAIN(model, 1), f));
-    fclose(f);
-
-    freeFlattenLayer(layer);
-}
-
-/*! group-quant PR4, Task 4: v4 was ALSO a REAL shipped format (the interim
- *  state Tasks 1-3 produced: SYM record group-general, but ASYM left on the
- *  intra-branch bridge -- old per-tensor shape, code-domain zp smuggled
- *  through the old i32 slot). Task 4's v5 bump offers NO migration path from
- *  it: a v4 ASYM record's zp decoded WRONG under the code-domain grid by
- *  design of that interim bridge (see Serialize.c/Deserialize.c's v4/v5
- *  history comments), so a v4 file -- including ones this same branch's own
- *  Tasks 1-3 could have produced -- must now fail cleanly at the version
- *  check, exactly like testDeserializeRejectsV3Version above. This closes
- *  Task 1's disclosed mis-decode window: a v4 file can no longer be silently
- *  read into a code-domain config at all, correct or not. */
-static void testDeserializeRejectsV4Version(void) {
-    FILE *f = fopen(FILE_PATH, "wb");
-    fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 4); /* v4: SYM group-general, ASYM still on the v4 bridge */
-    writeU32LE(f, 1); /* layerCount */
-    uint8_t tag = (uint8_t)FLATTEN;
-    fwrite(&tag, sizeof(uint8_t), 1, f);
-    fclose(f);
-
-    layer_t *layer = flattenLayerInit();
-    layer_t *model[] = {layer};
-
-    f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: unsupported format version 4 ",
-                             deserializeModel(&MODEL_CHAIN(model, 1), f));
-    fclose(f);
-
-    freeFlattenLayer(layer);
-}
-
-/*! v5 = the pre-BATCHNORM1D format (#460): no back-compat shim, established
- *  policy. v5 was a REAL shipped format (group-quant PR4 + BFP epic PR1, see
- *  Serialize.c/Deserialize.c's v5 history comment); Task 8's v6 bump adds the
- *  BATCHNORM1D record and offers no migration path from it, exactly like
- *  every prior version bump above. */
-static void testDeserializeRejectsV5Version(void) {
-    FILE *f = fopen(FILE_PATH, "wb");
-    fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 5); /* v5: pre-BATCHNORM1D format */
-    writeU32LE(f, 1); /* layerCount */
-    uint8_t tag = (uint8_t)FLATTEN;
-    fwrite(&tag, sizeof(uint8_t), 1, f);
-    fclose(f);
-
-    layer_t *layer = flattenLayerInit();
-    layer_t *model[] = {layer};
-
-    f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: unsupported format version 5 ",
-                             deserializeModel(&MODEL_CHAIN(model, 1), f));
-    fclose(f);
-
-    freeFlattenLayer(layer);
-}
-
-/*! v6 = the pre-#391 format: its LINEAR record has no hasBias presence byte,
- *  so a v6 file would misparse under v7. No back-compat shim, established
- *  policy. */
-static void testDeserializeRejectsV6Version(void) {
-    FILE *f = fopen(FILE_PATH, "wb");
-    fwrite("ODTS", 1, 4, f);
-    writeU32LE(f, 6); /* v6: LINEAR record without hasBias */
-    writeU32LE(f, 1); /* layerCount */
-    uint8_t tag = (uint8_t)FLATTEN;
-    fwrite(&tag, sizeof(uint8_t), 1, f);
-    fclose(f);
-
-    layer_t *layer = flattenLayerInit();
-    layer_t *model[] = {layer};
-
-    f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: unsupported format version 6 ",
-                             deserializeModel(&MODEL_CHAIN(model, 1), f));
-    fclose(f);
-
+        f = fopen(FILE_PATH, "rb");
+        ASSERT_EXITS_WITH_OUTPUT(1, "unsupported format version",
+                                 deserializeModel(&MODEL_CHAIN(model, 1), f));
+        fclose(f);
+    }
     freeFlattenLayer(layer);
 }
 
@@ -674,6 +572,61 @@ static void testDeserializeTensorAcceptsTransposedOrderOfDimensions(void) {
     freeTensor(skeleton);
 }
 
+/* A grad record a frozen skeleton skips gets the same permutation check; the
+ * record is otherwise complete, so without it the skip succeeds. */
+static void testSkipSerializedTensorRejectsDuplicateOrderOfDimensions(void) {
+    float paramData[] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
+    tensor_t *paramTensor = makeFloatTensor2D(2, 3, paramData, 6);
+    FILE *f = fopen(FILE_PATH, "wb");
+    fputc(1, f); /* hasGrad */
+    serializeTensor(paramTensor, f);
+    writeU32LE(f, 2);
+    writeU32LE(f, 2);
+    writeU32LE(f, 3);
+    writeU32LE(f, 1);
+    writeU32LE(f, 1);
+    fputc(FLOAT32, f);
+    for (int i = 0; i < 6; i++) {
+        writeF32LE(f, (float)i);
+    }
+    fclose(f);
+
+    tensor_t *skeletonParam = makeFloatTensor2D(2, 3, NULL, 0);
+    parameter_t frozenSkeleton = {.param = skeletonParam, .grad = NULL};
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "readTensorRecordHeader: orderOfDimensions[1] = 1 repeats an earlier entry",
+        deserializeParameter(&frozenSkeleton, f));
+    fclose(f);
+
+    freeTensor(skeletonParam);
+    freeTensor(paramTensor);
+}
+
+/* The writer emits hasGrad 0 or 1; any other byte is a corrupt record, even
+ * when every following tensor record is well-formed. */
+static void testDeserializeParameterRejectsHasGradAboveOne(void) {
+    float data[] = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
+    tensor_t *paramTensor = makeFloatTensor2D(2, 3, data, 6);
+    FILE *f = fopen(FILE_PATH, "wb");
+    fputc(2, f); /* hasGrad */
+    serializeTensor(paramTensor, f);
+    serializeTensor(paramTensor, f);
+    fclose(f);
+
+    tensor_t *skeletonParam = makeFloatTensor2D(2, 3, NULL, 0);
+    tensor_t *skeletonGrad = makeFloatTensor2D(2, 3, NULL, 0);
+    parameter_t trainableSkeleton = {.param = skeletonParam, .grad = skeletonGrad};
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeParameter: hasGrad byte 2 is neither 0 nor 1",
+                             deserializeParameter(&trainableSkeleton, f));
+    fclose(f);
+
+    freeTensor(skeletonGrad);
+    freeTensor(skeletonParam);
+    freeTensor(paramTensor);
+}
+
 static tensor_t *makeAsymTensor1D(size_t d0) {
     size_t *dims = reserveMemory(1 * sizeof(size_t));
     dims[0] = d0;
@@ -763,9 +716,7 @@ static tensor_t *makeSymTensor1D(size_t d0, uint8_t qBits, roundingMode_t roundi
     return initTensor(shape, quantizationInitSym(qBits, roundingMode), NULL);
 }
 
-/*! Group-quant PR2 (Task 5): grouped-SYM twin of makeSymTensor1D above --
- *  numGroups/groupSize must divide d0 (validateSymQConfigShape, called by
- *  initTensor, enforces it at construction). */
+/*! Grouped-SYM twin of makeSymTensor1D; numGroups * groupSize must equal d0. */
 static tensor_t *makeSymGroupedTensor1D(size_t d0, uint8_t qBits, roundingMode_t roundingMode,
                                         size_t numGroups, size_t groupSize) {
     size_t *dims = reserveMemory(1 * sizeof(size_t));
@@ -778,19 +729,9 @@ static tensor_t *makeSymGroupedTensor1D(size_t d0, uint8_t qBits, roundingMode_t
                       NULL);
 }
 
-/*! Group-quant PR2 (Task 5): PR1's fail-fast on ANY file-vs-skeleton
- *  numGroups mismatch is now LEGAL, provided the file's group shape divides
- *  the skeleton's element count -- deserializeQConfig REALLOCATES the
- *  skeleton's scales[] to the file's numGroups instead of dying
- *  (Deserialize.c's PR1-era comment explicitly named this the PR2 relax).
- *  This is the OLD testDeserializeQConfigRejectsNumGroupsMismatch fixture
- *  with its expectation INVERTED: same hand-crafted-bytes numGroups=2
- *  mismatch (skeleton built PER-TENSOR, numGroups=1), but groupSize is now 2
- *  (not the old fixture's 3) so 2*2 == 4 == the skeleton's element count --
- *  a mismatch this well-formed no longer has any guard left to fail at. See
- *  testDeserializeGroupedSymIntoPerTensorSkeleton below for the same relax
- *  exercised through the real serializeTensor/quantizationInitSymGrouped API
- *  instead of hand-assembled bytes. */
+/*! A grouped file record loads into a per-tensor skeleton: the scales array
+ *  is reallocated to the file's group count, and every scale and payload byte
+ *  arrives. */
 static void testDeserializeQConfigAcceptsNumGroupsMismatchViaReallocation(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     writeU32LE(f, 1); /* numberOfDimensions */
@@ -798,7 +739,7 @@ static void testDeserializeQConfigAcceptsNumGroupsMismatchViaReallocation(void) 
     writeU32LE(f, 0); /* orderOfDimensions[0] */
     uint8_t symType = (uint8_t)SYM;
     fwrite(&symType, 1, 1, f);
-    writeU32LE(f, 2); /* numGroups = 2, mismatches the skeleton's 1 */
+    writeU32LE(f, 2); /* numGroups = 2; the skeleton is per-tensor */
     writeU32LE(f, 2); /* groupSize = 2; 2*2 == 4 == the skeleton's element count */
     writeCanonScaleLE(f, 0.5f);
     writeCanonScaleLE(f, 0.25f);
@@ -835,15 +776,8 @@ static void testDeserializeQConfigAcceptsNumGroupsMismatchViaReallocation(void) 
     TEST_ASSERT_EQUAL_UINT8(0xCD, capturedPayload[1]);
 }
 
-/*! Group-quant PR2 (Task 5): a hand-crafted v4 record whose SYM group shape
- *  passes the numGroups==1<=>groupSize==0 sentinel (numGroups=3, groupSize=2
- *  is a well-formed GROUPED shape) but whose numGroups*groupSize (6) does
- *  not equal the skeleton's element count (4) must still die --
- *  validateSymQConfigShape's divisibility check, not the (now relaxed)
- *  numGroups-mismatch guard above. Golden-bytes style (hand-assembled bytes,
- *  UnitTestSerialize.c's testGoldenBytesModelReluSymOutputV4 pattern) rather
- *  than a real serializeTensor call, since no producer in this tree can be
- *  coaxed into emitting a shape this invalid. */
+/*! A well-formed grouped SYM shape (3 x 2) whose product differs from the
+ *  record's element count (4) dies at the exact-product check. */
 static void testDeserializeGroupedSymRejectsBadDivisibility(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     writeU32LE(f, 1); /* numberOfDimensions */
@@ -870,60 +804,6 @@ static void testDeserializeGroupedSymRejectsBadDivisibility(void) {
     fclose(f);
 
     freeTensor(skeleton);
-}
-
-/*! Group-quant PR2 (Task 5): a GROUPED file record (numGroups=3, groupSize=2,
- *  general -- not the per-channel special case) deserialized into a
- *  freshly-built PER-TENSOR skeleton (numGroups=1, groupSize=0) must
- *  reallocate the skeleton's scales[] and load every group's scale, and the
- *  packed tensor DATA must round-trip too -- proving the payload read (sized
- *  by qBits x element count only, independent of numGroups) is unaffected by
- *  the group-shape relax. Built through the real API (quantizationInitSymGrouped
- *  + serializeTensor), unlike the hand-crafted-bytes twin above. */
-static void testDeserializeGroupedSymIntoPerTensorSkeleton(void) {
-    tensor_t *src = makeSymGroupedTensor1D(6, 8, HALF_AWAY, 3, 2);
-    int32_t mantissas[] = {1, -2, 3, -4, 5, -6};
-    byteConversion((uint8_t *)mantissas, 32, src->data, 8, 6);
-    symQConfig_t *srcQc = src->quantization->qConfig;
-    srcQc->scales[0] = odtTestScale(0.125f);
-    srcQc->scales[1] = odtTestScale(0.25f);
-    srcQc->scales[2] = odtTestScale(0.375f);
-
-    FILE *f = fopen(FILE_PATH, "wb");
-    serializeTensor(src, f);
-    fclose(f);
-
-    tensor_t *skeleton = makeSymTensor1D(6, 8, HALF_AWAY); /* per-tensor: {1,0} */
-
-    f = fopen(FILE_PATH, "rb");
-    deserializeTensor(skeleton, f);
-    fclose(f);
-
-    symQConfig_t *dstQc = skeleton->quantization->qConfig;
-    /* CAPTURE before any free. */
-    size_t capturedNumGroups = dstQc->numGroups;
-    size_t capturedGroupSize = dstQc->groupSize;
-    float capturedScales[3];
-    for (size_t g = 0; g < 3; g++) {
-        capturedScales[g] = odtScaleToFloat(dstQc->scales[g]);
-    }
-    size_t dataBytes = calcNumberOfBytesForData(skeleton->quantization, 6);
-    uint8_t capturedSrcData[8];
-    uint8_t capturedDstData[8];
-    memcpy(capturedSrcData, src->data, dataBytes);
-    memcpy(capturedDstData, skeleton->data, dataBytes);
-
-    /* FREE in reverse-init order. */
-    freeTensor(skeleton);
-    freeTensor(src);
-
-    /* ASSERT on captured. */
-    TEST_ASSERT_EQUAL_size_t(3, capturedNumGroups);
-    TEST_ASSERT_EQUAL_size_t(2, capturedGroupSize);
-    TEST_ASSERT_EQUAL_FLOAT(0.125f, capturedScales[0]);
-    TEST_ASSERT_EQUAL_FLOAT(0.25f, capturedScales[1]);
-    TEST_ASSERT_EQUAL_FLOAT(0.375f, capturedScales[2]);
-    TEST_ASSERT_EQUAL_HEX8_ARRAY(capturedSrcData, capturedDstData, dataBytes);
 }
 
 /*! group-quant PR1: numGroups==1 but groupSize!=0 violates the sentinel
@@ -979,10 +859,7 @@ static tensor_t *makeBfpTensor1D(size_t d0, uint8_t mantissaBits, uint8_t expone
     return initTensor(shape, quantizationInitBfp(mantissaBits, exponentBits, roundingMode), NULL);
 }
 
-/*! BFP epic PR1 (Task 7): grouped-BFP twin of makeBfpTensor1D above --
- *  numGroups/groupSize must divide d0 (validateBfpQConfigShape, called by
- *  initTensor, enforces it at construction), mirroring
- *  makeSymGroupedTensor1D. */
+/*! Grouped-BFP twin of makeBfpTensor1D; numGroups * groupSize must equal d0. */
 static tensor_t *makeBfpGroupedTensor1D(size_t d0, uint8_t mantissaBits, uint8_t exponentBits,
                                         roundingMode_t roundingMode, size_t numGroups,
                                         size_t groupSize) {
@@ -998,14 +875,8 @@ static tensor_t *makeBfpGroupedTensor1D(size_t d0, uint8_t mantissaBits, uint8_t
         NULL);
 }
 
-/*! BFP epic PR1 (Task 7): grouped-BFP round trip, mirroring
- *  testDeserializeGroupedSymIntoPerTensorSkeleton's style but into a
- *  SAME-SHAPE skeleton (numGroups/groupSize match on both sides) -- proves
- *  every qConfig field (exponents, mantissaBits, exponentBits, roundingMode)
- *  and the packed payload round-trip intact. Mantissas are written via
- *  byteConversion directly (raw codes, no quantize/pack-path dependency),
- *  mirroring testDeserializeGroupedSymIntoPerTensorSkeleton's own mantissa
- *  setup. */
+/*! Grouped-BFP round trip into a same-shape skeleton: every qConfig field and
+ *  the packed payload (raw codes via byteConversion) arrive intact. */
 static void testBfpRoundTripGrouped(void) {
     tensor_t *src = makeBfpGroupedTensor1D(6, 4, 8, HALF_AWAY, 3, 2);
     bfpQConfig_t *srcQc = src->quantization->qConfig;
@@ -1058,8 +929,8 @@ static void testBfpRoundTripGrouped(void) {
     TEST_ASSERT_EQUAL_HEX8_ARRAY(capturedSrcData, capturedDstData, dataBytes);
 }
 
-/*! BFP epic PR1 (Task 7): PR2-style relax sibling of
- *  testDeserializeGroupedSymIntoPerTensorSkeleton -- a GROUPED file record
+/*! BFP sibling of
+ *  testDeserializeQConfigAcceptsNumGroupsMismatchViaReallocation -- a GROUPED file record
  *  (numGroups=4, groupSize=2) deserialized into a freshly-built PER-TENSOR
  *  skeleton (numGroups=1, groupSize=0) must REALLOCATE the skeleton's
  *  exponents[] and load every group's exponent, and the packed tensor DATA
@@ -1112,21 +983,9 @@ static void testBfpDeserializeReallocatesExponentsOnShapeChange(void) {
     TEST_ASSERT_EQUAL_HEX8_ARRAY(capturedSrcData, capturedDstData, dataBytes);
 }
 
-/*! BFP epic PR1 (Task 7): sibling of testDeserializeSymRejectsZeroNumGroupsInWireConfig
- *  -- fileNumGroups == 0 must be rejected by the shared
- *  SERIAL_MAX_QCONFIG_GROUPS guard
- *  DIRECTLY, not merely happen to survive as an always-false branch further
- *  down (validateBfpQConfigShape also rejects numGroups==0, but never runs
- *  at a numberOfElements==0 wire-config call site, so it cannot be the thing
- *  catching this here -- a live-tensor fixture like
- *  testDeserializeQConfigRejectsSentinelViolation's would let
- *  validateBfpQConfigShape backstop it instead, verified empirically while
- *  designing this test: a bare-tensor fixture with fileNumGroups=0 still
- *  dies with the explicit guard removed, because numGroups==0 is never a
- *  valid shape for validateBfpQConfigShape either -- so ONLY the layer-level,
- *  numberOfElements==0 call site isolates this guard's own necessity, per
- *  the SYM sibling's own comment making the identical point). groupSize is
- *  written nonzero (1) so the sentinel check does not fire first either. */
+/*! fileNumGroups == 0 dies at the group cap. A layer wire config has no
+ *  geometry, so no shape validation can catch it instead; groupSize is 1 so
+ *  the sentinel check does not fire first either. */
 static void testBfpDeserializeRejectsZeroNumGroupsInWireConfig(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
@@ -1208,29 +1067,8 @@ static void testBfpDeserializeRejectsSentinelViolation(void) {
     freeTensor(skeleton);
 }
 
-/*! BFP epic PR1: the BFP arm's mantissaBits/exponentBits
- *  wire bytes were overwritten into the skeleton's qConfig VERBATIM, with no
- *  range check -- unlike every other BFP wire field (numGroups, the sentinel
- *  invariant), which the arm already validates. A corrupt v5 record
- *  announcing a mantissaBits outside initBfpQConfigGrouped's own construction
- *  cap ([2,16], Quantization.c) reaches downstream UB the moment anything
- *  quantizes against it (mantissaBits=1 -> qMax=0, div-by-zero in
- *  packFloatBufferAsBfp) with no guard at the trust boundary where the value
- *  first arrives off the wire.
- *
- *  Isolation: exercised at a layer's outputQ wire-config call site
- *  (numberOfElements == 0, RELU's outputQ, mirroring
- *  testBfpDeserializeRejectsZeroNumGroupsInWireConfig) rather than a live
- *  tensor -- a live-tensor fixture risks the #316 payload-size check firing
- *  first for an unrelated reason (mantissaBits also drives
- *  calcNumberOfBytesForData), which would make this test pass even with the
- *  new guard removed. At a bare wire config there is no payload read to
- *  incidentally catch it: verified empirically pre-fix (TDD RED) -- this
- *  record parsed to completion (deserializeModel returned normally, no
- *  exit(1)) because deserializeLayer simply moves on to propLossQ next,
- *  which matches the skeleton's default FLOAT32 tag. The record is otherwise
- *  complete and well-formed (matching numGroups/groupSize, a real exponent
- *  byte, valid roundingMode, a matching propLossQ tag) for that same reason. */
+/*! A BFP wire config with mantissaBits outside [2, 16] dies. Use a layer wire config so
+ *  payload-size rejection cannot mask the width check. */
 static void testBfpDeserializeRejectsMantissaBitsOutOfRange(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
@@ -1278,18 +1116,8 @@ static void testBfpDeserializeRejectsMantissaBitsOutOfRange(void) {
     freeQuantization(floatQ);
 }
 
-/*! Sibling of testBfpDeserializeRejectsMantissaBitsOutOfRange above, same
- *  isolation rationale (bare wire config, no payload read to incidentally
- *  catch it) -- exponentBits outside initBfpQConfigGrouped's own [2,8] cap.
- *  An unvalidated exponentBits=0 would make bfpExponentBias compute
- *  `1 << -1` (UB) the moment anything derives a scale from this config;
- *  exponentBits > 31 would make `1u << exponentBits` UB in
- *  packFloatBufferAsBfp. Unlike mantissaBits, exponentBits never factors into
- *  calcNumberOfBytesForData at all, so no live-tensor fixture could ever
- *  isolate this guard from the payload-size check by construction -- the
- *  bare wire-config call site is the ONLY place this guard's necessity is
- *  observable, mirroring the SYM SERIAL_MAX_QCONFIG_GROUPS sibling tests' own
- *  reasoning for the same call-site choice. */
+/*! A BFP wire config with exponentBits outside [2, 8] dies. Use a layer wire config so
+ *  payload-size rejection cannot mask the width check. */
 static void testBfpDeserializeRejectsExponentBitsOutOfRange(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
@@ -1491,7 +1319,7 @@ static void testSkipSerializedTensorRejectsRankAboveCap(void) {
  *  catches a payload cut short -- fseek past a genuinely truncated file's real
  *  end succeeds silently (POSIX), so the earlier fseek-past-payload call
  *  cannot fail on its own. A genuine hasGrad=1 parameter record has nothing
- *  after the grad tensor (serializeSparsity is a zero-byte stub), so
+ *  after the grad tensor, so
  *  shortening the whole file trims the grad tensor's payload tail; mirrors
  *  testDeserializeTensorFailsFastOnTruncatedPayload's file-shortening idiom. */
 static void testSkipSerializedTensorRejectsTruncatedPayload(void) {
@@ -1808,16 +1636,9 @@ static void testDeserializeAsymRejectsOversizedNumGroupsInWireConfig(void) {
     freeQuantization(floatQ);
 }
 
-/*! Companion to the above, same isolation rationale: fileNumGroups == 0 is
- *  equally invalid (numGroups == 1 is the per-tensor floor; 0 groups
- *  describes no tensor at all) and must be rejected by
- *  SERIAL_MAX_QCONFIG_GROUPS's guard directly, not merely happen to survive
- *  as an always-false branch further down (validateSymQConfigShape also
- *  rejects numGroups==0, but never runs at a numberOfElements==0 wire-config
- *  call site, so it cannot be the thing catching this here). Record is
- *  likewise complete (0 scale floats follow, since fileNumGroups == 0) so
- *  removing the guard would let the whole model parse successfully instead
- *  of dying for an unrelated reason. */
+/*! fileNumGroups == 0 dies at the group cap. A layer wire config has no
+ *  geometry, so no shape validation can catch it instead, and the record is
+ *  complete, so without the cap the model parses. */
 static void testDeserializeSymRejectsZeroNumGroupsInWireConfig(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
@@ -1941,7 +1762,9 @@ static void testDeserializeAsymRejectsWireQBitsAboveSixteen(void) {
 
     tensor_t *skeleton = makeAsymTensor1D(4);
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeTensor(skeleton, f));
+    /* The message pins the width check: a wider record also fails the payload size. */
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeQConfig: ASYM file qBits",
+                             deserializeTensor(skeleton, f));
     fclose(f);
 
     freeTensor(skeleton);
@@ -1966,8 +1789,8 @@ static void writeSymTensorRecordWithQBits(uint8_t qBits) {
 }
 
 /* A complete RELU record whose outputQ wire config carries qBits: without the guard the whole
- * model parses, because numberOfElements == 0 there skips validateSymQConfigShape. */
-static void writeReluSymOutputWireRecordWithQBits(uint8_t qBits) {
+ * model parses, because a wire config has no geometry to validate against. */
+static void writeReluSymOutputWireRecord(uint32_t numGroups, uint32_t groupSize, uint8_t qBits) {
     FILE *f = fopen(FILE_PATH, "wb");
     fwrite("ODTS", 1, 4, f);
     writeU32LE(f, ODTS_VERSION);
@@ -1982,15 +1805,21 @@ static void writeReluSymOutputWireRecordWithQBits(uint8_t qBits) {
     fwrite(&arithByte, 1, 1, f);
     uint8_t symType = (uint8_t)SYM;
     fwrite(&symType, 1, 1, f);
-    writeU32LE(f, 1); /* numGroups */
-    writeU32LE(f, 0); /* groupSize */
-    writeCanonScaleLE(f, 0.5f);
+    writeU32LE(f, numGroups);
+    writeU32LE(f, groupSize);
+    for (uint32_t g = 0; g < numGroups; g++) {
+        writeCanonScaleLE(f, 0.5f);
+    }
     fwrite(&qBits, 1, 1, f);
     uint8_t roundingMode = 0;
     fwrite(&roundingMode, 1, 1, f);
     uint8_t propLossFloatTag = (uint8_t)FLOAT32;
     fwrite(&propLossFloatTag, 1, 1, f);
     fclose(f);
+}
+
+static void writeReluSymOutputWireRecordWithQBits(uint8_t qBits) {
+    writeReluSymOutputWireRecord(1, 0, qBits);
 }
 
 static void assertSymTensorRecordQBitsRejected(uint8_t qBits) {
@@ -2021,34 +1850,41 @@ static void assertSymWireConfigQBitsRejected(uint8_t qBits) {
     freeQuantization(floatQ);
 }
 
-/*! #479: the SYM twin of the ASYM wire-qBits guard, at the [2, 31] storage ceiling. The
- *  wire-config variants are the ones only this guard can catch. */
-static void testDeserializeSymRejectsWireQBitsZero(void) {
-    assertSymTensorRecordQBitsRejected(0);
+/*! A wire config has no geometry, so only the unconditional sentinel check
+ *  stops a {1, 3} or {2, 0} group shape there; the record is otherwise complete. */
+static void testDeserializeSymRejectsSentinelViolationInWireConfig(void) {
+    const uint32_t shapes[][2] = {{1, 3}, {2, 0}};
+    for (size_t i = 0; i < 2; i++) {
+        writeReluSymOutputWireRecord(shapes[i][0], shapes[i][1], 8);
+        quantization_t *floatQ = quantizationInitFloat();
+        quantization_t *symOutputQ = quantizationInitSym(8, HALF_AWAY);
+        layerQuant_t lq;
+        layerQuantInitUniform(&lq, floatQ);
+        lq.outputQ = symOutputQ;
+        layer_t *layer = reluLayerInit(&lq);
+        layer_t *model[] = {layer};
+        FILE *f = fopen(FILE_PATH, "rb");
+        ASSERT_EXITS_WITH_OUTPUT(1, "sentinel invariant",
+                                 deserializeModel(&MODEL_CHAIN(model, 1), f));
+        fclose(f);
+        freeReluLayer(layer);
+        freeQuantization(symOutputQ);
+        freeQuantization(floatQ);
+    }
 }
 
-static void testDeserializeSymRejectsWireQBitsZeroInWireConfig(void) {
-    assertSymWireConfigQBitsRejected(0);
+/*! SYM widths outside [2, 31] die at both call sites: a tensor record and a
+ *  layer wire config, which has no geometry and skips the shape validation.
+ *  qBits == 1 has qMax == 0, so its scale is inf and every dequant is NaN. */
+static void testDeserializeSymRejectsWireQBitsOutsideRange(void) {
+    const uint8_t outside[] = {0, 1, 32};
+    for (size_t i = 0; i < sizeof(outside); i++) {
+        assertSymTensorRecordQBitsRejected(outside[i]);
+        assertSymWireConfigQBitsRejected(outside[i]);
+    }
 }
 
-/*! qBits == 1 has qMax == 0, so its scale is inf and every dequant is NaN. */
-static void testDeserializeSymRejectsWireQBitsOne(void) {
-    assertSymTensorRecordQBitsRejected(1);
-}
-
-static void testDeserializeSymRejectsWireQBitsOneInWireConfig(void) {
-    assertSymWireConfigQBitsRejected(1);
-}
-
-static void testDeserializeSymRejectsWireQBitsAbove31(void) {
-    assertSymTensorRecordQBitsRejected(32);
-}
-
-static void testDeserializeSymRejectsWireQBitsAbove31InWireConfig(void) {
-    assertSymWireConfigQBitsRejected(32);
-}
-
-/*! #479: pins both inclusive ends of [2, 31], so an off-by-one tightening of the guard fails. */
+/*! Pins both inclusive ends of [2, 31], so an off-by-one tightening of the guard fails. */
 static void testDeserializeSymAcceptsWireQBitsBoundsInWireConfig(void) {
     const uint8_t bounds[] = {2, 31};
     for (size_t i = 0; i < 2; i++) {
@@ -2135,13 +1971,8 @@ static void testDeserializeParameterLoadsPerTensorSymGrad(void) {
     freeTensor(fileGrad);
 }
 
-/*! group-quant PR4 (Task 4): a hand-crafted v5 ASYM record whose group shape
- *  passes the numGroups==1<=>groupSize==0 sentinel (numGroups=3, groupSize=2
- *  is a well-formed GROUPED shape) but whose numGroups*groupSize (6) does
- *  not equal the skeleton's element count (4) must still die --
- *  validateAsymQConfigShape's divisibility check, mirroring
- *  testDeserializeGroupedSymRejectsBadDivisibility exactly, plus the second
- *  (zeroPoints) array. */
+/*! ASYM twin of testDeserializeGroupedSymRejectsBadDivisibility, with the
+ *  zeroPoints array. */
 static void testDeserializeGroupedAsymRejectsBadDivisibility(void) {
     FILE *f = fopen(FILE_PATH, "wb");
     writeU32LE(f, 1); /* numberOfDimensions */
@@ -2179,12 +2010,11 @@ static void testDeserializeGroupedAsymRejectsBadDivisibility(void) {
  *  zeroPoints[] arrays and load every group's scale/zeroPoint, and the
  *  packed tensor DATA must round-trip too -- proving the payload read
  *  (sized by qBits x element count only, independent of numGroups) is
- *  unaffected. Mirrors testDeserializeGroupedSymIntoPerTensorSkeleton
- *  exactly, built through the real API (quantizationInitAsymGrouped +
- *  serializeTensor), not hand-crafted bytes. Run under ASan (mutation ii:
- *  sizing only scales[] on realloc leaves zeroPoints[] stale -- an
- *  ASan-visible heap-buffer-overflow the moment the zeroPoints loop writes
- *  past it). */
+ *  unaffected. The SYM case is
+ *  testDeserializeQConfigAcceptsNumGroupsMismatchViaReallocation; this one is built through the
+ * real API (quantizationInitAsymGrouped + serializeTensor), not hand-crafted bytes. Run under ASan
+ * (mutation ii: sizing only scales[] on realloc leaves zeroPoints[] stale -- an ASan-visible
+ * heap-buffer-overflow the moment the zeroPoints loop writes past it). */
 static void testDeserializeGroupedAsymIntoPerTensorSkeleton(void) {
     tensor_t *src = makeAsymGroupedTensor1D(6, 8, HALF_AWAY, 3, 2);
     int32_t codes[] = {10, 20, 30, 40, 50, 60};
@@ -2305,12 +2135,7 @@ static void testSkipSerializedGroupedAsymGrad(void) {
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(siblingData, capturedSibling, 3);
 }
 
-/*! group-quant PR4 (Task 4): the ASYM twin of
- *  testSkipSerializedGroupedSymGradRejectsBadDivisibility -- a GROUPED grad
- *  record on the SKIP path whose numGroups*groupSize (9) does not equal its
- *  own element count (6) must still fail fast: the ASYM arm's
- *  validateAsymQConfigShape call is reached via the real element count
- *  skipSerializedTensor threads through, exactly like the SYM arm's. */
+/*! ASYM twin of testSkipSerializedGroupedSymGradRejectsBadDivisibility. */
 static void testSkipSerializedGroupedAsymGradRejectsBadDivisibility(void) {
     float paramData[] = {1.f, 2.f, 3.f, 4.f};
     tensor_t *paramTensor = makeFloatTensor2D(2, 2, paramData, 4);
@@ -2352,17 +2177,8 @@ static void testSkipSerializedGroupedAsymGradRejectsBadDivisibility(void) {
     freeTensor(paramTensor);
 }
 
-/*! Group-quant PR2 (Task 5): skipSerializedTensor now threads
- *  the real element count it just parsed from the record's own dims into
- *  deserializeQConfig instead of a hardcoded 0 -- proven here by a GROUPED
- *  grad record on the SKIP path (frozen skeleton, deserializeParameter)
- *  whose numGroups*groupSize (9) does not equal its own element count (6):
- *  before this fix numberOfElements==0 suppressed validateSymQConfigShape
- *  unconditionally on the skip path, so this record would have silently
- *  "succeeded" past skip parsing despite being corrupt. Hand-crafted bytes,
- *  mirroring testDeserializeGroupedSymRejectsBadDivisibility -- no producer
- *  in this tree emits an invalid-divisibility record (initSymQConfigGrouped
- *  enforces the shape at construction). */
+/*! A skipped grouped grad record is validated against its own element count:
+ *  numGroups * groupSize (9) != 6 dies even though the record is discarded. */
 static void testSkipSerializedGroupedSymGradRejectsBadDivisibility(void) {
     float paramData[] = {1.f, 2.f, 3.f, 4.f};
     tensor_t *paramTensor = makeFloatTensor2D(2, 2, paramData, 4);
@@ -3331,11 +3147,7 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testSerializeAndDeserializeTensor);
     RUN_TEST(testDeserializeRejectsBadMagic);
-    RUN_TEST(testDeserializeRejectsWrongVersion);
-    RUN_TEST(testDeserializeRejectsV3Version);
-    RUN_TEST(testDeserializeRejectsV4Version);
-    RUN_TEST(testDeserializeRejectsV5Version);
-    RUN_TEST(testDeserializeRejectsV6Version);
+    RUN_TEST(testDeserializeRejectsUnsupportedVersions);
     RUN_TEST(testDeserializeRejectsV7Version);
     RUN_TEST(testDeserializeRejectsV8Version);
     RUN_TEST(testDeserializeRejectsWiringKindMismatch);
@@ -3353,11 +3165,12 @@ int main(void) {
     RUN_TEST(testDeserializeTensorRejectsOutOfRangeOrderOfDimensions);
     RUN_TEST(testDeserializeTensorRejectsDuplicateOrderOfDimensions);
     RUN_TEST(testDeserializeTensorAcceptsTransposedOrderOfDimensions);
+    RUN_TEST(testSkipSerializedTensorRejectsDuplicateOrderOfDimensions);
+    RUN_TEST(testDeserializeParameterRejectsHasGradAboveOne);
     RUN_TEST(testDeserializeTensorRoundTripsAsymZeroPoint);
     RUN_TEST(testDeserializeQConfigAcceptsWideZeroPoint);
     RUN_TEST(testDeserializeQConfigAcceptsNumGroupsMismatchViaReallocation);
     RUN_TEST(testDeserializeGroupedSymRejectsBadDivisibility);
-    RUN_TEST(testDeserializeGroupedSymIntoPerTensorSkeleton);
     RUN_TEST(testDeserializeQConfigRejectsSentinelViolation);
     RUN_TEST(testBfpRoundTripGrouped);
     RUN_TEST(testBfpDeserializeReallocatesExponentsOnShapeChange);
@@ -3382,12 +3195,8 @@ int main(void) {
     RUN_TEST(testDeserializeSymRejectsZeroNumGroupsInWireConfig);
     RUN_TEST(testDeserializeAsymRejectsZeroNumGroupsInWireConfig);
     RUN_TEST(testDeserializeAsymRejectsWireQBitsAboveSixteen);
-    RUN_TEST(testDeserializeSymRejectsWireQBitsZero);
-    RUN_TEST(testDeserializeSymRejectsWireQBitsZeroInWireConfig);
-    RUN_TEST(testDeserializeSymRejectsWireQBitsOne);
-    RUN_TEST(testDeserializeSymRejectsWireQBitsOneInWireConfig);
-    RUN_TEST(testDeserializeSymRejectsWireQBitsAbove31);
-    RUN_TEST(testDeserializeSymRejectsWireQBitsAbove31InWireConfig);
+    RUN_TEST(testDeserializeSymRejectsSentinelViolationInWireConfig);
+    RUN_TEST(testDeserializeSymRejectsWireQBitsOutsideRange);
     RUN_TEST(testDeserializeSymAcceptsWireQBitsBoundsInWireConfig);
     RUN_TEST(testDeserializeGroupedAsymRejectsBadDivisibility);
     RUN_TEST(testDeserializeParameterRejectsGroupedSymGrad);

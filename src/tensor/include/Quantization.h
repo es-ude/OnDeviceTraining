@@ -131,9 +131,15 @@ void initSymQConfig(uint8_t qBits, roundingMode_t roundingMode, symQConfig_t *sy
  * any shape other than {1, 0} or {>1, >0}. */
 void initSymQConfigGrouped(uint8_t qBits, roundingMode_t roundingMode, size_t numGroups,
                            size_t groupSize, symQConfig_t *qC);
-/*! Use where a config attaches to a concrete element count (initTensor, the
- * deserializer, requantize targets): checks width, shape, and the overflow-
- * checked numGroups * groupSize == numberOfElements. */
+/*! Dtype-independent group-shape check behind the validate...QConfigShape
+ * functions: {1, 0}, or {>1, >0} with the overflow-checked
+ * numGroups * groupSize == numberOfElements. `what` prefixes the diagnostic.
+ * The deserializer calls it directly on file values whose widths it checks itself. */
+void validateGroupShape(size_t numGroups, size_t groupSize, size_t numberOfElements,
+                        const char *what);
+/*! Use where a config attaches to a concrete element count (initTensor,
+ * requantize targets): checks width, shape, and the overflow-checked
+ * numGroups * groupSize == numberOfElements. */
 void validateSymQConfigShape(const symQConfig_t *qC, size_t numberOfElements);
 void initAsymQConfig(uint8_t qBits, roundingMode_t roundingMode, asymQConfig_t *asymQConfig);
 /*! Allocates scales[numGroups] = 1 and zeroPoints[numGroups] = 0. Rejects a

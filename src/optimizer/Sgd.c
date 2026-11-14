@@ -69,6 +69,9 @@ typedef struct {
 typedef struct {
     float lr;
 } sgdMParamCtx_t; /* momentum: param */
+typedef struct {
+    float momentum, weightDecay, lr;
+} sgdMFusedCtx_t; /* momentum: state and param in one op */
 
 /* executeOp update kernels. The update arithmetic comes from the sgd_t's
  * updateMath knob (#310); only ARITH_FLOAT32 is implemented (guards in
@@ -79,7 +82,11 @@ typedef struct {
  * arithmetic.roundingMode, so each step function overrides it with
  * optim->writeBackRounding on every param/state write-back -- that is where
  * a SYM param's SR_HALF_AWAY dead-zone escape lives (#279, PR #284). The
- * tensors' own qConfig roundingMode stays untouched (storage/serialization). */
+ * tensors' own qConfig roundingMode stays untouched (storage/serialization).
+ * Momentum runs a state op and then a param op; with a FLOAT32 state and grad
+ * the two collapse into one op (sgdMFusedKernel) so a quantized param is
+ * decoded once per step instead of twice. A quantized state keeps the two
+ * ops: the param op must read the state from its re-quantized codes. */
 
 /* operands {param, grad} -> rawOut = param - lr*(grad + wd*param) */
 static void sgdUpdateKernel(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t *aux,
@@ -126,6 +133,30 @@ static void sgdMParamKernel(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t 
     float *out = (float *)rawOut->data;
     for (size_t i = 0; i < numberOfValues; i++) {
         out[i] = param[i] - ctx->lr * state[i];
+    }
+}
+
+/* operands {param, state, grad}; aux is the FLOAT32 state, written in place:
+ * aux = mom*state + grad + wd*param, rawOut = param - lr*aux. The expressions
+ * and their order are sgdMStateKernel's then sgdMParamKernel's, so the result
+ * is bit-identical to the two ops. Elementwise: element i is read before it
+ * is written, so aux and rawOut may alias the state and param operands. */
+static void sgdMFusedKernel(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t *aux,
+                            const void *ctxv, rngStream_t *rs) {
+    (void)n;
+    const sgdMFusedCtx_t *ctx = ctxv;
+    size_t numberOfValues = calcNumberOfElementsByTensor(rawOut);
+    float *param = (float *)op[0]->data;
+    float *state = (float *)op[1]->data;
+    float *grad = (float *)op[2]->data;
+    float *stateOut = (float *)aux->data;
+    float *out = (float *)rawOut->data;
+    for (size_t i = 0; i < numberOfValues; i++) {
+        float p = param[i];
+        float g = grad[i] + ctx->weightDecay * p;
+        float s = ctx->momentum * state[i] + g;
+        stateOut[i] = s;
+        out[i] = p - ctx->lr * s;
     }
 }
 
@@ -271,6 +302,34 @@ void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
     for (size_t i = 0; i < optim->sizeStates; i++) {
         parameter_t *p = optim->parameter[i];
         tensor_t *state = optim->states[i]->stateBuffers[0];
+
+        /* FLOAT32 state and grad: one op under the PARAM op's key. The state
+         * write never rounds (auxOut is not converted), so the param write-back
+         * draws from the same OUT stream as in the two-op path below. A
+         * quantized grad keeps the two ops: the fused op would hold param
+         * scratch, grad scratch and rawData at once, above the old peak stack. */
+        if (state->quantization->type == FLOAT32 && p->grad->quantization->type == FLOAT32) {
+            sgdMFusedCtx_t fc = {.momentum = sgd->momentumFactor,
+                                 .weightDecay = sgd->weightDecay,
+                                 .lr = sgd->learningRate};
+            rngKey_t fusedKey;
+            executeOp(
+                &(opSpec_t){
+                    .kernel = sgdMFusedKernel,
+                    .ctx = &fc,
+                    .inputs = (tensor_t *[]){p->param, state, p->grad},
+                    .nInputs = 3,
+                    .arithmetic = updateMath,
+                    .key = optimizerUpdateOpKey(updateKey, (uint32_t)i, SGD_OP_PARAM, &fusedKey),
+                    .mode = OUT_WRITE,
+                    .auxOut = state,
+                    .writesInPlaceSafe = true,
+                    /* param is inputs[0] here. */
+                    .groupedSymOperandPos = 1,
+                },
+                p->param);
+            continue;
+        }
 
         /* BFP state on a BFP gradient: the integer momentum store, then -- for a
          * BFP parameter -- the integer parameter update from the STORED v' */

@@ -2696,6 +2696,189 @@ void testSgdMomentumStepWritesStateThenParamUnderTheirOpKeys(void) {
     assertUpdateOutStream(1, updateKey, 0u, 1u, 0x08a6cedfu);
 }
 
+#define PIN_N 8
+#define PIN_PARAMS 7
+
+/* A FLOAT32 tensor of PIN_N values, requantized into `q` (NULL keeps FLOAT32;
+ * `q` is freed here). */
+static tensor_t *pinTensor(const float *values, quantization_t *q) {
+    tensor_t *t = buildFloatTensor1D(values, PIN_N);
+    if (q != NULL) {
+        requantizeTensorInPlace(t, q);
+        freeQuantization(q);
+    }
+    return t;
+}
+
+static void pinDequantBits(tensor_t *t, uint32_t bits[PIN_N]) {
+    tensor_t view;
+    quantization_t viewQ;
+    initFloat32Quantization(&viewQ);
+    float values[PIN_N];
+    setTensorValuesForConversion((uint8_t *)values, &viewQ, t, &view);
+    convertTensor(t, &view, NULL);
+    memcpy(bits, values, sizeof(values));
+}
+
+/* Momentum SGD with FLOAT32 state, SR write-back under an update key, nonzero
+ * weight decay, two steps (the state feeds back), over every param dtype a
+ * FLOAT32 state serves: FLOAT32, SYM, grouped SYM, grouped ASYM, BFP, and SYM
+ * and BFP params on quantized grads. The goldens are bit patterns captured
+ * from the two-op path (state op, then param op); lr, momentum and weight
+ * decay are powers of two, so every product is exact and FMA contraction
+ * cannot move them. */
+void testSgdMomentumFloatStateStepPinsParamAndStateBits(void) {
+    static const float paramValues[PIN_N] = {0.91f,  -0.37f, 0.052f, -1.2f,
+                                             0.333f, 0.71f,  -0.08f, 0.44f};
+    static const float gradValues[PIN_N] = {0.21f,  -0.013f, 0.4f,  0.077f,
+                                            -0.31f, 0.0042f, 0.19f, -0.26f};
+    static const float stateValues[PIN_N] = {0.05f,  -0.11f, 0.02f,  0.3f,
+                                             -0.07f, 0.013f, -0.22f, 0.09f};
+    tensor_t *p[PIN_PARAMS] = {
+        pinTensor(paramValues, NULL),
+        pinTensor(paramValues, quantizationInitSym(8, HALF_AWAY)),
+        pinTensor(paramValues, quantizationInitSymGrouped(8, HALF_AWAY, 2, 4)),
+        pinTensor(paramValues, quantizationInitAsymGrouped(8, HALF_AWAY, 2, 4)),
+        pinTensor(paramValues, quantizationInitBfp(8, 8, HALF_AWAY)),
+        pinTensor(paramValues, quantizationInitSym(8, HALF_AWAY)),
+        pinTensor(paramValues, quantizationInitBfp(8, 8, HALF_AWAY)),
+    };
+    tensor_t *g[PIN_PARAMS];
+    for (size_t i = 0; i < 5; i++) {
+        g[i] = pinTensor(gradValues, NULL);
+    }
+    g[5] = pinTensor(gradValues, quantizationInitSym(8, HALF_AWAY));
+    g[6] = pinTensor(gradValues, quantizationInitBfp(8, 8, HALF_AWAY));
+
+    parameter_t *params[PIN_PARAMS];
+    tensor_t *stateTensors[PIN_PARAMS];
+    tensor_t *stateBuffers[PIN_PARAMS][1];
+    states_t st[PIN_PARAMS];
+    states_t *stArr[PIN_PARAMS];
+    for (size_t i = 0; i < PIN_PARAMS; i++) {
+        params[i] = parameterInit(p[i], g[i]);
+        stateTensors[i] = pinTensor(stateValues, NULL);
+        stateBuffers[i][0] = stateTensors[i];
+        st[i] = (states_t){.stateBuffers = stateBuffers[i], .statesPerParameter = 1};
+        stArr[i] = &st[i];
+    }
+    sgd_t sgd;
+    sgdInit(&sgd, 0.125f, 0.5f, 0.0625f,
+            (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimImpl_t impl = {.sgd = &sgd};
+    optimizer_t optim = {.type = SGD_M,
+                         .impl = &impl,
+                         .parameter = params,
+                         .states = stArr,
+                         .sizeStates = PIN_PARAMS,
+                         .writeBackRounding = SR_HALF_AWAY};
+
+    for (uint64_t step = 0; step < 2; step++) {
+        const rngKey_t updateKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED + step);
+        sgdStepM(&optim, &updateKey);
+    }
+
+    uint32_t paramBits[PIN_PARAMS][PIN_N];
+    uint32_t stateBits[PIN_PARAMS][PIN_N];
+    for (size_t i = 0; i < PIN_PARAMS; i++) {
+        pinDequantBits(p[i], paramBits[i]);
+        memcpy(stateBits[i], stateTensors[i]->data, sizeof(stateBits[i]));
+        freeTensor(stateTensors[i]);
+        freeParameter(params[i]);
+    }
+
+    static const uint32_t expectedParamBits[PIN_PARAMS][PIN_N] = {
+        {0x3f527ba4u, 0xbeb26cf2u, 0xbd9a98f6u, 0xbf9d42d2u, 0x3edbf6c3u, 0x3f319365u, 0xbdefd999u,
+         0x3f01087bu},
+        {0x3f500aa0u, 0xbeb25240u, 0xbd8ab1c0u, 0xbf9d44fcu, 0x3ed9f2c0u, 0x3f325240u, 0xbdedc300u,
+         0x3f0343a8u},
+        {0x3f5284a8u, 0xbeb74650u, 0xbd9e8200u, 0xbf9d44fcu, 0x3edfbb00u, 0x3f319608u, 0xbdeaeac0u,
+         0x3f00a520u},
+        {0x3f4ff478u, 0xbeb53040u, 0xbd943ec0u, 0xbf9d82acu, 0x3eda2698u, 0x3f317374u, 0xbdf0f150u,
+         0x3f016cdeu},
+        {0x3f540000u, 0xbeb00000u, 0xbdc00000u, 0xbf9c0000u, 0x3ee00000u, 0x3f300000u, 0xbde00000u,
+         0x3f000000u},
+        {0x3f527210u, 0xbeb73620u, 0xbd9e7400u, 0xbf9d3718u, 0x3ed9df80u, 0x3f324280u, 0xbdedae00u,
+         0x3f00be40u},
+        {0x3f500000u, 0xbeb00000u, 0xbda00000u, 0xbfa00000u, 0x3ed80000u, 0x3f2c0000u, 0xbe000000u,
+         0x3ef80000u},
+    };
+    static const uint32_t expectedStateBits[PIN_PARAMS][PIN_N] = {
+        {0x3ed23148u, 0xbda5d687u, 0x3f1b4d2fu, 0x3d9d4fdfu, 0xbee5c25eu, 0x3d9aff48u, 0x3e633d70u,
+         0xbea64a3du},
+        {0x3ed1d688u, 0xbda54ce2u, 0x3f1b7cb5u, 0x3d9d4e35u, 0xbee61396u, 0x3d9a9aacu, 0x3e63927au,
+         0xbea600e7u},
+        {0x3ed2252au, 0xbda6876au, 0x3f1b5564u, 0x3d9d4e35u, 0xbee5a01au, 0x3d9b006eu, 0x3e635890u,
+         0xbea6360cu},
+        {0x3ed21446u, 0xbda64e14u, 0x3f1b46f5u, 0x3d9cd823u, 0xbee5e6aeu, 0x3d9adebeu, 0x3e632c90u,
+         0xbea64d74u},
+        {0x3ed22e14u, 0xbda6418au, 0x3f1b0148u, 0x3d9d24ddu, 0xbee5ca3eu, 0x3d9a8ef4u, 0x3e63051eu,
+         0xbea6a8f5u},
+        {0x3ed2eda6u, 0xbda549e4u, 0x3f1b55abu, 0x3d990026u, 0xbee50d48u, 0x3d9897b0u, 0x3e6200b6u,
+         0xbea7671fu},
+        {0x3ed2e666u, 0xbda251ecu, 0x3f1aa7aeu, 0x3d9e999au, 0xbee4b5c2u, 0x3d97a7f0u, 0x3e652e14u,
+         0xbea7fae1u},
+    };
+    for (size_t i = 0; i < PIN_PARAMS; i++) {
+        TEST_ASSERT_EQUAL_HEX32_ARRAY(expectedParamBits[i], paramBits[i], PIN_N);
+        TEST_ASSERT_EQUAL_HEX32_ARRAY(expectedStateBits[i], stateBits[i], PIN_N);
+    }
+}
+
+static size_t sgdDecodeCount;
+static conversionFunction_t sgdSavedDecodeCell;
+
+static void sgdCountingDecodeCell(tensor_t *in, tensor_t *out, rngStream_t *rs) {
+    sgdDecodeCount++;
+    sgdSavedDecodeCell(in, out, rs);
+}
+
+/* SYM_INT32 decodes during one momentum step of a SYM_INT32 param with a
+ * FLOAT32 state; a SYM_INT32 grad when quantizedGrad. */
+static size_t symInt32DecodesOfOneMomentumStep(bool quantizedGrad) {
+    const rngKey_t updateKey = rngKeyFromSeed(UPDATE_KEY_TEST_SEED);
+    parameter_t *param = buildSymDeadZoneFixture(HALF_AWAY, 0.1f);
+    if (quantizedGrad) {
+        quantization_t *gradQ = quantizationInitSymInt32(HALF_AWAY);
+        requantizeTensorInPlace(param->grad, gradQ);
+        freeQuantization(gradQ);
+    }
+    tensor_t *state = buildFloatTensor1D((float[]){0.5f, -0.25f}, 2);
+    tensor_t *stateBuffers[1] = {state};
+    states_t st = {.stateBuffers = stateBuffers, .statesPerParameter = 1};
+    states_t *stArr[1] = {&st};
+    parameter_t *params[1] = {param};
+    sgd_t sgd;
+    sgdInit(&sgd, 0.1f, 0.25f, 0.f,
+            (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimImpl_t impl = {.sgd = &sgd};
+    optimizer_t optim = {.type = SGD_M,
+                         .impl = &impl,
+                         .parameter = params,
+                         .states = stArr,
+                         .sizeStates = 1,
+                         .writeBackRounding = SR_HALF_AWAY};
+    sgdSavedDecodeCell = conversionMatrix[SYM_INT32][FLOAT32];
+    conversionMatrix[SYM_INT32][FLOAT32] = sgdCountingDecodeCell;
+    sgdDecodeCount = 0;
+
+    sgdStepM(&optim, &updateKey);
+
+    conversionMatrix[SYM_INT32][FLOAT32] = sgdSavedDecodeCell;
+    freeTensor(state);
+    freeParameter(param);
+    return sgdDecodeCount;
+}
+
+/* With a FLOAT32 state and grad the step is one op: the param decodes once.
+ * A quantized grad keeps the two ops (one op would hold param scratch, grad
+ * scratch and rawData at once): param + grad in the state op, the param
+ * again in the param op. */
+void testSgdMomentumFusesOnlyWhenStateAndGradAreFloat32(void) {
+    TEST_ASSERT_EQUAL_UINT32(1u, (uint32_t)symInt32DecodesOfOneMomentumStep(false));
+    TEST_ASSERT_EQUAL_UINT32(3u, (uint32_t)symInt32DecodesOfOneMomentumStep(true));
+}
+
 /* A FLOAT32 param has no rounding step: an SR write-back without an update
  * key steps normally (a missing key matters only where a draw happens). */
 static void stepFloat32SrWithoutAKey(void) {
@@ -3388,6 +3571,8 @@ int main() {
     RUN_TEST(testSgdStepWritesEachParamBackUnderItsUpdateOpKey);
     RUN_TEST(testOptimizerStepWithoutAnUpdateKeyExitsOnAnSrWriteBack);
     RUN_TEST(testSgdMomentumStepWritesStateThenParamUnderTheirOpKeys);
+    RUN_TEST(testSgdMomentumFloatStateStepPinsParamAndStateBits);
+    RUN_TEST(testSgdMomentumFusesOnlyWhenStateAndGradAreFloat32);
     RUN_TEST(testSgdFloat32SrWriteBackStepsWithoutAnUpdateKey);
     RUN_TEST(testSgdSrWriteBackIsAPureFunctionOfTheUpdateKeyAndTheParam);
 #if SIZE_MAX > UINT32_MAX

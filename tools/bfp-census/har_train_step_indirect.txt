@@ -154,6 +154,7 @@ exclude RematArena.c        rematArenaDone                          ARENA schedu
 exclude RematArena.c        rematArenaEnd                           ARENA scheduler row and placement policies: the step's ephemeral scheduler is HEAP
 exclude RematArena.c        rematArenaNext                          ARENA scheduler row and placement policies: the step's ephemeral scheduler is HEAP
 exclude Sgd.c               sgdGetLr                                LR get / set: trainingRun per epoch (logging, schedule), outside the step
+exclude Sgd.c               sgdMFusedKernel                         SGD executeOp kernel of the non-BFP storage arms: BFP state + param run the in-place engines (rooted)
 exclude Sgd.c               sgdMParamKernel                         SGD executeOp kernel of the non-BFP storage arms: BFP state + param run the in-place engines (rooted)
 exclude Sgd.c               sgdMStateKernel                         SGD executeOp kernel of the non-BFP storage arms: BFP state + param run the in-place engines (rooted)
 exclude Sgd.c               sgdSetLr                                LR get / set: trainingRun per epoch (logging, schedule), outside the step

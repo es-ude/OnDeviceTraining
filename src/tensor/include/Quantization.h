@@ -31,8 +31,9 @@ typedef struct symInt32QConfig {
 /* SYM grad ACCUMULATION-TARGET width contract — NOT a backward-compute knob.
  * Backward kernels always run int32-mantissa math at operand width (see
  * ODT_SYM_OPERAND_QMAXBITS above); this bound instead caps the qMaxBits/qBits
- * a SYM_INT32/SYM/ASYM grad TARGET may declare, enforced where increments are
- * accumulated into it (accumulateOut in ExecuteOp.c) and baked into
+ * a SYM_INT32/SYM grad TARGET may declare, enforced where increments are
+ * accumulated into it (accumulateOut in ExecuteOp.c; ASYM grads are capped at
+ * 16 bits by validateAsymQBits at init, so lowering N does not cap them) and baked into
  * gradInitSymInt32. Rationale is value-sum soundness: int16-range mantissas
  * accumulate in an int32 buffer with headroom; wider widths break that
  * argument. It is NOT a footprint knob either — SYM_INT32 grads stay 4

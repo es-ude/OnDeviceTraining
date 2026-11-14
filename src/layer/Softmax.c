@@ -361,6 +361,16 @@ typedef struct {
     rngStream_t *shift;
 } softmaxKernelCtx_t;
 
+/* A BFP_SHIFT_SR softmax draws from the FORWARD-phase shift stream; a key-less
+ * call (inference()) has none. Checked once per call, not per shift. */
+static void softmaxRequireShiftStream(const softmaxConfig_t *cfg, const rngStream_t *shift) {
+    if (cfg->bfpExpShiftRounding == BFP_SHIFT_SR && shift == NULL) {
+        PRINT_ERROR("Softmax: BFP_SHIFT_SR needs a key (run it through inferenceWithLoss with "
+                    "call->key or a training step)");
+        exit(1);
+    }
+}
+
 static void softmaxForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                     const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -435,6 +445,7 @@ void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output,
                                    .shift = layerExecPurposeStream(exec, RNG_TAG_FORWARD,
                                                                    RNG_TAG_SOFTMAX_SHIFT,
                                                                    &shiftStorage)};
+        softmaxRequireShiftStream(cfg, kctx.shift);
         executeOp(
             &(opSpec_t){.kernel = softmaxForwardKernelBfp,
                         .ctx = &kctx,
@@ -728,6 +739,7 @@ void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, ten
                                    .shift = layerExecPurposeStream(exec, RNG_TAG_FORWARD,
                                                                    RNG_TAG_SOFTMAX_SHIFT,
                                                                    &shiftStorage)};
+        softmaxRequireShiftStream(cfg, kctx.shift);
         executeOp(
             &(opSpec_t){.kernel = softmaxBackwardKernelBfp,
                         .ctx = &kctx,

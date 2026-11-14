@@ -230,7 +230,7 @@ static void layerNormValidateSymTensor(tensor_t *t, const char *what) {
  * groups (gamma_j shared by all G groups) and the layout-agnostic logical
  * index map — the flat equal-count arithmetic elementwise ops can express
  * neither. Scale bookkeeping:
- *   s_y    = s_norm * s_gamma                  (product idiom, mulSymInt32Tensors)
+ *   s_y    = s_norm * s_gamma                  (product of the two scales)
  *   seed_j = round(beta_q,j * s_beta / s_y)    (bias-rescale idiom,
  *            matmulSymInt32TensorsWithBias — a raw beta_q add would silently
  *            drop beta under dynamic per-tensor scales)

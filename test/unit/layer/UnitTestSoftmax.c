@@ -1183,6 +1183,25 @@ void testSoftmaxBfpBackwardRecomputesTheForwardsSoftmaxUnderSrShifts(void) {
     }
 }
 
+/* InferenceApi.h promises a named error, not a NULL read, when a key-less
+ * forward reaches an SR shift. */
+void testSoftmaxBfpSrShiftWithoutAKeyExits(void) {
+    const int32_t zeros[8] = {0};
+    tensor_t *in = buildSmBfpAInput();
+    tensor_t *out = buildSmBfpWireWithCodes(8, 16, 8, 1, 0, zeros, (uint8_t[]){127});
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, out->quantization);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+    softmaxSetBfpExpShiftRounding(softmaxLayer, BFP_SHIFT_SR);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "Softmax: BFP_SHIFT_SR needs a key",
+                             layerFunctions[SOFTMAX].forward(softmaxLayer, in, out, NULL));
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(out);
+    freeTensor(in);
+}
+
 /* R-S2 step 2 (arithmetic-bfp.md §5.9): the coarse-negative-block regime. Block
  * A holds the SIGNED max (2.0 at E=-5); block B {-100, -80, +1.0, -50} is
  * negative-dominated, so its absmax-minimal grid (E=0) is legitimately
@@ -2392,6 +2411,7 @@ int main() {
     RUN_TEST(unitTestSoftmaxForwardBfpNativeTrunc);
     RUN_TEST(unitTestSoftmaxForwardBfpNativeHalfAway);
     RUN_TEST(testSoftmaxBfpBackwardRecomputesTheForwardsSoftmaxUnderSrShifts);
+    RUN_TEST(testSoftmaxBfpSrShiftWithoutAKeyExits);
     RUN_TEST(unitTestSoftmaxForwardBfpCoarseNegativeBlock);
     RUN_TEST(unitTestSoftmaxForwardBfpCoarseSaturation);
     RUN_TEST(unitTestSoftmaxForwardBfpRejectsAFloat32Input);

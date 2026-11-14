@@ -30,7 +30,7 @@ typedef struct {
                                     copies so batch composition and the MEAN-loss
                                     weighting stay comparable across modes */
     uint32_t minCount;           /* class eligible once generator count >= minCount;
-                                    must be >= 1 for PPCA_SAMPLE/CLASS_MEAN.
+                                    0 only when every generator is populated.
                                     Ignored by EXEMPLAR, which gates on a
                                     non-empty class buffer */
     replayMode_t mode;           /* zero-init = PPCA sampling */

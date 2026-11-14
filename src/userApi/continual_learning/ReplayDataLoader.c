@@ -190,11 +190,6 @@ dataLoader_t *replayDataLoaderWrap(dataLoader_t *base, const replayLoaderConfig_
                     "required (set, or exemplars for REPLAY_MODE_EXEMPLAR)");
         exit(1);
     }
-    /* A generator with count 0 cannot be sampled. */
-    if (cfg->mode != REPLAY_MODE_EXEMPLAR && cfg->minCount == 0) {
-        PRINT_ERROR("replayDataLoaderWrap: minCount must be >= 1 for PPCA and class-mean replay");
-        exit(1);
-    }
     /* Slot i draws under (SLOT, i), a 32-bit fold index. */
     if (cfg->samplesPerClass > UINT32_MAX) {
         PRINT_ERROR("replayDataLoaderWrap: samplesPerClass exceeds UINT32_MAX");

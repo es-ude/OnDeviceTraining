@@ -226,36 +226,6 @@ void testMeanModeReplaysClassCentroidsWithoutStream(void) {
     freeFakeDataset();
 }
 
-static void wrapWithMinCountZero(replayMode_t mode) {
-    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
-    ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
-    ppcaReplaySet_t *set = ppcaReplaySetCreate(2, &cfg);
-    replayLoaderConfig_t rcfg = {.set = set, .samplesPerClass = 1, .minCount = 0, .mode = mode};
-    (void)replayDataLoaderWrap(base, &rcfg);
-}
-
-/* A count-0 generator cannot be sampled, so minCount 0 is refused at wrap
- * time instead of at the first fetch. */
-void testWrapRejectsMinCountZeroForGeneratorModes(void) {
-    ASSERT_EXITS_WITH_OUTPUT(1, "minCount must be >= 1",
-                             wrapWithMinCountZero(REPLAY_MODE_PPCA_SAMPLE));
-    ASSERT_EXITS_WITH_OUTPUT(1, "minCount must be >= 1",
-                             wrapWithMinCountZero(REPLAY_MODE_CLASS_MEAN));
-}
-
-/* EXEMPLAR gates on a non-empty buffer and ignores minCount. */
-void testExemplarWrapAcceptsMinCountZero(void) {
-    dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
-    exemplarBuffer_t *buf = exemplarBufferCreate(2, 1);
-    replayLoaderConfig_t rcfg = {
-        .exemplars = buf, .samplesPerClass = 1, .minCount = 0, .mode = REPLAY_MODE_EXEMPLAR};
-    dataLoader_t *wrapped = replayDataLoaderWrap(base, &rcfg);
-    TEST_ASSERT_NOT_NULL(wrapped);
-    freeReplayDataLoader(wrapped);
-    freeExemplarBuffer(buf);
-    freeDataLoader(base);
-}
-
 static void fetchPpcaReplayWithoutAStepKey(void) {
     buildFakeDataset();
     dataLoader_t *base = dataLoaderInit(fakeGetSample, fakeGetSize, 2, NULL, NULL, false, true);
@@ -917,8 +887,6 @@ int main(void) {
     RUN_TEST(testMinCountGatesClasses);
     RUN_TEST(testNoEligibleClassPassesBaseBatchThrough);
     RUN_TEST(testMeanModeReplaysClassCentroidsWithoutStream);
-    RUN_TEST(testWrapRejectsMinCountZeroForGeneratorModes);
-    RUN_TEST(testExemplarWrapAcceptsMinCountZero);
     RUN_TEST(testPpcaReplayWithoutAStepKeyExits);
     RUN_TEST(testExemplarReplayWithoutAStepKeyExits);
     RUN_TEST(testExemplarBufferKeepsFirstKAndCopies);

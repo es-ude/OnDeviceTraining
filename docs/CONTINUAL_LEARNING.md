@@ -206,10 +206,10 @@ for realistic `dim`/`maxSessionSamples` — it is `reserveMemory`-backed
 - **`minCount`** (gates immature generators out of replay: a class is
   eligible once its generator's `count >= minCount`) — start at **`>= 2k`**
   as a rule of thumb (enough absorbed samples for the merge's
-  numerical-rank guard to trust `k` components). `minCount` must be `>= 1`
-  in PPCA and class-mean modes: `minCount == 0` would make an untouched
-  generator (`count == 0`) eligible, so `replayDataLoaderWrap` rejects it
-  (`PRINT_ERROR + exit(1)`). EXEMPLAR mode ignores `minCount`.
+  numerical-rank guard to trust `k` components). **Keep `minCount >= 1`** unless
+  every generator is already populated (e.g. loaded from a checkpoint):
+  `minCount == 0` makes an untouched generator (`count == 0`) eligible, and
+  `ppcaReplaySample` then exits at the first batch that reaches it.
 - **`maxSessionSamples`** — sizes the shared merge workspace (passed to
   `ppcaWorkspaceCreate`/`ppcaReplaySetCreate` via `ppcaReplayConfig_t`). A
   single `ppcaReplayUpdate` call with more than `maxSessionSamples` rows

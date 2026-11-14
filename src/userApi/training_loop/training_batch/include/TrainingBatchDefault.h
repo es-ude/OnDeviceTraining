@@ -5,28 +5,13 @@
 
 #include "TrainingLoopApi.h"
 
-/*! Trains one macro batch: walks batch->samples in order in batch->size / m
- *  chunks of exactly m rows (m = microBatchSize; 0 means 1) and calls
- *  calculateGradsFn once per chunk -- grads accumulate across chunks, the
- *  optimizer step is the caller's (trainingEpochDefault).
- *  - m == 1: every sample is wrapped by batchViewOf, no copy, no heap.
- *  - m > 1: each chunk's items and labels are gathered into two [m, ...]
- *    buffers, reserved once per call and freed before returning (gate and
- *    gather live in StackGather, shared with evaluation, #468). FLOAT32
- *    only: every layer must pass layerIsFloat32Only (checked once per call,
- *    after the divisibility and empty-batch checks, before any buffer or
- *    chunk) and every sample's item and label must be
- *    FLOAT32, sparsity-free and match sample 0 in rank, dimensions and
- *    order -- fail fast otherwise.
- *  Fails fast unless batch->size % m == 0 (a replay loader must keep its
- *  appended sample count divisible by m), and at m > 1 on an empty batch.
- *  Frees every sample_t it consumes.
- *  Returns the per-sample mean loss for REDUCTION_MEAN (chunk losses weighted
- *  by their m rows, divided by batch->size) and the plain sum for SUM.
- *  See docs/conventions/data-shape.md, "Who adds the batch axis".
- *  call (NULLable) goes to every calculateGradsFn call unchanged; a scheduler
- *  in call->remat must be keyed to the input those calls receive: [1, ...]
- *  at m == 1, [m, ...] at m > 1. */
+/*! Accumulates gradients without stepping the optimizer; consumes sample
+ *  wrappers. Requires whole microbatches (m = microBatchSize, 0 means 1).
+ *  Stacked samples must be matching dense FLOAT32 tensors; the model's
+ *  FLOAT32 eligibility at m > 1 is the caller's (trainingRun checks it).
+ *  Returns row-weighted mean loss or total loss. Input views are borrowed for
+ *  each callback; call keys derive from chunk indices, and a scheduler in
+ *  call->remat must be keyed to [1, ...] at m == 1, [m, ...] at m > 1. */
 float trainingBatchDefault(const model_t *model, lossConfig_t lossConfig, batch_t *batch,
                            calculateGradsFn_t calculateGradsFn, reduction_t forwardReduction,
                            size_t microBatchSize, const trainingCall_t *call);

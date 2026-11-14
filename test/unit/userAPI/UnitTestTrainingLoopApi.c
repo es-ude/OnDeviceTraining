@@ -2114,6 +2114,44 @@ void testTrainingEpochDefaultRejectsBatchLargerThanDataset(void) {
     freeEpochDataset();
 }
 
+/* The identity Linear (2 -> 2) of the epoch dataset under trainingRun, train
+ * loader batch trainBatch; for the entry checks below. */
+static void runIdentityLinear(lossFuncType_t funcType, uint16_t trainBatch) {
+    tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
+    parameter_t *w = parameterInit(wParam, gradInitFloat(wParam, NULL));
+    tensor_t *bParam = buildFloatTensor2D(1, 2, (float[]){0.f, 0.f}, 2);
+    parameter_t *b = parameterInit(bParam, gradInitFloat(bParam, NULL));
+    quantization_t testQ;
+    initFloat32Quantization(&testQ);
+    layer_t *model[] = {buildBorrowedLinearLayer(w, b, &testQ)};
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    initEpochDataset();
+    dataLoader_t *trainDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, trainBatch, NULL, NULL, false, true);
+    dataLoader_t *evalDl =
+        dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
+    (void)trainingRun(&MODEL_CHAIN(model, 1),
+                      (lossConfig_t){.funcType = funcType, .backwardReduction = REDUCTION_SUM},
+                      trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss, NULL);
+}
+
+void testTrainingRunRejectsATrainLoaderWithNoBatch(void) {
+    /* 4 samples, batch 8: the entry names it, before the eval peek and the
+     * epoch-boundary check of trainingEpochDefault. */
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRun: the training loader yields no batch",
+                             runIdentityLinear(MSE, 8));
+}
+
+void testTrainingRunRejectsCrossEntropyWithoutAFinalSoftmax(void) {
+    /* The CE backward skips the last layer for its fused p - y gradient: on a
+     * Linear it would silently drop that layer's backward. */
+    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRun: a CROSS_ENTROPY loss needs a Softmax",
+                             runIdentityLinear(CROSS_ENTROPY, 1));
+}
+
 /* Guards (b), (c), (d) of the design: all fire before the first batch. */
 void testTrainingRunRejectsBsSchedulerWiredToAnotherLoader(void) {
     tensor_t *wParam = buildFloatTensor2D(2, 2, (float[]){1.f, 0.f, 0.f, 1.f}, 4);
@@ -2901,7 +2939,7 @@ void testEvaluationEpochWithMetrics_BfpOutputWireDequantCompares() {
 
 /* ---- #152 PR3a: batch_t consumers add the batch axis -----------------------
  * Datasets deliver samples in their natural shape; trainingBatchDefault,
- * trainingEpochDefault, evaluationBatch and evaluateBatchInternal hand the
+ * trainingEpochDefault, evaluationBatch and the metric evaluation loop hand the
  * model [1, ...] batchViewOf views. The probes below stand in for
  * calculateGradsFn / inferenceFn and record what they were handed -- no layer
  * runs, so a natural-shape tensor reaching the callback is a clean assertion
@@ -3514,33 +3552,8 @@ static void initANullState(void) {
     trainingRngInit(NULL, 1u);
 }
 
-static void stepKeyOfANullState(void) {
-    (void)trainingRngStepKey(NULL);
-}
-
-static void updateKeyOfANullState(void) {
-    (void)trainingRngUpdateKey(NULL);
-}
-
-static void evalKeyOfANullState(void) {
-    (void)trainingRngEvalKey(NULL);
-}
-
-static void advanceANullState(void) {
-    trainingRngAdvance(NULL);
-}
-
-static void advanceEpochOfANullState(void) {
-    trainingRngAdvanceEpoch(NULL);
-}
-
-void testTrainingRngHelpersExitOnANullState(void) {
+void testTrainingRngInitExitsOnANullState(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngInit: rng is NULL", initANullState());
-    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngStepKey: rng is NULL", stepKeyOfANullState());
-    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngUpdateKey: rng is NULL", updateKeyOfANullState());
-    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngEvalKey: rng is NULL", evalKeyOfANullState());
-    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngAdvance: rng is NULL", advanceANullState());
-    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngAdvanceEpoch: rng is NULL", advanceEpochOfANullState());
 }
 
 static void advancePastTheLastStep(void) {
@@ -3629,31 +3642,6 @@ void testTrainingRngInitKeyIsTheInitFoldOfTheLayerIndex(void) {
     assertSameKey(rngFold(rng.root, RNG_TAG_INIT, 3u), trainingRngInitKey(&rng, 3u));
     assertTrainingKey(0x5cdda14fu, 0xe704a5f1u, trainingRngInitKey(&rng, 3u));
     assertTrainingKey(0x32cb78bcu, 0xb2b4e2ddu, trainingRngInitKey(&rng, (size_t)UINT32_MAX));
-}
-
-static void shuffleKeyOfANullState(void) {
-    (void)trainingRngShuffleKey(NULL, true);
-}
-
-static void shuffleEvalKeyOfANullState(void) {
-    (void)trainingRngShuffleEvalKey(NULL);
-}
-
-static void initKeyOfANullState(void) {
-    (void)trainingRngInitKey(NULL, 0u);
-}
-
-void testTrainingRngShuffleKeyExitsOnANullState(void) {
-    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngShuffleKey: rng is NULL", shuffleKeyOfANullState());
-}
-
-void testTrainingRngShuffleEvalKeyExitsOnANullState(void) {
-    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngShuffleEvalKey: rng is NULL",
-                             shuffleEvalKeyOfANullState());
-}
-
-void testTrainingRngInitKeyExitsOnANullState(void) {
-    ASSERT_EXITS_WITH_OUTPUT(1, "trainingRngInitKey: rng is NULL", initKeyOfANullState());
 }
 
 #if SIZE_MAX > UINT32_MAX
@@ -4465,6 +4453,8 @@ int main(void) {
     RUN_TEST(testTrainingRunCallbackObservesTheEpochsOwnLrAndBatchWithBothSchedulers);
     RUN_TEST(testTrainingRunCompensatingBsSchedulerWritesTheLrEachEpoch);
     RUN_TEST(testTrainingEpochDefaultRejectsBatchLargerThanDataset);
+    RUN_TEST(testTrainingRunRejectsATrainLoaderWithNoBatch);
+    RUN_TEST(testTrainingRunRejectsCrossEntropyWithoutAFinalSoftmax);
     RUN_TEST(testTrainingRunRejectsBsSchedulerWiredToAnotherLoader);
     RUN_TEST(testTrainingRunRejectsBsCompensationWiredToAnotherOptimizer);
     RUN_TEST(testTrainingRunRejectsLrSchedulerNextToCompensatingBsScheduler);
@@ -4497,7 +4487,7 @@ int main(void) {
     RUN_TEST(testTrainingRngEvalKeyIsTheEvalFoldOfTheRoot);
     RUN_TEST(testTrainingRngAdvanceCountsUpdatesAndAdvanceEpochCountsEpochs);
     RUN_TEST(testTrainingRngReachesTheLastStepEpochAndCallIndexWithoutExiting);
-    RUN_TEST(testTrainingRngHelpersExitOnANullState);
+    RUN_TEST(testTrainingRngInitExitsOnANullState);
     RUN_TEST(testTrainingRngAdvanceExitsWhenTheStepCounterIsExhausted);
     RUN_TEST(testTrainingRngAdvanceEpochExitsWhenTheEpochCounterIsExhausted);
 #if SIZE_MAX > UINT32_MAX
@@ -4506,9 +4496,6 @@ int main(void) {
     RUN_TEST(testTrainingRngShuffleKeyFollowsTheEpochOnlyWhenPerEpoch);
     RUN_TEST(testTrainingRngShuffleEvalKeyIsOneKeyPerRun);
     RUN_TEST(testTrainingRngInitKeyIsTheInitFoldOfTheLayerIndex);
-    RUN_TEST(testTrainingRngShuffleKeyExitsOnANullState);
-    RUN_TEST(testTrainingRngShuffleEvalKeyExitsOnANullState);
-    RUN_TEST(testTrainingRngInitKeyExitsOnANullState);
 #if SIZE_MAX > UINT32_MAX
     RUN_TEST(testTrainingRngInitKeyExitsAboveUint32Max);
 #endif

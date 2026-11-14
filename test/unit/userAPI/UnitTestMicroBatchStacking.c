@@ -741,7 +741,7 @@ static void trainModelBBatchOrDie(layer_t **model, size_t batchSize, size_t micr
 void testTrainingBatchDefaultRejectsBatchNotDivisibleByMicroBatch(void) {
     /* Divisibility check 4: b % m == 0 at entry -- m not dividing b (the
      * message must name both: numbers plus the keyword "microBatchSize";
-     * a direct call, so checks 1-3 are not on this path), and
+     * a direct call, so checks 1-2 are not on this path), and
      * m > b. */
     initModelBData();
     quantization_t *q = quantizationInitFloat();
@@ -1040,18 +1040,34 @@ void testStackedRejectsChunkDifferingFromSampleZero(void) {
 
 /* ---- FLOAT32 gate ---------------------------------------------------------- */
 
-/* Each gated model below trains cleanly at m = 2 WITHOUT the gate (the funnel
- * converts every non-FLOAT32 operand), so only the gate can make it exit. */
+/* trainingRun's gate fires before any sample is read: drawing one exits 3,
+ * so a missing gate cannot pass as exit 1. Evaluation stays per-sample, so
+ * its forward-only gate never fires first. */
+static sample_t *getUnreadGateSample(size_t id) {
+    (void)id;
+    _exit(3);
+}
+
+static size_t getGateDatasetSize(void) {
+    return B_N;
+}
+
 static void trainStackedMseOrDie(layer_t **model, size_t modelSize) {
-    batch_t *batch = buildBatch(bItems, bLabels, 4);
-    trainingBatchDefault(&MODEL_CHAIN(model, modelSize), defaultLossConfig(MSE), batch,
-                         calculateGradsSequential, REDUCTION_MEAN, 2, NULL);
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, modelSize), momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    dataLoader_t *trainDl =
+        dataLoaderInit(getUnreadGateSample, getGateDatasetSize, 4, NULL, NULL, false, true);
+    dataLoader_t *evalDl =
+        dataLoaderInit(getUnreadGateSample, getGateDatasetSize, 1, NULL, NULL, false, true);
+    trainingRunOptions_t options = {.microBatchSize = 2, .evalMicroBatchSize = 1};
+    trainingRun(&MODEL_CHAIN(model, modelSize), defaultLossConfig(MSE), trainDl, evalDl, sgd, 1,
+                calculateGradsSequential, inferenceWithLoss, &options);
 }
 
 static void assertStackedGateRejects(layer_t **model, size_t modelSize) {
-    initModelBData();
     ASSERT_EXITS_WITH_FAILURE(trainStackedMseOrDie(model, modelSize));
-    freeModelBData();
 }
 
 void testStackedGateRejectsSymLayer(void) {
@@ -1159,7 +1175,6 @@ void testStackedGateRejectsQuantizationLayer(void) {
     layer_t *model[B_SIZE + 1];
     buildModelB(model, &lq, 22u);
     model[B_SIZE] = quantLayerInit(&toSym);
-    initModelBData();
     char message[512];
     int code = -2;
 
@@ -1168,7 +1183,6 @@ void testStackedGateRejectsQuantizationLayer(void) {
     /* A string literal (Task 2), so it stays valid after the frees below. */
     const char *field = layerNonFloat32Field(model[B_SIZE]);
 
-    freeModelBData();
     freeQuantLayer(model[B_SIZE]);
     freeModelB(model);
     freeQuantization(symQ);
@@ -1220,8 +1234,7 @@ void testStackedGateRejectsSymGradStorage(void) {
 }
 
 void testStackedTrainingWithFrozenFirstLayerMatchesPerSample(void) {
-    /* A frozen layer has NULL grads (#380): the gate must accept it without
-     * dereferencing them, and the trainable layer's grads must match m = 1. */
+    /* A frozen layer has NULL grads: the trainable layer's grads must match m = 1. */
     initModelBData();
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
@@ -1259,7 +1272,7 @@ void testStackedTrainingWithFrozenFirstLayerMatchesPerSample(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-6f + 1e-5f * fabsf(loss[0]), loss[0], loss[1]);
 }
 
-/* ---- trainingEpochDefault (0 means 1, divisibility check 3) -------------- */
+/* ---- trainingEpochDefault (0 means 1) ------------------------------------ */
 
 /* Classifier: Linear(5->4) -> ReLU -> Linear(4->3) -> Softmax, CrossEntropy,
  * over 8 samples ([5] items, one-hot [3] labels). */
@@ -1414,30 +1427,11 @@ static void runEpochOnLoaderOrDie(dataLoader_t *dl, size_t microBatchSize) {
                          calculateGradsSequential, REDUCTION_MEAN, microBatchSize, NULL);
 }
 
-void testTrainingEpochDefaultRejectsBatchNotDivisibleByMicroBatch(void) {
-    /* Check 3: loader batch 6, m = 4 -- dies before the first batch is drawn
-     * (exit 1, not the tripwire's 3: that is what tells it from check 4,
-     * which would print the same 6 and 4) and names b and m (numbers plus
-     * the keyword "microBatchSize"). */
-    dataLoader_t *dl =
-        dataLoaderInit(getTripwireSample, getClassifierDatasetSize, 6, NULL, NULL, false, true);
-    char message[512];
-    int code = -2;
-
-    CAPTURE_EXIT_AND_OUTPUT(runEpochOnLoaderOrDie(dl, 4), message, sizeof message, &code);
-
-    freeDataLoader(dl);
-    TEST_ASSERT_EQUAL_INT_MESSAGE(1, code, "check 3 must exit(1) before any sample is read");
-    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(message, "microBatchSize"), "check 3 must name the knob");
-    TEST_ASSERT_TRUE_MESSAGE(messageHasNumber(message, 6), "check 3 must name b (6)");
-    TEST_ASSERT_TRUE_MESSAGE(messageHasNumber(message, 4), "check 3 must name m (4)");
-}
-
 void testTrainingEpochDefaultBackstopsAnIndivisibleReplayBatch(void) {
-    /* Loader batchSize 4 passes check 3 at m = 2, but its batches carry 5
-     * samples (the replay loader's base + eligible * r shape): check 4 inside
-     * trainingBatchDefault must stop it (known limitation of check 3). The
-     * message's b is the batch's 5 -- a number check 3, which only sees the
+    /* Loader batchSize 4 divides at m = 2, but its batches carry 5 samples
+     * (the replay loader's base + eligible * r shape): trainingBatchDefault's
+     * check on the returned batch must stop it. The message's b is the
+     * batch's 5 -- a number a nominal-size check, which only sees the
      * loader's 4, can never print. */
     initClassifierData();
     dataLoader_t *dl =
@@ -1450,11 +1444,12 @@ void testTrainingEpochDefaultBackstopsAnIndivisibleReplayBatch(void) {
 
     freeDataLoader(dl);
     freeClassifierData();
-    TEST_ASSERT_EQUAL_INT_MESSAGE(1, code, "check 4 must stop the ragged replay batch");
-    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(message, "microBatchSize"), "check 4 must name the knob");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, code, "the batch check must stop the ragged replay batch");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(message, "microBatchSize"),
+                                 "the batch check must name the knob");
     TEST_ASSERT_TRUE_MESSAGE(messageHasNumber(message, 5),
-                             "check 4 must name the batch's b (5), not the loader's 4");
-    TEST_ASSERT_TRUE_MESSAGE(messageHasNumber(message, 2), "check 4 must name m (2)");
+                             "the batch check must name the batch's b (5), not the loader's 4");
+    TEST_ASSERT_TRUE_MESSAGE(messageHasNumber(message, 2), "the batch check must name m (2)");
 }
 
 void testTrainingEpochDefaultMicroBatchZeroEqualsOne(void) {
@@ -1579,7 +1574,7 @@ static void runClassifierOrDie(uint16_t batchSize, size_t numberOfEpochs, schedu
 void testTrainingRunRejectsLoaderBatchNotDivisibleByMicroBatch(void) {
     /* Check 1: before epoch 0 -- before even the eval loader's numClasses
      * peek, so the tripwire dataset is never read (exit 1, not 3: that is what
-     * tells it from checks 3 and 4, which would print the same 3 and 2) --
+     * tells it from check 4, which would print the same 3 and 2) --
      * and the message names b and m (numbers plus the keyword
      * "microBatchSize"). */
     char message[512];
@@ -1858,7 +1853,6 @@ int main(void) {
     RUN_TEST(testStackedGateRejectsPerOpSymMathOnFloat32Storage);
     RUN_TEST(testStackedGateRejectsSymGradStorage);
     RUN_TEST(testStackedTrainingWithFrozenFirstLayerMatchesPerSample);
-    RUN_TEST(testTrainingEpochDefaultRejectsBatchNotDivisibleByMicroBatch);
     RUN_TEST(testTrainingEpochDefaultBackstopsAnIndivisibleReplayBatch);
     RUN_TEST(testTrainingEpochDefaultMicroBatchZeroEqualsOne);
     RUN_TEST(testTrainingEpochDefaultStacksAndTracksPerSample);

@@ -22,9 +22,7 @@
 #include "TensorApi.h"
 #include "TraceApi.h"
 
-/* Dropout and BatchNorm1d run in training mode exactly for one grads call
- * (forward + backward, #460): inference, inferenceWithLoss and evaluation
- * never flip it, so they see eval mode. */
+/* Enable training mode only around forward/backward; inference remains in eval mode. */
 static void setLayersTrainingMode(const model_t *m, bool training) {
     for (size_t i = 0; i < m->numLayers; i++) {
         switch (m->layers[i]->type) {
@@ -50,10 +48,8 @@ static trainingStats_t *initTrainingStats(tensor_t *output) {
     return trainingStats;
 }
 
-/* What a training call without a scheduler runs on (remat D15, D30):
- * LIVENESS frees each activation after its last reader, with values
- * identical to STORE_ALL. The policy of this use case, not of the scheduler
- * library, whose NULL spec keeps meaning STORE_ALL. */
+/* Unspecified training schedulers use LIVENESS; the scheduler library's NULL
+ * plan spec means STORE_ALL. */
 static const rematPlanSpec_t defaultPlanSpec = {.policy = REMAT_PLAN_LIVENESS};
 
 const rematPlanSpec_t *calculateGradsDefaultPlanSpec(void) {
@@ -142,20 +138,6 @@ static trainingStats_t *calculateGradsImpl(const model_t *m, lossConfig_t lossCo
             for (uint8_t i = 0; i < op.k; i++) {
                 x[i] = op.in[i];
             }
-#ifdef ODT_REMAT_VERIFY
-            /* Strict W_dead: an input the step marks META (its backward does
-             * not read it) gets a header without bytes on every plan, so a
-             * read the read-set table denies crashes here instead of passing
-             * on the NULL path and breaking under LIVENESS. */
-            tensor_t dead[MODEL_MAX_ARITY];
-            for (uint8_t i = 0; i < op.k; i++) {
-                if (op.inMeta[i]) {
-                    dead[i] = *op.in[i];
-                    dead[i].data = NULL;
-                    x[i] = &dead[i];
-                }
-            }
-#endif
             /* op.dx[i] == NULL: no gradient wanted for input i (grads-only node). */
             opFunctions[layer->type].backward(layer, x, op.k, op.dy, op.dx, op.dxMode, ex);
             break;
@@ -201,9 +183,7 @@ static void traceModelParams(const model_t *m, const char *tag, bool wantGrad, t
         if (!layerParameters(m->layers[i], &w, &b)) {
             continue;
         }
-        /* Frozen layers (#380): getGradFromParameter returns NULL (Task 1 elides
-         * the grad tensor). The TraceApi contract promises sinks a borrowed VALID
-         * tensor -- skip the call entirely rather than handing them NULL. */
+        /* Frozen parameters have no gradient; sinks require a valid tensor. */
         tensor_t *wt = wantGrad ? getGradFromParameter(w) : getParamFromParameter(w);
         if (wt != NULL) {
             snprintf(phase, sizeof(phase), "%s.weight", tag);

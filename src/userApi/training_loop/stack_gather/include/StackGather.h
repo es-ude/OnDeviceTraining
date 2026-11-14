@@ -13,16 +13,16 @@
  * evaluation: layerForwardNonFloat32Field). */
 typedef const char *(*nonFloat32FieldFn_t)(layer_t *layer);
 
-/* Gather buffer of m rows x perSampleBytes: overflow-checked multiply; NULL
- * from reserveMemory fails fast -- never a copy through NULL. `caller` prefixes
- * every error message; `knob` names the option that set m ("microBatchSize" or
- * "evalMicroBatchSize") so the user is pointed at the right field. */
+/* Gather buffer of m rows x perSampleBytes: overflow-checked multiply.
+ * `caller` prefixes every error message; `knob` names the option that set m
+ * ("microBatchSize" or "evalMicroBatchSize") so the user is pointed at the
+ * right field. */
 uint8_t *stackGatherReserveBuffer(const char *caller, const char *knob, size_t m,
                                   size_t perSampleBytes, const char *what);
 
-/* FLOAT32 gate over the whole model, evaluated once per stacked run before any
- * buffer is reserved. Fails fast naming the first layer whose fieldFn reports a
- * non-FLOAT32 field. */
+/* FLOAT32 gate over the whole model, run once at the public entry (trainingRun,
+ * the evaluation entries) before any sample is read. Fails fast naming the
+ * first layer whose fieldFn reports a non-FLOAT32 field. */
 void stackGatherRequireFloat32Model(const char *caller, const char *knob, const model_t *model,
                                     size_t m, nonFloat32FieldFn_t fieldFn);
 

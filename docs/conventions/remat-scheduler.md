@@ -114,15 +114,12 @@ A scheduler binds against the model as it is at each call.
   and stream checks, and ARENA's init-time placement verifier. There is no
   opt-out macro.
 - **`ODT_REMAT_VERIFY`** (a CMake option, default OFF): dtype-aware poison of
-  wire bytes at bind and at release, and strict W_dead, keyed on the operand
-  mode: the driver passes every META input of a BACKWARD as a header without
-  bytes.
+  wire bytes at bind and at release.
   ON in the `unit_test`, `unit_test_debug` and `unit_test_asan` presets, and in
   `unit_test_ubsan` through `unit_test_debug`; OFF in `unit_test_error`,
   `unit_test_info` and every non-test preset. It is a PUBLIC compile definition
-  on `RematPlan`: a test whose `LIB_UNDER_TEST` is `RematScheduler`,
-  `RematCheck` or `CalculateGradsSequential` lists `RematPlan` in `MORE_LIBS`
-  before it `#ifdef`s on it.
+  on `RematPlan`: a test whose `LIB_UNDER_TEST` is `RematScheduler` or
+  `RematCheck` lists `RematPlan` in `MORE_LIBS` before it `#ifdef`s on it.
 
 ## Adding a row
 
@@ -474,7 +471,5 @@ STORE_ALL reference, remat D57).
 **Rule names.**
 - **W_dead** A BACKWARD input whose operand mode is META (its layer does not
   read it: `layerBackwardReadsInput` false) may be a header with
-  `data == NULL` (the LIVENESS state). Under `ODT_REMAT_VERIFY` the driver
-  passes every META input as such a dead header on every plan (strict
-  W_dead, keyed on the operand mode), so a read the read-set table denies
-  crashes under STORE_ALL too.
+  `data == NULL` (the LIVENESS state, the default plan of a training call),
+  so a read the read-set table denies crashes on that plan.

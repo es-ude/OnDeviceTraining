@@ -16,7 +16,7 @@
  *  - layerIdx:   model index of the layer; for the loss gradient, == m->numLayers.
  *  - layerType:  the layer's type (for naming / dtype decisions).
  *  - phase:      "fwd" | "refwd" | "agrad" | "lossgrad" for tracedGrads;
- *                "<tag>.weight" / "<tag>.bias" for traceModelWeights/Grads (Task 3).
+ *                "<tag>.weight" / "<tag>.bias" for traceModelWeights/Grads.
  *  - tensor:     borrowed; valid only for the duration of the call. */
 typedef void (*traceSink_t)(void *ctx, size_t layerIdx, layerType_t layerType, const char *phase,
                             tensor_t *tensor);
@@ -44,13 +44,10 @@ trainingStats_t *tracedGrads(const model_t *m, lossConfig_t lossConfig,
                              reduction_t forwardReduction, tensor_t *input, tensor_t *label,
                              traceSink_t sink, void *ctx, const trainingCall_t *call);
 
-/*! Fire `sink` for each trainable layer's weight and bias PARAM tensors, with
- *  phase "<tag>.weight" / "<tag>.bias". Param-less layers and NULL bias are
- *  skipped; a frozen layer's weight/bias GRAD is also skipped (#380 --
- *  frozen layers carry grad == NULL, and the sink contract promises a
- *  borrowed VALID tensor, never NULL). (Trainable: LINEAR, CONV1D,
- *  CONV1D_TRANSPOSED, LAYERNORM, GROUPNORM, BATCHNORM1D when affine; BN
- *  running buffers are not traced.) */
+/*! Trace parameter values, including frozen parameters, with phase
+ *  "<tag>.weight" / "<tag>.bias"; omit absent biases and non-parameter
+ *  buffers (BatchNorm1d running statistics). Gradient tracing also omits
+ *  frozen parameters. */
 void traceModelWeights(const model_t *m, const char *tag, traceSink_t sink, void *ctx);
 
 /*! Same, for the GRAD tensor of each parameter_t. */

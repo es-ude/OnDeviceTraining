@@ -29,25 +29,6 @@ void freeTrainingStats(trainingStats_t *trainingStats) {
     freeReservedMemory(trainingStats);
 }
 
-float evaluationBatch(const model_t *model, lossFuncType_t funcType, batch_t *batch,
-                      inferenceWithLossFn_t inferenceFn, reduction_t forwardReduction) {
-    float totalLoss = 0.0f;
-
-    for (size_t i = 0; i < batch->size; i++) {
-        batchView_t itemView;
-        batchView_t labelView;
-        inferenceStats_t *stats = inferenceFn(
-            model, batchViewOf(&itemView, batch->samples[i]->item),
-            batchViewOf(&labelView, batch->samples[i]->label), funcType, forwardReduction, NULL);
-        totalLoss += stats->loss;
-        freeInferenceStats(stats);
-        freeSample(batch->samples[i]);
-    }
-
-    /* Pure sum — no division. Caller (evaluationEpoch) handles macro reduction. */
-    return totalLoss;
-}
-
 static size_t argmax(const float *data, size_t n) {
     size_t maxIdx = 0;
     float maxVal = data[0];
@@ -61,11 +42,7 @@ static size_t argmax(const float *data, size_t n) {
     return maxIdx;
 }
 
-/* Argmax over a wire tensor in ITS OWN dtype (#206 acceptance prerequisite):
- * SYM_INT32 mantissa order IS value order (scale > 0), so no dequant is
- * needed — while casting the int32 codes to float* garbles the comparison
- * (negative mantissas reinterpret as NaN bit patterns and freeze a float
- * argmax at index 0). */
+/* Positive-scale SYM_INT32 codes preserve value ordering; compare them directly. */
 static size_t argmaxByTensor(const tensor_t *t, size_t n) {
     switch (t->quantization->type) {
     case FLOAT32:
@@ -83,16 +60,8 @@ static size_t argmaxByTensor(const tensor_t *t, size_t n) {
         return maxIdx;
     }
     case BFP: {
-        /* BFP epic PR2 Task 8: mantissa order is NOT value order here — every
-         * GROUP carries its own exponent, so a small value in a fine-grained
-         * group can outrank a large one on the raw mantissa. Comparison must
-         * happen after dequant (exact: m * 2^E, so float comparison semantics
-         * are preserved). Streamed in chunks so no scratch scales with n;
-         * dequantChunkToFloat requires count <= ODT_CONVERSION_CHUNK_ELEMS and
-         * a byte-aligned elemOffset, both satisfied by a walk that starts at 0
-         * and strides by the (multiple-of-8) chunk size. Both call sites argmax
-         * a single sample's class vector from element 0 — this must not be
-         * handed an arbitrary per-sample slice offset. */
+        /* BFP groups have different exponents: compare dequantized values.
+         * Chunk offsets remain byte-aligned; this helper starts at element zero. */
         float chunk[ODT_CONVERSION_CHUNK_ELEMS];
         size_t maxIdx = 0;
         float maxVal = 0.f;
@@ -117,7 +86,7 @@ static size_t argmaxByTensor(const tensor_t *t, size_t n) {
     }
 }
 
-/* #468: computed from sizes, before any getBatch -- a dataset smaller than
+/* Computed from sizes, before any getBatch -- a dataset smaller than
  * batchSize would otherwise make getBatch overrun the loader's index table,
  * and a MEAN over zero samples is 0/0. */
 static size_t requireEvalBatches(dataLoader_t *dataLoader, const char *caller) {
@@ -132,7 +101,7 @@ static size_t requireEvalBatches(dataLoader_t *dataLoader, const char *caller) {
     return numberOfBatches;
 }
 
-/* #468: every metric indexes [0, numClasses); a caller-supplied
+/* Every metric indexes [0, numClasses); a caller-supplied
  * numClasses that disagrees with the label would read past each class row. */
 static void requireNumClassesMatchesLabel(size_t numClasses, tensor_t *label, const char *caller) {
     size_t labelElements = calcNumberOfElementsByTensor(label);
@@ -147,7 +116,9 @@ static size_t resolveEvalMicroBatch(size_t microBatchSize) {
     return (microBatchSize == 0) ? 1 : microBatchSize;
 }
 
-/* Per-class counters of the metric entry points; NULL for evaluationEpoch. */
+/* Per-class counters of the metric entry points; NULL for evaluationEpoch.
+ * The counters are reserved at the first streamed sample, whose label also
+ * gives numClasses when it is 0. */
 typedef struct evalCounts {
     size_t *tp;
     size_t *predCount;
@@ -155,6 +126,23 @@ typedef struct evalCounts {
     size_t *confusionMatrix; /* NULL: no report */
     size_t numClasses;
 } evalCounts_t;
+
+static void initCounts(evalCounts_t *counts, tensor_t *firstLabel, const char *caller) {
+    if (counts->numClasses == 0) {
+        counts->numClasses = calcNumberOfElementsByTensor(firstLabel);
+    } else {
+        requireNumClassesMatchesLabel(counts->numClasses, firstLabel, caller);
+    }
+    size_t n = counts->numClasses;
+    counts->tp = reserveMemory(n * sizeof(size_t));
+    counts->predCount = reserveMemory(n * sizeof(size_t));
+    counts->actualCount = reserveMemory(n * sizeof(size_t));
+    for (size_t c = 0; c < n; c++) {
+        counts->tp[c] = 0;
+        counts->predCount[c] = 0;
+        counts->actualCount[c] = 0;
+    }
+}
 
 static void countPrediction(evalCounts_t *counts, size_t predicted, size_t target) {
     if (predicted == target) {
@@ -226,8 +214,9 @@ static void requireUntrackedBatchNormsEvaluable(const model_t *model, const tens
     freeReservedMemory(shapes);
 }
 
-/* numClasses and the evaluation pre-flight are read off the first sample of
- * getBatch(0); a custom loader may report a dataset yet return an empty batch. */
+/* trainingRun reads numClasses and the evaluation pre-flight off the first
+ * sample of getBatch(0); a custom loader may report a dataset yet return an
+ * empty batch. */
 static void requireNonEmptyFirstBatch(batch_t *firstBatch, const char *caller) {
     if (firstBatch->size == 0) {
         freeBatch(firstBatch);
@@ -261,10 +250,10 @@ static void requireEvaluableChunks(const model_t *model, dataLoader_t *dataLoade
 
 /* Runs once, on the first streamed sample of every evaluation, whatever m. */
 static void evalFirstSample(const model_t *model, dataLoader_t *dataLoader, sample_t *first,
-                            size_t m, size_t numClasses, const char *caller) {
+                            size_t m, evalCounts_t *counts, const char *caller) {
     requireEvaluableChunks(model, dataLoader, first->item, m, caller);
-    if (numClasses != 0) {
-        requireNumClassesMatchesLabel(numClasses, first->label, caller);
+    if (counts != NULL) {
+        initCounts(counts, first->label, caller);
     }
 }
 
@@ -283,14 +272,7 @@ static void requireStreamedSamples(size_t totalSamples, const char *caller) {
  * class scores -- the per-row argmax reads it at row * C. */
 static void requireChunkOutput(const char *caller, inferenceStats_t *stats, size_t rows, size_t C,
                                size_t chunkFirst) {
-    tensor_t *out = (stats == NULL) ? NULL : stats->output;
-    if (out == NULL || out->quantization == NULL || out->shape == NULL || out->data == NULL ||
-        out->shape->dimensions == NULL || out->shape->orderOfDimensions == NULL) {
-        PRINT_ERROR("%s: the inference function returned no output tensor, quantization, shape or "
-                    "data for the chunk starting at sample %zu",
-                    caller, chunkFirst);
-        exit(1);
-    }
+    tensor_t *out = stats->output;
     if (out->quantization->type != FLOAT32) {
         PRINT_ERROR("%s: stacked evaluation is FLOAT32-only, but the output of the chunk starting "
                     "at sample %zu has dtype %d",
@@ -367,7 +349,6 @@ static float evaluateStacked(const char *caller, const char *knob, const model_t
                              size_t numberOfBatches, inferenceWithLossFn_t inferenceFn,
                              reduction_t forwardReduction, size_t m, evalCounts_t *counts,
                              size_t *totalSamples, const trainingCall_t *call) {
-    stackGatherRequireFloat32Model(caller, knob, model, m, layerForwardNonFloat32Field);
     tensor_t *referenceItem = NULL;
     tensor_t *referenceLabel = NULL;
     uint8_t *itemBuffer = NULL;
@@ -384,8 +365,7 @@ static float evaluateStacked(const char *caller, const char *knob, const model_t
         for (size_t i = 0; i < batch->size; i++) {
             sample_t *sample = batch->samples[i];
             if (referenceItem == NULL) {
-                evalFirstSample(model, dataLoader, sample, m,
-                                counts != NULL ? counts->numClasses : 0, caller);
+                evalFirstSample(model, dataLoader, sample, m, counts, caller);
                 referenceItem = sample->item;
                 referenceLabel = sample->label;
                 /* Validates the reference's own dtype/sparsity before its
@@ -399,11 +379,12 @@ static float evaluateStacked(const char *caller, const char *knob, const model_t
                 C = calcNumberOfElementsByTensor(referenceLabel);
                 itemBuffer = stackGatherReserveBuffer(caller, knob, m, itemBytes, "item");
                 labelBuffer = stackGatherReserveBuffer(caller, knob, m, labelBytes, "label");
+            } else {
+                stackGatherRequireStackable(caller, knob, referenceItem, sample->item, "item",
+                                            streamed, m);
+                stackGatherRequireStackable(caller, knob, referenceLabel, sample->label, "label",
+                                            streamed, m);
             }
-            stackGatherRequireStackable(caller, knob, referenceItem, sample->item, "item", streamed,
-                                        m);
-            stackGatherRequireStackable(caller, knob, referenceLabel, sample->label, "label",
-                                        streamed, m);
             memcpy(itemBuffer + rows * itemBytes, sample->item->data, itemBytes);
             memcpy(labelBuffer + rows * labelBytes, sample->label->data, labelBytes);
             rows++;
@@ -434,47 +415,13 @@ static float evaluateStacked(const char *caller, const char *knob, const model_t
     return totalLoss;
 }
 
-float evaluationEpoch(const model_t *model, lossFuncType_t funcType, dataLoader_t *dataLoader,
-                      inferenceWithLossFn_t inferenceFn, reduction_t forwardReduction,
-                      size_t microBatchSize) {
-    modelRequireValid(model, "evaluationEpoch");
-    size_t m = resolveEvalMicroBatch(microBatchSize);
-    size_t numberOfBatches = requireEvalBatches(dataLoader, "evaluationEpoch");
-    float totalLoss = 0.0f;
-    size_t totalSamples = 0;
-
-    if (m == 1) {
-        /* The first sample of the first NON-EMPTY batch, as on the m > 1 path. */
-        bool firstSeen = false;
-        for (size_t i = 0; i < numberOfBatches; i++) {
-            batch_t *batch = dataLoader->getBatch(dataLoader, i, NULL);
-            if (!firstSeen && batch->size > 0) {
-                evalFirstSample(model, dataLoader, batch->samples[0], m, 0, "evaluationEpoch");
-                firstSeen = true;
-            }
-            totalLoss += evaluationBatch(model, funcType, batch, inferenceFn, forwardReduction);
-            totalSamples += batch->size;
-            freeBatch(batch);
-        }
-    } else {
-        totalLoss = evaluateStacked("evaluationEpoch", "microBatchSize", model, funcType,
-                                    dataLoader, numberOfBatches, inferenceFn, forwardReduction, m,
-                                    NULL, &totalSamples, NULL);
-    }
-    requireStreamedSamples(totalSamples, "evaluationEpoch");
-
-    if (forwardReduction == REDUCTION_MEAN) {
-        return totalLoss / (float)totalSamples;
-    }
-    return totalLoss;
-}
-
-/* callBase: the evaluation epoch's call index of the batch's first sample (one
- * call per sample). */
-static float evaluateBatchInternal(const model_t *model, lossFuncType_t funcType, batch_t *batch,
-                                   inferenceWithLossFn_t inferenceFn, evalCounts_t *counts,
-                                   reduction_t forwardReduction, size_t callBase,
-                                   const trainingCall_t *call) {
+/* The per-sample loop shared by evaluationBatch and every m == 1 evaluation.
+ * counts NULL: no prediction counting. callBase: the evaluation epoch's call
+ * index of the batch's first sample (one call per sample). Returns the plain
+ * loss sum; the epoch level divides for MEAN. */
+static float evaluateSamples(const model_t *model, lossFuncType_t funcType, batch_t *batch,
+                             inferenceWithLossFn_t inferenceFn, reduction_t forwardReduction,
+                             evalCounts_t *counts, size_t callBase, const trainingCall_t *call) {
     float totalLoss = 0.0f;
 
     for (size_t i = 0; i < batch->size; i++) {
@@ -488,17 +435,62 @@ static float evaluateBatchInternal(const model_t *model, lossFuncType_t funcType
             trainingCallForIndex(call, callBase + i, &next, &callKey));
         totalLoss += stats->loss;
 
-        size_t predicted = argmaxByTensor(stats->output, counts->numClasses);
-        /* The raw sample label IS the one row's class vector (the view shares
-         * its data), so the target argmax reads it directly. */
-        size_t target = argmaxByTensor(batch->samples[i]->label, counts->numClasses);
-        countPrediction(counts, predicted, target);
+        if (counts != NULL) {
+            size_t predicted = argmaxByTensor(stats->output, counts->numClasses);
+            /* The raw sample label IS the one row's class vector (the view
+             * shares its data), so the target argmax reads it directly. */
+            size_t target = argmaxByTensor(batch->samples[i]->label, counts->numClasses);
+            countPrediction(counts, predicted, target);
+        }
 
         freeInferenceStats(stats);
         freeSample(batch->samples[i]);
     }
+    return totalLoss;
+}
 
-    /* Pure sum — caller divides by totalSamples for MEAN. */
+float evaluationBatch(const model_t *model, lossFuncType_t funcType, batch_t *batch,
+                      inferenceWithLossFn_t inferenceFn, reduction_t forwardReduction) {
+    return evaluateSamples(model, funcType, batch, inferenceFn, forwardReduction, NULL, 0, NULL);
+}
+
+/* One evaluation epoch over numberOfBatches loader batches: per sample at
+ * m == 1 (each batch summed on its own, then added), stacked at m > 1.
+ * counts (NULLable) is filled from the first streamed sample on. Returns the
+ * loss reduced per forwardReduction over the streamed count, written to
+ * *totalSamples. */
+static float evaluateEpochInternal(const char *caller, const char *knob, const model_t *model,
+                                   lossFuncType_t funcType, dataLoader_t *dataLoader,
+                                   size_t numberOfBatches, inferenceWithLossFn_t inferenceFn,
+                                   reduction_t forwardReduction, size_t m, evalCounts_t *counts,
+                                   size_t *totalSamples, const trainingCall_t *call) {
+    float totalLoss = 0.0f;
+    size_t streamed = 0;
+
+    if (m == 1) {
+        /* The first sample of the first NON-EMPTY batch, as on the m > 1 path. */
+        bool firstSeen = false;
+        for (size_t i = 0; i < numberOfBatches; i++) {
+            batch_t *batch = dataLoader->getBatch(dataLoader, i, NULL);
+            if (!firstSeen && batch->size > 0) {
+                evalFirstSample(model, dataLoader, batch->samples[0], m, counts, caller);
+                firstSeen = true;
+            }
+            totalLoss += evaluateSamples(model, funcType, batch, inferenceFn, forwardReduction,
+                                         counts, streamed, call);
+            streamed += batch->size;
+            freeBatch(batch);
+        }
+    } else {
+        totalLoss = evaluateStacked(caller, knob, model, funcType, dataLoader, numberOfBatches,
+                                    inferenceFn, forwardReduction, m, counts, &streamed, call);
+    }
+    requireStreamedSamples(streamed, caller);
+    *totalSamples = streamed;
+
+    if (forwardReduction == REDUCTION_MEAN) {
+        return totalLoss / (float)streamed;
+    }
     return totalLoss;
 }
 
@@ -543,68 +535,53 @@ static float computeMacroF1(const size_t *tp, const size_t *predCount, const siz
     return sum / (float)numClasses;
 }
 
-static epochStats_t evaluateEpochInternal(const char *knob, const model_t *model,
-                                          lossFuncType_t funcType, dataLoader_t *dataLoader,
-                                          inferenceWithLossFn_t inferenceFn,
-                                          size_t *confusionMatrix, size_t numClasses,
-                                          reduction_t forwardReduction, size_t m,
-                                          const char *caller, const trainingCall_t *call) {
-    size_t numberOfBatches = requireEvalBatches(dataLoader, caller);
-
-    size_t *tp = reserveMemory(numClasses * sizeof(size_t));
-    size_t *predCount = reserveMemory(numClasses * sizeof(size_t));
-    size_t *actualCount = reserveMemory(numClasses * sizeof(size_t));
-
-    for (size_t c = 0; c < numClasses; c++) {
-        tp[c] = 0;
-        predCount[c] = 0;
-        actualCount[c] = 0;
-    }
-
-    evalCounts_t counts = {.tp = tp,
-                           .predCount = predCount,
-                           .actualCount = actualCount,
-                           .confusionMatrix = confusionMatrix,
-                           .numClasses = numClasses};
-    float totalLoss = 0.0f;
+/* The metric entries' epoch: numClasses 0 takes it from the first label. */
+static epochStats_t evaluateEpochWithMetrics(const char *caller, const char *knob,
+                                             const model_t *model, lossFuncType_t funcType,
+                                             dataLoader_t *dataLoader, size_t numberOfBatches,
+                                             inferenceWithLossFn_t inferenceFn,
+                                             size_t *confusionMatrix, size_t numClasses,
+                                             reduction_t forwardReduction, size_t m,
+                                             const trainingCall_t *call) {
+    evalCounts_t counts = {.confusionMatrix = confusionMatrix, .numClasses = numClasses};
     size_t totalSamples = 0;
-
-    if (m == 1) {
-        /* The first sample of the first NON-EMPTY batch, as on the m > 1 path. */
-        bool firstSeen = false;
-        for (size_t i = 0; i < numberOfBatches; i++) {
-            batch_t *batch = dataLoader->getBatch(dataLoader, i, NULL);
-            if (!firstSeen && batch->size > 0) {
-                evalFirstSample(model, dataLoader, batch->samples[0], m, numClasses, caller);
-                firstSeen = true;
-            }
-            totalLoss += evaluateBatchInternal(model, funcType, batch, inferenceFn, &counts,
-                                               forwardReduction, totalSamples, call);
-            totalSamples += batch->size;
-            freeBatch(batch);
-        }
-    } else {
-        totalLoss = evaluateStacked(caller, knob, model, funcType, dataLoader, numberOfBatches,
-                                    inferenceFn, forwardReduction, m, &counts, &totalSamples, call);
-    }
-    requireStreamedSamples(totalSamples, caller);
-
     epochStats_t stats;
-    if (forwardReduction == REDUCTION_MEAN) {
-        stats.loss = totalLoss / (float)totalSamples;
-    } else {
-        stats.loss = totalLoss;
-    }
-    stats.accuracy = computeAccuracy(tp, numClasses, totalSamples);
-    stats.precision = computeMacroPrecision(tp, predCount, numClasses);
-    stats.recall = computeMacroRecall(tp, actualCount, numClasses);
-    stats.f1 = computeMacroF1(tp, predCount, actualCount, numClasses);
+    stats.loss =
+        evaluateEpochInternal(caller, knob, model, funcType, dataLoader, numberOfBatches,
+                              inferenceFn, forwardReduction, m, &counts, &totalSamples, call);
+    stats.accuracy = computeAccuracy(counts.tp, counts.numClasses, totalSamples);
+    stats.precision = computeMacroPrecision(counts.tp, counts.predCount, counts.numClasses);
+    stats.recall = computeMacroRecall(counts.tp, counts.actualCount, counts.numClasses);
+    stats.f1 = computeMacroF1(counts.tp, counts.predCount, counts.actualCount, counts.numClasses);
 
-    freeReservedMemory(tp);
-    freeReservedMemory(predCount);
-    freeReservedMemory(actualCount);
-
+    freeReservedMemory(counts.tp);
+    freeReservedMemory(counts.predCount);
+    freeReservedMemory(counts.actualCount);
     return stats;
+}
+
+/* The standalone entries' setup, once per call: the batch count and, at
+ * m > 1, the forward-only FLOAT32 gate (backward-only fields stay free). */
+static size_t requireEvalEntry(const char *caller, const model_t *model, dataLoader_t *dataLoader,
+                               size_t m) {
+    size_t numberOfBatches = requireEvalBatches(dataLoader, caller);
+    if (m > 1) {
+        stackGatherRequireFloat32Model(caller, "microBatchSize", model, m,
+                                       layerForwardNonFloat32Field);
+    }
+    return numberOfBatches;
+}
+
+float evaluationEpoch(const model_t *model, lossFuncType_t funcType, dataLoader_t *dataLoader,
+                      inferenceWithLossFn_t inferenceFn, reduction_t forwardReduction,
+                      size_t microBatchSize) {
+    modelRequireValid(model, "evaluationEpoch");
+    size_t m = resolveEvalMicroBatch(microBatchSize);
+    size_t numberOfBatches = requireEvalEntry("evaluationEpoch", model, dataLoader, m);
+    size_t totalSamples = 0;
+    return evaluateEpochInternal("evaluationEpoch", "microBatchSize", model, funcType, dataLoader,
+                                 numberOfBatches, inferenceFn, forwardReduction, m, NULL,
+                                 &totalSamples, NULL);
 }
 
 epochStats_t evaluationEpochWithMetrics(const model_t *model, lossFuncType_t funcType,
@@ -612,19 +589,10 @@ epochStats_t evaluationEpochWithMetrics(const model_t *model, lossFuncType_t fun
                                         reduction_t forwardReduction, size_t microBatchSize) {
     modelRequireValid(model, "evaluationEpochWithMetrics");
     size_t m = resolveEvalMicroBatch(microBatchSize);
-    (void)requireEvalBatches(dataLoader, "evaluationEpochWithMetrics");
-    // Peek at first sample to derive numClasses from label shape
-    batch_t *firstBatch = dataLoader->getBatch(dataLoader, 0, NULL);
-    requireNonEmptyFirstBatch(firstBatch, "evaluationEpochWithMetrics");
-    size_t numClasses = calcNumberOfElementsByTensor(firstBatch->samples[0]->label);
-    for (size_t i = 0; i < firstBatch->size; i++) {
-        freeSample(firstBatch->samples[i]);
-    }
-    freeBatch(firstBatch);
-
-    return evaluateEpochInternal("microBatchSize", model, funcType, dataLoader, inferenceFn, NULL,
-                                 numClasses, forwardReduction, m, "evaluationEpochWithMetrics",
-                                 NULL);
+    size_t numberOfBatches = requireEvalEntry("evaluationEpochWithMetrics", model, dataLoader, m);
+    return evaluateEpochWithMetrics("evaluationEpochWithMetrics", "microBatchSize", model, funcType,
+                                    dataLoader, numberOfBatches, inferenceFn, NULL, 0,
+                                    forwardReduction, m, NULL);
 }
 
 classificationReport_t
@@ -632,23 +600,22 @@ evaluationEpochWithReport(const model_t *model, lossFuncType_t funcType, dataLoa
                           inferenceWithLossFn_t inferenceFn, size_t *cmBuffer, size_t numClasses,
                           reduction_t forwardReduction, size_t microBatchSize) {
     modelRequireValid(model, "evaluationEpochWithReport");
-    /* #468: 0 is evalFirstSample's "no metrics" opt-out, so the
-     * first-sample check would let it through to 0-sized counters. */
+    /* 0 internally means "take numClasses from the label". */
     if (numClasses == 0) {
         PRINT_ERROR("evaluationEpochWithReport: numClasses is 0 -- it must equal the label's "
                     "element count (>= 1)");
         exit(1);
     }
     size_t m = resolveEvalMicroBatch(microBatchSize);
-    // Zero the caller's CM buffer
+    size_t numberOfBatches = requireEvalEntry("evaluationEpochWithReport", model, dataLoader, m);
     for (size_t i = 0; i < numClasses * numClasses; i++) {
         cmBuffer[i] = 0;
     }
 
     classificationReport_t report;
-    report.stats =
-        evaluateEpochInternal("microBatchSize", model, funcType, dataLoader, inferenceFn, cmBuffer,
-                              numClasses, forwardReduction, m, "evaluationEpochWithReport", NULL);
+    report.stats = evaluateEpochWithMetrics("evaluationEpochWithReport", "microBatchSize", model,
+                                            funcType, dataLoader, numberOfBatches, inferenceFn,
+                                            cmBuffer, numClasses, forwardReduction, m, NULL);
     report.confusionMatrix = cmBuffer;
     report.numClasses = numClasses;
     return report;
@@ -667,15 +634,15 @@ trainingRunResult_t trainingRun(const model_t *model, lossConfig_t lossConfig,
     bsScheduler_t *bsScheduler = (options != NULL) ? options->bsScheduler : NULL;
     epochCallbackFn_t callback = (options != NULL) ? options->callback : NULL;
     bool stopOnNonFiniteLoss = (options != NULL) ? options->stopOnNonFiniteLoss : false;
-    /* 0 means 1 (#152): zero-initialised options keep per-sample training. */
+    /* 0 means 1: zero-initialised options keep per-sample training. */
     size_t microBatchSize =
         (options != NULL && options->microBatchSize != 0) ? options->microBatchSize : 1;
-    /* #468: evaluation inherits the training micro-batch unless set. */
+    /* Evaluation inherits the training micro-batch unless set. */
     size_t evalMicroBatchSize = (options != NULL && options->evalMicroBatchSize != 0)
                                     ? options->evalMicroBatchSize
                                     : microBatchSize;
     /* Every training call gets the options' scheduler; evaluation gets it
-     * behind the entry check below (remat D19). The epoch level reads rng;
+     * behind the entry check below. The epoch level reads rng;
      * evaluation gets one key per epoch in the loop below. */
     trainingRng_t *rng = (options != NULL) ? options->rng : NULL;
     const trainingCall_t trainCall = {.remat = (options != NULL) ? options->remat : NULL,
@@ -691,7 +658,7 @@ trainingRunResult_t trainingRun(const model_t *model, lossConfig_t lossConfig,
     }
     if (lrScheduler != NULL && lrScheduler->optimizer != optimizer) {
         PRINT_ERROR("trainingRun: lrScheduler is wired to a different optimizer than the one "
-                    "passed to trainingRun (#327)");
+                    "passed to trainingRun");
         exit(1);
     }
     if (bsScheduler != NULL && bsScheduler->dataLoader != trainDataLoader) {
@@ -711,10 +678,8 @@ trainingRunResult_t trainingRun(const model_t *model, lossConfig_t lossConfig,
         exit(1);
     }
 
-    /* #152 divisibility checks 1 and 2 (3: trainingEpochDefault, 4:
-     * trainingBatchDefault): every macro batch this run trains must
-     * split into whole chunks of microBatchSize rows (b % m == 0, no ragged
-     * tails). Both fire before anything is read or trained. */
+    /* Validate current and scheduled macro batches before training; every
+     * batch must split into whole microbatches. */
     if (trainDataLoader->batchSize % microBatchSize != 0) {
         PRINT_ERROR("trainingRun: trainDataLoader batchSize %u is not divisible by "
                     "microBatchSize %zu (b %% m == 0 is required)",
@@ -738,6 +703,27 @@ trainingRunResult_t trainingRun(const model_t *model, lossConfig_t lossConfig,
             }
         }
     }
+    /* Checked again at every epoch boundary: the dataset may change. */
+    size_t trainDatasetSize = trainDataLoader->getDatasetSize();
+    if (trainDatasetSize / trainDataLoader->batchSize == 0) {
+        PRINT_ERROR("trainingRun: the training loader yields no batch (dataset size %zu < "
+                    "batchSize %u)",
+                    trainDatasetSize, (unsigned)trainDataLoader->batchSize);
+        exit(1);
+    }
+    if (microBatchSize > 1) {
+        stackGatherRequireFloat32Model("trainingRun", "microBatchSize", model, microBatchSize,
+                                       layerNonFloat32Field);
+    }
+    /* The CrossEntropy backward writes the fused p - y gradient and skips the
+     * last layer, which is right only for a Softmax. */
+    const layer_t *lastLayer = model->layers[model->numLayers - 1];
+    if (lossConfig.funcType == CROSS_ENTROPY && lastLayer->type != SOFTMAX) {
+        PRINT_ERROR("trainingRun: a CROSS_ENTROPY loss needs a Softmax as the model's last layer "
+                    "(layer %zu has layerType_t %d)",
+                    model->numLayers - 1, (int)lastLayer->type);
+        exit(1);
+    }
 
     (void)requireEvalBatches(evalDataLoader, "trainingRun");
     /* A shuffle = true eval loader gets one order per run, under the run's
@@ -759,15 +745,8 @@ trainingRunResult_t trainingRun(const model_t *model, lossConfig_t lossConfig,
     }
     requireEvaluableChunks(model, evalDataLoader, firstBatch->samples[0]->item, evalMicroBatchSize,
                            "trainingRun");
-    /* Evaluation shares the training scheduler only when every eval chunk has
-     * the training row count m: the same micro-batch, and no N mod m tail
-     * chunk over the nominal sample count (N < m is such a tail). Otherwise
-     * it runs without one, so such a run still completes. The sample shape is
-     * not judged here: an eval sample whose own shape or dtype differs from
-     * the key exits at its call's bind check or, when evaluation stacks
-     * samples, at the gather check, which can fire first; the first ragged
-     * chunk of a loader whose stream differs from its nominal count exits at
-     * the bind check. */
+    /* Share the training scheduler only for matching evaluation row counts
+     * without a nominal tail; live shape mismatches are checked when binding. */
     size_t evalNominal = evalNominalCount(evalDataLoader);
     bool evalOnTheScheduler =
         evalMicroBatchSize == microBatchSize && evalNominal % evalMicroBatchSize == 0;
@@ -784,13 +763,8 @@ trainingRunResult_t trainingRun(const model_t *model, lossConfig_t lossConfig,
     const reduction_t forwardReduction = REDUCTION_MEAN;
 
     for (size_t epoch = 0; epoch < numberOfEpochs; epoch++) {
-        /* Every epoch, epoch 0 included, starts from the train loader's order
-         * under its shuffle key: the current epoch's (rng->epoch, which also
-         * counts the epochs of earlier trainingRun calls, never this loop's
-         * counter) when the loader reshuffles per epoch (#381), else epoch
-         * 0's, so a shuffle-once loader keeps one order. A shuffle = false
-         * loader keeps its order; without options->rng a shuffle = true loader
-         * has no key and stops here. */
+        /* Use the persistent RNG epoch for per-epoch shuffle; shuffle-once
+         * loaders always use epoch zero's key. */
         if (rng != NULL) {
             rngKey_t shuffleKey = trainingRngShuffleKey(rng, trainDataLoader->reshufflePerEpoch);
             dataLoaderShuffle(trainDataLoader, &shuffleKey);
@@ -817,9 +791,11 @@ trainingRunResult_t trainingRun(const model_t *model, lossConfig_t lossConfig,
             evalKey = trainingRngEvalKey(rng);
             epochEvalCall.key = &evalKey;
         }
-        epochStats_t evalStats = evaluateEpochInternal(
-            "evalMicroBatchSize", model, lossConfig.funcType, evalDataLoader, inferenceFn, NULL,
-            numClasses, forwardReduction, evalMicroBatchSize, "trainingRun", &epochEvalCall);
+        size_t evalBatches = requireEvalBatches(evalDataLoader, "trainingRun");
+        epochStats_t evalStats = evaluateEpochWithMetrics(
+            "trainingRun", "evalMicroBatchSize", model, lossConfig.funcType, evalDataLoader,
+            evalBatches, inferenceFn, NULL, numClasses, forwardReduction, evalMicroBatchSize,
+            &epochEvalCall);
         if (rng != NULL) {
             trainingRngAdvanceEpoch(rng);
         }

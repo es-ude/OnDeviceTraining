@@ -7,13 +7,10 @@
 #include "BatchView.h"
 #include "Common.h"
 #include "DataLoaderApi.h"
-#include "LayerConfigAccess.h"
 #include "StackGather.h"
 #include "StorageApi.h"
 #include "TrainingBatchDefault.h"
 
-/* m == 1: PR3a's per-sample walk, unchanged -- each sample is wrapped by
- * batchViewOf (no copy, no heap), so default runs stay bit-identical. */
 static float trainingBatchPerSample(const model_t *model, lossConfig_t lossConfig, batch_t *batch,
                                     calculateGradsFn_t calculateGradsFn,
                                     reduction_t forwardReduction, const trainingCall_t *call) {
@@ -37,14 +34,8 @@ static float trainingBatchPerSample(const model_t *model, lossConfig_t lossConfi
     return totalLoss;
 }
 
-/* m > 1: b/m chunks of exactly m rows. Each chunk's item and label
- * bytes are copied row after row into the two gather buffers; the stacked
- * tensors are stack-local batch views of the chunk's first sample, re-pointed
- * at the buffers with dims[0] = m (shape [m, ...sampleShape], order
- * [0, sampleOrder + 1]; quantization and sparsity stay shared with that first
- * sample). One calculateGradsFn call per chunk; the chunk's sample_t structs
- * are freed after it (the tensors stay dataset-owned). Returns the loss sum
- * weighted by rows for MEAN (Σ chunkLoss * m), plain for SUM. Out of line, so
+/* Gathers dense matching samples into reusable buffers. Dataset tensors
+ * outlive their wrappers. Weight MEAN chunk losses by row count. Out of line, so
  * the bfp-census's `trainingBatchDefault self` row holds only the per-sample
  * path's own call sites (the m == 1 loss-value sum). */
 static __attribute__((noinline)) float trainingBatchStacked(const model_t *model,
@@ -131,8 +122,6 @@ float trainingBatchDefault(const model_t *model, lossConfig_t lossConfig, batch_
         totalLoss = trainingBatchPerSample(model, lossConfig, batch, calculateGradsFn,
                                            forwardReduction, call);
     } else {
-        stackGatherRequireFloat32Model("trainingBatchDefault", "microBatchSize", model, m,
-                                       layerNonFloat32Field);
         totalLoss = trainingBatchStacked(model, lossConfig, batch, calculateGradsFn,
                                          forwardReduction, m, call);
     }

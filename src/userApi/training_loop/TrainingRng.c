@@ -29,7 +29,6 @@ void trainingRngInit(trainingRng_t *rng, uint64_t seed) {
 }
 
 rngKey_t trainingRngStepKey(const trainingRng_t *rng) {
-    requireState(rng, "trainingRngStepKey");
     return rngFold(rng->root, RNG_TAG_STEP, rng->step);
 }
 
@@ -44,17 +43,14 @@ rngKey_t trainingRngCallKey(rngKey_t parentKey, size_t callIndex) {
 }
 
 rngKey_t trainingRngUpdateKey(const trainingRng_t *rng) {
-    requireState(rng, "trainingRngUpdateKey");
     return rngFold(rng->root, RNG_TAG_UPDATE, rng->step);
 }
 
 rngKey_t trainingRngEvalKey(const trainingRng_t *rng) {
-    requireState(rng, "trainingRngEvalKey");
     return rngFold(rng->root, RNG_TAG_EVAL, rng->epoch);
 }
 
 void trainingRngAdvance(trainingRng_t *rng) {
-    requireState(rng, "trainingRngAdvance");
     if (rng->step == UINT32_MAX) {
         PRINT_ERROR("trainingRngAdvance: step counter exhausted");
         exit(1);
@@ -63,7 +59,6 @@ void trainingRngAdvance(trainingRng_t *rng) {
 }
 
 void trainingRngAdvanceEpoch(trainingRng_t *rng) {
-    requireState(rng, "trainingRngAdvanceEpoch");
     if (rng->epoch == UINT32_MAX) {
         PRINT_ERROR("trainingRngAdvanceEpoch: epoch counter exhausted");
         exit(1);
@@ -72,17 +67,14 @@ void trainingRngAdvanceEpoch(trainingRng_t *rng) {
 }
 
 rngKey_t trainingRngShuffleKey(const trainingRng_t *rng, bool perEpoch) {
-    requireState(rng, "trainingRngShuffleKey");
     return rngFold(rng->root, RNG_TAG_SHUFFLE, perEpoch ? rng->epoch : 0u);
 }
 
 rngKey_t trainingRngShuffleEvalKey(const trainingRng_t *rng) {
-    requireState(rng, "trainingRngShuffleEvalKey");
     return rngFold(rng->root, RNG_TAG_SHUFFLE_EVAL, 0u);
 }
 
 rngKey_t trainingRngInitKey(const trainingRng_t *rng, size_t layerIndex) {
-    requireState(rng, "trainingRngInitKey");
     /* rngFold's index is 32 bits wide: a larger index would wrap onto the key
      * of an earlier layer. */
     if (layerIndex > UINT32_MAX) {

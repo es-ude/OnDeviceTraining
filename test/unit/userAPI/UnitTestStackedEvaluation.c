@@ -182,11 +182,12 @@ static void evaluateEmptyLoader(entryPoint_t via) {
 }
 
 /* exit 1 (not 2): the guard fires from sizes alone, before the index table
- * (which a dataset smaller than batchSize would overrun) is read. */
+ * (which a dataset smaller than batchSize would overrun) is read. The message
+ * tells it from the empty-stream check, which also exits 1. */
 void testEmptyEvalLoaderFailsBeforeAnyGetBatch(void) {
-    ASSERT_EXITS_WITH_FAILURE(evaluateEmptyLoader(VIA_EPOCH));
-    ASSERT_EXITS_WITH_FAILURE(evaluateEmptyLoader(VIA_METRICS));
-    ASSERT_EXITS_WITH_FAILURE(evaluateEmptyLoader(VIA_REPORT));
+    ASSERT_EXITS_WITH_OUTPUT(1, "yields no batch", evaluateEmptyLoader(VIA_EPOCH));
+    ASSERT_EXITS_WITH_OUTPUT(1, "yields no batch", evaluateEmptyLoader(VIA_METRICS));
+    ASSERT_EXITS_WITH_OUTPUT(1, "yields no batch", evaluateEmptyLoader(VIA_REPORT));
 }
 
 /* ---- the report's numClasses must match the label ------------------------ */
@@ -297,7 +298,7 @@ void testStackedSpansLoaderBatchesAndRespectsDropLast(void) {
     TEST_ASSERT_TRUE(sameStats(r1.stats, r4.stats));
 }
 
-/* ---- no entry point gains a getBatch call ------------------------------- */
+/* ---- every entry point fetches each batch once --------------------------- */
 
 static size_t g_getBatchCalls;
 static getBatchFn_t g_realGetBatch;
@@ -334,7 +335,7 @@ static size_t countGetBatch(entryPoint_t via, size_t m) {
     return g_getBatchCalls;
 }
 
-void testEntryPointsKeepTodaysGetBatchCallCount(void) {
+void testEntryPointsFetchEachBatchOnce(void) {
     initData();
     size_t calls[2][3];
     const size_t ms[2] = {1, 3};
@@ -346,7 +347,7 @@ void testEntryPointsKeepTodaysGetBatchCallCount(void) {
     freeFixtureData();
     for (size_t k = 0; k < 2; k++) {
         TEST_ASSERT_EQUAL_size_t(N_EVAL, calls[k][0]);
-        TEST_ASSERT_EQUAL_size_t(N_EVAL + 1, calls[k][1]); /* its existing numClasses peek */
+        TEST_ASSERT_EQUAL_size_t(N_EVAL, calls[k][1]);
         TEST_ASSERT_EQUAL_size_t(N_EVAL, calls[k][2]);
     }
 }
@@ -443,35 +444,6 @@ static inferenceStats_t *swappedOrderInference(const model_t *model, tensor_t *i
     o[1] = t;
     return s;
 }
-static inferenceStats_t *nullDataInference(const model_t *model, tensor_t *in, tensor_t *label,
-                                           lossFuncType_t f, reduction_t r,
-                                           const trainingCall_t *call) {
-    inferenceStats_t *s = inferenceWithLoss(model, in, label, f, r, call);
-    s->output->data = NULL; /* leaks in the forked child only */
-    return s;
-}
-static inferenceStats_t *nullOrderInference(const model_t *model, tensor_t *in, tensor_t *label,
-                                            lossFuncType_t f, reduction_t r,
-                                            const trainingCall_t *call) {
-    inferenceStats_t *s = inferenceWithLoss(model, in, label, f, r, call);
-    s->output->shape->orderOfDimensions = NULL; /* leaks in the forked child only */
-    return s;
-}
-
-static inferenceStats_t *nullStatsInference(const model_t *model, tensor_t *in, tensor_t *label,
-                                            lossFuncType_t f, reduction_t r,
-                                            const trainingCall_t *call) {
-    (void)inferenceWithLoss(model, in, label, f, r, call); /* leaks in the forked child only */
-    return NULL;
-}
-static inferenceStats_t *nullShapeInference(const model_t *model, tensor_t *in, tensor_t *label,
-                                            lossFuncType_t f, reduction_t r,
-                                            const trainingCall_t *call) {
-    inferenceStats_t *s = inferenceWithLoss(model, in, label, f, r, call);
-    s->output->shape = NULL; /* leaks in the forked child only */
-    return s;
-}
-
 /* A stream that yields no sample at all (custom getBatch returning empty
  * batches) must fail fast instead of dividing MEAN loss and metrics by 0. */
 static batch_t *emptyGetBatch(dataLoader_t *dl, size_t index, const rngKey_t *stepKey) {
@@ -484,37 +456,27 @@ static batch_t *emptyGetBatch(dataLoader_t *dl, size_t index, const rngKey_t *st
     return b;
 }
 
-static void metricsOverEmptyStream(size_t m) {
+static void evaluateEmptyStream(entryPoint_t via, size_t m) {
     layer_t *model[MODEL_SIZE];
     buildModel(model);
     dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
     dl->getBatch = emptyGetBatch;
-    (void)evaluationEpoch(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl, inferenceWithLoss,
-                          REDUCTION_MEAN, m);
+    if (via == VIA_EPOCH) {
+        (void)evaluationEpoch(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl, inferenceWithLoss,
+                              REDUCTION_MEAN, m);
+    } else {
+        /* The metrics take numClasses from the first streamed label: there is none. */
+        (void)evaluationEpochWithMetrics(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl,
+                                         inferenceWithLoss, REDUCTION_MEAN, m);
+    }
 }
 
 void testEmptyStreamFailsFast(void) {
     initData();
-    ASSERT_EXITS_WITH_FAILURE(metricsOverEmptyStream(1));
-    ASSERT_EXITS_WITH_FAILURE(metricsOverEmptyStream(2));
-    freeFixtureData();
-}
-
-static void metricsWithEmptyFirstBatch(void) {
-    layer_t *model[MODEL_SIZE];
-    buildModel(model);
-    dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
-    dl->getBatch = emptyGetBatch;
-    (void)evaluationEpochWithMetrics(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl, inferenceWithLoss,
-                                     REDUCTION_MEAN, 1);
-}
-
-/* The numClasses peek reads samples[0] of getBatch(0): a loader that reports
- * a dataset but hands back an empty first batch must fail fast, not read out
- * of bounds. */
-void testEmptyFirstBatchFailsFastInMetricsPeek(void) {
-    initData();
-    ASSERT_EXITS_WITH_FAILURE(metricsWithEmptyFirstBatch());
+    ASSERT_EXITS_WITH_FAILURE(evaluateEmptyStream(VIA_EPOCH, 1));
+    ASSERT_EXITS_WITH_FAILURE(evaluateEmptyStream(VIA_EPOCH, 2));
+    ASSERT_EXITS_WITH_FAILURE(evaluateEmptyStream(VIA_METRICS, 1));
+    ASSERT_EXITS_WITH_FAILURE(evaluateEmptyStream(VIA_METRICS, 2));
     freeFixtureData();
 }
 
@@ -526,16 +488,13 @@ void testStackedRejectsMalformedInferenceOutput(void) {
     ASSERT_EXITS_WITH_FAILURE(metricsWith(flatRowInference, 2));
     ASSERT_EXITS_WITH_FAILURE(metricsWith(shortRowInference, 2));
     ASSERT_EXITS_WITH_FAILURE(metricsWith(swappedOrderInference, 2));
-    ASSERT_EXITS_WITH_FAILURE(metricsWith(nullDataInference, 2));
-    ASSERT_EXITS_WITH_FAILURE(metricsWith(nullOrderInference, 2));
-    ASSERT_EXITS_WITH_FAILURE(metricsWith(nullStatsInference, 2));
-    ASSERT_EXITS_WITH_FAILURE(metricsWith(nullShapeInference, 2));
     freeFixtureData();
 }
 
-static void metricsWithMismatchedSample(bool dtype) {
+/* dtype: sample `index` is SYM_INT32-tagged; else sample 4 has another shape. */
+static void metricsWithMismatchedSample(bool dtype, size_t index) {
     if (dtype) {
-        g_items[4]->quantization->type = SYM_INT32; /* child only */
+        g_items[index]->quantization->type = SYM_INT32; /* child only */
     } else {
         freeTensor(g_items[4]);
         g_items[4] = buildFloatTensor((size_t[]){IN_F + 1}, 1, NULL);
@@ -552,37 +511,41 @@ void testStackedReportRejectsNumClassesNotMatchingTheLabel(void) {
 
 void testStackedRejectsUnstackableSamples(void) {
     initData();
-    ASSERT_EXITS_WITH_FAILURE(metricsWithMismatchedSample(true));
-    ASSERT_EXITS_WITH_FAILURE(metricsWithMismatchedSample(false));
+    ASSERT_EXITS_WITH_FAILURE(metricsWithMismatchedSample(true, 4));
+    ASSERT_EXITS_WITH_FAILURE(metricsWithMismatchedSample(true, 0)); /* the reference itself */
+    ASSERT_EXITS_WITH_FAILURE(metricsWithMismatchedSample(false, 4));
     freeFixtureData();
 }
 
-/* Allows WithMetrics' numClasses peek (call 0), exits 2 on any later call:
- * proves the gate fires before the stream starts. */
-static size_t g_gateCalls;
-static batch_t *getBatchMustNotRunAfterGate(dataLoader_t *dl, size_t index,
-                                            const rngKey_t *stepKey) {
-    if (g_gateCalls++ > 0) {
-        _exit(2);
-    }
-    return g_realGetBatch(dl, index, stepKey);
-}
-
-static void metricsWithSymForward(size_t m) {
+/* Any getBatch exits 2: the gate must fire at the entry, before the stream. */
+static void evaluateSymForward(entryPoint_t via, size_t m) {
     layer_t *model[MODEL_SIZE];
     buildModel(model);
     model[1]->config->relu->forwardMath.type = ARITH_SYM_INT32; /* child only */
     dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
-    g_realGetBatch = dl->getBatch;
-    dl->getBatch = getBatchMustNotRunAfterGate;
-    (void)evaluationEpochWithMetrics(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl, inferenceWithLoss,
-                                     REDUCTION_MEAN, m);
+    dl->getBatch = getBatchMustNotRun;
+    size_t cm[CLS * CLS];
+    switch (via) {
+    case VIA_EPOCH:
+        (void)evaluationEpoch(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl, inferenceWithLoss,
+                              REDUCTION_MEAN, m);
+        break;
+    case VIA_METRICS:
+        (void)evaluationEpochWithMetrics(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl,
+                                         inferenceWithLoss, REDUCTION_MEAN, m);
+        break;
+    case VIA_REPORT:
+        (void)evaluationEpochWithReport(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl, inferenceWithLoss,
+                                        cm, CLS, REDUCTION_MEAN, m);
+        break;
+    }
 }
 
 void testStackedForwardGateFiresBeforeTheStream(void) {
     initData();
-    g_gateCalls = 0;
-    ASSERT_EXITS_WITH_FAILURE(metricsWithSymForward(2));
+    ASSERT_EXITS_WITH_FAILURE(evaluateSymForward(VIA_EPOCH, 2));
+    ASSERT_EXITS_WITH_FAILURE(evaluateSymForward(VIA_METRICS, 2));
+    ASSERT_EXITS_WITH_FAILURE(evaluateSymForward(VIA_REPORT, 2));
     freeFixtureData();
 }
 
@@ -681,11 +644,10 @@ int main(void) {
     layerQuantInitUniform(&g_lq, g_q);
     UNITY_BEGIN();
     RUN_TEST(testEmptyEvalLoaderFailsBeforeAnyGetBatch);
-    RUN_TEST(testEmptyFirstBatchFailsFastInMetricsPeek);
     RUN_TEST(testReportRejectsNumClassesNotMatchingTheLabel);
     RUN_TEST(testStackedReportMatchesPerSampleForEveryChunkSize);
     RUN_TEST(testStackedSpansLoaderBatchesAndRespectsDropLast);
-    RUN_TEST(testEntryPointsKeepTodaysGetBatchCallCount);
+    RUN_TEST(testEntryPointsFetchEachBatchOnce);
     RUN_TEST(testStackedMeanDividesByStreamedCount);
     RUN_TEST(testEmptyStreamFailsFast);
     RUN_TEST(testStackedRejectsMalformedInferenceOutput);

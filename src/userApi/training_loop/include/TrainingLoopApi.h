@@ -13,7 +13,7 @@
 #include "Tensor.h"
 #include "TrainingCall.h"
 
-/* #327: forward typedefs only — callers passing NULL need no scheduler
+/* Forward typedefs only — callers passing NULL need no scheduler
  * headers. Identical typedefs live in LrScheduler.h / BsScheduler.h (C11
  * allows the redefinition). */
 typedef struct lrScheduler lrScheduler_t;
@@ -30,8 +30,9 @@ typedef struct trainingRng {
     uint32_t epoch;
 } trainingRng_t;
 
-/* Every helper that takes the state stops the program with a named error on a
- * NULL state (a caller bug). A missing key is a NULL key pointer instead. */
+/* Every helper that takes the state requires a non-NULL state initialised by
+ * trainingRngInit; trainingRngInit, Serialize and Deserialize reject a NULL
+ * one. A missing key is a NULL key pointer instead. */
 
 /*! root = rngKeyFromSeed(seed); step = epoch = 0. */
 void trainingRngInit(trainingRng_t *rng, uint64_t seed);
@@ -77,10 +78,11 @@ rngKey_t trainingRngInitKey(const trainingRng_t *rng, size_t layerIndex);
  * little-endian u32: "ODTK" | version 1 | root.w[0] | root.w[1] | step | epoch.
  * Saved with the model's ODTS file, it lets a stopped run go on with the keys
  * it would have used. It holds no position inside an epoch: save between
- * epochs. Optimizer state (SGD momentum, AdamW moments and step count, #350)
- * and LR/batch-size scheduler state are not part of it, and trainingRun's
- * schedulers count epochs from 0 on every call: an exact resume needs SGD
- * without momentum and no scheduler. */
+ * epochs. Optimizer state (SGD momentum, AdamW moments and step count) and
+ * LR/batch-size scheduler state are not part of it; a scheduler keeps its
+ * lastEpoch only in memory (trainingRun continues from it within one
+ * process). An exact resume in a new process needs SGD without momentum and
+ * no scheduler. */
 void trainingRngSerialize(const trainingRng_t *rng, FILE *f);
 
 /*! Reads one ODTK record into *rng. A record that is not ODTK, a version other
@@ -100,11 +102,9 @@ typedef struct trainingStats {
     float loss;
 } trainingStats_t;
 
-/*! Aggregate evaluation metrics for a full epoch.
- *
- * Loss is averaged across batches. Accuracy is over all evaluated samples.
- * Precision, recall and F1 are macro-averaged (unweighted mean across classes).
- */
+/*! Aggregate evaluation metrics for a full epoch. MEAN evaluation loss is
+ * divided by the streamed sample count; SUM returns the total. Accuracy is over
+ * all evaluated samples. Precision, recall and F1 are unweighted class means. */
 typedef struct epochStats {
     float loss;
     float accuracy;
@@ -125,29 +125,11 @@ typedef struct classificationReport {
     size_t numClasses;
 } classificationReport_t;
 
-/*! Final result of trainingRun() after the last epoch completed — either the
- * last of numberOfEpochs, or, when stopOnNonFiniteLoss ended the run early,
- * the first epoch whose train or eval loss was non-finite.
- *
- * `finalTrainLoss` and `finalEvalStats.loss` share the same unit (per-sample
- * mean of the configured loss function) but are measured over different
- * windows:
- *
- *   - `finalTrainLoss`  is a during-epoch mean of batch-means: each batch's
- *                       per-sample loss is averaged across the batch, and
- *                       those batch-means are averaged across the epoch.
- *                       Weights mutate across batches, so this number mixes
- *                       early-epoch under-trained weights with late-epoch
- *                       near-converged weights.
- *
- *   - `finalEvalStats.loss` is a post-epoch full-pass measurement on the
- *                           eval dataset with the weight state frozen at the
- *                           end of the epoch.
- *
- * As a consequence, the two values disagree — typically eval > train by a
- * factor that grows with training as the model converges. This is the
- * generalization gap × measurement-window difference, not a unit mismatch.
- */
+/*! Final result of trainingRun() after the last epoch completed: the last of
+ * numberOfEpochs, or, when stopOnNonFiniteLoss ended the run early, the first
+ * epoch whose train or eval loss was non-finite. Training loss averages batch
+ * means while weights change; evaluation loss is measured after the epoch with
+ * fixed weights. Both use per-sample mean units. */
 typedef struct trainingRunResult {
     float finalTrainLoss;
     epochStats_t finalEvalStats;
@@ -158,15 +140,15 @@ typedef struct trainingRunResult {
 
 /*! When invoked by trainingBatchDefault, input/label are borrowed stack
  *  views, valid only for the duration of the call: at microBatchSize 1 the
- *  [1, ...] views batchViewOf built for one sample (they share its data,
- *  #152 PR3a); at m > 1 [m, ...] views over the loop's gather buffers -- a
- *  copy of the chunk's m samples, overwritten by the next chunk and freed
- *  before trainingBatchDefault returns (#152 PR3b).
+ *  [1, ...] views batchViewOf built for one sample (they share its data);
+ *  at m > 1 [m, ...] views over the loop's gather buffers -- a copy of the
+ *  chunk's m samples, overwritten by the next chunk and freed before
+ *  trainingBatchDefault returns.
  *
  *  Dropout and BatchNorm1d are in training mode only inside
  *  calculateGradsSequential / tracedGrads (they flip the per-layer
  *  `training` flag around the call); a custom function that does not route
- *  through them runs both in eval mode (#460).
+ *  through them runs both in eval mode.
  *
  *  call is the caller's, NULLable and borrowed for the call: a function that
  *  routes through calculateGradsSequential / tracedGrads forwards it, so a
@@ -177,10 +159,10 @@ typedef trainingStats_t *(*calculateGradsFn_t)(const model_t *model, lossConfig_
 
 /*! When invoked by the evaluation loop, input/label are borrowed stack views
  *  of shape [rows, ...sampleShape], valid only for the call: at
- *  microBatchSize 1 rows == 1 and they share the sample's data (#152 PR3a);
+ *  microBatchSize 1 rows == 1 and they share the sample's data;
  *  at m > 1 they point into the loop's gather buffers, overwritten by the
  *  next chunk. The function returns an output whose leading dimension is
- *  rows and whose per-row block holds the C class scores (#468), and the
+ *  rows and whose per-row block holds the C class scores, and the
  *  loss reduced over the rows per forwardReduction. trainingRun's evaluation
  *  passes its call with this call's key (see trainingRunOptions_t.remat and
  *  .rng), the public evaluation
@@ -211,44 +193,33 @@ typedef void (*epochCallbackFn_t)(epochInfo_t info, epochStats_t evalStats);
  * "no schedulers, no callback, per-sample training" — exactly the pre-port
  * default behaviour. */
 typedef struct trainingRunOptions {
-    lrScheduler_t *lrScheduler; /* NULLable; stepped once per epoch after the callback (#327) */
+    lrScheduler_t *lrScheduler; /* NULLable; stepped once per epoch after the callback */
     bsScheduler_t *bsScheduler; /* NULLable; stepped once per epoch after lrScheduler */
     epochCallbackFn_t callback; /* NULLable */
     bool stopOnNonFiniteLoss;   /* end the run after the first epoch whose train or eval loss is
                                     not finite */
-    size_t microBatchSize;      /* rows per forward/backward call inside each macro batch (#152);
+    size_t microBatchSize;      /* rows per forward/backward call inside each macro batch;
                                     0 means 1. m > 1 stacks m samples into one [m, ...] call:
                                     FLOAT32 models only, every macro batch must be divisible by m.
                                     Evaluation inherits it unless evalMicroBatchSize is set.
                                     Dropout fails fast at m > 1 (its mask holds one sample). A
                                     rank-2 BatchNorm1d in training mode needs microBatchSize >= 2
                                     (batch statistics need >= 2 values per channel). */
-    size_t evalMicroBatchSize;  /* rows per inferenceFn call during evaluation (#468); 0 inherits
+    size_t evalMicroBatchSize;  /* rows per inferenceFn call during evaluation; 0 inherits
                                     microBatchSize. m_eval > 1 stacks consecutive eval samples
                                     into [rows, ...] chunks (rows <= m_eval; the last chunk holds
                                     the N mod m_eval remainder): FLOAT32 forward only. The gather
                                     buffers hold m_eval rows even when the eval set is smaller.
                                     An untracked BatchNorm1d's eval output depends on its chunk
                                     mates (deterministic: the eval loader is never reshuffled). */
-    rematScheduler_t *remat;    /* NULLable; NULL keeps a fresh scheduler per training call
-                                    (remat D15, D30). Otherwise caller-initialised (rematHeapInit /
-                                    rematArenaInit) and caller-owned: trainingRun borrows it for
-                                    every training call and never tears it down; the caller
-                                    deinits it after the run. Its key must match the input of
-                                    every training call -- [1, ...sampleShape] at microBatchSize 1,
-                                    [m, ...sampleShape] at m > 1 -- so every training sample must
-                                    have the one sampleShape it was keyed to: the first call
-                                    whose input differs exits naming the mismatch, and a zeroed
-                                    or deinitialised one exits at the first call.
-                                    Evaluation runs on it too when every eval chunk has the
-                                    training row count: evalMicroBatchSize equal to
-                                    microBatchSize, and the eval loader's nominal count
-                                    (datasetSize / batchSize * batchSize) a multiple of it.
-                                    Otherwise evaluation runs without it (remat D19). On it,
-                                    every eval sample must have the sampleShape too (the first
-                                    eval call whose input differs exits naming the mismatch),
-                                    and a loader whose stream differs from its nominal count
-                                    exits at its first ragged chunk. */
+    rematScheduler_t *remat;    /* NULLable; NULL keeps a fresh scheduler per training call.
+                                    Otherwise a borrowed, initialized scheduler (rematHeapInit /
+                                    rematArenaInit), keyed to every training input: [1, ...] at
+                                    microBatchSize 1, [m, ...] at m > 1; the caller deinits it
+                                    after the run. Evaluation shares it only when its micro-batch
+                                    size matches training and its nominal sample count has no
+                                    tail; otherwise evaluation uses an ephemeral scheduler. Live
+                                    input/key mismatches fail. */
     trainingRng_t *rng;         /* NULLable; NULL runs without keys, so a shuffle = true train
                                     or eval loader stops at its shuffle. Otherwise
                                     caller-initialised (trainingRngInit) and caller-owned: the
@@ -265,60 +236,33 @@ void freeTrainingStats(trainingStats_t *trainingStats);
  * shuffle = true loader serves its identity order until dataLoaderShuffle has
  * set its order (DataLoaderApi.h). */
 
-/*! Per-sample primitive over one batch_t: never stacks (the epoch entry points do, #468). */
+/*! Per-sample primitive over one batch_t: never stacks (the epoch entry points do). */
 float evaluationBatch(const model_t *model, lossFuncType_t funcType, batch_t *batch,
                       inferenceWithLossFn_t inferenceFn, reduction_t forwardReduction);
 
-/* microBatchSize: rows per inferenceFn call; 0 means 1. m > 1 stacks consecutive samples of the
- * loader's stream into [rows, ...] chunks (rows <= m, the last chunk holds the remainder) --
- * FLOAT32 forwards only (#468). */
+/* The three epoch entries below: microBatchSize is the rows per inferenceFn call; 0 means 1.
+ * m > 1 stacks consecutive samples of the loader's stream into [rows, ...] chunks (rows <= m, the
+ * last chunk holds the remainder) -- FLOAT32 forwards only. */
 float evaluationEpoch(const model_t *model, lossFuncType_t funcType, dataLoader_t *dataLoader,
                       inferenceWithLossFn_t inferenceFn, reduction_t forwardReduction,
                       size_t microBatchSize);
 
-/* microBatchSize: rows per inferenceFn call; 0 means 1. m > 1 stacks consecutive samples of the
- * loader's stream into [rows, ...] chunks (rows <= m, the last chunk holds the remainder) --
- * FLOAT32 forwards only (#468). */
 epochStats_t evaluationEpochWithMetrics(const model_t *model, lossFuncType_t funcType,
                                         dataLoader_t *dataLoader, inferenceWithLossFn_t inferenceFn,
                                         reduction_t forwardReduction, size_t microBatchSize);
 
-/* microBatchSize: rows per inferenceFn call; 0 means 1. m > 1 stacks consecutive samples of the
- * loader's stream into [rows, ...] chunks (rows <= m, the last chunk holds the remainder) --
- * FLOAT32 forwards only (#468). */
 classificationReport_t
 evaluationEpochWithReport(const model_t *model, lossFuncType_t funcType, dataLoader_t *dataLoader,
                           inferenceWithLossFn_t inferenceFn, size_t *cmBuffer, size_t numClasses,
                           reduction_t forwardReduction, size_t microBatchSize);
 
-/*! Runs numberOfEpochs of train+eval. Before the first epoch a shuffle = true
- * eval loader is shuffled once under trainingRngShuffleEvalKey (never again).
- * Per epoch, in this order: shuffle the train loader under
- * trainingRngShuffleKey(rng, reshufflePerEpoch) (#381; the epoch is the
- * counter in options->rng, so a run split over several calls keeps its
- * orders) -> capture epochInfo_t (batch, updates,
- * LR the epoch trains with) -> trainingEpochDefault -> evaluate -> count the
- * epoch in options->rng -> callback -> lrSchedulerStep -> bsSchedulerStep
- * (last: it only writes
- * trainDataLoader->batchSize, which the next epoch reads fresh). A callback
- * that logs the LR/batch therefore reports the values this epoch actually
- * trained with. trainDataLoader and evalDataLoader must be distinct objects:
- * the eval loader keeps one order per run and is never resized, while the
- * train loader is reshuffled each epoch and resized by the batch scheduler;
- * to evaluate on the training data, build a second loader over the same
- * dataset. Fails fast (before the first batch) if: the same loader object is
- * passed as both; the LR scheduler is
- * wired to another optimizer (#327); the batch scheduler is wired to a loader
- * other than trainDataLoader (the eval loader is never resized); its LR
- * compensation is wired to another optimizer; an LR scheduler and a
- * compensating batch scheduler would both write the LR every epoch; the train
- * loader's batchSize is not divisible by options->microBatchSize; or, with a
- * batch scheduler and microBatchSize > 1, any batch the scheduler will set for
- * epochs 1..numberOfEpochs-1 is not divisible by it (#152); or
- * evaluation cannot run: the eval loader yields no batch; a non-FLOAT32
- * forward with an evaluation micro-batch > 1; or an untracked (noRunningStats)
- * BatchNorm1d whose evaluation chunk -- full or the N mod m tail -- has fewer
- * than 2 values per channel (#467/#468). */
+/*! Runs numberOfEpochs of train+eval. Requires distinct train/eval loaders and
+ * compatible scheduler wiring. Validates microbatch schedules, the training
+ * loader's first epoch, the model (FLOAT32 at microBatchSize > 1; a Softmax last
+ * layer under CROSS_ENTROPY) and evaluation feasibility before training. A
+ * shuffle = true eval loader is shuffled once, under trainingRngShuffleEvalKey.
+ * Each epoch shuffles, trains, evaluates, advances the RNG epoch, calls back,
+ * then steps LR and batch schedulers. */
 trainingRunResult_t trainingRun(const model_t *model, lossConfig_t lossConfig,
                                 dataLoader_t *trainDataLoader, dataLoader_t *evalDataLoader,
                                 optimizer_t *optimizer, size_t numberOfEpochs,

@@ -18,6 +18,7 @@
 #include "LayerExec.h"
 #include "LayerWireGuards.h"
 #include "Mul.h"
+#include "NormConfigGuard.h"
 #include "Quantization.h"
 #include "Reduce.h"
 #include "Rounding.h"
@@ -62,22 +63,6 @@ static void layerNormGroupSizes(tensor_t *t, size_t numNormDims, size_t *outG, s
     *outG = (n == 0) ? 0 : total / n;
 }
 
-static bool layerNormIsArithmetic(arithmeticType_t type) {
-    return type == ARITH_FLOAT32 || type == ARITH_SYM_INT32 || type == ARITH_BFP;
-}
-
-static bool layerNormIsBfpOperand(qtype_t type) {
-    return type == FLOAT32 || type == BFP;
-}
-
-/* OUT_WRITE is the zero value, so an unset mode would overwrite the grads. */
-static void layerNormRequireAccMode(outputMode_t mode, const char *who, const char *field) {
-    if (mode != OUT_ACC_DYNAMIC_RESCALE && mode != OUT_ACC_FIXED_SCALE) {
-        PRINT_ERROR("%s: %s must be a grad accumulate mode (got %d)", who, field, (int)mode);
-        exit(1);
-    }
-}
-
 void layerNormValidateConfig(const layerNormConfig_t *cfg, const char *who) {
     size_t count = 1;
     for (size_t d = 0; d < cfg->numNormDims; d++) {
@@ -90,76 +75,9 @@ void layerNormValidateConfig(const layerNormConfig_t *cfg, const char *who) {
                     count, gammaCount, betaCount);
         exit(1);
     }
-    arithmeticType_t fwd = cfg->forwardMath.type;
-    arithmeticType_t bwd = cfg->propLossMath.type;
-    if (!layerNormIsArithmetic(fwd) || !layerNormIsArithmetic(bwd)) {
-        PRINT_ERROR("%s: forwardMath and propLossMath must be ARITH_FLOAT32, ARITH_SYM_INT32 or "
-                    "ARITH_BFP (got %d, %d)",
-                    who, (int)fwd, (int)bwd);
-        exit(1);
-    }
-    qtype_t gammaType = cfg->gamma->param->quantization->type;
-    qtype_t betaType = cfg->beta->param->quantization->type;
-    /* The SYM_INT32 kernels read gamma/beta as int32 mantissas. */
-    if (fwd == ARITH_SYM_INT32 && (gammaType != SYM_INT32 || betaType != SYM_INT32)) {
-        PRINT_ERROR("%s: SYM_INT32 forwardMath requires SYM_INT32 gamma AND beta storage", who);
-        exit(1);
-    }
-    /* The ARITH_BFP kernels borrow BFP params and stage FLOAT32 ones at the produced-wire
-     * config, which must therefore be BFP. */
-    if (fwd == ARITH_BFP && (!layerNormIsBfpOperand(gammaType) ||
-                             !layerNormIsBfpOperand(betaType) || cfg->outputQ->type != BFP)) {
-        PRINT_ERROR("%s: ARITH_BFP forwardMath requires FLOAT32 or BFP gamma AND beta storage and "
-                    "a BFP-typed outputQ (the staging width anchor)",
-                    who);
-        exit(1);
-    }
-    /* FLOAT32 math over quantized params would forward fine and die at the first backward:
-     * the FLOAT32 backward raw-casts gamma. */
-    if (fwd == ARITH_FLOAT32 && (gammaType != FLOAT32 || betaType != FLOAT32)) {
-        PRINT_ERROR("%s: ARITH_FLOAT32 forwardMath requires FLOAT32 gamma AND beta storage -- "
-                    "declare ARITH_BFP / ARITH_SYM_INT32 math, or insert a Quantization layer",
-                    who);
-        exit(1);
-    }
-    /* The SYM_INT32 backward reads forwardInput and gamma as mantissas. SYM forward + FLOAT32
-     * backward stays constructible as the inference-only profile. */
-    if (bwd == ARITH_SYM_INT32 && fwd != ARITH_SYM_INT32) {
-        PRINT_ERROR("%s: SYM_INT32 propLossMath requires SYM_INT32 forwardMath", who);
-        exit(1);
-    }
-    if (bwd == ARITH_BFP && (!layerNormIsBfpOperand(gammaType) ||
-                             !layerNormIsBfpOperand(betaType) || cfg->propLossQ->type != BFP)) {
-        PRINT_ERROR("%s: ARITH_BFP propLossMath requires FLOAT32 or BFP gamma AND beta storage "
-                    "and a BFP-typed propLossQ (the staging width anchor)",
-                    who);
-        exit(1);
-    }
-    if (bwd == ARITH_FLOAT32 && (gammaType == BFP || betaType == BFP || cfg->outputQ->type == BFP ||
-                                 cfg->propLossQ->type == BFP)) {
-        PRINT_ERROR("%s: ARITH_FLOAT32 propLossMath rejects BFP gamma/beta storage and BFP wire "
-                    "configs -- the FLOAT32 backward raw-casts",
-                    who);
-        exit(1);
-    }
-    if (cfg->frozen) {
-        return; /* no grads: the modes and grad storage are never used */
-    }
-    if (bwd != ARITH_FLOAT32) {
-        layerNormRequireAccMode(cfg->weightGradAccMode, who, "weightGradAccMode");
-        layerNormRequireAccMode(cfg->biasGradAccMode, who, "biasGradAccMode");
-        return;
-    }
-    /* The FLOAT32 backward ignores the modes: it adds into the grads through a raw float *
-     * cast. */
-    if (cfg->gamma->grad->quantization->type != FLOAT32 ||
-        cfg->beta->grad->quantization->type != FLOAT32) {
-        PRINT_ERROR("%s: ARITH_FLOAT32 propLossMath requires FLOAT32 gamma/beta grad storage "
-                    "(got %d, %d)",
-                    who, (int)cfg->gamma->grad->quantization->type,
-                    (int)cfg->beta->grad->quantization->type);
-        exit(1);
-    }
+    normValidateAffineCoherence(cfg->gamma, cfg->beta, cfg->forwardMath.type,
+                                cfg->propLossMath.type, cfg->outputQ, cfg->propLossQ,
+                                cfg->weightGradAccMode, cfg->biasGradAccMode, cfg->frozen, who);
 }
 
 /* Logical size of dim `index`; orderOfDimensions is a permutation (initTensor, deserializer). */
@@ -221,20 +139,15 @@ static size_t layerNormPhysOffset(tensor_t *t, size_t numNormDims, size_t g, siz
  * same group g the layer iterates), then invSigma[g] = 1/sqrt(var[g]+eps).
  * Variance is BIASED (÷N, NOT N-1); eps is INSIDE the sqrt.
  *
- * ONE helper for BOTH FLOAT32 and SYM_INT32, forward AND backward, so a layer's
- * passes can never desync on the stats definition. The path is chosen by input
- * dtype: SYM_INT32 dequants+centers in float INSIDE Reduce (guarded
- * qMaxBits <= 16) — same math as the old inline mantissa loops (d = q*scale -
- * mean, acc += d*d, ÷N).
+ * ONE helper for every dtype, forward AND backward, so the passes can never
+ * desync on the stats definition. The path is chosen by input dtype: SYM_INT32
+ * dequants and centers in float inside Reduce (guarded qMaxBits <= 16).
  *
- * Memory: this deliberately trades the old per-group recompute-over-store (no
- * scratch at all, not even G floats) for 3*G floats of stack at peak (the
- * caller's mean[G] + invSigma[G], plus var[G] local to this helper), computed
- * ONCE and SHARED across both passes — not 2*G per pass. The approved tradeoff
- * keeps the statistics math in the arithmetic module, not the layer.
- * Callers MUST guarantee G > 0 (the stats
- * VLAs and Reduce's block loop are undefined at G == 0); every caller early-outs
- * on G == 0 || N == 0 before calling here. */
+ * Memory: 3*G floats of stack at peak (the caller's mean[G] + invSigma[G], plus
+ * var[G] local to this helper), computed once and shared across both passes;
+ * the price of keeping the statistics math in the arithmetic module.
+ * Callers MUST guarantee G > 0 (the stats VLAs and Reduce's block loop are
+ * undefined at G == 0). */
 static void layerNormAllGroupStats(tensor_t *t, size_t numNormDims, size_t G, float eps,
                                    float *mean, float *invSigma) {
     size_t statsDims[1] = {G};
@@ -301,16 +214,15 @@ static void layerNormRequireSymWire(const tensor_t *t, const char *what) {
  *            drop beta under dynamic per-tensor scales)
  *   y_q    = q * gamma_q,j + seed_j            (the product q*gamma_q <= qMax^2
  *            fits int32, but the rescaled seed is DATA-DEPENDENT and unbounded:
- *            |seed| ~ |beta| * qMax^2 / (absmax_n * absmax_gamma). The shared
- *            rescaleIntoAccumulatorScale helper (#189) fails fast
- *            outside the safe envelope instead of casting an
- *            out-of-range float to int32 (UB). Spec errata: "int32 is safe
- *            throughout" holds only while the rescaled seed leaves one worst-case
- *            int12xint12 product (2047*2047 ≈ 4.2e6, #227) of int32 headroom for the
+ *            |seed| ~ |beta| * qMax^2 / (absmax_n * absmax_gamma).
+ *            rescaleIntoAccumulatorScale fails fast outside the safe envelope
+ *            instead of casting an out-of-range float to int32 (UB). int32 is
+ *            safe only while the rescaled seed leaves one worst-case int12xint12
+ *            product (2047*2047 ≈ 4.2e6) of int32 headroom for the
  *            gamma-product, i.e. |beta| <~ absmax_n * absmax_gamma.)
  * gamma/beta are contiguous default-order rank-D tensors -> flat index j. This
  * writes a RAW, unrestored y_q (accumulator-range, same class as Linear/Conv's
- * matmul output, PR1b.2 D2/D3) into rawOut's own scale field — the executeOp
+ * matmul output) into rawOut's own scale field — the executeOp
  * OUT_WRITE epilogue (caller, layerNormForward) restores width at the
  * producer via the SYM->SYM diagonal requant. */
 static void layerNormAffineSymInt32(size_t numNormDims, tensor_t *gamma, tensor_t *beta,
@@ -330,9 +242,8 @@ static void layerNormAffineSymInt32(size_t numNormDims, tensor_t *gamma, tensor_
     size_t G, N;
     layerNormGroupSizes(output, numNormDims, &G, &N);
 
-    /* Seed-rescale + flag-gated int32-overflow guard live in the shared #189 helper
-     * (rescaleIntoAccumulatorScale): beta is refolded from its own scale into the
-     * output (gamma-product) scale sY per element. */
+    /* rescaleIntoAccumulatorScale refolds beta from its own scale into the output
+     * (gamma-product) scale sY per element, with the int32-overflow guard. */
     for (size_t g = 0; g < G; g++) {
         for (size_t j = 0; j < N; j++) {
             size_t off = layerNormPhysOffset(output, numNormDims, g, j);
@@ -344,25 +255,19 @@ static void layerNormAffineSymInt32(size_t numNormDims, tensor_t *gamma, tensor_
     storeCanonScale(&outQC->scale, sY);
 }
 
-/* SYM_INT32 forward (LayerNorm epic #148, verified scale-folding scheme):
+/* SYM_INT32 forward (scale-folding scheme):
  * pass 1: per-group float stats + GLOBAL absmax of the normalized values.
  *         Multi-group REQUIRES the per-group 1/sigma_g to hit the DATA — one
  *         per-tensor scale cannot encode G different sigmas; only the global
  *         stretch lives in the scale.
  * pass 2: normalize the stored per-group stats, stretch by K = qMax/absmax,
  *         round-clamp. Stats come ONCE from the Reduce module into G-float stack
- *         scratch (layerNormAllGroupStats) and both passes read them — the
- *         approved tradeoff of 3*G floats of stack at peak (mean[G] +
- *         invSigma[G] + the helper-local var[G]), computed once and shared
- *         across both passes, for keeping the stats math in the arithmetic
- *         module (was: per-group recompute-over-store, no scratch at all).
- *         Stats are computed only when
- *         !allConstant (the constant/zero-absmax branch never reads them).
+ *         scratch (layerNormAllGroupStats) and both passes read them. Stats
+ *         are computed only when !allConstant (the constant/zero-absmax branch
+ *         never reads them).
  * Output scale s_norm = 1/K, then the affine stage folds in gamma/beta and
- * writes the (raw, unrestored) producer scale. gamma/beta are passed
- * explicitly (funnel operands, PR1b.2) rather than read via cfg, mirroring
- * Linear's weights/bias adapter pattern — cfg is retained only for
- * eps/numNormDims/qMaxBits-independent geometry. */
+ * writes the (raw, unrestored) producer scale. gamma/beta are funnel operands,
+ * not read via cfg — cfg carries only eps/numNormDims geometry. */
 static void layerNormForwardSymInt32(layerNormConfig_t *cfg, tensor_t *gamma, tensor_t *beta,
                                      tensor_t *input, tensor_t *output, rngStream_t *rs) {
     layerNormRequireSymWidth(input, "input");
@@ -382,7 +287,7 @@ static void layerNormForwardSymInt32(layerNormConfig_t *cfg, tensor_t *gamma, te
     layerNormGroupSizes(input, cfg->numNormDims, &G, &N);
 
     if (G == 0 || N == 0) {
-        storeCanonScale(&outQC->scale, 1.0f); /* nothing to normalize; neutral scale (cf. #160) */
+        storeCanonScale(&outQC->scale, 1.0f); /* nothing to normalize; neutral scale */
         return;
     }
 
@@ -456,7 +361,7 @@ static void layerNormForwardSymInt32(layerNormConfig_t *cfg, tensor_t *gamma, te
                 float n = ((float)in[inOff] * inScale - mean[g]) * invSigma[g];
                 size_t outOff = layerNormPhysOffset(output, cfg->numNormDims, g, j);
                 /* defensive integer clamp: exact SR never moves an exactly representable qMax/qMin;
-                 * kept for inexact float grid bounds (#511) */
+                 * kept for inexact float grid bounds */
                 out[outOff] =
                     clampInt32(roundByMode(clamp(n * K, qMin, qMax), outQC->roundingMode, rs),
                                (int32_t)qMin, (int32_t)qMax);
@@ -467,12 +372,11 @@ static void layerNormForwardSymInt32(layerNormConfig_t *cfg, tensor_t *gamma, te
     layerNormAffineSymInt32(cfg->numNormDims, gamma, beta, output, sNorm, rs);
 }
 
-/* ARITH_BFP forward (R-N2/R-N3): stats in float32 from exact (mantissa, E)
- * dequants via the Reduce BFP arms; normalize + affine in float -- the SYM
- * integer-affine/beta-seed bookkeeping has no BFP analog (a BFP scale is 2^E;
- * like AvgPool's /K fold, R-P4). Raw out is FLOAT32 (BFP D7); the OUT_WRITE
- * epilogue packs the BFP wire with fresh exponents. Operands arrive in the
- * funnel's unpacked-BFP scratch form (borrowed or staged). */
+/* ARITH_BFP forward: stats in float32 from exact (mantissa, E) dequants via the
+ * Reduce BFP arms; normalize + affine in float -- the SYM integer-affine/beta-seed
+ * bookkeeping has no BFP analog (a BFP scale is 2^E). Raw out is FLOAT32; the
+ * OUT_WRITE epilogue packs the BFP wire with fresh exponents. Operands arrive in
+ * the funnel's unpacked-BFP scratch form (borrowed or staged). */
 static void layerNormForwardBfp(const layerNormConfig_t *cfg, tensor_t *gamma, tensor_t *beta,
                                 tensor_t *input, tensor_t *rawOut) {
     size_t G;
@@ -519,7 +423,7 @@ static void layerNormForwardFloat(layerNormConfig_t *cfg, tensor_t *gamma, tenso
     size_t G, N;
     layerNormGroupSizes(input, cfg->numNormDims, &G, &N);
     if (G == 0 || N == 0) {
-        return; /* nothing to normalize (empty group geometry); cf. #160 */
+        return; /* nothing to normalize (empty group geometry) */
     }
 
     float mean[G];
@@ -539,7 +443,7 @@ static void layerNormForwardFloat(layerNormConfig_t *cfg, tensor_t *gamma, tenso
 /* executeOp forward kernel adapters — operands {input, gamma, beta}; ctx =
  * cfg (eps/normalizedShape/numNormDims geometry, not a tensor so it cannot
  * travel through the funnel's operand array). The SYM kernel emits a RAW,
- * unrestored producer scale (Finding A, PR1b.2 D2/D3): the OUT_WRITE epilogue
+ * unrestored producer scale: the OUT_WRITE epilogue
  * (layerNormForward) restores width via the SYM->SYM diagonal requant, same
  * as Linear/Conv1d's matmul-family forwards. */
 static void layerNormForwardKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut,
@@ -629,14 +533,11 @@ static void layerNormBackwardFloat(layerNormConfig_t *cfg, tensor_t *forwardInpu
                                    tensor_t *propLoss) {
     float *x = (float *)forwardInput->data;
     float *dy = (float *)loss->data;
-    /* propLoss == NULL (#380 PR2): grads-only call -- fetch NULL instead of
-     * dereferencing the absent buffer; the scatter loop below is guarded on
-     * dx and never touches propLoss in that case. */
+    /* propLoss == NULL is a grads-only call: the dx scatter below is skipped. */
     float *dx = (propLoss != NULL) ? (float *)propLoss->data : NULL;
     float *gamma = (float *)cfg->gamma->param->data;
     const bool frozen = cfg->frozen;
-    /* Frozen: no grad tensors exist (Task 1 elides them) -- fetch NULL instead
-     * of dereferencing cfg->gamma->grad / cfg->beta->grad. */
+    /* A frozen layer has no grad tensors. */
     float *dgamma = frozen ? NULL : (float *)cfg->gamma->grad->data; /* accumulated += */
     float *dbeta = frozen ? NULL : (float *)cfg->beta->grad->data;   /* accumulated += */
 
@@ -646,9 +547,8 @@ static void layerNormBackwardFloat(layerNormConfig_t *cfg, tensor_t *forwardInpu
         return; /* empty group geometry: no grad increments, nothing to scatter */
     }
 
-    /* Stats computed ONCE up front through the shared Reduce helper (was:
-     * per-group recompute-over-store); mean[g]/invSigma[g] feed both the grad
-     * pass and the dx scatter, so they cannot desync from the forward. */
+    /* Stats from the forward's helper feed both the grad pass and the dx scatter,
+     * so neither can desync from the forward. */
     float mean[G];
     float invSigma[G];
     layerNormAllGroupStats(forwardInput, cfg->numNormDims, G, cfg->eps, mean, invSigma);
@@ -674,9 +574,7 @@ static void layerNormBackwardFloat(layerNormConfig_t *cfg, tensor_t *forwardInpu
         meanDn /= (float)N;
         meanDnN /= (float)N;
 
-        /* dx scattered back to the same physical offset its x came from.
-         * propLoss == NULL (#380 PR2): grads-only call -- skip the scatter
-         * entirely (no propLoss->... touch, no dx write). */
+        /* dx overwrites the same physical offset its x came from. */
         if (dx != NULL) {
             for (size_t j = 0; j < N; j++) {
                 size_t xoff = layerNormPhysOffset(forwardInput, cfg->numNormDims, g, j);
@@ -691,11 +589,10 @@ static void layerNormBackwardFloat(layerNormConfig_t *cfg, tensor_t *forwardInpu
     }
 }
 
-/* SYM_INT32 backward (LayerNorm epic #148, verified scheme). mu/sigma are computed
- * ONCE from forwardInput through layerNormAllGroupStats — the SAME shared Reduce
- * helper the forward uses, so backward can never desync from the forward
- * definition — into G-float stack scratch that both passes read (was: per-group
- * recompute-over-store; approved 2*G-float tradeoff). dy and gamma are
+/* SYM_INT32 backward. mu/sigma are computed ONCE from forwardInput through
+ * layerNormAllGroupStats — the SAME shared Reduce helper the forward uses, so
+ * backward can never desync from the forward definition — into G-float stack
+ * scratch that both passes read. dy and gamma are
  * dequantized per element via their own scales (float math; dy/gamma mantissas
  * are never integer-summed — only forwardInput is subject to the int32
  * mantissa-sum bound).
@@ -724,7 +621,7 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
     layerNormGroupSizes(forwardInput, cfg->numNormDims, &G, &N);
     if (G == 0 || N == 0) {
         if (propLoss != NULL) {
-            storeCanonScale(&plQC->scale, 1.0f); /* nothing to do; neutral scale (cf. #160) */
+            storeCanonScale(&plQC->scale, 1.0f); /* nothing to do; neutral scale */
         }
         return;
     }
@@ -736,8 +633,6 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
         dbetaInc[j] = 0.0f;
     }
 
-    /* Stats once from forwardInput via the shared Reduce helper; mean[g]/
-     * invSigma[g] drive both pass A and pass B (was: per-group recompute). */
     float mean[G];
     float invSigma[G];
     layerNormAllGroupStats(forwardInput, cfg->numNormDims, G, cfg->eps, mean, invSigma);
@@ -809,9 +704,7 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
      * absmax==0 source is dy == 0, and zero PROPAGATES exactly through
      * products and sums even under -ffp-contract=fast, so the float check is
      * reliable here.
-     * propLoss == NULL (#380 PR2): grads-only call -- skip pass B entirely
-     * (no dx write, no propLoss scale refresh; stats/absmax bookkeeping in
-     * pass A above already ran unconditionally). */
+     * propLoss == NULL (grads-only call) skips pass B. */
     if (propLoss != NULL) {
         rngStream_t dxStorage;
         rngStream_t *dxStream =
@@ -870,10 +763,10 @@ static void layerNormBackwardSymInt32(layerNormConfig_t *cfg, tensor_t *forwardI
 }
 
 /* dbeta_j = sum over blocks g of dy[g,j]: a pure mantissa VALUE-sum walked
- * j-outer/g-inner (R-P4 sum contract; the strided walk typically closes a
- * segment every element -- the contract degrades to per-element folds
- * gracefully, never wrongly). Raw out is beta-shaped FLOAT32 and memset
- * here: the funnel's Phase-2 raw is uninitialized scratch (#427). */
+ * j-outer/g-inner (the strided walk typically closes a same-exponent segment
+ * every element -- it degrades to per-element folds, never wrong). Raw out is
+ * beta-shaped FLOAT32 and memset here: the funnel's raw is uninitialized
+ * scratch. */
 static void layerNormCalcBetaGradsBfp(const layerNormConfig_t *cfg, tensor_t *loss,
                                       tensor_t *rawOut) {
     size_t G;
@@ -912,8 +805,8 @@ static void layerNormCalcBetaGradsBfp(const layerNormConfig_t *cfg, tensor_t *lo
 
 /* dgamma_j = sum over blocks g of dy[g,j] * n[g,j]. n is float, so the
  * accumulation is per-element float32 -- a mixed (mantissa x float) product
- * has no same-exponent int32 partial. Stats recomputed here (R-N4's
- * documented per-op cost). */
+ * has no same-exponent int32 partial. The dgamma and dx ops each recompute the
+ * stats. */
 static void layerNormCalcGammaGradsBfp(const layerNormConfig_t *cfg, tensor_t *forwardInput,
                                        tensor_t *loss, tensor_t *rawOut) {
     size_t G;
@@ -1072,7 +965,7 @@ void layerNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
         layerNormBackwardSymInt32(cfg, forwardInput, loss, propLoss, exec);
         break;
     case ARITH_BFP: {
-        /* R-N1: propLossQ anchors ALL THREE backward ops' staging, even when
+        /* propLossQ anchors ALL THREE backward ops' staging, even when
          * the propLoss TENSOR is NULL (the grad ops still stage at it). */
         const bfpQConfig_t *anchor = bfpWireAnchor(cfg->propLossQ, "LayerNorm backward");
         bfpQConfig_t stage = {.exponents = NULL,

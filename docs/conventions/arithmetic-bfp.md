@@ -982,7 +982,7 @@ the one factory family that allocates non-FLOAT32 params directly (no
 `requireFloat32` gate — #270 covers RANDOM init, and gamma = 1 / beta = 0
 are constants that are exact grid points on any BFP grid). Geometry follows
 the wire-allocator Decision 5 rule applied to params
-(`layerNormParamQLike`/`groupNormParamQLike`): the storage template's
+(`normParamQLike`): the storage template's
 `groupSize` is honored, `numGroups` is derived from THIS parameter's
 element count (never taken from the shape-agnostic template),
 `groupSize == N` normalizes to the per-tensor `{1,0}` config (a `{1,N}`

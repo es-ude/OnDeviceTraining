@@ -69,20 +69,14 @@ static size_t bnInner(const tensor_t *t) {
 
 /* Batch statistics need n >= 2 values per channel: n = 1 has no variance
  * (and n/(n-1) divides by zero), n = 0 would write 0/0 into the running
- * stats. PyTorch rejects n = 1 only; n = 0 is stricter by design (#460).
+ * stats. PyTorch rejects n = 1 only; n = 0 is stricter by design.
  *
  * An untracked (noRunningStats) BN always uses batch statistics, even in
- * eval (there are no running statistics to use), over its evaluation chunk
- * (#468): the untracked-eval n is rows * T of that chunk, so a single-row
- * rank-2 [1, C] chunk has n = 1.
- * The generic "raise microBatchSize" / "a frozen or eval-mode BN falls back
- * to running statistics" message is actively wrong there: there are no
- * running statistics to fall back to, and the knob to raise is the
- * evaluation micro-batch size. Give that case its own message. The same
- * untracked BN dying in training (#467) needs its own message too: the
- * generic branch's "(a frozen or eval-mode BN uses running statistics
- * instead)" parenthetical is false without running statistics to fall back
- * on, even though microBatchSize is still the right knob to raise. */
+ * eval, over its evaluation chunk: n is rows * T of that chunk, so a
+ * single-row rank-2 [1, C] chunk has n = 1. Untracked BNs get their own
+ * messages: the generic "(a frozen or eval-mode BN uses running statistics
+ * instead)" is false without running statistics, and in eval the knob to
+ * raise is the evaluation micro-batch size, not microBatchSize. */
 static void bnDieUntrackedEval(const char *what, size_t n) {
     PRINT_ERROR("BatchNorm1d %s: no running statistics (noRunningStats), so evaluation normalizes "
                 "with batch statistics over its chunk (n = rows x T values per channel) -- got "
@@ -131,10 +125,9 @@ static void bnRequireBatchStatsSize(const batchNorm1dConfig_t *cfg, const tensor
     exit(1);
 }
 
-/* #467/#468: an untracked BN normalizes with batch statistics even in evaluation
+/* An untracked BN normalizes with batch statistics even in evaluation
  * (bnUsesBatchStats), over its evaluation chunk -- [rows, C] or [rows, C, T] -- so
- * n = rows * prod(dims[2:]). No-op for a tracked BN, which falls back to running
- * statistics in eval. */
+ * n = rows * prod(dims[2:]). */
 void batchNorm1dRequireEvaluable(const layer_t *layer, const shape_t *evalInputShape,
                                  const char *what) {
     if (layer->config->batchNorm1d->trackRunningStats) {

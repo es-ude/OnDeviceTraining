@@ -3403,7 +3403,7 @@ void testFactoryOwningBfpDeepCopiesQuantizations(void) {
     freeQuantization(bfpQ);
 
     /* Params still readable afterwards: their storage quant came through
-     * layerNormParamQLike, not from the caller's allocation. */
+     * normParamQLike, not from the caller's allocation. */
     float gammaVals[4];
     dequantBfpTensorLn(cfg->gamma->param, gammaVals);
 

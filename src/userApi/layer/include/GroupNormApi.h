@@ -12,28 +12,21 @@ typedef struct groupNormInit {
     size_t numGroups;   /* REQUIRED — G, must be > 0 and divide numChannels */
     size_t numChannels; /* REQUIRED — C, must be > 0 */
     float eps;          /* 0 -> default 1e-5 */
-    /* affine is ALWAYS ON for v1 (gamma + beta present), shape [C]. */
+    /* affine is always on: gamma and beta exist, shape [C]. */
     trainable_t trainable; /* zero-init → TRAINABLE_DEFAULT (trainable) */
 } groupNormInit_t;
 
-/*! Borrowing factory — stores lq->outputQ / lq->propLossQ verbatim
- *  into the config (ownsQuantizations=false; caller retains ownership of the
- *  storage quantizations). Allocates gamma (init 1) and beta (init 0) parameter_t
- *  of shape [numChannels] (storage dtype = lq->weightStorage / lq->biasStorage)
- *  and their grads via gradInit(param, lq->weightGradStorage ?: FLOAT32, NULL)
- *  (resp. biasGradStorage for beta) — the NULL-knob default is a hard-pinned
- *  FLOAT32, not lq->propLossQ.
- *  Use when: outputQ/propLossQ are shared/long-lived (e.g. reused across
- *  several layers) and the caller manages their lifetime — they must
- *  outlive the layer. */
+/*! Borrowing factory: stores lq->outputQ / lq->propLossQ verbatim (the caller keeps
+ *  ownership; they must outlive the layer). Allocates gamma = 1 and beta = 0 of shape
+ *  [numChannels] in lq->weightStorage / lq->biasStorage (FLOAT32, SYM_INT32 or BFP; a
+ *  grouped BFP template keeps its groupSize, which must divide numChannels) and, unless
+ *  frozen, their grads in lq->weightGradStorage / lq->biasGradStorage, FLOAT32 when NULL.
+ *  Use when: the quantization configs are shared/long-lived. */
 layer_t *groupNormLayerInit(groupNormInit_t *init, layerQuant_t *lq);
 
-/*! Owning factory — deep-copies lq->outputQ / lq->propLossQ into the
- *  config (ownsQuantizations=true; the caller may drop its outputQ/propLossQ
- *  pointers immediately). Identical gamma/beta allocation as the Borrowing
- *  variant. Mirrors layerNormLayerInitOwning.
- *  Use when: outputQ/propLossQ are stack-locals or one-off configs and you
- *  want fire-and-forget teardown (freeGroupNormLayer tears them down too). */
+/*! Owning factory: as groupNormLayerInit, but deep-copies lq->outputQ / lq->propLossQ
+ *  (freeGroupNormLayer tears the copies down). Use when: the configs are stack-locals
+ *  or one-off. */
 layer_t *groupNormLayerInitOwning(groupNormInit_t *init, layerQuant_t *lq);
 
 /*! Frees a factory-built layer: parameters and wrappers; an owning layer also frees

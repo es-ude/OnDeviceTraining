@@ -20,6 +20,7 @@
 #include "LayerWireGuards.h"
 #include "MinMax.h"
 #include "Mul.h"
+#include "NormConfigGuard.h"
 #include "Quantization.h"
 #include "Reduce.h"
 #include "Rounding.h"
@@ -48,22 +49,6 @@ void initGroupNormConfig(groupNormConfig_t *cfg, parameter_t *gamma, parameter_t
     cfg->frozen = false;
 }
 
-static bool groupNormIsArithmetic(arithmeticType_t type) {
-    return type == ARITH_FLOAT32 || type == ARITH_SYM_INT32 || type == ARITH_BFP;
-}
-
-static bool groupNormIsBfpOperand(qtype_t type) {
-    return type == FLOAT32 || type == BFP;
-}
-
-/* OUT_WRITE is the zero value, so an unset mode would overwrite the grads. */
-static void groupNormRequireAccMode(outputMode_t mode, const char *who, const char *field) {
-    if (mode != OUT_ACC_DYNAMIC_RESCALE && mode != OUT_ACC_FIXED_SCALE) {
-        PRINT_ERROR("%s: %s must be a grad accumulate mode (got %d)", who, field, (int)mode);
-        exit(1);
-    }
-}
-
 void groupNormValidateConfig(const groupNormConfig_t *cfg, const char *who) {
     if (cfg->numGroups == 0 || cfg->numChannels % cfg->numGroups != 0) {
         PRINT_ERROR("%s: numGroups (%zu) must be > 0 and divide numChannels (%zu)", who,
@@ -77,76 +62,9 @@ void groupNormValidateConfig(const groupNormConfig_t *cfg, const char *who) {
                     cfg->numChannels, gammaCount, betaCount);
         exit(1);
     }
-    arithmeticType_t fwd = cfg->forwardMath.type;
-    arithmeticType_t bwd = cfg->propLossMath.type;
-    if (!groupNormIsArithmetic(fwd) || !groupNormIsArithmetic(bwd)) {
-        PRINT_ERROR("%s: forwardMath and propLossMath must be ARITH_FLOAT32, ARITH_SYM_INT32 or "
-                    "ARITH_BFP (got %d, %d)",
-                    who, (int)fwd, (int)bwd);
-        exit(1);
-    }
-    qtype_t gammaType = cfg->gamma->param->quantization->type;
-    qtype_t betaType = cfg->beta->param->quantization->type;
-    /* The SYM_INT32 kernels read gamma/beta as int32 mantissas. */
-    if (fwd == ARITH_SYM_INT32 && (gammaType != SYM_INT32 || betaType != SYM_INT32)) {
-        PRINT_ERROR("%s: SYM_INT32 forwardMath requires SYM_INT32 gamma AND beta storage", who);
-        exit(1);
-    }
-    /* The ARITH_BFP kernels borrow BFP params and stage FLOAT32 ones at the produced-wire
-     * config, which must therefore be BFP. */
-    if (fwd == ARITH_BFP && (!groupNormIsBfpOperand(gammaType) ||
-                             !groupNormIsBfpOperand(betaType) || cfg->outputQ->type != BFP)) {
-        PRINT_ERROR("%s: ARITH_BFP forwardMath requires FLOAT32 or BFP gamma AND beta storage and "
-                    "a BFP-typed outputQ (the staging width anchor)",
-                    who);
-        exit(1);
-    }
-    /* FLOAT32 math over quantized params would forward fine and die at the first backward:
-     * the FLOAT32 backward raw-casts gamma. */
-    if (fwd == ARITH_FLOAT32 && (gammaType != FLOAT32 || betaType != FLOAT32)) {
-        PRINT_ERROR("%s: ARITH_FLOAT32 forwardMath requires FLOAT32 gamma AND beta storage -- "
-                    "declare ARITH_BFP / ARITH_SYM_INT32 math, or insert a Quantization layer",
-                    who);
-        exit(1);
-    }
-    /* The SYM_INT32 backward reads forwardInput and gamma as mantissas. SYM forward + FLOAT32
-     * backward stays constructible as the inference-only profile. */
-    if (bwd == ARITH_SYM_INT32 && fwd != ARITH_SYM_INT32) {
-        PRINT_ERROR("%s: SYM_INT32 propLossMath requires SYM_INT32 forwardMath", who);
-        exit(1);
-    }
-    if (bwd == ARITH_BFP && (!groupNormIsBfpOperand(gammaType) ||
-                             !groupNormIsBfpOperand(betaType) || cfg->propLossQ->type != BFP)) {
-        PRINT_ERROR("%s: ARITH_BFP propLossMath requires FLOAT32 or BFP gamma AND beta storage "
-                    "and a BFP-typed propLossQ (the staging width anchor)",
-                    who);
-        exit(1);
-    }
-    if (bwd == ARITH_FLOAT32 && (gammaType == BFP || betaType == BFP || cfg->outputQ->type == BFP ||
-                                 cfg->propLossQ->type == BFP)) {
-        PRINT_ERROR("%s: ARITH_FLOAT32 propLossMath rejects BFP gamma/beta storage and BFP wire "
-                    "configs -- the FLOAT32 backward raw-casts",
-                    who);
-        exit(1);
-    }
-    if (cfg->frozen) {
-        return; /* no grads: the modes and grad storage are never used */
-    }
-    if (bwd != ARITH_FLOAT32) {
-        groupNormRequireAccMode(cfg->weightGradAccMode, who, "weightGradAccMode");
-        groupNormRequireAccMode(cfg->biasGradAccMode, who, "biasGradAccMode");
-        return;
-    }
-    /* The FLOAT32 backward ignores the modes: it adds into the grads through a raw float *
-     * cast. */
-    if (cfg->gamma->grad->quantization->type != FLOAT32 ||
-        cfg->beta->grad->quantization->type != FLOAT32) {
-        PRINT_ERROR("%s: ARITH_FLOAT32 propLossMath requires FLOAT32 gamma/beta grad storage "
-                    "(got %d, %d)",
-                    who, (int)cfg->gamma->grad->quantization->type,
-                    (int)cfg->beta->grad->quantization->type);
-        exit(1);
-    }
+    normValidateAffineCoherence(cfg->gamma, cfg->beta, cfg->forwardMath.type,
+                                cfg->propLossMath.type, cfg->outputQ, cfg->propLossQ,
+                                cfg->weightGradAccMode, cfg->biasGradAccMode, cfg->frozen, who);
 }
 
 /* Group geometry from a validated [B,C,T] input: cpg = C/G channels per group,
@@ -172,11 +90,9 @@ static void groupNormGroupGeom(tensor_t *input, const groupNormConfig_t *cfg, si
  * leading [B,G] dims — the same k = b*G + g order the kernels iterate, so
  * mean[k]/invSigma[k] index the block the layer is processing.
  *
- * ONE helper for BOTH FLOAT32 and SYM_INT32, forward AND backward, so a
- * layer's passes can never desync on the stats definition (the Task-2
- * LayerNorm precedent). Callers MUST guarantee K > 0 && N > 0 (the stats VLAs
- * and Reduce's block loop are undefined at 0); every caller early-outs before
- * calling here. */
+ * ONE helper for every dtype, forward AND backward, so the passes can never
+ * desync on the stats definition. Callers MUST guarantee K > 0 && N > 0 (the
+ * stats VLAs and Reduce's block loop are undefined at 0). */
 static void groupNormAllGroupStats(tensor_t *t, const groupNormConfig_t *cfg, size_t B, size_t cpg,
                                    size_t T, size_t K, float eps, float *mean, float *invSigma) {
     size_t viewDims[4] = {B, cfg->numGroups, cpg, T};
@@ -239,7 +155,7 @@ static void groupNormForwardFloat(groupNormConfig_t *cfg, tensor_t *gamma, tenso
     size_t T;
     groupNormGroupGeom(input, cfg, &K, &N, &cpg, &B, &T);
     if (K == 0 || N == 0) {
-        return; /* nothing to normalize (empty group geometry); cf. #160 */
+        return; /* nothing to normalize (empty group geometry) */
     }
 
     float mean[K];
@@ -288,16 +204,15 @@ static void groupNormRequireSymWire(const tensor_t *t, const char *what) {
  * abs-max=qMax / var~1 invariants and has its own requantization + output
  * scale). Per-CHANNEL: gamma_c/beta_c are indexed by c = g*cpg + j/T (NOT
  * flat j, LayerNorm's per-element scheme) and broadcast over T and the batch.
- * Scale bookkeeping (the verified LayerNorm folding):
+ * Scale bookkeeping (as LayerNorm's):
  *   s_y    = s_norm * s_gamma                  (product idiom)
  *   seed_c = round(beta_q,c * s_beta / s_y)    (bias-rescale idiom — a raw
  *            beta_q add would silently drop beta under dynamic scales)
  *   y_q    = q * gamma_q,c + seed_c            (the product q*gamma_q <= qMax^2
  *            fits int32, but the rescaled seed is DATA-DEPENDENT and unbounded:
- *            the shared rescaleIntoAccumulatorScale helper (#189) fails fast
- *            outside the safe envelope instead of
- *            casting an out-of-range float to int32 (UB); safe while
- *            |beta| <~ absmax_n * absmax_gamma, #227.)
+ *            rescaleIntoAccumulatorScale fails fast outside the safe envelope
+ *            instead of casting an out-of-range float to int32 (UB); safe while
+ *            |beta| <~ absmax_n * absmax_gamma.)
  * This writes a RAW, unrestored y_q (accumulator-range, same class as
  * Linear/Conv's matmul output) into the raw output's own scale field — the
  * executeOp OUT_WRITE epilogue (caller, groupNormForward) restores width at
@@ -322,12 +237,8 @@ static void groupNormAffineSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, ten
     size_t T;
     groupNormGroupGeom(output, cfg, &K, &N, &cpg, &B, &T);
 
-    /* seed_c = round(beta_q,c * s_beta / s_y) depends ONLY on the channel c
-     * (betaQ[c], betaQC->scale and sY are all per-channel or scalar), so hoist
-     * it out of the (b,grp,t) element loop and compute it once per channel into
-     * stack scratch — the element loop then just indexes seed[c]. Numerics are
-     * identical (same rescaleIntoAccumulatorScale inputs per channel). Guarded
-     * K > 0 && N > 0 by the caller's early-out, so C = numChannels >= 1 here. */
+    /* seed_c depends only on the channel, so it is computed once per channel. The
+     * caller's K > 0 && N > 0 early-out guarantees C >= 1 for the VLA. */
     size_t C = cfg->numChannels;
     const float betaScale = loadCanonScale(&betaQC->scale);
     int32_t seed[C];
@@ -349,7 +260,7 @@ static void groupNormAffineSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, ten
     storeCanonScale(&outQC->scale, sY);
 }
 
-/* SYM_INT32 forward (the verified LayerNorm scale-folding scheme):
+/* SYM_INT32 forward (LayerNorm's scale-folding scheme):
  * pass 1: per-block float stats + GLOBAL absmax of the normalized values.
  *         Multi-block REQUIRES the per-block 1/sigma_k to hit the DATA — one
  *         per-tensor scale cannot encode K different sigmas; only the global
@@ -389,7 +300,7 @@ static void groupNormForwardSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, te
     groupNormGroupGeom(input, cfg, &K, &N, &cpg, &B, &T);
 
     if (K == 0 || N == 0) {
-        storeCanonScale(&outQC->scale, 1.0f); /* nothing to normalize; neutral scale (cf. #160) */
+        storeCanonScale(&outQC->scale, 1.0f); /* nothing to normalize; neutral scale */
         return;
     }
 
@@ -475,7 +386,7 @@ static void groupNormForwardSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, te
                     float n = mulFloat32s(
                         subFloat32s(mulFloat32s((float)in[off], inScale), mean[k]), invSigma[k]);
                     /* defensive integer clamp: exact SR never moves an exactly representable
-                     * qMax/qMin; kept for inexact float grid bounds (#511) */
+                     * qMax/qMin; kept for inexact float grid bounds */
                     out[off] = clampInt32(roundByMode(clamp(mulFloat32s(n, stretch), qMin, qMax),
                                                       outQC->roundingMode, rs),
                                           (int32_t)qMin, (int32_t)qMax);
@@ -487,11 +398,10 @@ static void groupNormForwardSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, te
     groupNormAffineSymInt32(cfg, gamma, beta, output, sNorm, rs);
 }
 
-/* ARITH_BFP forward (R-N2/R-N3): BFP stats via the [B,G,cpg,T] alias view,
- * per-channel float affine, FLOAT32 raw (BFP D7); OUT_WRITE packs the wire. The
- * SYM path's integer-affine/beta-seed bookkeeping has no BFP analog (a BFP
- * scale is 2^E; like AvgPool's /K fold, R-P4). Operands arrive in the funnel's
- * unpacked-BFP scratch form (borrowed or staged). */
+/* ARITH_BFP forward: BFP stats via the [B,G,cpg,T] alias view, per-channel float
+ * affine into a FLOAT32 raw; OUT_WRITE packs the wire. The SYM path's
+ * integer-affine/beta-seed bookkeeping has no BFP analog (a BFP scale is 2^E).
+ * Operands arrive in the funnel's unpacked-BFP scratch form (borrowed or staged). */
 static void groupNormForwardBfp(const groupNormConfig_t *cfg, tensor_t *gamma, tensor_t *beta,
                                 tensor_t *input, tensor_t *rawOut) {
     size_t K;
@@ -634,14 +544,11 @@ static void groupNormBackwardFloat(groupNormConfig_t *cfg, tensor_t *forwardInpu
                                    tensor_t *propLoss) {
     float *x = (float *)forwardInput->data;
     float *dy = (float *)loss->data;
-    /* propLoss == NULL (#380 PR2): grads-only call -- fetch NULL instead of
-     * dereferencing the absent buffer; the scatter loop below is guarded on
-     * dx and never touches propLoss in that case. */
+    /* propLoss == NULL is a grads-only call: the dx scatter below is skipped. */
     float *dx = (propLoss != NULL) ? (float *)propLoss->data : NULL;
     float *gamma = (float *)cfg->gamma->param->data;
     const bool frozen = cfg->frozen;
-    /* Frozen: no grad tensors exist (Task 1 elides them) -- fetch NULL instead
-     * of dereferencing cfg->gamma->grad / cfg->beta->grad. */
+    /* A frozen layer has no grad tensors. */
     float *dgamma = frozen ? NULL : (float *)cfg->gamma->grad->data; /* accumulated += */
     float *dbeta = frozen ? NULL : (float *)cfg->beta->grad->data;   /* accumulated += */
 
@@ -690,10 +597,7 @@ static void groupNormBackwardFloat(groupNormConfig_t *cfg, tensor_t *forwardInpu
             meanDn = divFloat32s(meanDn, (float)N);
             meanDnN = divFloat32s(meanDnN, (float)N);
 
-            /* dx scattered back to the same physical offset its x came from
-             * (overwrite, not accumulate). propLoss == NULL (#380 PR2):
-             * grads-only call -- skip the scatter entirely (no propLoss->...
-             * touch, no dx write). */
+            /* dx overwrites the same physical offset its x came from. */
             if (dx != NULL) {
                 for (size_t j = 0; j < N; j++) {
                     size_t c = grp * cpg + j / T;
@@ -708,7 +612,7 @@ static void groupNormBackwardFloat(groupNormConfig_t *cfg, tensor_t *forwardInpu
     }
 }
 
-/* SYM_INT32 backward (the verified LayerNorm scheme, per-channel deltas).
+/* SYM_INT32 backward (LayerNorm's scheme with per-channel grads).
  * mu/sigma are computed ONCE from forwardInput through groupNormAllGroupStats
  * — the SAME shared Reduce helper the forward uses, so backward can never
  * desync from the forward definition — into K-float stack scratch that both
@@ -749,7 +653,7 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
     groupNormGroupGeom(forwardInput, cfg, &K, &N, &cpg, &B, &T);
     if (K == 0 || N == 0) {
         if (propLoss != NULL) {
-            storeCanonScale(&plQC->scale, 1.0f); /* nothing to do; neutral scale (cf. #160) */
+            storeCanonScale(&plQC->scale, 1.0f); /* nothing to do; neutral scale */
         }
         return;
     }
@@ -840,9 +744,7 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
      * (unlike the forward's constant-input case): the only realistic
      * absmax==0 source is dy == 0, and zero PROPAGATES exactly through
      * products and sums — the float check is reliable here.
-     * propLoss == NULL (#380 PR2): grads-only call -- skip pass B entirely
-     * (no dx write, no propLoss scale refresh; stats/absmax bookkeeping in
-     * pass A above already ran unconditionally). */
+     * propLoss == NULL (grads-only call) skips pass B. */
     if (propLoss != NULL) {
         rngStream_t dxStorage;
         rngStream_t *dxStream =
@@ -910,9 +812,9 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
 
 /* dbeta_c = sum over (b, t) of dy[b,c,t]: a pure mantissa VALUE-sum. Within
  * one (b,c) row the T elements are storage-contiguous -- real same-exponent
- * segments, so the R-P4 int32 segment-fold does actual work here (unlike
- * LayerNorm's strided dbeta). Raw is [C] FLOAT32 and memset here (#427:
- * funnel Phase-2 raw is uninitialized scratch). */
+ * segments, so the int32 segment-fold does actual work here (unlike
+ * LayerNorm's strided dbeta). Raw is [C] FLOAT32 and memset here: the funnel's
+ * raw is uninitialized scratch. */
 static void groupNormCalcBetaGradsBfp(const groupNormConfig_t *cfg, tensor_t *loss,
                                       tensor_t *rawOut) {
     size_t K;
@@ -961,7 +863,7 @@ static void groupNormCalcBetaGradsBfp(const groupNormConfig_t *cfg, tensor_t *lo
 
 /* dgamma_c = sum over (b, t) of dy[b,c,t] * n[b,c,t]. n is float, so the
  * accumulation is per-element float32 (no int32 partial for a mixed
- * mantissa-x-float product). Stats recomputed here (R-N4 per-op cost). */
+ * mantissa-x-float product). The dgamma and dx ops each recompute the stats. */
 static void groupNormCalcGammaGradsBfp(const groupNormConfig_t *cfg, tensor_t *forwardInput,
                                        tensor_t *loss, tensor_t *rawOut) {
     size_t K;
@@ -1137,7 +1039,7 @@ void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
         groupNormBackwardSymInt32(cfg, forwardInput, loss, propLoss, exec);
         break;
     case ARITH_BFP: {
-        /* R-N1: propLossQ anchors ALL THREE backward ops' staging, even when
+        /* propLossQ anchors ALL THREE backward ops' staging, even when
          * the propLoss TENSOR is NULL (the grad ops still stage at it). */
         const bfpQConfig_t *anchor = bfpWireAnchor(cfg->propLossQ, "GroupNorm backward");
         bfpQConfig_t stage = {.exponents = NULL,

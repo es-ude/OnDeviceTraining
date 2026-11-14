@@ -40,10 +40,13 @@ void mulFloat32ElementWithFloat32TensorInplace(tensor_t *a, float b) {
 /* Width a raw elementwise SYM product declares (#516): a * b reaches the
  * corner 2^(qa-1) * 2^(qb-1) (both operands at their negative extreme), which
  * can exceed the operands' width, so the output carries the exact width of the
- * product's range (symAccumProductRange; 32 = the raw int32 range). */
+ * product's range (32 = the raw int32 range). */
 static uint8_t symProductWidth(uint8_t aBits, uint8_t bBits) {
+    int32_t aMin, aMax, bMin, bMax;
     uint64_t maxPos, maxNegMag;
-    symAccumProductRange(aBits, bBits, &maxPos, &maxNegMag);
+    symAccumWidthRange(aBits, &aMin, &aMax);
+    symAccumWidthRange(bBits, &bMin, &bMax);
+    symAccumCornerRange(aMin, aMax, bMin, bMax, &maxPos, &maxNegMag);
     return symAccumWidthForRange(maxPos, maxNegMag);
 }
 

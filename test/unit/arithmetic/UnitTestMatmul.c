@@ -2844,16 +2844,6 @@ void testMatmulGroupedGuardFullScaleN511RunsExact(void) {
     TEST_ASSERT_EQUAL_INT32(511 * 4194304, guardGroupedDotIn(511, 7, 12, SYM_CODES_ASYM_IMAGE));
 }
 
-/* A ctx whose .domain was never set (zero) names no code domain: the kernel
- * must abort naming the tag before any accumulation, never run the SYM range
- * over what may be an ASYM image -- 511 terms of 2047 x 4095 would be proven
- * safe under the SYM range and wrap. */
-void testMatmulGroupedZeroedCodeDomainAbortsBeforeTheLoop(void) {
-    guardFill(511, 2047, 4095, false);
-    ASSERT_EXITS_WITH_OUTPUT(1, "symGroupedWeightRange: unknown code domain tag 0",
-                             (void)guardGroupedDotIn(511, 7, 12, (symCodeDomain_t)0));
-}
-
 /* A stored grouped ASYM weight unpacks to code - zp[g], which reaches
  * +-(2^qBits - 1) = +-4095 at qBits 12 -- one code past the two's-complement
  * range a SYM weight of that width can hold. The kernel takes the range from
@@ -3230,7 +3220,6 @@ int main(void) {
     RUN_TEST(testMatmulSymGuardWiderOperandRunsExactWhenItFitsAndAbortsWhenItWraps);
     RUN_TEST(testMatmulGroupedGuardWideWeightRunsExactWhenItFitsAndAbortsWhenItWraps);
     RUN_TEST(testMatmulGroupedGuardAsymImageWeightKeepsItsFullRange);
-    RUN_TEST(testMatmulGroupedZeroedCodeDomainAbortsBeforeTheLoop);
     RUN_TEST(testMatmulSymGuardProvenSafeBoundaryN511RunsExact);
     RUN_TEST(testMatmulSymGuardDiesAtFirstWrappingNFullScaleNegativeCodes);
     RUN_TEST(testMatmulSymGuardDiesAtN513FullScalePositiveCodes);

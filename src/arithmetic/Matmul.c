@@ -510,7 +510,7 @@ static uint8_t matmulIntCoreGrouped(tensor_t *aTensor, tensor_t *bTensor, tensor
      * it holds; a revisit after a strided hop starts a fresh partial). The
      * running acc = seed + the rescaled partials: each rescale factor is
      * scales[g]/max(scales) <= 1, so |rescaled partial| <= |partial| up to the
-     * float32 evaluation slack (symAccumTermLimitRescaled) and the sum is
+     * float32 evaluation slack (the rescaled symAccumSiteTermLimit) and the sum is
      * bounded by N slacked products plus the seed. Proving the acc bound proves
      * the partial bound too (fewer terms, no seed), so one flag drives both. */
     /* The weight's operand range is its code domain's (SymGroupedWeight.h): a

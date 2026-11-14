@@ -521,12 +521,12 @@ reported alongside (`ratio_rigorous`) and never needed.
     compared with Leg A's N, widths and seed range, not just present).
     `symAccumProvenSafe` returning `true`: 13 of the 14 ABORT rows read `WRAP`
     (the silent overflow), `s1x_..._seed_n511` kernel tier MISMATCH.
-    `symAccumTermLimit` result `+ 2`: only the N = 513 rows go red (WRAP) --
+    `symAccumSiteTermLimit` result `+ 2`: only the N = 513 rows go red (WRAP) --
     the proof's boundary is pinned at N = 513. The same result `+ 1` turns NOTHING
     red, by construction: it proves N = 512, whose exact accumulator fits, so
     the output is identical (an equivalent mutant; the harness judges results
     and aborts, not which loop ran). The seed dropped from the proof
-    (`symAccumTermLimit(..., 0)`): only `s1x_..._seed_n511` (both tiers) red.
+    (`symAccumSiteTermLimit` with seed 0): only `s1x_..._seed_n511` (both tiers) red.
     The checked add returning `r + 1`: the checked-path cells go red on the
     kernel tier (`s1x/s2x_..._n512`, `s1y/s2y/s3y_*`; class `seed` = a
     constant residual) and where the layer's width restore does not absorb a

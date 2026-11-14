@@ -370,7 +370,7 @@ static void convT1dValidateWeightGroups(const symGroupedWeight_t *groupedWeight,
 /* Grouped twin of convTSymScatter: each product is rescaled into sAcc (factor
  * <= 1, so |rescaled| <= |product| up to the float32 evaluation slack) before it
  * joins the output element, hence the N * 2^(qa-1) * 2^(qb-1) bound with that
- * slack (symAccumTermLimitRescaled) covers the int32 += (and, on the checked
+ * slack (the rescaled symAccumSiteTermLimit) covers the int32 += (and, on the checked
  * path, the product itself for wide widths). */
 SYM_ACCUM_ALWAYS_INLINE void convTSymGroupedScatter(const convTSymView_t *v,
                                                     const symQConfig_t *weightGroups, float inScale,

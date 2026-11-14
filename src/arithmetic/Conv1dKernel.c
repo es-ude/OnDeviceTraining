@@ -795,7 +795,7 @@ void conv1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const *weight,
     conv1dGroupedBiasSeeds(bias, outChannels, sAcc, rs, seed);
 
     /* acc: the rescaled partials (each factor <= 1, plus the float32 slack of
-     * symAccumTermLimitRescaled) plus the seed, so N slacked products plus
+     * the rescaled symAccumSiteTermLimit) plus the seed, so N slacked products plus
      * seed bound it. Proving the acc proves the partial (fewer terms, no seed). */
     symAccumSite_t accSite = symAccumSiteInitRangesRescaled(
         "conv1dKernelSymInt32Grouped (rescaled accumulator)", nTerms, xMin, xMax, wMin, wMax, 0);

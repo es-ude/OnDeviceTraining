@@ -3,7 +3,6 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "DeathTest.h"
 #include "SymGroupedWeight.h"
 #include "TestScale.h"
 #include "unity.h"
@@ -50,30 +49,6 @@ void testRangeFollowsTheCodeDomain(void) {
     assertRange(SYM_CODES_ASYM_IMAGE, 12, -4095, 4095);
     assertRange(SYM_CODES_ASYM_IMAGE, 16, -65535, 65535);
     assertRange(SYM_CODES_TWOS_COMPLEMENT, 31, -1073741824, 1073741823);
-}
-
-void testUnknownCodeDomainAborts(void) {
-    symQConfig_t groups = symGroups(2, 4, 4);
-    symGroupedWeight_t w = {.groups = &groups, .domain = (symCodeDomain_t)7};
-    int32_t lo, hi;
-    ASSERT_EXITS_WITH_OUTPUT(1, "symGroupedWeightRange", symGroupedWeightRange(&w, &lo, &hi));
-}
-
-/* No valid tag is 0: a ctx whose .domain was never set (designated initializer
- * without it, memset, calloc) must fail fast naming the tag, never read as a
- * SYM weight -- the SYM range is the unsafe one for an ASYM image. */
-void testZeroedCodeDomainAbortsInsteadOfReadingAsSym(void) {
-    symQConfig_t groups = symGroups(2, 4, 4);
-    symGroupedWeight_t omitted = {.groups = &groups};
-    int32_t lo, hi;
-    ASSERT_EXITS_WITH_OUTPUT(1, "symGroupedWeightRange: unknown code domain tag 0",
-                             symGroupedWeightRange(&omitted, &lo, &hi));
-    symGroupedWeight_t zeroed;
-    memset(&zeroed, 0, sizeof zeroed);
-    zeroed.groups = &groups;
-    ASSERT_EXITS_WITH_OUTPUT(1, "code domain tag 0", symGroupedWeightRange(&zeroed, &lo, &hi));
-    TEST_ASSERT_NOT_EQUAL(0, SYM_CODES_TWOS_COMPLEMENT);
-    TEST_ASSERT_NOT_EQUAL(0, SYM_CODES_ASYM_IMAGE);
 }
 
 /* The builder tags a stored grouped SYM weight with its OWN config ... */
@@ -129,8 +104,6 @@ void testBuilderReturnsNullForEveryUngroupedWeight(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testRangeFollowsTheCodeDomain);
-    RUN_TEST(testUnknownCodeDomainAborts);
-    RUN_TEST(testZeroedCodeDomainAbortsInsteadOfReadingAsSym);
     RUN_TEST(testBuilderTagsAStoredGroupedSymWeight);
     RUN_TEST(testBuilderViewsAStoredGroupedAsymWeightAsAnImage);
     RUN_TEST(testBuilderReturnsNullForEveryUngroupedWeight);

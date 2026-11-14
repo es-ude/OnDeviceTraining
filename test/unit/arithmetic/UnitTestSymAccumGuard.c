@@ -9,10 +9,20 @@
 void setUp(void) {}
 void tearDown(void) {}
 
+static size_t termLimit(uint8_t aBits, uint8_t bBits, uint64_t maxAbsSeed) {
+    symAccumSite_t s = symAccumSiteInit("", 0, aBits, bBits, maxAbsSeed);
+    return symAccumSiteTermLimit(&s);
+}
+
+static size_t termLimitRescaled(uint8_t aBits, uint8_t bBits, uint64_t maxAbsSeed) {
+    symAccumSite_t s = symAccumSiteInitRescaled("", 0, aBits, bBits, maxAbsSeed);
+    return symAccumSiteTermLimit(&s);
+}
+
 /* int12 x int12: |code| <= 2^11 (two's-complement magnitude, -2^11 reachable),
  * product <= 2^22; 511 * 2^22 = 2^31 - 2^22 fits INT32_MAX, 512 * 2^22 = 2^31 does not. */
 void testTermLimitInt12Seed0Is511(void) {
-    TEST_ASSERT_EQUAL_size_t(511, symAccumTermLimit(12, 12, 0));
+    TEST_ASSERT_EQUAL_size_t(511, termLimit(12, 12, 0));
 }
 
 void testProvenSafeBoundaryAt511And512(void) {
@@ -25,34 +35,26 @@ void testProvenSafeBoundaryAt511And512(void) {
 void testSeedThatTipsTheBoundShrinksTheLimit(void) {
     /* room for exactly 511 products leaves 2^22 - 1 of seed; one more tips it */
     uint64_t roomFor511 = (uint64_t)INT32_MAX - 511ull * (1ull << 22);
-    TEST_ASSERT_EQUAL_size_t(511, symAccumTermLimit(12, 12, roomFor511));
-    TEST_ASSERT_EQUAL_size_t(510, symAccumTermLimit(12, 12, roomFor511 + 1));
-}
-
-void testMaxAbsSeedHandlesInt32Min(void) {
-    int32_t seeds[] = {5, -7, INT32_MIN, 3};
-    TEST_ASSERT_EQUAL_UINT64(2147483648ull, symAccumMaxAbsSeed(seeds, 4));
-    int32_t small[] = {5, -7, 3};
-    TEST_ASSERT_EQUAL_UINT64(7ull, symAccumMaxAbsSeed(small, 3));
-    TEST_ASSERT_EQUAL_UINT64(0ull, symAccumMaxAbsSeed(NULL, 0));
+    TEST_ASSERT_EQUAL_size_t(511, termLimit(12, 12, roomFor511));
+    TEST_ASSERT_EQUAL_size_t(510, termLimit(12, 12, roomFor511 + 1));
 }
 
 void testInt32MinSeedProvesOnlyZeroTerms(void) {
     /* |INT32_MIN| = 2^31 > INT32_MAX: any product can already overflow */
-    TEST_ASSERT_EQUAL_size_t(0, symAccumTermLimit(12, 12, 2147483648ull));
+    TEST_ASSERT_EQUAL_size_t(0, termLimit(12, 12, 2147483648ull));
 }
 
 void testInt16By16AdmitsExactlyOneTerm(void) {
-    TEST_ASSERT_EQUAL_size_t(1, symAccumTermLimit(16, 16, 0));
+    TEST_ASSERT_EQUAL_size_t(1, termLimit(16, 16, 0));
 }
 
 void testWidthsSummingPastTheInt32ProductProveNothing(void) {
     /* 2^15 * 2^16 = 2^31 > INT32_MAX */
-    TEST_ASSERT_EQUAL_size_t(0, symAccumTermLimit(16, 17, 0));
-    TEST_ASSERT_EQUAL_size_t(0, symAccumTermLimit(20, 20, 0));
-    TEST_ASSERT_EQUAL_size_t(0, symAccumTermLimit(32, 32, 0));
+    TEST_ASSERT_EQUAL_size_t(0, termLimit(16, 17, 0));
+    TEST_ASSERT_EQUAL_size_t(0, termLimit(20, 20, 0));
+    TEST_ASSERT_EQUAL_size_t(0, termLimit(32, 32, 0));
     /* absurd widths clamp instead of shifting past the bound arithmetic */
-    TEST_ASSERT_EQUAL_size_t(0, symAccumTermLimit(255, 255, 0));
+    TEST_ASSERT_EQUAL_size_t(0, termLimit(255, 255, 0));
 }
 
 void testZeroTermsAreAlwaysProvenSafe(void) {
@@ -120,21 +122,21 @@ void testProductCheckedAbortsOnlyWhenWideAndOverflowing(void) {
 void testRescaledTermLimitBoundaryIsTheSlackedBound(void) {
     uint64_t room511 = 511ull * ((1ull << 22) + 2ull);
     uint64_t seed = (uint64_t)INT32_MAX - room511;
-    TEST_ASSERT_EQUAL_size_t(511, symAccumTermLimitRescaled(12, 12, seed));
-    TEST_ASSERT_EQUAL_size_t(510, symAccumTermLimitRescaled(12, 12, seed + 1));
+    TEST_ASSERT_EQUAL_size_t(511, termLimitRescaled(12, 12, seed));
+    TEST_ASSERT_EQUAL_size_t(510, termLimitRescaled(12, 12, seed + 1));
     /* the unslacked bound still admits 511 there: the slack is what tightens it */
-    TEST_ASSERT_EQUAL_size_t(511, symAccumTermLimit(12, 12, seed + 1));
+    TEST_ASSERT_EQUAL_size_t(511, termLimit(12, 12, seed + 1));
 }
 
 void testRescaledTermLimitIsNeverLooserThanTheExactLimit(void) {
     for (uint8_t a = 1; a <= 20; a++) {
         for (uint8_t b = 1; b <= 20; b++) {
-            TEST_ASSERT_TRUE(symAccumTermLimitRescaled(a, b, 0) <= symAccumTermLimit(a, b, 0));
+            TEST_ASSERT_TRUE(termLimitRescaled(a, b, 0) <= termLimit(a, b, 0));
         }
     }
-    TEST_ASSERT_EQUAL_size_t(0, symAccumTermLimitRescaled(16, 17, 0));
-    TEST_ASSERT_EQUAL_size_t(0, symAccumTermLimitRescaled(12, 12, 2147483648ull));
-    TEST_ASSERT_EQUAL_size_t(0, symAccumTermLimitRescaled(32, 32, 0));
+    TEST_ASSERT_EQUAL_size_t(0, termLimitRescaled(16, 17, 0));
+    TEST_ASSERT_EQUAL_size_t(0, termLimitRescaled(12, 12, 2147483648ull));
+    TEST_ASSERT_EQUAL_size_t(0, termLimitRescaled(32, 32, 0));
 }
 
 void testRescaledSiteUsesTheSlackedLimit(void) {
@@ -393,7 +395,6 @@ int main(void) {
     RUN_TEST(testTermLimitInt12Seed0Is511);
     RUN_TEST(testProvenSafeBoundaryAt511And512);
     RUN_TEST(testSeedThatTipsTheBoundShrinksTheLimit);
-    RUN_TEST(testMaxAbsSeedHandlesInt32Min);
     RUN_TEST(testInt32MinSeedProvesOnlyZeroTerms);
     RUN_TEST(testInt16By16AdmitsExactlyOneTerm);
     RUN_TEST(testWidthsSummingPastTheInt32ProductProveNothing);

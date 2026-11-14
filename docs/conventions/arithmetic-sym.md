@@ -178,7 +178,7 @@ because the codes of a declared width `q` span `[−2^(q−1), 2^(q−1) − 1]`
   `N·2^(q−1)` negative — not a product with a one-bit code, so the sum of one
   int12 code declares 12, of two 13;
 - `N` terms multiply each side; a rescaled (grouped) site applies the slack of
-  `symAccumTermLimitRescaled` on each side; the **seed's sign** picks the side it
+  `the rescaled symAccumSiteTermLimit` on each side; the **seed's sign** picks the side it
   widens (`seedMax` on the positive, `seedMin` on the negative: a bias that only
   subtracts costs no bit on the positive side), from the kernel's actual seed
   array (`symAccumSiteSetSeeds`); the magnitude-only `symAccumSiteInit` reads
@@ -190,7 +190,7 @@ ConvT kernels (the rescaled site for the grouped twins, the bias-pass seeds for
 ConvT; `symAccumResultBits`), the loss wire's value sum for the public Linear
 bias-grad sum `linearCalcBiasGradsSymInt32` (the Linear weight grad and dx are
 stamped by the matmul they call), one product for `mulSymInt32Tensors` (+ in
-place, `symAccumProductRange`) and `[−(2^(qa−1) + 2^(qb−1)), (2^(qa−1) − 1) +
+place, `symAccumCornerRange`) and `[−(2^(qa−1) + 2^(qb−1)), (2^(qa−1) − 1) +
 (2^(qb−1) − 1)]` for the equal-scale branch of `addSymInt32Tensors` (int12 +
 int12 → 13; these two have no accumulator and run unguarded — the stamp is a
 declaration, and an elementwise product with `qa + qb > 32` is signed-overflow
@@ -362,7 +362,7 @@ only the quantization configs change; the int32 accumulator (no int64) is kept.
   stochastic round adds up to 1. Those accumulators (grouped Matmul / Conv1d
   rescaled accumulator, grouped ConvT scatter) therefore use the slacked bound
   `N · (mp + 1) + N · mp / 2^22 + max|seed| ≤ INT32_MAX` (`mp = 2^(qa−1) ·
-  2^(qb−1)`, `symAccumTermLimitRescaled`); the raw group partials stay on the
+  2^(qb−1)`, `the rescaled symAccumSiteTermLimit`); the raw group partials stay on the
   exact bound.
   Assumption: stored codes obey their declared width (`qMaxBits`/`qBits` is
   metadata and is not re-checked per code). Every funnel staging route declares

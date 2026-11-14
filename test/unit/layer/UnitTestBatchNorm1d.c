@@ -504,7 +504,8 @@ void testForwardRejectsRank1(void) {
     size_t order[1] = {0};
     bnFixture_t f;
     bnFixtureInit(&f, 3, true, true, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT, 0.0f);
-    ASSERT_EXITS_WITH_FAILURE(bnForwardOnStackInput(&f, (size_t[]){3}, 1, order));
+    ASSERT_EXITS_WITH_OUTPUT(1, "must be rank 2 [m,C] or rank 3",
+                             bnForwardOnStackInput(&f, (size_t[]){3}, 1, order));
     bnFixtureFree(&f);
 }
 
@@ -512,7 +513,8 @@ void testForwardRejectsRank4(void) {
     size_t order[4] = {0, 1, 2, 3};
     bnFixture_t f;
     bnFixtureInit(&f, 3, true, true, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT, 0.0f);
-    ASSERT_EXITS_WITH_FAILURE(bnForwardOnStackInput(&f, (size_t[]){2, 3, 2, 2}, 4, order));
+    ASSERT_EXITS_WITH_OUTPUT(1, "must be rank 2 [m,C] or rank 3",
+                             bnForwardOnStackInput(&f, (size_t[]){2, 3, 2, 2}, 4, order));
     bnFixtureFree(&f);
 }
 
@@ -520,7 +522,8 @@ void testForwardRejectsTransposedInput(void) {
     size_t order[2] = {1, 0};
     bnFixture_t f;
     bnFixtureInit(&f, 3, true, true, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT, 0.0f);
-    ASSERT_EXITS_WITH_FAILURE(bnForwardOnStackInput(&f, (size_t[]){3, 3}, 2, order));
+    ASSERT_EXITS_WITH_OUTPUT(1, "input must be identity-order",
+                             bnForwardOnStackInput(&f, (size_t[]){3, 3}, 2, order));
     bnFixtureFree(&f);
 }
 
@@ -549,66 +552,6 @@ void testForwardRejectsNonFloat32Input(void) {
     bnFixtureFree(&f);
 }
 
-void testForwardRejectsNonFloat32Math(void) {
-    size_t order[2] = {0, 1};
-    bnFixture_t f;
-    bnFixtureInit(&f, 3, true, true, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT, 0.0f);
-    f.cfg.forwardMath = (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = HALF_AWAY};
-    ASSERT_EXITS_WITH_FAILURE(bnForwardOnStackInput(&f, (size_t[]){4, 3}, 2, order));
-    bnFixtureFree(&f);
-}
-
-/* Config validation: half-pairs, running-buffer dtype/capacity, output shape. */
-static void initWithGammaOnly(void) {
-    batchNorm1dConfig_t cfg;
-    parameter_t *g = buildFloatParam(3, NULL);
-    quantization_t *q = quantizationInitFloat();
-    initBatchNorm1dConfig(&cfg, g, NULL, NULL, NULL, 3, 1e-5f, BN_MOMENTUM_DEFAULT, 0.0f, q, q);
-}
-
-static void initWithRunningMeanOnly(void) {
-    batchNorm1dConfig_t cfg;
-    tensor_t *rm = buildFloatTensorND(1, (size_t[]){3}, NULL);
-    quantization_t *q = quantizationInitFloat();
-    initBatchNorm1dConfig(&cfg, NULL, NULL, rm, NULL, 3, 1e-5f, BN_MOMENTUM_DEFAULT, 0.0f, q, q);
-}
-
-void testInitRejectsGammaWithoutBeta(void) {
-    ASSERT_EXITS_WITH_FAILURE(initWithGammaOnly());
-}
-
-void testInitRejectsRunningMeanWithoutRunningVar(void) {
-    ASSERT_EXITS_WITH_FAILURE(initWithRunningMeanOnly());
-}
-
-static void evalForwardWithSymRunningVar(bnFixture_t *f) {
-    size_t order[2] = {0, 1};
-    /* relabel only: the guard fires before any data read */
-    freeQuantization(f->runningVar->quantization);
-    f->runningVar->quantization = quantizationInitSymInt32(HALF_AWAY);
-    bnForwardOnStackInput(f, (size_t[]){4, 3}, 2, order);
-}
-
-void testForwardRejectsNonFloat32RunningBuffer(void) {
-    bnFixture_t f;
-    bnFixtureInit(&f, 3, true, true, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT, 0.0f);
-    ASSERT_EXITS_WITH_FAILURE(evalForwardWithSymRunningVar(&f));
-    bnFixtureFree(&f);
-}
-
-static void evalForwardWithShortRunningMean(bnFixture_t *f) {
-    size_t order[2] = {0, 1};
-    f->cfg.runningMean = buildFloatTensorND(1, (size_t[]){2}, NULL); /* C = 3 */
-    bnForwardOnStackInput(f, (size_t[]){4, 3}, 2, order);
-}
-
-void testForwardRejectsShortRunningBuffer(void) {
-    bnFixture_t f;
-    bnFixtureInit(&f, 3, true, true, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT, 0.0f);
-    ASSERT_EXITS_WITH_FAILURE(evalForwardWithShortRunningMean(&f));
-    bnFixtureFree(&f);
-}
-
 static void forwardIntoSmallerOutput(bnFixture_t *f) {
     size_t order[2] = {0, 1};
     shape_t inShape;
@@ -634,8 +577,7 @@ void testForwardRejectsMismatchedOutputShape(void) {
     bnFixtureFree(&f);
 }
 
-/* bnValidateOutputMatchesInput once checked only rank
- * and dims, not orderOfDimensions or dtype -- the kernel writes the output in
+/* The kernel writes the output in
  * the input's flat IDENTITY order (bnForwardKernelFloat indexes `y[i]`
  * linearly), so a same-shape but transposed output would land values at the
  * wrong physical offsets, and a non-FLOAT32 output would misinterpret the
@@ -866,28 +808,29 @@ void testBackwardRejectsLossShapeMismatch(void) {
     bnFixtureFree(&f);
 }
 
-static void backwardWithShortGammaGrad(bnFixture_t *f) {
-    freeTensor(f->gamma->grad);
-    f->gamma->grad = buildFloatTensorND(1, (size_t[]){f->cfg.numChannels - 1}, NULL);
-    tensor_t *in = buildFloatTensorND(2, (size_t[]){4, 3}, input_bn_trainRank2);
-    tensor_t *loss = buildFloatTensorND(2, (size_t[]){4, 3}, lossGrad_bn_trainRank2);
-    tensor_t *prop = buildFloatTensorND(2, (size_t[]){4, 3}, NULL);
-    layerFunctions[BATCHNORM1D].backward(&f->layer, in, loss, prop, NULL);
+/* which: 0..2 relabels forwardInput/loss/propLoss as SYM_INT32 (the guard fires before any
+ * data read); 3 shortens propLoss. */
+static void backwardWithBadWire(bnFixture_t *f, int which) {
+    tensor_t *wires[3] = {buildFloatTensorND(2, (size_t[]){4, 3}, input_bn_trainRank2),
+                          buildFloatTensorND(2, (size_t[]){4, 3}, lossGrad_bn_trainRank2),
+                          buildFloatTensorND(2, (size_t[]){which == 3 ? 2 : 4, 3}, NULL)};
+    if (which < 3) {
+        freeQuantization(wires[which]->quantization);
+        wires[which]->quantization = quantizationInitSymInt32(HALF_AWAY);
+    }
+    layerFunctions[BATCHNORM1D].backward(&f->layer, wires[0], wires[1], wires[2], NULL);
 }
 
-/* The ad hoc grad check once verified only dtype, not
- * element count -- a gamma grad with the wrong number of elements (here
- * C - 1) was accepted, and the backward's per-channel write loop would then
- * walk off the end of the buffer. bnRequireChannelVector (already used for
- * gamma/beta/running buffers) checks both dtype and capacity; reuse it here
- * instead of the bespoke predicate. */
-void testBackwardRejectsShortGammaGrad(void) {
-    bnFixture_t f;
-    bnFixtureInit(&f, 3, true, true, gamma_bn_trainRank2, beta_bn_trainRank2, NULL, NULL,
-                  BN_MOMENTUM_DEFAULT, 0.0f);
-    f.cfg.training = true;
-    ASSERT_EXITS_WITH_FAILURE(backwardWithShortGammaGrad(&f));
-    bnFixtureFree(&f);
+void testBackwardRejectsBadWires(void) {
+    const char *expected[4] = {"forwardInput must be FLOAT32", "loss must be FLOAT32",
+                               "propLoss must be FLOAT32", "propLoss dim 0 must be 4"};
+    for (int which = 0; which < 4; which++) {
+        bnFixture_t f;
+        bnFixtureInit(&f, 3, true, true, NULL, NULL, NULL, NULL, BN_MOMENTUM_DEFAULT, 0.0f);
+        f.cfg.training = true;
+        ASSERT_EXITS_WITH_OUTPUT(1, expected[which], backwardWithBadWire(&f, which));
+        bnFixtureFree(&f);
+    }
 }
 
 static layerQuant_t floatLq(quantization_t *q) {
@@ -1056,11 +999,6 @@ int main(void) {
     RUN_TEST(testForwardRejectsTransposedInput);
     RUN_TEST(testForwardRejectsWrongChannelCount);
     RUN_TEST(testForwardRejectsNonFloat32Input);
-    RUN_TEST(testForwardRejectsNonFloat32Math);
-    RUN_TEST(testInitRejectsGammaWithoutBeta);
-    RUN_TEST(testInitRejectsRunningMeanWithoutRunningVar);
-    RUN_TEST(testForwardRejectsNonFloat32RunningBuffer);
-    RUN_TEST(testForwardRejectsShortRunningBuffer);
     RUN_TEST(testForwardRejectsMismatchedOutputShape);
     RUN_TEST(testForwardRejectsTransposedOutput);
     RUN_TEST(testForwardRejectsNonFloat32Output);
@@ -1073,7 +1011,7 @@ int main(void) {
     RUN_TEST(testGradsOnlyBackwardMatchesFullAndAccumulates);
     RUN_TEST(testBackwardTrainingRejectsSingleRow);
     RUN_TEST(testBackwardRejectsLossShapeMismatch);
-    RUN_TEST(testBackwardRejectsShortGammaGrad);
+    RUN_TEST(testBackwardRejectsBadWires);
     RUN_TEST(testFactoryZeroInitGivesPyTorchDefaults);
     RUN_TEST(testFactoryOptionsNoAffineNoStatsCumulativeFrozen);
     RUN_TEST(testFactoryRejectsInvalidInit);

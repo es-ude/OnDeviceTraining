@@ -106,17 +106,9 @@ static void validateGroupNormInit(groupNormInit_t *init) {
         PRINT_ERROR("groupNormLayerInit: init pointer is NULL");
         exit(1);
     }
-    if (init->numGroups == 0) {
-        PRINT_ERROR("groupNormLayerInit: numGroups must be > 0 (got 0)");
-        exit(1);
-    }
+    /* groupNormValidateConfig checks the group geometry. */
     if (init->numChannels == 0) {
         PRINT_ERROR("groupNormLayerInit: numChannels must be > 0 (got 0)");
-        exit(1);
-    }
-    if (init->numChannels % init->numGroups != 0) {
-        PRINT_ERROR("groupNormLayerInit: numChannels (%zu) must be divisible by numGroups (%zu)",
-                    init->numChannels, init->numGroups);
         exit(1);
     }
     if (init->eps < 0.0f) {
@@ -125,25 +117,11 @@ static void validateGroupNormInit(groupNormInit_t *init) {
     }
 }
 
-/* NULL-guarded wire-config predicate: a hand-built layerQuant_t may carry NULL
- * wire configs, and the coherence rules below read them unconditionally. */
-static bool isBfpTyped(const quantization_t *q) {
-    return q != NULL && q->type == BFP;
-}
-
 static bool isGroupNormParamStorage(const quantization_t *q) {
     return q->type == FLOAT32 || q->type == SYM_INT32 || q->type == BFP;
 }
 
-/* Storage the ARITH_BFP arms can take as an operand: BFP is borrowed zero-copy,
- * FLOAT32 is staged into BFP scratch at the wire anchor. */
-static bool isGroupNormBfpOperandStorage(const quantization_t *q) {
-    return q->type == FLOAT32 || q->type == BFP;
-}
-
-/* Coherence rule set (BFP epic PR5 Task 6): R1 param dtypes, R2-R4 forwardMath
- * vs. param storage, R5-R7 propLossMath, R8 grad storage (delegated to
- * gradInit). Each rule is a straight-line check with one guided message. */
+/* Checks what the allocation needs; groupNormValidateConfig checks the built config. */
 static void validateLayerQuantForGroupNorm(layerQuant_t *lq) {
     if (lq == NULL) {
         PRINT_ERROR("groupNormLayerInit: lq pointer is NULL");
@@ -165,7 +143,6 @@ static void validateLayerQuantForGroupNorm(layerQuant_t *lq) {
         PRINT_ERROR("groupNormLayerInit: layerQuant.biasStorage must be set (beta storage)");
         exit(1);
     }
-    /* R1: the three param dtypes a norm kernel can read at all. */
     if (!isGroupNormParamStorage(lq->weightStorage)) {
         PRINT_ERROR("groupNormLayerInit: gamma storage must be FLOAT32, SYM_INT32 or BFP");
         exit(1);
@@ -174,85 +151,7 @@ static void validateLayerQuantForGroupNorm(layerQuant_t *lq) {
         PRINT_ERROR("groupNormLayerInit: beta storage must be FLOAT32, SYM_INT32 or BFP");
         exit(1);
     }
-    /* R2: the SYM_INT32 kernels read gamma/beta as int32 mantissas; a float
-     * buffer read that way is silent garbage. */
-    if (lq->forwardMath.type == ARITH_SYM_INT32 &&
-        (lq->weightStorage->type != SYM_INT32 || lq->biasStorage->type != SYM_INT32)) {
-        PRINT_ERROR("groupNormLayerInit: SYM_INT32 forwardMath requires SYM_INT32 gamma AND beta "
-                    "storage");
-        exit(1);
-    }
-    /* R3: the ARITH_BFP forward takes gamma/beta in the funnel's unpacked-BFP
-     * scratch form — borrowed from BFP storage or staged from FLOAT32 — and
-     * anchors that staging on outputQ (norms have no reduction-weight operand,
-     * R-N1). Checked eagerly here so a mis-wired profile dies at construction
-     * with this message instead of at the first forward. */
-    if (lq->forwardMath.type == ARITH_BFP) {
-        if (!isGroupNormBfpOperandStorage(lq->weightStorage) ||
-            !isGroupNormBfpOperandStorage(lq->biasStorage)) {
-            PRINT_ERROR("groupNormLayerInit: ARITH_BFP forwardMath requires FLOAT32 (staged) or "
-                        "BFP (borrowed) gamma AND beta storage");
-            exit(1);
-        }
-        if (!isBfpTyped(lq->outputQ)) {
-            PRINT_ERROR("groupNormLayerInit: ARITH_BFP forwardMath requires a BFP-typed outputQ — "
-                        "it is the staging width anchor (docs/conventions/arithmetic-bfp.md)");
-            exit(1);
-        }
-    }
-    /* R4: FLOAT32 math over BFP/SYM params stays UNCONSTRUCTIBLE for the norms,
-     * deliberately unlike the GEMM family's fake-quant profile: the norms'
-     * FLOAT32 BACKWARD raw-casts gamma and rejects any non-FLOAT32 operand, so
-     * such a layer would forward fine and die at the first backward — a trap,
-     * not a feature. The GEMM layers support it because their backward is
-     * funnel-routed; the norms' is not. Fake-quant-forward experiments pin
-     * cfg->forwardMath directly on a hand-wired config. */
-    if (lq->forwardMath.type == ARITH_FLOAT32 &&
-        (lq->weightStorage->type != FLOAT32 || lq->biasStorage->type != FLOAT32)) {
-        PRINT_ERROR("groupNormLayerInit: ARITH_FLOAT32 forwardMath requires FLOAT32 gamma AND beta "
-                    "storage — the FLOAT32 norm backward raw-casts gamma; declare ARITH_BFP / "
-                    "ARITH_SYM_INT32 math, or insert a Quantization layer");
-        exit(1);
-    }
-    /* R5: the SYM_INT32 backward recomputes group stats from forwardInput's
-     * int32 mantissas and reads gamma mantissas; with a FLOAT32 forward those
-     * buffers hold float bits — silent garbage. The REVERSE (SYM forwardMath +
-     * FLOAT32 backwardMath) stays constructible: it is the inference-only
-     * profile, and the runtime backward guard rejects training it. */
-    if (lq->propLossMath.type == ARITH_SYM_INT32 && lq->forwardMath.type != ARITH_SYM_INT32) {
-        PRINT_ERROR("groupNormLayerInit: SYM_INT32 backwardMath requires SYM_INT32 forwardMath");
-        exit(1);
-    }
-    /* R6: R3's backward twin — all three backward ops stage at propLossQ. A
-     * FLOAT32 forward with an ARITH_BFP backward is mechanically legal and
-     * stays allowed (the operands stage at the propLossQ anchor). */
-    if (lq->propLossMath.type == ARITH_BFP) {
-        if (!isGroupNormBfpOperandStorage(lq->weightStorage) ||
-            !isGroupNormBfpOperandStorage(lq->biasStorage)) {
-            PRINT_ERROR("groupNormLayerInit: ARITH_BFP propLossMath requires FLOAT32 (staged) or "
-                        "BFP (borrowed) gamma AND beta storage");
-            exit(1);
-        }
-        if (!isBfpTyped(lq->propLossQ)) {
-            PRINT_ERROR("groupNormLayerInit: ARITH_BFP propLossMath requires a BFP-typed propLossQ "
-                        "— it is the staging width anchor (docs/conventions/arithmetic-bfp.md)");
-            exit(1);
-        }
-    }
-    /* R7: the factory-level mirror of the backward's op-entry guards. The
-     * FLOAT32 norm backward raw-casts EVERY operand, so a single BFP among the
-     * params or the wire configs makes it read packed payloads as floats. */
-    if (lq->propLossMath.type == ARITH_FLOAT32 &&
-        (lq->weightStorage->type == BFP || lq->biasStorage->type == BFP ||
-         isBfpTyped(lq->outputQ) || isBfpTyped(lq->propLossQ))) {
-        PRINT_ERROR("groupNormLayerInit: ARITH_FLOAT32 propLossMath rejects BFP gamma/beta storage "
-                    "and BFP wire configs — the FLOAT32 norm backward raw-casts; keep wires and "
-                    "params FLOAT32, declare ARITH_BFP, or insert a Quantization layer");
-        exit(1);
-    }
-    /* R8 (weightGradStorage/biasGradStorage): NULL falls back to FLOAT32 (#261)
-     * and a non-NULL template flows to gradInit, whose per-tensor-only BFP
-     * carrier gate rejects grouped templates. No duplicate gate here. */
+    /* A grouped BFP grad template is rejected by gradInit. */
 }
 
 /* Shared scaffolding for both factories: validate, allocate the layer/config
@@ -312,6 +211,7 @@ layer_t *groupNormLayerInit(groupNormInit_t *init, layerQuant_t *lq) {
     cfg->weightGradAccMode = lq->weightGradAccMode;
     cfg->biasGradAccMode = lq->biasGradAccMode;
     cfg->ownsQuantizations = false;
+    groupNormValidateConfig(cfg, "groupNormLayerInit");
 
     return layer;
 }
@@ -330,6 +230,7 @@ layer_t *groupNormLayerInitOwning(groupNormInit_t *init, layerQuant_t *lq) {
     cfg->weightGradAccMode = lq->weightGradAccMode;
     cfg->biasGradAccMode = lq->biasGradAccMode;
     cfg->ownsQuantizations = true;
+    groupNormValidateConfig(cfg, "groupNormLayerInitOwning");
 
     return layer;
 }
@@ -340,29 +241,13 @@ void freeGroupNormLayer(layer_t *layer) {
     }
     groupNormConfig_t *cfg = layer->config->groupNorm;
 
-    /* ALWAYS tear down the factory-allocated parameters (gamma/beta + their grad
-     * tensors + data + shapes). The param tensors own their storage quant via
-     * getQLike, so storage quant is freed here regardless of ownsQuantizations. */
-    if (cfg->gamma != NULL) {
-        freeParameter(cfg->gamma);
-    }
-    if (cfg->beta != NULL) {
-        freeParameter(cfg->beta);
-    }
-
-    /* Owning-variant only — tear down the two storage quantization_t (qConfig +
-     * struct). Dedup guard exactly like freeLayerNormLayer: free propLossQ only
-     * if it is a distinct allocation from outputQ. The Owning factory always
-     * deep-copies into two separate instances, so the guard is a defensive
-     * measure; the Borrowing variant has ownsQuantizations=false and skips this
-     * branch (caller frees them). */
+    /* The param tensors own their storage quantization (getQLike). */
+    freeParameter(cfg->gamma);
+    freeParameter(cfg->beta);
+    /* The owning factory deep-copies outputQ and propLossQ into two distinct allocations. */
     if (cfg->ownsQuantizations) {
-        if (cfg->outputQ != NULL) {
-            freeQuantization(cfg->outputQ);
-        }
-        if (cfg->propLossQ != NULL && cfg->propLossQ != cfg->outputQ) {
-            freeQuantization(cfg->propLossQ);
-        }
+        freeQuantization(cfg->outputQ);
+        freeQuantization(cfg->propLossQ);
     }
 
     freeReservedMemory(cfg);

@@ -36,11 +36,8 @@ layer_t *groupNormLayerInit(groupNormInit_t *init, layerQuant_t *lq);
  *  want fire-and-forget teardown (freeGroupNormLayer tears them down too). */
 layer_t *groupNormLayerInitOwning(groupNormInit_t *init, layerQuant_t *lq);
 
-/*! Frees the parameter_t (gamma/beta + grads), and the layer/config wrappers.
- *  ALWAYS frees gamma/beta. If ownsQuantizations is true (Owning factory),
- *  also frees outputQ and propLossQ (qConfig + struct, with an
- *  outputQ != propLossQ dedup guard); if false (Borrowing factory), leaves
- *  the caller-owned math quantizations untouched. */
+/*! Frees a factory-built layer: parameters and wrappers; an owning layer also frees
+ *  outputQ/propLossQ. */
 void freeGroupNormLayer(layer_t *layer);
 
 #endif // ODT_GROUPNORM_API_H

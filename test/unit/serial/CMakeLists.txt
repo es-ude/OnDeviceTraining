@@ -28,6 +28,10 @@ add_elastic_ai_unit_test(
         ReluApi
         BatchNorm1d
         BatchNorm1dApi
+        GroupNorm
+        GroupNormApi
+        LayerNorm
+        LayerNormApi
         LayerQuant
         ArithmeticType
 

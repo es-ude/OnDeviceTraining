@@ -939,6 +939,7 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeArithmetic(&layerNormConfig->propLossMath, f);
         deserializeQuantization(layerNormConfig->outputQ, f, 0);
         deserializeQuantization(layerNormConfig->propLossQ, f, 0);
+        layerNormValidateConfig(layerNormConfig, "deserializeModel: LAYERNORM");
         break;
     }
     case GROUPNORM: {
@@ -952,6 +953,7 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeArithmetic(&groupNormConfig->propLossMath, f);
         deserializeQuantization(groupNormConfig->outputQ, f, 0);
         deserializeQuantization(groupNormConfig->propLossQ, f, 0);
+        groupNormValidateConfig(groupNormConfig, "deserializeModel: GROUPNORM");
         break;
     }
     case BATCHNORM1D: {
@@ -1013,11 +1015,8 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         }
         deserializeArithmetic(&c->forwardMath, f);
         deserializeArithmetic(&c->propLossMath, f);
-        /* Mirror the factory rule
-         * (BatchNorm1dApi.c's validateLayerQuantForBatchNorm1d) at the
-         * deserialize-time trust boundary -- a file-loaded BN otherwise
-         * would not be rejected until its FLOAT32-only forward/backward
-         * guard fires at call time instead of at load time. */
+        /* Mirror the factory rule (validateLayerQuantForBatchNorm1d): forward and backward
+         * trust a FLOAT32-only config. */
         if (c->forwardMath.type != ARITH_FLOAT32) {
             PRINT_ERROR("deserializeModel: BATCHNORM1D forwardMath must be ARITH_FLOAT32 (got %d) "
                         "-- BatchNorm1d is FLOAT32-only",

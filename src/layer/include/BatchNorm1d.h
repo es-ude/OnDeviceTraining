@@ -63,15 +63,11 @@ typedef struct batchNorm1dConfig {
     arithmetic_t propLossMath;
     quantization_t *outputQ;
     quantization_t *propLossQ;
-    outputMode_t weightGradAccMode; /* unused by BatchNorm1d (grads accumulate directly in
-                                       FLOAT32); kept for config-shape parity with the norm
-                                       layers */
-    outputMode_t biasGradAccMode;   /* unused by BatchNorm1d (grads accumulate directly in
-                                       FLOAT32); kept for config-shape parity with the norm
-                                       layers */
     bool ownsQuantizations;
 } batchNorm1dConfig_t;
 
+/*! gamma/beta are both set or both NULL, and so are runningMean/runningVar: each
+ *  pair is detected from one pointer. */
 void initBatchNorm1dConfig(batchNorm1dConfig_t *cfg, parameter_t *gamma, parameter_t *beta,
                            tensor_t *runningMean, tensor_t *runningVar, size_t numChannels,
                            float eps, bnMomentumMode_t momentumMode, float momentum,

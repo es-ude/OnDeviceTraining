@@ -131,8 +131,6 @@ static layer_t *batchNorm1dLayerInitCommon(batchNorm1dInit_t *init, layerQuant_t
     cfg->frozen = !trainable;
     cfg->forwardMath = lq->forwardMath;
     cfg->propLossMath = lq->propLossMath;
-    cfg->weightGradAccMode = lq->weightGradAccMode;
-    cfg->biasGradAccMode = lq->biasGradAccMode;
     *outCfg = cfg;
     return layer;
 }

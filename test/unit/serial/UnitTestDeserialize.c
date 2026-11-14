@@ -11,7 +11,11 @@
 #include "Deserialize.h"
 #include "Flatten.h"
 #include "FlattenApi.h"
+#include "GroupNorm.h"
+#include "GroupNormApi.h"
 #include "Layer.h"
+#include "LayerNorm.h"
+#include "LayerNormApi.h"
 #include "LayerQuant.h"
 #include "Model.h"
 #include "OdtAssert.h"
@@ -2769,6 +2773,78 @@ static void testDeserializeBatchNormRejectsNonFloat32ForwardMath(void) {
     freeBatchNorm1dLayer(skeleton);
 }
 
+/* The GROUPNORM/LAYERNORM records overwrite the layer geometry, so the reader re-validates the
+ * loaded config. Each fixture serializes a factory-built layer whose geometry was edited after
+ * construction, then loads it into a clean skeleton of the original geometry. */
+static void expectGroupNormLoadRejected(size_t numGroups, size_t numChannels) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    groupNormInit_t init = {.numGroups = 2, .numChannels = 4, .trainable = TRAINABLE_FALSE};
+    layer_t *layer = groupNormLayerInitOwning(&init, &lq);
+    layer->config->groupNorm->numGroups = numGroups;
+    layer->config->groupNorm->numChannels = numChannels;
+    layer_t *model[] = {layer};
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(&MODEL_CHAIN(model, 1), f);
+    fclose(f);
+    freeGroupNormLayer(layer);
+
+    layer = groupNormLayerInitOwning(&init, &lq);
+    model[0] = layer;
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: GROUPNORM",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
+    fclose(f);
+    freeGroupNormLayer(layer);
+    freeQuantization(floatQ);
+}
+
+static void testDeserializeGroupNormRejectsIncoherentGeometry(void) {
+    expectGroupNormLoadRejected(3, 4); /* 3 groups do not divide 4 channels */
+    expectGroupNormLoadRejected(2, 8); /* 8 channels against the skeleton's 4 gamma/beta values */
+}
+
+static void testDeserializeLayerNormRejectsNormalizedShapeGammaMismatch(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layerNormInit_t init = {
+        .normalizedShape = (size_t[]){4}, .numNormDims = 1, .trainable = TRAINABLE_FALSE};
+    layer_t *layer = layerNormLayerInitOwning(&init, &lq);
+    layer->config->layerNorm->normalizedShape[0] = 2; /* gamma/beta keep 4 values */
+    layer_t *model[] = {layer};
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(&MODEL_CHAIN(model, 1), f);
+    fclose(f);
+    freeLayerNormLayer(layer);
+
+    layer = layerNormLayerInitOwning(&init, &lq);
+    model[0] = layer;
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: LAYERNORM",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
+    fclose(f);
+    freeLayerNormLayer(layer);
+    freeQuantization(floatQ);
+}
+
+#define BN_OFFSET_PROP_LOSS_MATH_TYPE (BN_OFFSET_FORWARD_MATH_TYPE + 2)
+
+static void testDeserializeBatchNormRejectsNonFloat32PropLossMath(void) {
+    writeValidBatchNorm1dFile();
+    patchFileU8(BN_OFFSET_PROP_LOSS_MATH_TYPE, (uint8_t)ARITH_SYM_INT32);
+    layer_t *skeleton = makeSkeletonBatchNorm1d(2, false, false);
+    layer_t *model[] = {skeleton};
+
+    FILE *f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "propLossMath must be ARITH_FLOAT32",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
+    fclose(f);
+
+    freeBatchNorm1dLayer(skeleton);
+}
+
 /* Serializes src to FILE_PATH and reopens it for reading; *fileLength gets
  * the on-disk size so a test can check readTensorRecordHeader stopped
  * exactly at the payload. */
@@ -3186,6 +3262,9 @@ int main(void) {
     RUN_TEST(testDeserializeBatchNormRejectsNegativeRunningVar);
     RUN_TEST(testDeserializeBatchNormFileHyperparametersWin);
     RUN_TEST(testDeserializeBatchNormRejectsNonFloat32ForwardMath);
+    RUN_TEST(testDeserializeBatchNormRejectsNonFloat32PropLossMath);
+    RUN_TEST(testDeserializeGroupNormRejectsIncoherentGeometry);
+    RUN_TEST(testDeserializeLayerNormRejectsNormalizedShapeGammaMismatch);
     RUN_TEST(testReadTensorRecordHeaderFloat32);
     RUN_TEST(testReadTensorRecordHeaderGroupedSym);
     RUN_TEST(testReadTensorRecordHeaderGroupedAsym);

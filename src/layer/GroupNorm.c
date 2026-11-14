@@ -17,6 +17,7 @@
 #include "ExecuteOp.h"
 #include "Layer.h"
 #include "LayerExec.h"
+#include "LayerWireGuards.h"
 #include "MinMax.h"
 #include "Mul.h"
 #include "Quantization.h"
@@ -41,68 +42,109 @@ void initGroupNormConfig(groupNormConfig_t *cfg, parameter_t *gamma, parameter_t
     cfg->propLossQ = backwardQ;
     cfg->ownsQuantizations = false;
 
-    /* OUT_ACC_DYNAMIC_RESCALE for BOTH grads, the LayerNorm scheme: dgamma and
-     * dbeta accumulate via the identity-kernel executeOp + Strategy-A requant —
-     * GroupNorm's beta grad has no FIXED_SCALE bias history to preserve.
-     * Carried on the config so hand-wired callers (UnitTestGroupNorm.c) get
-     * the canonical behavior; a layerQuant_t-driven factory (Task 4) overrides
-     * these right after this call if the caller opted into a different mode. */
+    /* Both grads default to dynamic rescaling; the factory overrides them from layerQuant_t. */
     cfg->weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
     cfg->biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
     cfg->frozen = false;
 }
 
-/* Fail fast unless `t` is rank-3 [B,C,T], identity-order, with dims[1] ==
- * numChannels. This single guard is what makes every flat offset and the
- * [B,G,cpg,T] alias view below valid: identity order ⇒ physical layout ==
- * logical row-major, so element (b,c,t) sits at ((b*C)+c)*T + t. A mismatched
- * channel dim would read gamma/beta out of bounds in forward and WRITE the
- * grad tensors out of bounds in backward — silently. Non-identity order /
- * rank-4 is a follow-up, not supported yet. */
-static void groupNormValidateInputShape(groupNormConfig_t *cfg, tensor_t *input) {
-    shape_t *s = input->shape;
-    if (s->numberOfDimensions != 3) {
-        PRINT_ERROR("GroupNorm: input must be rank-3 [B,C,T] (got rank %zu)",
-                    s->numberOfDimensions);
-        exit(1);
-    }
-    for (size_t d = 0; d < 3; d++) {
-        if (s->orderOfDimensions[d] != d) {
-            PRINT_ERROR("GroupNorm: input must be identity-order (dim %zu is order %zu)", d,
-                        s->orderOfDimensions[d]);
-            exit(1);
-        }
-    }
-    if (s->dimensions[1] != cfg->numChannels) {
-        PRINT_ERROR("GroupNorm: input channel dim is %zu but numChannels is %zu", s->dimensions[1],
-                    cfg->numChannels);
-        exit(1);
-    }
-    /* Config-time validation (numGroups > 0, numGroups divides numChannels)
-     * belongs to the factory (Task 4); hand-wired configs bypass it, and the
-     * kernels divide by these — cheap defensive re-check instead of an ugly
-     * div-by-zero / mis-grouped OOB crash. */
-    if (cfg->numGroups == 0 || cfg->numChannels % cfg->numGroups != 0) {
-        PRINT_ERROR("GroupNorm: numGroups (%zu) must be > 0 and divide numChannels (%zu)",
-                    cfg->numGroups, cfg->numChannels);
+static bool groupNormIsArithmetic(arithmeticType_t type) {
+    return type == ARITH_FLOAT32 || type == ARITH_SYM_INT32 || type == ARITH_BFP;
+}
+
+static bool groupNormIsBfpOperand(qtype_t type) {
+    return type == FLOAT32 || type == BFP;
+}
+
+/* OUT_WRITE is the zero value, so an unset mode would overwrite the grads. */
+static void groupNormRequireAccMode(outputMode_t mode, const char *who, const char *field) {
+    if (mode != OUT_ACC_DYNAMIC_RESCALE && mode != OUT_ACC_FIXED_SCALE) {
+        PRINT_ERROR("%s: %s must be a grad accumulate mode (got %d)", who, field, (int)mode);
         exit(1);
     }
 }
 
-/* #465: every kernel addresses output/loss/propLoss at the (validated,
- * identity-order) input's flat offsets, so `t` must have the input's rank, dims
- * and identity order -- otherwise an OOB write/read or silent mis-placement. */
-static void groupNormRequireInputShape(const tensor_t *input, const tensor_t *t, const char *what) {
-    const shape_t *in = input->shape;
-    const shape_t *s = t->shape;
-    bool same = s->numberOfDimensions == in->numberOfDimensions;
-    for (size_t d = 0; same && d < in->numberOfDimensions; d++) {
-        same = s->orderOfDimensions[d] == d && s->dimensions[d] == in->dimensions[d];
+void groupNormValidateConfig(const groupNormConfig_t *cfg, const char *who) {
+    if (cfg->numGroups == 0 || cfg->numChannels % cfg->numGroups != 0) {
+        PRINT_ERROR("%s: numGroups (%zu) must be > 0 and divide numChannels (%zu)", who,
+                    cfg->numGroups, cfg->numChannels);
+        exit(1);
     }
-    if (!same) {
-        PRINT_ERROR("GroupNorm: %s must be identity-order with the input's rank and dims "
-                    "(input rank %zu, %s rank %zu)",
-                    what, in->numberOfDimensions, what, s->numberOfDimensions);
+    size_t gammaCount = calcNumberOfElementsByTensor(cfg->gamma->param);
+    size_t betaCount = calcNumberOfElementsByTensor(cfg->beta->param);
+    if (gammaCount != cfg->numChannels || betaCount != cfg->numChannels) {
+        PRINT_ERROR("%s: numChannels (%zu) must match gamma (%zu) and beta (%zu)", who,
+                    cfg->numChannels, gammaCount, betaCount);
+        exit(1);
+    }
+    arithmeticType_t fwd = cfg->forwardMath.type;
+    arithmeticType_t bwd = cfg->propLossMath.type;
+    if (!groupNormIsArithmetic(fwd) || !groupNormIsArithmetic(bwd)) {
+        PRINT_ERROR("%s: forwardMath and propLossMath must be ARITH_FLOAT32, ARITH_SYM_INT32 or "
+                    "ARITH_BFP (got %d, %d)",
+                    who, (int)fwd, (int)bwd);
+        exit(1);
+    }
+    qtype_t gammaType = cfg->gamma->param->quantization->type;
+    qtype_t betaType = cfg->beta->param->quantization->type;
+    /* The SYM_INT32 kernels read gamma/beta as int32 mantissas. */
+    if (fwd == ARITH_SYM_INT32 && (gammaType != SYM_INT32 || betaType != SYM_INT32)) {
+        PRINT_ERROR("%s: SYM_INT32 forwardMath requires SYM_INT32 gamma AND beta storage", who);
+        exit(1);
+    }
+    /* The ARITH_BFP kernels borrow BFP params and stage FLOAT32 ones at the produced-wire
+     * config, which must therefore be BFP. */
+    if (fwd == ARITH_BFP && (!groupNormIsBfpOperand(gammaType) ||
+                             !groupNormIsBfpOperand(betaType) || cfg->outputQ->type != BFP)) {
+        PRINT_ERROR("%s: ARITH_BFP forwardMath requires FLOAT32 or BFP gamma AND beta storage and "
+                    "a BFP-typed outputQ (the staging width anchor)",
+                    who);
+        exit(1);
+    }
+    /* FLOAT32 math over quantized params would forward fine and die at the first backward:
+     * the FLOAT32 backward raw-casts gamma. */
+    if (fwd == ARITH_FLOAT32 && (gammaType != FLOAT32 || betaType != FLOAT32)) {
+        PRINT_ERROR("%s: ARITH_FLOAT32 forwardMath requires FLOAT32 gamma AND beta storage -- "
+                    "declare ARITH_BFP / ARITH_SYM_INT32 math, or insert a Quantization layer",
+                    who);
+        exit(1);
+    }
+    /* The SYM_INT32 backward reads forwardInput and gamma as mantissas. SYM forward + FLOAT32
+     * backward stays constructible as the inference-only profile. */
+    if (bwd == ARITH_SYM_INT32 && fwd != ARITH_SYM_INT32) {
+        PRINT_ERROR("%s: SYM_INT32 propLossMath requires SYM_INT32 forwardMath", who);
+        exit(1);
+    }
+    if (bwd == ARITH_BFP && (!groupNormIsBfpOperand(gammaType) ||
+                             !groupNormIsBfpOperand(betaType) || cfg->propLossQ->type != BFP)) {
+        PRINT_ERROR("%s: ARITH_BFP propLossMath requires FLOAT32 or BFP gamma AND beta storage "
+                    "and a BFP-typed propLossQ (the staging width anchor)",
+                    who);
+        exit(1);
+    }
+    if (bwd == ARITH_FLOAT32 && (gammaType == BFP || betaType == BFP || cfg->outputQ->type == BFP ||
+                                 cfg->propLossQ->type == BFP)) {
+        PRINT_ERROR("%s: ARITH_FLOAT32 propLossMath rejects BFP gamma/beta storage and BFP wire "
+                    "configs -- the FLOAT32 backward raw-casts",
+                    who);
+        exit(1);
+    }
+    if (cfg->frozen) {
+        return; /* no grads: the modes and grad storage are never used */
+    }
+    if (bwd != ARITH_FLOAT32) {
+        groupNormRequireAccMode(cfg->weightGradAccMode, who, "weightGradAccMode");
+        groupNormRequireAccMode(cfg->biasGradAccMode, who, "biasGradAccMode");
+        return;
+    }
+    /* The FLOAT32 backward ignores the modes: it adds into the grads through a raw float *
+     * cast. */
+    if (cfg->gamma->grad->quantization->type != FLOAT32 ||
+        cfg->beta->grad->quantization->type != FLOAT32) {
+        PRINT_ERROR("%s: ARITH_FLOAT32 propLossMath requires FLOAT32 gamma/beta grad storage "
+                    "(got %d, %d)",
+                    who, (int)cfg->gamma->grad->quantization->type,
+                    (int)cfg->beta->grad->quantization->type);
         exit(1);
     }
 }
@@ -173,19 +215,10 @@ static void groupNormAllGroupStats(tensor_t *t, const groupNormConfig_t *cfg, si
         meanOverTrailingAxesBfp(&view, 2, &meanT);
         varianceBiasedOverTrailingAxesBfp(&view, 2, &meanT, &varT);
         break;
-    case FLOAT32:
+    default: /* FLOAT32: the entry gates admit no other operand dtype */
         meanOverTrailingAxesFloat32(&view, 2, &meanT);
         varianceBiasedOverTrailingAxesFloat32(&view, 2, &meanT, &varT);
         break;
-    default:
-        /* PR2 Task 9 ruling (LayerNorm twin): a fall-through would hand int32
-         * mantissa scratch to the float reducer through a float* cast --
-         * silent wrong arithmetic, not a crash. Explicit switch, fail-fast
-         * default. */
-        PRINT_ERROR("GroupNorm stats: operand dtype %d has no stats path "
-                    "(FLOAT32/SYM_INT32/BFP)",
-                    (int)t->quantization->type);
-        exit(1);
     }
     for (size_t k = 0; k < K; k++) {
         invSigma[k] = rsqrtFloat32(var[k], eps); /* eps INSIDE sqrt */
@@ -231,23 +264,23 @@ static void groupNormForwardFloat(groupNormConfig_t *cfg, tensor_t *gamma, tenso
     }
 }
 
-/* The SYM_INT32 path reinterprets tensor data as int32 mantissas; a FLOAT32
- * buffer read that way is silent garbage, so fail fast. The int12 bound
- * (ODT_SYM_OPERAND_QMAXBITS) is required by the affine product q*gamma_q
- * (out[off]*gammaQ[c]); the mantissa-SUM behind the stats is a value-sum and
- * is sound at any qMaxBits <= 16 (it lives in the Reduce module, which
- * enforces that looser <= 16 bound itself). (#227) */
-static void groupNormValidateSymTensor(tensor_t *t, const char *what) {
-    if (t->quantization->type != SYM_INT32) {
-        PRINT_ERROR("GroupNorm SYM_INT32: %s must be SYM_INT32", what);
-        exit(1);
-    }
+/* The affine product q*gamma_q (out[off]*gammaQ[c]) needs the int12 operand bound; the
+ * mantissa-sum behind the stats is a value-sum the Reduce module bounds itself. */
+static void groupNormRequireSymWidth(const tensor_t *t, const char *what) {
     symInt32QConfig_t *qc = t->quantization->qConfig;
     if (qc->qMaxBits > ODT_SYM_OPERAND_QMAXBITS) {
         PRINT_ERROR("GroupNorm SYM_INT32: %s qMaxBits (%u) exceeds operand contract (%u)", what,
                     (unsigned)qc->qMaxBits, (unsigned)ODT_SYM_OPERAND_QMAXBITS);
         exit(1);
     }
+}
+
+static void groupNormRequireSymWire(const tensor_t *t, const char *what) {
+    if (t->quantization->type != SYM_INT32) {
+        PRINT_ERROR("GroupNorm SYM_INT32 backward: %s must be SYM_INT32", what);
+        exit(1);
+    }
+    groupNormRequireSymWidth(t, what);
 }
 
 /* Affine y = gamma*n + beta as a SEPARATE quantized elementwise stage, applied
@@ -330,10 +363,10 @@ static void groupNormAffineSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, ten
  * only eps/numGroups/numChannels geometry. */
 static void groupNormForwardSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, tensor_t *beta,
                                      tensor_t *input, tensor_t *output, rngStream_t *rs) {
-    groupNormValidateSymTensor(input, "input");
-    groupNormValidateSymTensor(output, "output");
-    groupNormValidateSymTensor(gamma, "gamma");
-    groupNormValidateSymTensor(beta, "beta");
+    groupNormRequireSymWidth(input, "input");
+    groupNormRequireSymWidth(output, "output");
+    groupNormRequireSymWidth(gamma, "gamma");
+    groupNormRequireSymWidth(beta, "beta");
 
     symInt32QConfig_t *inQC = input->quantization->qConfig;
     symInt32QConfig_t *outQC = output->quantization->qConfig;
@@ -360,7 +393,7 @@ static void groupNormForwardSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, te
         return;
     }
 
-    /* Identity-order guard (groupNormValidateInputShape, forward entry) makes
+    /* Identity-order guard (groupNormCalcOutputShape, forward entry) makes
      * whole-tensor flat scans valid: total == B*C*T contiguous elements. */
     size_t total = K * N;
 
@@ -454,15 +487,6 @@ static void groupNormForwardSymInt32(groupNormConfig_t *cfg, tensor_t *gamma, te
     groupNormAffineSymInt32(cfg, gamma, beta, output, sNorm, rs);
 }
 
-/* F5-style count gate for the BFP kernels' flat gamma/beta/raw indexing. */
-static void groupNormBfpRequireCount(tensor_t *t, size_t expected, const char *what) {
-    size_t n = calcNumberOfElementsByTensor(t);
-    if (n != expected) {
-        PRINT_ERROR("%s: element count %zu != expected %zu", what, n, expected);
-        exit(1);
-    }
-}
-
 /* ARITH_BFP forward (R-N2/R-N3): BFP stats via the [B,G,cpg,T] alias view,
  * per-channel float affine, FLOAT32 raw (BFP D7); OUT_WRITE packs the wire. The
  * SYM path's integer-affine/beta-seed bookkeeping has no BFP analog (a BFP
@@ -482,13 +506,6 @@ static void groupNormForwardBfp(const groupNormConfig_t *cfg, tensor_t *gamma, t
     const bfpQConfig_t *xQC = input->quantization->qConfig;
     const bfpQConfig_t *gQC = gamma->quantization->qConfig;
     const bfpQConfig_t *bQC = beta->quantization->qConfig;
-    validateBfpQConfigShape(xQC, calcNumberOfElementsByTensor(input));
-    groupNormBfpRequireCount(gamma, cfg->numChannels, "GroupNorm forward BFP gamma");
-    groupNormBfpRequireCount(beta, cfg->numChannels, "GroupNorm forward BFP beta");
-    validateBfpQConfigShape(gQC, cfg->numChannels); /* grid check per operand -- the count gate
-                                                     * alone cannot catch a malformed grid
-                                                     * (LayerNorm forward precedent) */
-    validateBfpQConfigShape(bQC, cfg->numChannels);
 
     float mean[K];
     float invSigma[K];
@@ -552,27 +569,6 @@ static void groupNormForwardKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut
     groupNormForwardSymInt32((groupNormConfig_t *)ctx, ops[1], ops[2], ops[0], rawOut, rs);
 }
 
-/* Explicit kernel dispatch, NOT a ternary — the LayerNorm twin (BFP epic PR2
- * Task 9): a ternary hands every non-SYM arithmetic to the FLOAT kernel, and
- * since the derivation flip a BFP profile arrives here as ARITH_BFP, whose
- * funnel-unpacked int32 mantissa scratch groupNormForwardFloat would read
- * through a float* cast — silent wrong arithmetic, not a crash. ARITH_BFP never
- * reaches this select since epic PR5 (groupNormForward early-returns through
- * its own arm), so the default covers only genuinely unimplemented
- * arithmetic. */
-static opKernelFn_t groupNormSelectForwardKernel(const groupNormConfig_t *cfg) {
-    switch (cfg->forwardMath.type) {
-    case ARITH_FLOAT32:
-        return groupNormForwardKernelFloat;
-    case ARITH_SYM_INT32:
-        return groupNormForwardKernelSym;
-    default:
-        PRINT_ERROR("GroupNorm forward: declared forwardMath %d not implemented",
-                    (int)cfg->forwardMath.type);
-        exit(1);
-    }
-}
-
 /* OP(k) of each funnel op of this layer, for layerExecOpKey. Part of the
  * value contract: append, never renumber. */
 enum {
@@ -585,8 +581,11 @@ enum {
 void groupNormForward(layer_t *layer, tensor_t *input, tensor_t *output, const layerExec_t *exec) {
     rngKey_t opKey;
     groupNormConfig_t *cfg = layer->config->groupNorm;
-    groupNormValidateInputShape(cfg, input);
-    groupNormRequireInputShape(input, output, "output");
+    size_t outDims[3];
+    size_t outOrder[3];
+    shape_t outExpected = {.dimensions = outDims, .orderOfDimensions = outOrder};
+    groupNormCalcOutputShape(layer, input->shape, &outExpected);
+    layerRequireDenseWire(output, &outExpected, "GroupNorm forward", "output");
 
     if (cfg->forwardMath.type == ARITH_BFP) {
         const bfpQConfig_t *anchor = bfpWireAnchor(cfg->outputQ, "GroupNorm forward");
@@ -615,9 +614,11 @@ void groupNormForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
         return;
     }
 
+    opKernelFn_t kernel = cfg->forwardMath.type == ARITH_SYM_INT32 ? groupNormForwardKernelSym
+                                                                   : groupNormForwardKernelFloat;
     executeOp(
         &(opSpec_t){
-            .kernel = groupNormSelectForwardKernel(cfg),
+            .kernel = kernel,
             .ctx = cfg,
             .inputs = (tensor_t *[]){input, getParamFromParameter(cfg->gamma),
                                      getParamFromParameter(cfg->beta)},
@@ -727,16 +728,6 @@ static void groupNormBackwardFloat(groupNormConfig_t *cfg, tensor_t *forwardInpu
 static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardInput,
                                       tensor_t *loss, tensor_t *propLoss, const layerExec_t *exec) {
     rngKey_t opKey;
-    groupNormValidateSymTensor(forwardInput, "forwardInput");
-    groupNormValidateSymTensor(loss, "loss");
-    /* propLoss == NULL (#380 PR2): grads-only call -- skip validating and
-     * fetching the absent buffer; pass B (below) never runs in that case. */
-    if (propLoss != NULL) {
-        groupNormValidateSymTensor(propLoss, "propLoss");
-    }
-    groupNormValidateSymTensor(cfg->gamma->param, "gamma");
-    /* beta->param is never read here (beta does not enter dx; dbeta needs only
-     * dy) — deliberately not validated. */
 
     int32_t *xq = (int32_t *)forwardInput->data;
     int32_t *dyq = (int32_t *)loss->data;
@@ -822,7 +813,6 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
         tensor_t dbetaT;
         setTensorValues(&dbetaT, (uint8_t *)dbetaInc, cfg->beta->grad->shape, &incQ,
                         cfg->beta->grad->sparsity);
-        executeOpValidateAccMode(cfg->weightGradAccMode, "GroupNorm weightGradAccMode");
         executeOp(
             &(opSpec_t){
                 .kernel = executeOpIdentityKernel,
@@ -833,7 +823,6 @@ static void groupNormBackwardSymInt32(groupNormConfig_t *cfg, tensor_t *forwardI
                 .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, GROUPNORM_OP_GAMMA_GRAD, &opKey),
             },
             cfg->gamma->grad);
-        executeOpValidateAccMode(cfg->biasGradAccMode, "GroupNorm biasGradAccMode");
         executeOp(
             &(opSpec_t){
                 .kernel = executeOpIdentityKernel,
@@ -932,14 +921,12 @@ static void groupNormCalcBetaGradsBfp(const groupNormConfig_t *cfg, tensor_t *lo
     size_t B;
     size_t T;
     groupNormGroupGeom(loss, cfg, &K, &N, &cpg, &B, &T);
-    groupNormBfpRequireCount(rawOut, cfg->numChannels, "GroupNorm dbeta BFP raw");
     float *out = (float *)rawOut->data;
     memset(out, 0, cfg->numChannels * sizeof(float));
     if (K == 0 || N == 0) {
         return;
     }
     const bfpQConfig_t *dyQC = loss->quantization->qConfig;
-    validateBfpQConfigShape(dyQC, calcNumberOfElementsByTensor(loss));
     bfpValidateSumHeadroom(dyQC, B * T, "GroupNorm dbeta BFP");
     const int32_t dyBias = bfpExponentBias(dyQC);
     int32_t const *dyArr = (int32_t const *)loss->data;
@@ -983,7 +970,6 @@ static void groupNormCalcGammaGradsBfp(const groupNormConfig_t *cfg, tensor_t *f
     size_t B;
     size_t T;
     groupNormGroupGeom(forwardInput, cfg, &K, &N, &cpg, &B, &T);
-    groupNormBfpRequireCount(rawOut, cfg->numChannels, "GroupNorm dgamma BFP raw");
     float *out = (float *)rawOut->data;
     memset(out, 0, cfg->numChannels * sizeof(float));
     if (K == 0 || N == 0) {
@@ -991,10 +977,6 @@ static void groupNormCalcGammaGradsBfp(const groupNormConfig_t *cfg, tensor_t *f
     }
     const bfpQConfig_t *xQC = forwardInput->quantization->qConfig;
     const bfpQConfig_t *dyQC = loss->quantization->qConfig;
-    validateBfpQConfigShape(xQC, calcNumberOfElementsByTensor(forwardInput));
-    validateBfpQConfigShape(dyQC, calcNumberOfElementsByTensor(loss));
-    groupNormBfpRequireCount(loss, calcNumberOfElementsByTensor(forwardInput),
-                             "GroupNorm dgamma BFP loss");
 
     float mean[K];
     float invSigma[K];
@@ -1039,20 +1021,6 @@ static void groupNormCalcPropLossBfp(const groupNormConfig_t *cfg, tensor_t *for
     const bfpQConfig_t *xQC = forwardInput->quantization->qConfig;
     const bfpQConfig_t *dyQC = loss->quantization->qConfig;
     const bfpQConfig_t *gQC = gamma->quantization->qConfig;
-    validateBfpQConfigShape(xQC, calcNumberOfElementsByTensor(forwardInput));
-    validateBfpQConfigShape(dyQC, calcNumberOfElementsByTensor(loss));
-    groupNormBfpRequireCount(gamma, cfg->numChannels, "GroupNorm dx BFP gamma");
-    validateBfpQConfigShape(gQC, cfg->numChannels); /* count gate alone cannot catch a malformed
-                                                     * grid; bfpGroupOf(gQC, c) would index
-                                                     * exponents[] OOB */
-    /* The walk below is forwardInput's ((b, grp) base + j), but loss is indexed
-     * at those offsets: a shorter loss reads outside its scratch. The dgamma
-     * twin's gate covers this incidentally when unfrozen -- frozen skips
-     * dgamma, so this gate is the sole catcher there. */
-    groupNormBfpRequireCount(loss, calcNumberOfElementsByTensor(forwardInput),
-                             "GroupNorm dx BFP loss");
-    groupNormBfpRequireCount(rawOut, calcNumberOfElementsByTensor(forwardInput),
-                             "GroupNorm dx BFP raw");
 
     float mean[K];
     float invSigma[K];
@@ -1131,17 +1099,18 @@ void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
                        const layerExec_t *exec) {
     rngKey_t opKey;
     groupNormConfig_t *cfg = layer->config->groupNorm;
-    groupNormValidateInputShape(cfg, forwardInput);
-    groupNormRequireInputShape(forwardInput, loss, "loss");
+    size_t wireDims[3];
+    size_t wireOrder[3];
+    shape_t wireExpected = {.dimensions = wireDims, .orderOfDimensions = wireOrder};
+    groupNormCalcOutputShape(layer, forwardInput->shape, &wireExpected);
+    layerRequireDenseWire(loss, &wireExpected, "GroupNorm backward", "loss");
     if (propLoss != NULL) {
-        groupNormRequireInputShape(forwardInput, propLoss, "propLoss");
+        layerRequireDenseWire(propLoss, &wireExpected, "GroupNorm backward", "propLoss");
     }
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:
-        /* SYM_INT32 forwardMath + FLOAT32 backwardMath is an inference-only
-         * profile: reading a SYM_INT32 forwardInput / loss / gamma as float*
-         * here would be silent garbage — fail fast. Training a SYM forward
-         * requires backwardMath = SYM_INT32 (factory rule, PR-3). */
+        /* The FLOAT32 backward raw-casts its operands; SYM forward + FLOAT32 backward is the
+         * inference-only profile and lands here. */
         if (forwardInput->quantization->type != FLOAT32 || loss->quantization->type != FLOAT32 ||
             cfg->gamma->param->quantization->type != FLOAT32) {
             PRINT_ERROR("GroupNorm backward: FLOAT32 backward requires FLOAT32 tensors "
@@ -1149,55 +1118,28 @@ void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
                         "use SYM_INT32 backwardMath to train)");
             exit(1);
         }
-        /* groupNormBackwardFloat raw-casts cfg->gamma->grad->data /
-         * cfg->beta->grad->data to float* (it bypasses the executeOp funnel,
-         * unlike the SYM_INT32 path's dgamma/dbeta identity-kernel executeOp
-         * calls). A packed (SYM/ASYM) grad tensor read/written that way is
-         * silent memory corruption, not garbage values — fail fast instead.
-         * PR3 (#261): routing float dgamma/dbeta through the funnel like the
-         * SYM_INT32 path is a follow-up issue; this guard only closes the gap
-         * until then (the LayerNorm precedent). Frozen (#380): no grad
-         * tensors exist (Task 1 elides them), so there is nothing to
-         * validate -- skip the whole check. */
-        if (!cfg->frozen && (cfg->gamma->grad->quantization->type != FLOAT32 ||
-                             cfg->beta->grad->quantization->type != FLOAT32)) {
-            PRINT_ERROR("GroupNorm backward: FLOAT32 backward writes gamma/beta grads via a raw "
-                        "float* cast — packed grad storage requires the funnel route (follow-up "
-                        "issue, #261) — got gamma grad dtype %d, beta grad dtype %d",
-                        (int)cfg->gamma->grad->quantization->type,
-                        (int)cfg->beta->grad->quantization->type);
-            exit(1);
-        }
-        /* groupNormBackwardFloat also writes propLoss->data (dx) via a raw
-         * float* cast. A SYM-storage propLossQ (SYM_INT32 fixed-point, or packed
-         * sub-byte SYM) paired with FLOAT32 propLossMath is factory-constructible,
-         * and that raw write silently corrupts the mantissa/packed buffer — fail
-         * fast instead (same #261 gap the gamma/beta grad guard closes).
-         * propLoss == NULL (#380 PR2): grads-only call -- nothing to
-         * validate, skip the whole check. */
         if (propLoss != NULL && propLoss->quantization->type != FLOAT32) {
             PRINT_ERROR("GroupNorm backward: FLOAT32 backward writes propLoss (dx) via a raw "
-                        "float* cast — SYM/packed propLoss storage requires the funnel route "
-                        "(follow-up issue, #261) — got propLoss dtype %d",
+                        "float* cast -- got propLoss dtype %d",
                         (int)propLoss->quantization->type);
             exit(1);
         }
         groupNormBackwardFloat(cfg, forwardInput, loss, propLoss);
         break;
     case ARITH_SYM_INT32:
+        /* The SYM_INT32 backward raw-casts its runtime wires to int32 mantissas. */
+        groupNormRequireSymWire(forwardInput, "forwardInput");
+        groupNormRequireSymWire(loss, "loss");
+        if (propLoss != NULL) {
+            groupNormRequireSymWire(propLoss, "propLoss");
+        }
+        groupNormRequireSymWidth(cfg->gamma->param, "gamma");
         groupNormBackwardSymInt32(cfg, forwardInput, loss, propLoss, exec);
         break;
     case ARITH_BFP: {
         /* R-N1: propLossQ anchors ALL THREE backward ops' staging, even when
          * the propLoss TENSOR is NULL (the grad ops still stage at it). */
         const bfpQConfig_t *anchor = bfpWireAnchor(cfg->propLossQ, "GroupNorm backward");
-        /* The dbeta kernel derives B/T from the LOSS tensor while offsetting
-         * with cfg->numChannels, so a count-equal but shape-PERMUTED loss
-         * (e.g. [2,2,4] against a [2,4,2] input) passes every count and grid
-         * gate and then reads out of bounds; dgamma/dx read it at
-         * forward-derived offsets, in bounds but silently wrong. The loss gets
-         * the same shape gate the forward applies to its input. */
-        groupNormValidateInputShape(cfg, loss);
         bfpQConfig_t stage = {.exponents = NULL,
                               .numGroups = 1,
                               .groupSize = 0,
@@ -1209,7 +1151,6 @@ void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
         const bfpQConfig_t *dyStage = loss->quantization->type == FLOAT32 ? &stage : NULL;
         const bfpQConfig_t *gStage = gammaT->quantization->type == FLOAT32 ? &stage : NULL;
         if (!cfg->frozen) {
-            executeOpValidateAccMode(cfg->weightGradAccMode, "GroupNorm weightGradAccMode");
             executeOp(&(opSpec_t){.kernel = groupNormDgammaKernelBfp,
                                   .ctx = cfg,
                                   .inputs = (tensor_t *[]){forwardInput, loss},
@@ -1220,7 +1161,6 @@ void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
                                                         GROUPNORM_OP_GAMMA_GRAD, &opKey),
                                   .bfpStage = {fiStage, dyStage, NULL}},
                       cfg->gamma->grad);
-            executeOpValidateAccMode(cfg->biasGradAccMode, "GroupNorm biasGradAccMode");
             executeOp(&(opSpec_t){.kernel = groupNormDbetaKernelBfp,
                                   .ctx = cfg,
                                   .inputs = (tensor_t *[]){loss},
@@ -1246,18 +1186,32 @@ void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
         }
         break;
     }
-    default:
-        PRINT_ERROR("GroupNorm backward: declared propLossMath %d not implemented",
-                    (int)cfg->propLossMath.type);
-        exit(1);
     }
 }
 
+/* Identity order makes element (b,c,t) sit at ((b*C)+c)*T + t, which every flat offset and
+ * the [B,G,cpg,T] alias view rely on; the channel match keeps gamma/beta and their grads in
+ * bounds. */
 void groupNormCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_t *outputShape) {
-    (void)layer;
-    memcpy(outputShape->dimensions, inputShape->dimensions,
-           inputShape->numberOfDimensions * sizeof(size_t));
-    memcpy(outputShape->orderOfDimensions, inputShape->orderOfDimensions,
-           inputShape->numberOfDimensions * sizeof(size_t));
-    outputShape->numberOfDimensions = inputShape->numberOfDimensions;
+    const groupNormConfig_t *cfg = layer->config->groupNorm;
+    if (inputShape->numberOfDimensions != 3) {
+        PRINT_ERROR("GroupNorm: input must be rank-3 [B,C,T] (got rank %zu)",
+                    inputShape->numberOfDimensions);
+        exit(1);
+    }
+    for (size_t d = 0; d < 3; d++) {
+        if (inputShape->orderOfDimensions[d] != d) {
+            PRINT_ERROR("GroupNorm: input must be identity-order (dim %zu is order %zu)", d,
+                        inputShape->orderOfDimensions[d]);
+            exit(1);
+        }
+    }
+    if (inputShape->dimensions[1] != cfg->numChannels) {
+        PRINT_ERROR("GroupNorm: input channel dim is %zu but numChannels is %zu",
+                    inputShape->dimensions[1], cfg->numChannels);
+        exit(1);
+    }
+    memcpy(outputShape->dimensions, inputShape->dimensions, 3 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(3, outputShape->orderOfDimensions);
+    outputShape->numberOfDimensions = 3;
 }

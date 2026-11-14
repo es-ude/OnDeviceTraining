@@ -37,12 +37,8 @@ layer_t *layerNormLayerInit(layerNormInit_t *init, layerQuant_t *lq);
  *  want fire-and-forget teardown (freeLayerNormLayer tears them down too). */
 layer_t *layerNormLayerInitOwning(layerNormInit_t *init, layerQuant_t *lq);
 
-/*! Frees the parameter_t (gamma/beta + grads + shapes), the copied
- *  normalizedShape, and the layer/config wrappers. ALWAYS frees gamma/beta.
- *  If ownsQuantizations is true (Owning factory), also frees forwardQ and
- *  backwardQ (qConfig + struct, with a backwardQ != forwardQ dedup guard);
- *  if false (Borrowing factory), leaves the caller-owned math quantizations
- *  untouched. */
+/*! Frees a factory-built layer: parameters, copied normalizedShape and wrappers; an owning
+ *  layer also frees outputQ/propLossQ. */
 void freeLayerNormLayer(layer_t *layer);
 
 #endif // ODT_LAYERNORM_API_H

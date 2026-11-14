@@ -33,6 +33,12 @@ void initLayerNormConfig(layerNormConfig_t *cfg, parameter_t *gamma, parameter_t
                          size_t *normalizedShape, size_t numNormDims, float eps,
                          quantization_t *forwardQ, quantization_t *backwardQ);
 
+/*! The config contract forward/backward rely on: normalizedShape matching gamma/beta,
+ *  supported arithmetic, arithmetic/storage coherence and, for a trainable layer, grad modes
+ *  and grad storage. Call once where a config enters -- the factory and the deserializer --
+ *  never per step. `who` prefixes the message. */
+void layerNormValidateConfig(const layerNormConfig_t *cfg, const char *who);
+
 void layerNormForward(layer_t *layer, tensor_t *input, tensor_t *output, const layerExec_t *exec);
 void layerNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss,
                        const layerExec_t *exec);

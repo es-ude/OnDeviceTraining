@@ -316,7 +316,7 @@ only the quantization configs change; the int32 accumulator (no int64) is kept.
   operands: they accept any declared width and the accumulator guard below
   decides per op (proven safe, exact on the checked path, or abort).
   `matmulValidateSymOperand` only checks the dtype. LayerNorm / GroupNorm
-  (`layerNormValidateSymTensor`, `groupNormValidateSymTensor`) still reject
+  (`layerNormRequireSymWidth`, `groupNormRequireSymWidth`) still reject
   `qMaxBits > ODT_SYM_OPERAND_QMAXBITS`: their affine product `q·gamma_q` has no
   guarded accumulator, so the cap is its overflow argument. The Reduce / pool
   value-sum caps (`qMaxBits ≤ 16`) are untouched.

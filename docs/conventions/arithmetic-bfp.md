@@ -940,10 +940,10 @@ those roundings), while staging and dx's OUT_WRITE round by
   uninitialized raw into the grad — on every non-empty path removing it is
   an equivalent mutant (the Task 5 finding, recorded here instead of
   faked test coverage).
-- **dx validates ALL operand grids, including gamma's**
-  (`validateBfpQConfigShape` per operand): the element-count gate alone
-  cannot catch a malformed `{numGroups, groupSize}`, and `bfpGroupOf`
-  would then index `exponents[]` out of bounds.
+- **The kernels trust operand grids and counts**: `initTensor` validates an
+  attached BFP grid, the funnel preserves borrowed grids or builds its staging
+  grid, and the layer's per-direction shape gate plus the factory/deserializer
+  config validator fix every element count the kernels index.
 
 **R-N5 — grad storage: the norms join the per-tensor BFP knob.** Because
 dgamma/dbeta land through the funnel's ACC epilogues, the PR3 grad-storage

@@ -1310,7 +1310,8 @@ void testEvalBindRunsTheFullKeyCheck(void) {
 /* Forward wires copy the upstream order (ReLU, LayerNorm); a dx wire always
  * gets identity order, as the pre-remat driver's dx allocator did. */
 void testBindCopiesForwardOrderAndGivesGradsIdentityOrder(void) {
-    layer_t *model[2] = {makeLayerNorm(4, false), makeRelu(&g_floatQ)};
+    /* Order {1, 0} makes the [1, 4] input logically [4, 1]. */
+    layer_t *model[2] = {makeLayerNorm(1, false), makeRelu(&g_floatQ)};
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     in.order[0] = 1;

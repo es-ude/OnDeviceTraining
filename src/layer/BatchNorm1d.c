@@ -13,6 +13,7 @@
 #include "ExecuteOp.h"
 #include "Layer.h"
 #include "LayerExec.h"
+#include "LayerWireGuards.h"
 #include "Mul.h"
 #include "Quantization.h"
 #include "Reduce.h"
@@ -25,20 +26,6 @@ void initBatchNorm1dConfig(batchNorm1dConfig_t *cfg, parameter_t *gamma, paramet
                            tensor_t *runningMean, tensor_t *runningVar, size_t numChannels,
                            float eps, bnMomentumMode_t momentumMode, float momentum,
                            quantization_t *forwardQ, quantization_t *backwardQ) {
-    /* affine/track are derived from ONE pointer each, so a half-pair would
-     * dereference NULL later. Both halves or neither. */
-    if ((gamma == NULL) != (beta == NULL)) {
-        PRINT_ERROR("initBatchNorm1dConfig: gamma and beta must both be set (affine) or both "
-                    "be NULL (got gamma %s, beta %s)",
-                    gamma ? "set" : "NULL", beta ? "set" : "NULL");
-        exit(1);
-    }
-    if ((runningMean == NULL) != (runningVar == NULL)) {
-        PRINT_ERROR("initBatchNorm1dConfig: runningMean and runningVar must both be set "
-                    "(tracked) or both be NULL (got runningMean %s, runningVar %s)",
-                    runningMean ? "set" : "NULL", runningVar ? "set" : "NULL");
-        exit(1);
-    }
     cfg->gamma = gamma;
     cfg->beta = beta;
     cfg->runningMean = runningMean;
@@ -60,108 +47,14 @@ void initBatchNorm1dConfig(batchNorm1dConfig_t *cfg, parameter_t *gamma, paramet
     cfg->propLossMath = arithmeticFromQuantizationOrDefault(backwardQ);
     cfg->outputQ = forwardQ;
     cfg->propLossQ = backwardQ;
-    cfg->weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
-    cfg->biasGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
     cfg->ownsQuantizations = false;
 }
 
-/* Fail fast unless `t` is a FLOAT32, identity-order [m, C] / [m, C, T] with
- * dims[1] == numChannels. Identity order makes element (b, c, t) sit at
- * (b*C + c)*T + t, which every flat loop below relies on. */
-static void bnValidateInput(const batchNorm1dConfig_t *cfg, const tensor_t *t, const char *what) {
-    const shape_t *s = t->shape;
-    size_t rank = s->numberOfDimensions;
-    if (rank != 2 && rank != 3) {
-        PRINT_ERROR("BatchNorm1d %s: must be rank 2 [m,C] or rank 3 [m,C,T] (got rank %zu)", what,
-                    rank);
-        exit(1);
-    }
-    for (size_t d = 0; d < rank; d++) {
-        if (s->orderOfDimensions[d] != d) {
-            PRINT_ERROR("BatchNorm1d %s: must be identity-order (dim %zu is order %zu)", what, d,
-                        s->orderOfDimensions[d]);
-            exit(1);
-        }
-    }
-    if (cfg->numChannels == 0 || s->dimensions[1] != cfg->numChannels) {
-        PRINT_ERROR("BatchNorm1d %s: channel dim is %zu but numChannels is %zu", what,
-                    s->dimensions[1], cfg->numChannels);
-        exit(1);
-    }
+/* The kernels cast every wire to float *. */
+static void bnRequireFloat32(const tensor_t *t, const char *where, const char *what) {
     if (t->quantization->type != FLOAT32) {
-        PRINT_ERROR("BatchNorm1d %s: must be FLOAT32 (got dtype %d) -- BatchNorm1d is FLOAT32-only",
+        PRINT_ERROR("%s: %s must be FLOAT32 (got dtype %d) -- BatchNorm1d is FLOAT32-only", where,
                     what, (int)t->quantization->type);
-        exit(1);
-    }
-}
-
-/* Every per-channel state tensor the kernels index as float[C]: FLOAT32 and
- * exactly numChannels elements (dtype AND capacity). */
-static void bnRequireChannelVector(const batchNorm1dConfig_t *cfg, const tensor_t *t,
-                                   const char *what) {
-    if (t->quantization->type != FLOAT32) {
-        PRINT_ERROR("BatchNorm1d: %s must be FLOAT32 (got dtype %d) -- BatchNorm1d is "
-                    "FLOAT32-only",
-                    what, (int)t->quantization->type);
-        exit(1);
-    }
-    size_t count = calcNumberOfElementsByTensor((tensor_t *)t);
-    if (count != cfg->numChannels) {
-        PRINT_ERROR("BatchNorm1d: %s has %zu elements but numChannels is %zu", what, count,
-                    cfg->numChannels);
-        exit(1);
-    }
-}
-
-static void bnValidateAffineParams(const batchNorm1dConfig_t *cfg) {
-    if (!cfg->affine) {
-        return;
-    }
-    bnRequireChannelVector(cfg, cfg->gamma->param, "gamma");
-    bnRequireChannelVector(cfg, cfg->beta->param, "beta");
-}
-
-static void bnValidateRunningBuffers(const batchNorm1dConfig_t *cfg) {
-    if (!cfg->trackRunningStats) {
-        return;
-    }
-    bnRequireChannelVector(cfg, cfg->runningMean, "runningMean");
-    bnRequireChannelVector(cfg, cfg->runningVar, "runningVar");
-}
-
-/* executeOp sizes its raw target from `output` (ExecuteOp.c:107) while the
- * kernel loops over the input's element count and writes y[i] at the flat
- * IDENTITY-order offset i (bnForwardKernelFloat): an output that does not
- * match the input's rank and dims would be written out of bounds, a
- * non-identity-order output would receive values at the wrong physical
- * offsets (silently, when m == C makes dims alone ambiguous), and a
- * non-FLOAT32 output would misinterpret the FLOAT32 bit pattern the kernel
- * writes. */
-static void bnValidateOutputMatchesInput(const tensor_t *input, const tensor_t *output) {
-    const shape_t *in = input->shape;
-    const shape_t *out = output->shape;
-    bool same = in->numberOfDimensions == out->numberOfDimensions;
-    for (size_t d = 0; same && d < in->numberOfDimensions; d++) {
-        same = in->dimensions[d] == out->dimensions[d];
-    }
-    if (!same) {
-        PRINT_ERROR("BatchNorm1d forward: output must have the input's rank and dims "
-                    "(input rank %zu, output rank %zu)",
-                    in->numberOfDimensions, out->numberOfDimensions);
-        exit(1);
-    }
-    for (size_t d = 0; d < out->numberOfDimensions; d++) {
-        if (out->orderOfDimensions[d] != d) {
-            PRINT_ERROR("BatchNorm1d forward: output must be identity-order (dim %zu is order "
-                        "%zu) -- the kernel writes in the input's flat identity order",
-                        d, out->orderOfDimensions[d]);
-            exit(1);
-        }
-    }
-    if (output->quantization->type != FLOAT32) {
-        PRINT_ERROR("BatchNorm1d forward: output must be FLOAT32 (got dtype %d) -- BatchNorm1d "
-                    "is FLOAT32-only",
-                    (int)output->quantization->type);
         exit(1);
     }
 }
@@ -354,15 +247,13 @@ void batchNorm1dForward(layer_t *layer, tensor_t *input, tensor_t *output,
                         const layerExec_t *exec) {
     rngKey_t opKey;
     batchNorm1dConfig_t *cfg = layer->config->batchNorm1d;
-    bnValidateInput(cfg, input, "forward input");
-    bnValidateOutputMatchesInput(input, output);
-    bnValidateAffineParams(cfg);
-    bnValidateRunningBuffers(cfg);
-    if (cfg->forwardMath.type != ARITH_FLOAT32) {
-        PRINT_ERROR("BatchNorm1d forward: forwardMath %d not supported -- FLOAT32 only",
-                    (int)cfg->forwardMath.type);
-        exit(1);
-    }
+    size_t outDims[3];
+    size_t outOrder[3];
+    shape_t outExpected = {.dimensions = outDims, .orderOfDimensions = outOrder};
+    batchNorm1dCalcOutputShape(layer, input->shape, &outExpected);
+    bnRequireFloat32(input, "BatchNorm1d forward", "input");
+    layerRequireDenseWire(output, &outExpected, "BatchNorm1d forward", "output");
+    bnRequireFloat32(output, "BatchNorm1d forward", "output");
     size_t total = calcNumberOfElementsByTensor(input);
     size_t n = total / cfg->numChannels;
     bool batchStats = bnUsesBatchStats(cfg);
@@ -400,49 +291,21 @@ void batchNorm1dForward(layer_t *layer, tensor_t *input, tensor_t *output,
         output);
 }
 
-static void bnRequireSameShape(const tensor_t *ref, const tensor_t *t, const char *what) {
-    const shape_t *a = ref->shape;
-    const shape_t *b = t->shape;
-    bool ok = a->numberOfDimensions == b->numberOfDimensions && t->quantization->type == FLOAT32;
-    for (size_t d = 0; ok && d < a->numberOfDimensions; d++) {
-        ok = a->dimensions[d] == b->dimensions[d] && b->orderOfDimensions[d] == d;
-    }
-    if (!ok) {
-        PRINT_ERROR("BatchNorm1d backward: %s must be FLOAT32, identity-order and shaped like the "
-                    "forward input",
-                    what);
-        exit(1);
-    }
-}
-
 void batchNorm1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, tensor_t *propLoss,
                          const layerExec_t *exec) {
     batchNorm1dConfig_t *cfg = layer->config->batchNorm1d;
-    bnValidateInput(cfg, forwardInput, "backward input");
-    bnRequireSameShape(forwardInput, loss, "loss");
+    size_t wireDims[3];
+    size_t wireOrder[3];
+    shape_t wireExpected = {.dimensions = wireDims, .orderOfDimensions = wireOrder};
+    batchNorm1dCalcOutputShape(layer, forwardInput->shape, &wireExpected);
+    bnRequireFloat32(forwardInput, "BatchNorm1d backward", "forwardInput");
+    layerRequireDenseWire(loss, &wireExpected, "BatchNorm1d backward", "loss");
+    bnRequireFloat32(loss, "BatchNorm1d backward", "loss");
     if (propLoss != NULL) {
-        bnRequireSameShape(forwardInput, propLoss, "propLoss");
-    }
-    bnValidateAffineParams(cfg);
-    bnValidateRunningBuffers(cfg);
-    if (cfg->propLossMath.type != ARITH_FLOAT32) {
-        PRINT_ERROR("BatchNorm1d backward: propLossMath %d not supported -- FLOAT32 only",
-                    (int)cfg->propLossMath.type);
-        exit(1);
+        layerRequireDenseWire(propLoss, &wireExpected, "BatchNorm1d backward", "propLoss");
+        bnRequireFloat32(propLoss, "BatchNorm1d backward", "propLoss");
     }
     bool wantGrads = cfg->affine && !cfg->frozen;
-    if (wantGrads) {
-        if (cfg->gamma->grad == NULL || cfg->beta->grad == NULL) {
-            PRINT_ERROR("BatchNorm1d backward: a trainable BN needs FLOAT32 gamma/beta grads");
-            exit(1);
-        }
-        /* Reuse bnRequireChannelVector (dtype AND element count) instead of
-         * the ad hoc dtype-only check -- a grad
-         * tensor with the wrong element count was silently accepted and the
-         * per-channel write loop below would walk off the end of it. */
-        bnRequireChannelVector(cfg, cfg->gamma->grad, "gamma grad");
-        bnRequireChannelVector(cfg, cfg->beta->grad, "beta grad");
-    }
     size_t total = calcNumberOfElementsByTensor(forwardInput);
     size_t C = cfg->numChannels;
     size_t n = total / C;
@@ -501,11 +364,29 @@ void batchNorm1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss,
     }
 }
 
+/* Element (b, c, t) of an identity-order input sits at (b*C + c)*T + t, which
+ * every flat loop above relies on. */
 void batchNorm1dCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_t *outputShape) {
-    (void)layer;
-    memcpy(outputShape->dimensions, inputShape->dimensions,
-           inputShape->numberOfDimensions * sizeof(size_t));
-    memcpy(outputShape->orderOfDimensions, inputShape->orderOfDimensions,
-           inputShape->numberOfDimensions * sizeof(size_t));
-    outputShape->numberOfDimensions = inputShape->numberOfDimensions;
+    const batchNorm1dConfig_t *cfg = layer->config->batchNorm1d;
+    size_t rank = inputShape->numberOfDimensions;
+    if (rank != 2 && rank != 3) {
+        PRINT_ERROR("BatchNorm1d: input must be rank 2 [m,C] or rank 3 [m,C,T] (got rank %zu)",
+                    rank);
+        exit(1);
+    }
+    for (size_t d = 0; d < rank; d++) {
+        if (inputShape->orderOfDimensions[d] != d) {
+            PRINT_ERROR("BatchNorm1d: input must be identity-order (dim %zu is order %zu)", d,
+                        inputShape->orderOfDimensions[d]);
+            exit(1);
+        }
+    }
+    if (inputShape->dimensions[1] != cfg->numChannels) {
+        PRINT_ERROR("BatchNorm1d: input channel dim is %zu but numChannels is %zu",
+                    inputShape->dimensions[1], cfg->numChannels);
+        exit(1);
+    }
+    memcpy(outputShape->dimensions, inputShape->dimensions, rank * sizeof(size_t));
+    setOrderOfDimsForNewTensor(rank, outputShape->orderOfDimensions);
+    outputShape->numberOfDimensions = rank;
 }

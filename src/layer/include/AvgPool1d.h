@@ -25,8 +25,6 @@ void avgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
 
 void avgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
                        tensor_t *propLoss, const layerExec_t *exec);
-void avgPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
-                            tensor_t *propLoss);
 
 struct rngStream;
 

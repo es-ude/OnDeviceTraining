@@ -305,73 +305,6 @@ void testAvgPool1dBackwardFloatOverwritesStalePropLoss(void) {
                                      "a repeated backward must reproduce dx (OUT_WRITE)");
 }
 
-/* #4 PR0: the FLOAT32 dx arm takes batch and channels from
- * lossGrad but memsets and scatters into propLoss, so a propLoss with fewer
- * channels is written past its end -- it must fail fast instead. */
-void testAvgPool1dBackwardFloatRejectsPropLossWithFewerChannels(void) {
-    size_t inputDims[] = {2, 2, 8};
-    size_t outputDims[] = {2, 2, 3};
-    size_t smallPropLossDims[] = {2, 1, 8};
-
-    avgPool1dRunResult_t r = avgPool1dBuild(NULL, inputDims, 2, VALID, 2, 2, NULL, outputDims);
-    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, NULL);
-    tensor_t *propLoss = makeFloatTensor(smallPropLossDims, 3, NULL);
-
-    ASSERT_EXITS_WITH_OUTPUT(
-        1, "AvgPool1d backward FLOAT32 (propLoss): expected shape [2, 2, 8], got [2, 1, 8]",
-        avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
-
-    freeTensor(propLoss);
-    freeTensor(lossGrad);
-    freeTensor(r.output);
-    freeTensor(r.input);
-    freeQuantization(r.q);
-}
-
-/* #4 PR0: the propLoss rank is checked before its dimensions[2] is read -- on
- * a rank-2 shape that read is itself a heap over-read (visible under ASan). */
-void testAvgPool1dBackwardFloatRejectsRank2PropLoss(void) {
-    size_t inputDims[] = {2, 2, 8};
-    size_t outputDims[] = {2, 2, 3};
-    size_t rank2PropLossDims[] = {2, 16};
-
-    avgPool1dRunResult_t r = avgPool1dBuild(NULL, inputDims, 2, VALID, 2, 2, NULL, outputDims);
-    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, NULL);
-    tensor_t *propLoss = makeFloatTensor(rank2PropLossDims, 2, NULL);
-
-    ASSERT_EXITS_WITH_OUTPUT(1,
-                             "AvgPool1d backward FLOAT32: lossGrad and propLoss must both be "
-                             "rank-3, got ranks 3 and 2",
-                             avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
-
-    freeTensor(propLoss);
-    freeTensor(lossGrad);
-    freeTensor(r.output);
-    freeTensor(r.input);
-    freeQuantization(r.q);
-}
-
-/* #4 PR0: the FLOAT32 forward takes batch and channels from the input but
- * writes them into rawOut, so an output with a smaller batch is written past
- * its end -- it must fail fast instead. */
-void testAvgPool1dForwardFloatRejectsOutputWithSmallerBatch(void) {
-    size_t inputDims[] = {2, 2, 8};
-    size_t outputDims[] = {2, 2, 3};
-    size_t smallOutputDims[] = {1, 2, 3};
-
-    avgPool1dRunResult_t r = avgPool1dBuild(NULL, inputDims, 2, VALID, 2, 2, NULL, outputDims);
-    tensor_t *smallOutput = makeFloatTensor(smallOutputDims, 3, NULL);
-
-    ASSERT_EXITS_WITH_OUTPUT(
-        1, "AvgPool1d forward FLOAT32 (rawOut): expected shape [2, 2, 3], got [1, 2, 3]",
-        avgPool1dForward(r.layer, r.input, smallOutput, NULL));
-
-    freeTensor(smallOutput);
-    freeTensor(r.output);
-    freeTensor(r.input);
-    freeQuantization(r.q);
-}
-
 // Smoke test for the funnel's new SYM-input capability (spec Testing list):
 // the layer's own forwardMath stays FLOAT32 (no SYM kernel body exists for
 // this op), but a SYM_INT32-typed *producer* tensor feeding it must now be
@@ -600,70 +533,6 @@ void testAvgPool1dBackwardSymRejectsTermsOverBound(void) {
     tensor_t *propLoss = buildSymTensor(inputDims, 3, NULL);
 
     ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
-}
-
-/* #4 PR0: the SYM_INT32 dx kernel takes batch and channels from lossGrad but
- * memsets and scatters into rawOut (propLoss's shape), so a propLoss with a
- * smaller batch is written past its end -- it must fail fast instead. */
-void testAvgPool1dBackwardSymRejectsPropLossWithSmallerBatch(void) {
-    size_t inputDims[] = {2, 2, 8};
-    size_t outputDims[] = {2, 2, 3};
-    size_t smallPropLossDims[] = {1, 2, 8};
-
-    avgPool1dSymRun_t r = avgPool1dBuildSym(NULL, inputDims, 2, VALID, 2, 2, outputDims);
-    tensor_t *lossGrad = buildSymTensor(outputDims, 3, NULL);
-    tensor_t *propLoss = buildSymTensor(smallPropLossDims, 3, NULL);
-
-    ASSERT_EXITS_WITH_OUTPUT(
-        1, "AvgPool1d backward SYM_INT32 (rawOut): expected shape [2, 2, 8], got [1, 2, 8]",
-        avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
-
-    freeTensor(propLoss);
-    freeTensor(lossGrad);
-    freeTensor(r.output);
-    freeTensor(r.input);
-}
-
-/* #4 PR0: the dx output's rank is checked before its dimensions[2] is read --
- * on a rank-2 shape that read is itself a heap over-read (visible under ASan). */
-void testAvgPool1dBackwardSymRejectsRank2PropLoss(void) {
-    size_t inputDims[] = {2, 2, 8};
-    size_t outputDims[] = {2, 2, 3};
-    size_t rank2PropLossDims[] = {2, 16};
-
-    avgPool1dSymRun_t r = avgPool1dBuildSym(NULL, inputDims, 2, VALID, 2, 2, outputDims);
-    tensor_t *lossGrad = buildSymTensor(outputDims, 3, NULL);
-    tensor_t *propLoss = buildSymTensor(rank2PropLossDims, 2, NULL);
-
-    ASSERT_EXITS_WITH_OUTPUT(1,
-                             "AvgPool1d backward SYM_INT32: lossGrad and rawOut must both be "
-                             "rank-3, got ranks 3 and 2",
-                             avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
-
-    freeTensor(propLoss);
-    freeTensor(lossGrad);
-    freeTensor(r.output);
-    freeTensor(r.input);
-}
-
-/* #4 PR0: the SYM_INT32 forward takes batch and channels from the input but
- * writes them into rawOut (the output's shape), so an output with fewer
- * channels is written past its end -- it must fail fast instead. */
-void testAvgPool1dForwardSymRejectsOutputWithFewerChannels(void) {
-    size_t inputDims[] = {2, 2, 8};
-    size_t outputDims[] = {2, 2, 3};
-    size_t smallOutputDims[] = {2, 1, 3};
-
-    avgPool1dSymRun_t r = avgPool1dBuildSym(NULL, inputDims, 2, VALID, 2, 2, outputDims);
-    tensor_t *smallOutput = buildSymTensor(smallOutputDims, 3, NULL);
-
-    ASSERT_EXITS_WITH_OUTPUT(
-        1, "AvgPool1d forward SYM_INT32 (rawOut): expected shape [2, 2, 3], got [2, 1, 3]",
-        avgPool1dForward(r.layer, r.input, smallOutput, NULL));
-
-    freeTensor(smallOutput);
-    freeTensor(r.output);
-    freeTensor(r.input);
 }
 
 /* ---- BFP epic PR4 (R-P1/R-P4): native ARITH_BFP arms ---- */
@@ -1467,82 +1336,6 @@ void testAvgPool1dBackwardBfpScattersIntoFloat32Raw(void) {
     freeTensor(lossGrad);
 }
 
-/* BFP epic PR4 (R-P7d): the rule-1 mirror. A pinned ARITH_BFP forward with a
- * NULL or non-BFP outputQ has no width anchor and must die EAGERLY — the
- * userApi factories copy layerQuant_t slots by value and never call
- * initAvgPool1dConfig, so both spellings are reachable. */
-void testAvgPool1dForwardBfpRequiresBfpOutputQ(void) {
-    size_t inputDims[] = {1, 2, 8};
-    size_t outputDims[] = {1, 2, 4};
-    tensor_t *input = makeFloatTensor(inputDims, 3, kBfpAvgPoolStageInput);
-    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
-    quantization_t *floatQ = quantizationInitFloat();
-
-    kernel_t k;
-    initKernel(&k, (size_t)kBfpAvgPoolKernelSize, SAME, (size_t)kBfpAvgPoolDilation,
-               (size_t)kBfpAvgPoolStride);
-    avgPool1dConfig_t nullCfg = {0};
-    nullCfg.kernel = &k;
-    nullCfg.forwardMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
-    nullCfg.outputQ = NULL;
-    layerConfig_t nullLc = {.avgPool1d = &nullCfg};
-    layer_t nullLayer = {.type = AVGPOOL1D, .config = &nullLc};
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&nullLayer, input, output, NULL));
-
-    avgPool1dConfig_t floatCfg = nullCfg;
-    floatCfg.outputQ = floatQ;
-    layerConfig_t floatLc = {.avgPool1d = &floatCfg};
-    layer_t floatLayer = {.type = AVGPOOL1D, .config = &floatLc};
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&floatLayer, input, output, NULL));
-
-    freeQuantization(floatQ);
-    freeTensor(output);
-    freeTensor(input);
-}
-
-/* BFP epic PR4: the shape gate on the NEW kernel. The write index is
- * (b * channels + c) * outputLength + outPos with batch/channels read off the
- * INPUT, so an output that matches on LENGTH but not on batch or channels is
- * written past its end — a checker that looks only at dimensions[2] passes it.
- * Three cases: matching length + wrong channels, matching length + wrong
- * batch, and wrong rank. The first case is the one the length-only check
- * misses; it is listed first so a regression is unmistakable. */
-void testAvgPool1dForwardBfpRejectsMismatchedOutputShape(void) {
-    size_t inputDims[] = {1, 2, 8};
-    size_t wrongChannels[] = {1, 1, 4}; /* right length, wrong channels */
-    size_t wrongBatch[] = {2, 2, 4};    /* right length + channels, wrong batch */
-    size_t wrongRank[] = {2, 4};        /* right element count, rank 2 */
-    int32_t inCodes[16];
-    for (size_t i = 0; i < kBfpAvgPoolInCodes_len; i++) {
-        inCodes[i] = kBfpAvgPoolInCodes[i];
-    }
-    tensor_t *input = buildBfpWireWithCodes(
-        inputDims, 3, (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits,
-        (size_t)kBfpAvgPoolInNumGroups, (size_t)kBfpAvgPoolInGroupSize, inCodes, kBfpAvgPoolInExps);
-    tensor_t *badChannels = makeFloatTensor(wrongChannels, 3, NULL);
-    tensor_t *badBatch = makeFloatTensor(wrongBatch, 3, NULL);
-    tensor_t *badRank = makeFloatTensor(wrongRank, 2, NULL);
-    quantization_t *wireQ = quantizationInitBfpGrouped(
-        (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits, HALF_AWAY,
-        (size_t)kBfpAvgPoolInNumGroups, (size_t)kBfpAvgPoolInGroupSize);
-    kernel_t k;
-    avgPool1dConfig_t cfg;
-    layerConfig_t lc;
-    layer_t layer;
-    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, SAME,
-                           (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
-
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, input, badChannels, NULL));
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, input, badBatch, NULL));
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, input, badRank, NULL));
-
-    freeQuantization(wireQ);
-    freeTensor(badRank);
-    freeTensor(badBatch);
-    freeTensor(badChannels);
-    freeTensor(input);
-}
-
 /* The SUM headroom guard (bfpValidateSumHeadroom -- the sum limit
  * INT32_MAX >> (m-1), NOT the product limit). It cannot be tripped through a
  * legal AvgPool fixture: mantissaBits is capped at 16 at construction, so the
@@ -1637,10 +1430,8 @@ void testAvgPool1dForwardBfpWireUnderPinnedFloat32(void) {
 void setUp(void) {}
 void tearDown(void) {}
 
-/* BFP epic PR4 (R-P7d): the guard is NARROWED, not removed — a BFP wire under
- * the raw-casting FLOAT32/SYM arms must still die, and the ARITH_BFP backward
- * needs a BFP-typed propLossQ anchor (R-P1). */
-void testAvgPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
+/* The FLOAT32 backward casts both wires to float, so a BFP wire must die. */
+void testAvgPool1dBackwardFloatRejectsBfpWires(void) {
     size_t inputDims[] = {1, 2, 8};
     size_t outputDims[] = {1, 2, 4};
     tensor_t *bfpLossGrad = buildBfpWireWithCodes(
@@ -1659,21 +1450,12 @@ void testAvgPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
     layer_t floatLayer;
     avgPool1dBuildBfpLayer(&floatCfg, &kf, &floatLc, &floatLayer, (size_t)kBfpAvgPoolKernelSize,
                            SAME, (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, floatQ);
-    ASSERT_EXITS_WITH_FAILURE(
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "AvgPool1d backward (lossGrad): no BFP semantics",
         avgPool1dBackward(&floatLayer, NULL, bfpLossGrad, floatPropLoss, NULL));
-    ASSERT_EXITS_WITH_FAILURE(
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "AvgPool1d backward (propLoss): no BFP semantics",
         avgPool1dBackward(&floatLayer, NULL, floatLossGrad, bfpPropLoss, NULL));
-
-    kernel_t kb;
-    initKernel(&kb, (size_t)kBfpAvgPoolKernelSize, SAME, (size_t)kBfpAvgPoolDilation,
-               (size_t)kBfpAvgPoolStride);
-    avgPool1dConfig_t bfpCfg = {0};
-    bfpCfg.kernel = &kb;
-    bfpCfg.propLossMath = (arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY};
-    bfpCfg.propLossQ = NULL;
-    layerConfig_t bfpLc = {.avgPool1d = &bfpCfg};
-    layer_t bfpLayer = {.type = AVGPOOL1D, .config = &bfpLc};
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(&bfpLayer, NULL, bfpLossGrad, floatPropLoss, NULL));
 
     freeQuantization(floatQ);
     freeTensor(bfpPropLoss);
@@ -1682,55 +1464,75 @@ void testAvgPool1dBackwardBfpGuardsNarrowedNotRemoved(void) {
     freeTensor(bfpLossGrad);
 }
 
-/* BFP epic PR4, the OPERAND side of the rank gate. executeOp never
- * inspects operand rank (it sizes the raw from the TARGET only), so a rank-2
- * BFP operand reaches the kernel, which would read dimensions[0..2] off a
- * two-element dims array — an over-read of the shape itself. Both kernels
- * therefore open with their own rank check BEFORE poolRequireDims3, and
- * these two deaths are the only ones that can reach it: every other rank-2
- * case in this file passes a rank-2 OUTPUT, which dies in poolRequireDims3
- * first. Operands carry no codes — the guard fires before any data read.
- *
- * MUTATION STATUS, stated honestly: DELETING either rank guard does NOT redden
- * this test. The statements right after it feed the over-read dims[0..2] into
- * poolRequireDims3 (and, in the backward, the geometry check), which
- * exit(1) all the same — and the death harness compares exit codes only, with
- * no message capture, so it cannot tell the two deaths apart. That is defense
- * in depth, not coverage. What IS proven: giving each rank guard a distinct
- * exit code makes exactly the matching assertion below fail, so both deaths
- * really do originate in the rank guards and no rank-2 operand reaches the
- * indexing loops. */
-void testAvgPool1dBfpRejectsRank2Operands(void) {
-    size_t rank2Input[] = {2, 8};
-    size_t rank2LossGrad[] = {2, 4};
-    size_t inputDims[] = {1, 2, 8};
-    size_t outputDims[] = {1, 2, 4};
-    tensor_t *badInput = buildBfpWireWithCodes(
-        rank2Input, 2, (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits,
-        (size_t)kBfpAvgPoolInNumGroups, (size_t)kBfpAvgPoolInGroupSize, NULL, NULL);
-    tensor_t *badLossGrad = buildBfpWireWithCodes(
-        rank2LossGrad, 2, (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits,
-        (size_t)kBfpAvgPoolOutNumGroups, (size_t)kBfpAvgPoolOutGroupSize, NULL, NULL);
-    tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
+/* The forward writes [B, C, Lout] output cells from the input's dims, so an
+ * input of the wrong rank or an output of another shape must die first. */
+void testAvgPool1dForwardRejectsMismatchedShapes(void) {
+    size_t inputDims[] = {2, 2, 8};
+    size_t outputDims[] = {2, 2, 3};
+    size_t rank2Dims[] = {2, 16};
+    size_t smallBatch[] = {1, 2, 3};
+    size_t fewerChannels[] = {2, 1, 3};
+    size_t shorter[] = {2, 2, 2};
+    avgPool1dRunResult_t r = avgPool1dBuild(NULL, inputDims, 2, VALID, 2, 2, NULL, outputDims);
+    tensor_t *rank2Input = makeFloatTensor(rank2Dims, 2, NULL);
+    tensor_t *batchOut = makeFloatTensor(smallBatch, 3, NULL);
+    tensor_t *channelOut = makeFloatTensor(fewerChannels, 3, NULL);
+    tensor_t *lengthOut = makeFloatTensor(shorter, 3, NULL);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "AvgPool1d expects 3D input [batch, channel, length], got 2D",
+                             avgPool1dForward(r.layer, rank2Input, r.output, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "AvgPool1d forward: output dim 0 must be 2, got 1",
+                             avgPool1dForward(r.layer, r.input, batchOut, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "AvgPool1d forward: output dim 1 must be 2, got 1",
+                             avgPool1dForward(r.layer, r.input, channelOut, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "AvgPool1d forward: output dim 2 must be 3, got 2",
+                             avgPool1dForward(r.layer, r.input, lengthOut, NULL));
+
+    freeTensor(lengthOut);
+    freeTensor(channelOut);
+    freeTensor(batchOut);
+    freeTensor(rank2Input);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
+}
+
+/* The backward reads lossGrad as [B, C, Lout] of propLoss's shape and
+ * scatters into propLoss, so a propLoss of the wrong rank or a loss of another
+ * shape must die first. */
+void testAvgPool1dBackwardRejectsMismatchedShapes(void) {
+    size_t inputDims[] = {2, 2, 8};
+    size_t outputDims[] = {2, 2, 3};
+    size_t rank2Dims[] = {2, 16};
+    size_t smallBatch[] = {1, 2, 3};
+    size_t fewerChannels[] = {2, 1, 3};
+    size_t shorter[] = {2, 2, 2};
+    avgPool1dRunResult_t r = avgPool1dBuild(NULL, inputDims, 2, VALID, 2, 2, NULL, outputDims);
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, NULL);
     tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
-    quantization_t *wireQ = quantizationInitBfpGrouped(
-        (uint8_t)kBfpAvgPoolMantissaBits, (uint8_t)kBfpAvgPoolExponentBits, HALF_AWAY,
-        (size_t)kBfpAvgPoolInNumGroups, (size_t)kBfpAvgPoolInGroupSize);
-    kernel_t k;
-    avgPool1dConfig_t cfg;
-    layerConfig_t lc;
-    layer_t layer;
-    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, (size_t)kBfpAvgPoolKernelSize, SAME,
-                           (size_t)kBfpAvgPoolDilation, (size_t)kBfpAvgPoolStride, wireQ);
+    tensor_t *rank2PropLoss = makeFloatTensor(rank2Dims, 2, NULL);
+    tensor_t *batchLoss = makeFloatTensor(smallBatch, 3, NULL);
+    tensor_t *channelLoss = makeFloatTensor(fewerChannels, 3, NULL);
+    tensor_t *lengthLoss = makeFloatTensor(shorter, 3, NULL);
 
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dForward(&layer, badInput, output, NULL));
-    ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(&layer, NULL, badLossGrad, propLoss, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "AvgPool1d expects 3D input [batch, channel, length], got 2D",
+                             avgPool1dBackward(r.layer, NULL, lossGrad, rank2PropLoss, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "AvgPool1d backward: loss dim 0 must be 2, got 1",
+                             avgPool1dBackward(r.layer, NULL, batchLoss, propLoss, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "AvgPool1d backward: loss dim 1 must be 2, got 1",
+                             avgPool1dBackward(r.layer, NULL, channelLoss, propLoss, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "AvgPool1d backward: loss dim 2 must be 3, got 2",
+                             avgPool1dBackward(r.layer, NULL, lengthLoss, propLoss, NULL));
 
-    freeQuantization(wireQ);
+    freeTensor(lengthLoss);
+    freeTensor(channelLoss);
+    freeTensor(batchLoss);
+    freeTensor(rank2PropLoss);
     freeTensor(propLoss);
-    freeTensor(output);
-    freeTensor(badLossGrad);
-    freeTensor(badInput);
+    freeTensor(lossGrad);
+    freeTensor(r.output);
+    freeTensor(r.input);
+    freeQuantization(r.q);
 }
 
 /* The SR forward rounds in the OUT_WRITE epilogue of its forward op: OP 0
@@ -1791,12 +1593,6 @@ int main(void) {
     RUN_TEST(testAvgPool1dWithSamePadding);
     RUN_TEST(testAvgPool1dEdgeCases);
     RUN_TEST(testAvgPool1dBackwardFloatOverwritesStalePropLoss);
-    RUN_TEST(testAvgPool1dBackwardFloatRejectsPropLossWithFewerChannels);
-    RUN_TEST(testAvgPool1dBackwardFloatRejectsRank2PropLoss);
-    RUN_TEST(testAvgPool1dForwardFloatRejectsOutputWithSmallerBatch);
-    RUN_TEST(testAvgPool1dBackwardSymRejectsPropLossWithSmallerBatch);
-    RUN_TEST(testAvgPool1dBackwardSymRejectsRank2PropLoss);
-    RUN_TEST(testAvgPool1dForwardSymRejectsOutputWithFewerChannels);
     RUN_TEST(testAvgPool1dForwardWithSymInt32Input);
     RUN_TEST(testAvgPool1dForwardSymBasic);
     RUN_TEST(testAvgPool1dBackwardSymBasic);
@@ -1818,13 +1614,12 @@ int main(void) {
     RUN_TEST(testAvgPool1dBackwardBfpIntoBfpWireReblocksTheIntegerRaw);
     RUN_TEST(testAvgPool1dBackwardBfpRawRejectsAFloatRaw);
     RUN_TEST(testAvgPool1dBfpRawZeroGroupDoesNotSetTheAccumulator);
-    RUN_TEST(testAvgPool1dForwardBfpRequiresBfpOutputQ);
-    RUN_TEST(testAvgPool1dForwardBfpRejectsMismatchedOutputShape);
     RUN_TEST(testAvgPool1dForwardBfpSumHeadroomGuardIsWired);
     RUN_TEST(testAvgPool1dForwardBfpWireUnderPinnedFloat32);
     RUN_TEST(testAvgPool1dBackwardBfpScattersIntoFloat32Raw);
-    RUN_TEST(testAvgPool1dBackwardBfpGuardsNarrowedNotRemoved);
-    RUN_TEST(testAvgPool1dBfpRejectsRank2Operands);
+    RUN_TEST(testAvgPool1dBackwardFloatRejectsBfpWires);
+    RUN_TEST(testAvgPool1dForwardRejectsMismatchedShapes);
+    RUN_TEST(testAvgPool1dBackwardRejectsMismatchedShapes);
     RUN_TEST(testAvgPool1dSrForwardIsAPureFunctionOfItsForwardOpKey);
     RUN_TEST(testAvgPool1dInitConfigClearsOwnsQuantizations);
     return UNITY_END();

@@ -11,29 +11,6 @@
  * new library; every layer target already reaches src/layer/include and links
  * Common, Tensor and Arithmetic. */
 
-/* For the pool kernels (MaxPool1d, AvgPool1d, AdaptiveAvgPool1d), every arm:
- * they index their outputs as DENSE [batch][channels][length] arrays whose
- * batch and channels come from the OPERAND's dims (input forward, lossGrad
- * backward), so an output that disagrees on dim 0 or dim 1 is written past
- * its end even when its length is right — checking dimensions[2] alone is not
- * enough. Rank is checked first: dimensions[0..2] on a rank-2 shape is itself
- * an over-read, which is also why a backward arm rank-checks its dx output
- * before reading that output's length to pass in here. */
-static inline void poolRequireDims3(const tensor_t *t, size_t d0, size_t d1, size_t d2,
-                                    const char *what) {
-    if (t->shape->numberOfDimensions != 3) {
-        PRINT_ERROR("%s: expected a rank-3 [batch, channels, length] tensor, got rank %zu", what,
-                    t->shape->numberOfDimensions);
-        exit(1);
-    }
-    if (t->shape->dimensions[0] != d0 || t->shape->dimensions[1] != d1 ||
-        t->shape->dimensions[2] != d2) {
-        PRINT_ERROR("%s: expected shape [%zu, %zu, %zu], got [%zu, %zu, %zu]", what, d0, d1, d2,
-                    t->shape->dimensions[0], t->shape->dimensions[1], t->shape->dimensions[2]);
-        exit(1);
-    }
-}
-
 static inline void layerRequireRank(const tensor_t *t, const shape_t *expected, const char *where,
                                     const char *what) {
     if (t->shape->numberOfDimensions != expected->numberOfDimensions) {
@@ -44,9 +21,9 @@ static inline void layerRequireRank(const tensor_t *t, const shape_t *expected, 
 }
 
 /* For a wire a kernel addresses by raw flat index (every GEMM-produced wire,
- * and the conv kernels' consumed loss): they take the physical dims and ignore
- * orderOfDimensions, so a transposed view with the right logical dims would be
- * silently mis-placed. Hence physical dims AND identity order. */
+ * the conv kernels' consumed loss, the pool kernels' output, loss and argmax): they take the
+ * physical dims and ignore orderOfDimensions, so a transposed view with the right logical dims
+ * would be silently mis-placed. Hence physical dims AND identity order. */
 static inline void layerRequireDenseWire(const tensor_t *t, const shape_t *expected,
                                          const char *where, const char *what) {
     layerRequireRank(t, expected, where, what);

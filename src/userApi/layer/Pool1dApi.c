@@ -44,6 +44,29 @@ static size_t computePool1dOutputLength(paddingType_t padding, size_t inputLengt
     return (inputLength - effectiveK) / stride + 1;
 }
 
+static bool isPoolArithmetic(arithmeticType_t type) {
+    return type == ARITH_FLOAT32 || type == ARITH_SYM_INT32 || type == ARITH_BFP;
+}
+
+/* The ARITH_BFP kernels take their FLOAT32-operand staging widths from the
+ * produced-wire config, so that config must be BFP. */
+static void validatePoolMath(const layerQuant_t *lq, const char *where) {
+    if (!isPoolArithmetic(lq->forwardMath.type) || !isPoolArithmetic(lq->propLossMath.type)) {
+        PRINT_ERROR("%s: layerQuant.forwardMath and propLossMath must be ARITH_FLOAT32, "
+                    "ARITH_SYM_INT32 or ARITH_BFP",
+                    where);
+        exit(1);
+    }
+    if (lq->forwardMath.type == ARITH_BFP && lq->outputQ->type != BFP) {
+        PRINT_ERROR("%s: ARITH_BFP forwardMath requires a BFP-typed outputQ", where);
+        exit(1);
+    }
+    if (lq->propLossMath.type == ARITH_BFP && lq->propLossQ->type != BFP) {
+        PRINT_ERROR("%s: ARITH_BFP propLossMath requires a BFP-typed propLossQ", where);
+        exit(1);
+    }
+}
+
 /* ============================================================================
  * MaxPool1d
  * ========================================================================== */
@@ -80,6 +103,7 @@ static void validateLayerQuantForMaxPool1d(layerQuant_t *lq) {
         PRINT_ERROR("maxPool1dLayerInit: layerQuant.propLossQ must be set");
         exit(1);
     }
+    validatePoolMath(lq, "maxPool1dLayerInit");
 }
 
 static shape_t *buildOwnedShape(const size_t *srcDims, size_t numberOfDims) {
@@ -209,6 +233,7 @@ static void validateLayerQuantForAvgPool1d(layerQuant_t *lq) {
         PRINT_ERROR("avgPool1dLayerInit: layerQuant.propLossQ must be set");
         exit(1);
     }
+    validatePoolMath(lq, "avgPool1dLayerInit");
 }
 
 /* Ruling R1: under BFP math (either slot) the mean is an exponent shift, so

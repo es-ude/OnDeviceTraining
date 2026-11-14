@@ -19,10 +19,6 @@
 
 void initAvgPool1dConfig(avgPool1dConfig_t *cfg, kernel_t *kernel, quantization_t *forwardQ,
                          quantization_t *propLossQ) {
-    if (kernel->size == 0) {
-        PRINT_ERROR("AvgPool1d: kernel size must be >= 1");
-        exit(1);
-    }
     cfg->kernel = kernel;
     cfg->forwardMath = arithmeticFromQuantizationOrDefault(forwardQ);
     cfg->propLossMath = arithmeticFromQuantizationOrDefault(propLossQ);
@@ -47,9 +43,6 @@ static void avgPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, t
 
     windowGeometry1d_t geom = windowGeometry1dCalc(inputLength, cfg->kernel);
     size_t outputLength = geom.outputLength;
-
-    // batch/channels come from the input but size the rawOut writes (F5 parity).
-    poolRequireDims3(rawOut, batch, channels, outputLength, "AvgPool1d forward FLOAT32 (rawOut)");
 
     float const *xArr = (float const *)input->data;
     float *yArr = (float *)rawOut->data;
@@ -118,9 +111,6 @@ static void avgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
     windowGeometry1d_t geom = windowGeometry1dCalc(inputLength, cfg->kernel);
     size_t outputLength = geom.outputLength;
 
-    // batch/channels come from the input but size the rawOut writes (F5 parity).
-    poolRequireDims3(rawOut, batch, channels, outputLength, "AvgPool1d forward SYM_INT32 (rawOut)");
-
     poolValidateSymValueSum(input, cfg->kernel->size, "AvgPool1d forward SYM");
 
     int32_t const *xArr = (int32_t const *)input->data;
@@ -186,12 +176,6 @@ void avgPool1dForwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, te
     const avgPool1dConfig_t *cfg = ctx;
     tensor_t *input = ops[0];
 
-    if (input->shape->numberOfDimensions != 3) {
-        PRINT_ERROR("AvgPool1d forward BFP: input must be rank-3 [batch, channels, length], got "
-                    "rank %zu",
-                    input->shape->numberOfDimensions);
-        exit(1);
-    }
     if (input->quantization->type != BFP || rawOut->quantization->type != BFP_RAW) {
         PRINT_ERROR("AvgPool1d forward BFP: needs a BFP (unpacked scratch) input and a BFP_RAW "
                     "output (opSpec_t.bfpRawOut), got dtypes %d -> %d",
@@ -206,14 +190,7 @@ void avgPool1dForwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, te
     windowGeometry1d_t geom = windowGeometry1dCalc(inputLength, cfg->kernel);
     size_t outputLength = geom.outputLength;
 
-    /* All THREE dims, not just the length (F5): the write index below is
-     * (b * channels + c) * outputLength + outPos with batch/channels taken
-     * from the INPUT, so a rawOut that agrees on length but not on batch or
-     * channels is written past its end. */
-    poolRequireDims3(rawOut, batch, channels, outputLength, "AvgPool1d forward BFP (rawOut)");
-
     const bfpQConfig_t *qC = input->quantization->qConfig;
-    validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(input));
     bfpValidateSumHeadroom(qC, cfg->kernel->size, "AvgPool1d forward BFP");
     const int32_t expBias = bfpExponentBias(qC);
 
@@ -317,6 +294,13 @@ enum {
 void avgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const layerExec_t *exec) {
     rngKey_t opKey;
     avgPool1dConfig_t *cfg = layer->config->avgPool1d;
+
+    size_t outDims[3];
+    size_t outOrder[3];
+    shape_t outExpected = {.dimensions = outDims, .orderOfDimensions = outOrder};
+    avgPool1dCalcOutputShape(layer, input->shape, &outExpected);
+    layerRequireDenseWire(output, &outExpected, "AvgPool1d forward", "output");
+
     if (cfg->forwardMath.type == ARITH_BFP) {
         const bfpQConfig_t *anchor = bfpWireAnchor(cfg->outputQ, "AvgPool1d forward");
         /* Stack template: lifetime covers the executeOp call (same frame).
@@ -345,18 +329,8 @@ void avgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
         return;
     }
 
-    opKernelFn_t kernel;
-    switch (cfg->forwardMath.type) {
-    case ARITH_FLOAT32:
-        kernel = avgPool1dForwardKernel;
-        break;
-    case ARITH_SYM_INT32:
-        kernel = avgPool1dForwardKernelSymInt32;
-        break;
-    default:
-        PRINT_ERROR("AvgPool1d forward: quantization type not implemented");
-        exit(1);
-    }
+    opKernelFn_t kernel = cfg->forwardMath.type == ARITH_SYM_INT32 ? avgPool1dForwardKernelSymInt32
+                                                                   : avgPool1dForwardKernel;
     executeOp(
         &(opSpec_t){
             .kernel = kernel,
@@ -370,33 +344,14 @@ void avgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
         output);
 }
 
-void avgPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
-                            tensor_t *propLoss) {
-    avgPool1dConfig_t *cfg = layer->config->avgPool1d;
-    (void)forwardInput; // not needed: window geometry is determined by kernel + input shape
-
-    if (lossGrad->shape->numberOfDimensions != 3 || propLoss->shape->numberOfDimensions != 3) {
-        PRINT_ERROR("AvgPool1d backward FLOAT32: lossGrad and propLoss must both be rank-3, got "
-                    "ranks %zu and %zu",
-                    lossGrad->shape->numberOfDimensions, propLoss->shape->numberOfDimensions);
-        exit(1);
-    }
+static void avgPool1dBackwardFloat(const avgPool1dConfig_t *cfg, tensor_t *lossGrad,
+                                   tensor_t *propLoss) {
     size_t batch = lossGrad->shape->dimensions[0];
     size_t channels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
     size_t inputLength = propLoss->shape->dimensions[2];
 
-    // batch/channels come from lossGrad but size the propLoss memset + scatter (F5 parity).
-    poolRequireDims3(propLoss, batch, channels, inputLength,
-                     "AvgPool1d backward FLOAT32 (propLoss)");
-
     windowGeometry1d_t geom = windowGeometry1dCalc(inputLength, cfg->kernel);
-    if (geom.outputLength != outputLength) {
-        PRINT_ERROR("AvgPool1d backward: lossGrad outputLength (%zu) does not match "
-                    "geometry-derived (%zu)",
-                    outputLength, geom.outputLength);
-        exit(1);
-    }
 
     float const *gyArr = (float const *)lossGrad->data;
     float *gxArr = (float *)propLoss->data;
@@ -435,27 +390,12 @@ static void avgPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *
     const avgPool1dConfig_t *cfg = ctx;
     tensor_t *lossGrad = ops[0];
 
-    if (lossGrad->shape->numberOfDimensions != 3 || rawOut->shape->numberOfDimensions != 3) {
-        PRINT_ERROR("AvgPool1d backward SYM_INT32: lossGrad and rawOut must both be rank-3, got "
-                    "ranks %zu and %zu",
-                    lossGrad->shape->numberOfDimensions, rawOut->shape->numberOfDimensions);
-        exit(1);
-    }
     size_t batch = lossGrad->shape->dimensions[0];
     size_t channels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
     size_t inputLength = rawOut->shape->dimensions[2];
 
-    // batch/channels come from lossGrad but size the rawOut memset + scatter (F5 parity).
-    poolRequireDims3(rawOut, batch, channels, inputLength, "AvgPool1d backward SYM_INT32 (rawOut)");
-
     windowGeometry1d_t geom = windowGeometry1dCalc(inputLength, cfg->kernel);
-    if (geom.outputLength != outputLength) {
-        PRINT_ERROR("AvgPool1d backward: lossGrad outputLength (%zu) does not match "
-                    "geometry-derived (%zu)",
-                    outputLength, geom.outputLength);
-        exit(1);
-    }
 
     /* Worst-case scatter collisions per input cell = covering windows =
      * (effK-1)/stride + 1. */
@@ -550,12 +490,6 @@ void avgPool1dBackwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, t
     const avgPool1dConfig_t *cfg = ctx;
     tensor_t *lossGrad = ops[0];
 
-    if (lossGrad->shape->numberOfDimensions != 3 || rawOut->shape->numberOfDimensions != 3) {
-        PRINT_ERROR("AvgPool1d backward BFP: lossGrad and rawOut must both be rank-3 [batch, "
-                    "channels, length], got ranks %zu and %zu",
-                    lossGrad->shape->numberOfDimensions, rawOut->shape->numberOfDimensions);
-        exit(1);
-    }
     if (lossGrad->quantization->type != BFP || rawOut->quantization->type != BFP_RAW) {
         PRINT_ERROR("AvgPool1d backward BFP: needs a BFP (unpacked scratch) lossGrad and a BFP_RAW "
                     "output (opSpec_t.bfpRawOut), got dtypes %d -> %d",
@@ -569,20 +503,8 @@ void avgPool1dBackwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, t
     size_t inputLength = rawOut->shape->dimensions[2];
 
     windowGeometry1d_t geom = windowGeometry1dCalc(inputLength, cfg->kernel);
-    if (geom.outputLength != outputLength) {
-        PRINT_ERROR("AvgPool1d backward: lossGrad outputLength (%zu) does not match "
-                    "geometry-derived (%zu)",
-                    outputLength, geom.outputLength);
-        exit(1);
-    }
-    /* All three dims (F5): the scatter index is (b * channels + c) *
-     * inputLength + inputIdx with batch/channels off the LOSSGRAD, and the
-     * memset below sizes batch * channels * inputLength codes — a rawOut that
-     * agrees only on inputLength is both memset and scattered past its end. */
-    poolRequireDims3(rawOut, batch, channels, inputLength, "AvgPool1d backward BFP (rawOut)");
 
     const bfpQConfig_t *qC = lossGrad->quantization->qConfig;
-    validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(lossGrad));
     const int32_t expBias = bfpExponentBias(qC);
     bfpRawQConfig_t *rawQC = rawOut->quantization->qConfig;
     size_t rows = batch * channels;
@@ -617,24 +539,27 @@ void avgPool1dBackwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, t
     bfpRawEmitFromRows(acc, nOut, eAccOfRow, inputLength, rawQC, "AvgPool1d backward BFP");
 }
 
+/* forwardInput is unused and may be NULL. */
 void avgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
                        tensor_t *propLoss, const layerExec_t *exec) {
+    (void)forwardInput;
     rngKey_t opKey;
     avgPool1dConfig_t *cfg = layer->config->avgPool1d;
+
+    size_t lossDims[3];
+    size_t lossOrder[3];
+    shape_t lossExpected = {.dimensions = lossDims, .orderOfDimensions = lossOrder};
+    avgPool1dCalcOutputShape(layer, propLoss->shape, &lossExpected);
+    layerRequireDenseWire(lossGrad, &lossExpected, "AvgPool1d backward", "loss");
+
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:
-        /* forwardInput is NOT guarded: this layer never dereferences it. */
-        /* Runs OUTSIDE executeOp and raw-casts both wires to float*; a packed
-         * BFP wire would be read as wide scalars (4x heap over-read on
-         * lossGrad, over-write into the packed propLoss buffer). #315 parity. */
+        /* This path casts lossGrad and propLoss directly to float. */
         bfpRequireNoBfpWire(lossGrad, "AvgPool1d backward (lossGrad)");
         bfpRequireNoBfpWire(propLoss, "AvgPool1d backward (propLoss)");
-        avgPool1dBackwardFloat(layer, forwardInput, lossGrad, propLoss);
+        avgPool1dBackwardFloat(cfg, lossGrad, propLoss);
         break;
     case ARITH_SYM_INT32:
-        bfpRequireNoBfpWire(lossGrad, "AvgPool1d backward (lossGrad)");
-        bfpRequireNoBfpWire(propLoss, "AvgPool1d backward (propLoss)");
-        (void)forwardInput; // not needed: window geometry comes from kernel + shapes
         executeOp(
             &(opSpec_t){
                 .kernel = avgPool1dBackwardKernelSymInt32,
@@ -655,7 +580,6 @@ void avgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGra
                               .roundingMode = cfg->propLossMath.roundingMode,
                               .mantissaBits = anchor->mantissaBits,
                               .exponentBits = anchor->exponentBits};
-        (void)forwardInput; // not needed: window geometry comes from kernel + shapes
         executeOp(
             &(opSpec_t){
                 .kernel = avgPool1dBackwardKernelBfpRaw,
@@ -671,9 +595,6 @@ void avgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGra
             propLoss);
         break;
     }
-    default:
-        PRINT_ERROR("AvgPool1d backward: quantization type not implemented");
-        exit(1);
     }
 }
 

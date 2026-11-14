@@ -24,6 +24,29 @@ static void validateInit(adaptiveAvgPool1dInit_t *init) {
     }
 }
 
+static bool isPoolArithmetic(arithmeticType_t type) {
+    return type == ARITH_FLOAT32 || type == ARITH_SYM_INT32 || type == ARITH_BFP;
+}
+
+/* The ARITH_BFP kernels take their FLOAT32-operand staging widths from the
+ * produced-wire config, so that config must be BFP. */
+static void validatePoolMath(const layerQuant_t *lq, const char *where) {
+    if (!isPoolArithmetic(lq->forwardMath.type) || !isPoolArithmetic(lq->propLossMath.type)) {
+        PRINT_ERROR("%s: layerQuant.forwardMath and propLossMath must be ARITH_FLOAT32, "
+                    "ARITH_SYM_INT32 or ARITH_BFP",
+                    where);
+        exit(1);
+    }
+    if (lq->forwardMath.type == ARITH_BFP && lq->outputQ->type != BFP) {
+        PRINT_ERROR("%s: ARITH_BFP forwardMath requires a BFP-typed outputQ", where);
+        exit(1);
+    }
+    if (lq->propLossMath.type == ARITH_BFP && lq->propLossQ->type != BFP) {
+        PRINT_ERROR("%s: ARITH_BFP propLossMath requires a BFP-typed propLossQ", where);
+        exit(1);
+    }
+}
+
 static void validateLayerQuant(layerQuant_t *lq) {
     if (lq == NULL) {
         PRINT_ERROR("adaptiveAvgPool1dLayerInit: lq pointer is NULL");
@@ -37,6 +60,7 @@ static void validateLayerQuant(layerQuant_t *lq) {
         PRINT_ERROR("adaptiveAvgPool1dLayerInit: layerQuant.propLossQ must be set");
         exit(1);
     }
+    validatePoolMath(lq, "adaptiveAvgPool1dLayerInit");
 }
 
 static layer_t *buildSkeleton(adaptiveAvgPool1dInit_t *init) {

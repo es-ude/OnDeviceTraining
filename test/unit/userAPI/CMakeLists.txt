@@ -213,6 +213,7 @@ add_elastic_ai_unit_test(
         Rounding
         AdaptiveAvgPool1d
         TensorApi
+        odt_test_death
 )
 
 add_executable(UnitTestDropoutIntegration UnitTestDropoutIntegration.c)

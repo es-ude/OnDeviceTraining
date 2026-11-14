@@ -25,8 +25,6 @@ void adaptiveAvgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output,
 
 void adaptiveAvgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
                                tensor_t *propLoss, const layerExec_t *exec);
-void adaptiveAvgPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
-                                    tensor_t *propLoss);
 
 void adaptiveAvgPool1dCalcOutputShape(layer_t *layer, shape_t *inputShape, shape_t *outputShape);
 

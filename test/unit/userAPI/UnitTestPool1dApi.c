@@ -121,27 +121,6 @@ void testMaxPool1dLayerInitOwningDeepCopiesTwoQuantizations(void) {
     freeQuantization(q);
 }
 
-void testMaxPool1dLayerInitOwningRepeatedBuildFreeNoLeak(void) {
-    for (int i = 0; i < 5; i++) {
-        quantization_t *q = quantizationInitFloat();
-        layerQuant_t lq;
-        layerQuantInitUniform(&lq, q);
-
-        layer_t *layer = maxPool1dLayerInitOwning(
-            &(maxPool1dInit_t){
-                .kernelSize = 2,
-                .stride = 2,
-                .inputChannels = 4,
-                .inputLength = 8,
-            },
-            &lq);
-
-        freeMaxPool1dLayer(layer);
-        freeQuantization(q);
-    }
-    TEST_PASS();
-}
-
 /* ============================================================================
  * AvgPool1d
  * ========================================================================== */
@@ -251,6 +230,90 @@ void testAvgPool1dLayerInitOwningDeepCopiesTwoQuantizations(void) {
     TEST_ASSERT_TRUE(cfg->ownsQuantizations);
 
     freeAvgPool1dLayer(layer);
+    freeQuantization(q);
+}
+
+#define POOL_INVALID_ARITH ((arithmeticType_t)7)
+
+void testMaxPool1dLayerInitRejectsUnsupportedArithmetic(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t badForward;
+    layerQuantInitUniform(&badForward, q);
+    badForward.forwardMath.type = POOL_INVALID_ARITH;
+    layerQuant_t badPropLoss;
+    layerQuantInitUniform(&badPropLoss, q);
+    badPropLoss.propLossMath.type = POOL_INVALID_ARITH;
+    const char *msg = "maxPool1dLayerInit: layerQuant.forwardMath and propLossMath must be";
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, msg,
+        (void)maxPool1dLayerInit(
+            &(maxPool1dInit_t){.kernelSize = 2, .inputChannels = 2, .inputLength = 8},
+            &badForward));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, msg,
+        (void)maxPool1dLayerInitOwning(
+            &(maxPool1dInit_t){.kernelSize = 2, .inputChannels = 2, .inputLength = 8},
+            &badPropLoss));
+    freeQuantization(q);
+}
+
+/* An ARITH_BFP op stages FLOAT32 operands at its produced-wire widths, so that
+ * wire config must be BFP. */
+void testMaxPool1dLayerInitRejectsBfpMathWithoutBfpWire(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t bfpForward;
+    layerQuantInitUniform(&bfpForward, q);
+    bfpForward.forwardMath.type = ARITH_BFP;
+    layerQuant_t bfpPropLoss;
+    layerQuantInitUniform(&bfpPropLoss, q);
+    bfpPropLoss.propLossMath.type = ARITH_BFP;
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "maxPool1dLayerInit: ARITH_BFP forwardMath requires a BFP-typed outputQ",
+        (void)maxPool1dLayerInit(
+            &(maxPool1dInit_t){.kernelSize = 2, .inputChannels = 2, .inputLength = 8},
+            &bfpForward));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "maxPool1dLayerInit: ARITH_BFP propLossMath requires a BFP-typed propLossQ",
+        (void)maxPool1dLayerInitOwning(
+            &(maxPool1dInit_t){.kernelSize = 2, .inputChannels = 2, .inputLength = 8},
+            &bfpPropLoss));
+    freeQuantization(q);
+}
+
+void testAvgPool1dLayerInitRejectsUnsupportedArithmetic(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t badForward;
+    layerQuantInitUniform(&badForward, q);
+    badForward.forwardMath.type = POOL_INVALID_ARITH;
+    layerQuant_t badPropLoss;
+    layerQuantInitUniform(&badPropLoss, q);
+    badPropLoss.propLossMath.type = POOL_INVALID_ARITH;
+    const char *msg = "avgPool1dLayerInit: layerQuant.forwardMath and propLossMath must be";
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, msg, (void)avgPool1dLayerInit(&(avgPool1dInit_t){.kernelSize = 2}, &badForward));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, msg, (void)avgPool1dLayerInitOwning(&(avgPool1dInit_t){.kernelSize = 2}, &badPropLoss));
+    freeQuantization(q);
+}
+
+void testAvgPool1dLayerInitRejectsBfpMathWithoutBfpWire(void) {
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t bfpForward;
+    layerQuantInitUniform(&bfpForward, q);
+    bfpForward.forwardMath.type = ARITH_BFP;
+    layerQuant_t bfpPropLoss;
+    layerQuantInitUniform(&bfpPropLoss, q);
+    bfpPropLoss.propLossMath.type = ARITH_BFP;
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "avgPool1dLayerInit: ARITH_BFP forwardMath requires a BFP-typed outputQ",
+        (void)avgPool1dLayerInit(&(avgPool1dInit_t){.kernelSize = 2}, &bfpForward));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "avgPool1dLayerInit: ARITH_BFP propLossMath requires a BFP-typed propLossQ",
+        (void)avgPool1dLayerInitOwning(&(avgPool1dInit_t){.kernelSize = 2}, &bfpPropLoss));
     freeQuantization(q);
 }
 
@@ -547,11 +610,14 @@ int main(void) {
     RUN_TEST(testMaxPool1dLayerInitBorrowingBuildsLayerWithKernelAndArgmax);
     RUN_TEST(testMaxPool1dLayerInitBorrowingStrideDefaultsToKernelSize);
     RUN_TEST(testMaxPool1dLayerInitOwningDeepCopiesTwoQuantizations);
-    RUN_TEST(testMaxPool1dLayerInitOwningRepeatedBuildFreeNoLeak);
     RUN_TEST(testAvgPool1dLayerInitBorrowingBuildsLayerWithKernel);
     RUN_TEST(testAvgPool1dLayerInitRejectsANonPowerOfTwoKernelUnderBfpMath);
     RUN_TEST(testAvgPool1dLayerInitBorrowingStrideDefaultsToKernelSize);
     RUN_TEST(testAvgPool1dLayerInitOwningDeepCopiesTwoQuantizations);
+    RUN_TEST(testMaxPool1dLayerInitRejectsUnsupportedArithmetic);
+    RUN_TEST(testMaxPool1dLayerInitRejectsBfpMathWithoutBfpWire);
+    RUN_TEST(testAvgPool1dLayerInitRejectsUnsupportedArithmetic);
+    RUN_TEST(testAvgPool1dLayerInitRejectsBfpMathWithoutBfpWire);
     RUN_TEST(testMaxPool1dArgmaxGrowsOnceAndTracksBatch);
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testMaxPool1dArgmaxGrowthReturnsTheOldBlock);

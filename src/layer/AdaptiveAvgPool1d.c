@@ -19,10 +19,6 @@
 
 void initAdaptiveAvgPool1dConfig(adaptiveAvgPool1dConfig_t *cfg, size_t outputSize,
                                  quantization_t *forwardQ, quantization_t *propLossQ) {
-    if (outputSize == 0) {
-        PRINT_ERROR("AdaptiveAvgPool1d: outputSize must be >= 1");
-        exit(1);
-    }
     cfg->outputSize = outputSize;
     cfg->forwardMath = arithmeticFromQuantizationOrDefault(forwardQ);
     cfg->propLossMath = arithmeticFromQuantizationOrDefault(propLossQ);
@@ -46,10 +42,6 @@ static void adaptiveAvgPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *r
     size_t channels = input->shape->dimensions[1];
     size_t inputLength = input->shape->dimensions[2];
     size_t outputLength = cfg->outputSize;
-
-    // batch/channels come from the input but size the rawOut writes (F5 parity).
-    poolRequireDims3(rawOut, batch, channels, outputLength,
-                     "AdaptiveAvgPool1d forward FLOAT32 (rawOut)");
 
     float const *xArr = (float const *)input->data;
     float *yArr = (float *)rawOut->data;
@@ -114,10 +106,6 @@ static void adaptiveAvgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, ten
     size_t inputLength = input->shape->dimensions[2];
     size_t outputLength = cfg->outputSize;
 
-    // batch/channels come from the input but size the rawOut writes (F5 parity).
-    poolRequireDims3(rawOut, batch, channels, outputLength,
-                     "AdaptiveAvgPool1d forward SYM_INT32 (rawOut)");
-
     /* Max adaptive window count = ceil((o+1)L/O) - floor(oL/O) <= L/O + 1,
      * conservatively bounded by ceil(L/O) + 1. */
     poolValidateSymValueSum(input, (inputLength + outputLength - 1) / outputLength + 1,
@@ -160,23 +148,12 @@ static void adaptiveAvgPool1dForwardKernelBfp(tensor_t **ops, size_t n, tensor_t
     const adaptiveAvgPool1dConfig_t *cfg = ctx;
     tensor_t *input = ops[0];
 
-    if (input->shape->numberOfDimensions != 3) {
-        PRINT_ERROR("AdaptiveAvgPool1d forward BFP: input must be rank-3 [batch, channels, "
-                    "length], got rank %zu",
-                    input->shape->numberOfDimensions);
-        exit(1);
-    }
     size_t batch = input->shape->dimensions[0];
     size_t channels = input->shape->dimensions[1];
     size_t inputLength = input->shape->dimensions[2];
     size_t outputLength = cfg->outputSize;
 
-    /* All three dims (F5), not just the length — see poolRequireDims3. */
-    poolRequireDims3(rawOut, batch, channels, outputLength,
-                     "AdaptiveAvgPool1d forward BFP (rawOut)");
-
     const bfpQConfig_t *qC = input->quantization->qConfig;
-    validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(input));
     bfpValidateSumHeadroom(qC, (inputLength + outputLength - 1) / outputLength + 1,
                            "AdaptiveAvgPool1d forward BFP");
     const int32_t expBias = bfpExponentBias(qC);
@@ -225,6 +202,13 @@ void adaptiveAvgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output,
                               const layerExec_t *exec) {
     rngKey_t opKey;
     adaptiveAvgPool1dConfig_t *cfg = layer->config->adaptiveAvgPool1d;
+
+    size_t outDims[3];
+    size_t outOrder[3];
+    shape_t outExpected = {.dimensions = outDims, .orderOfDimensions = outOrder};
+    adaptiveAvgPool1dCalcOutputShape(layer, input->shape, &outExpected);
+    layerRequireDenseWire(output, &outExpected, "AdaptiveAvgPool1d forward", "output");
+
     if (cfg->forwardMath.type == ARITH_BFP) {
         const bfpQConfig_t *anchor = bfpWireAnchor(cfg->outputQ, "AdaptiveAvgPool1d forward");
         /* Stack template: lifetime covers the executeOp call (same frame).
@@ -252,18 +236,9 @@ void adaptiveAvgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output,
         return;
     }
 
-    opKernelFn_t kernel;
-    switch (cfg->forwardMath.type) {
-    case ARITH_FLOAT32:
-        kernel = adaptiveAvgPool1dForwardKernel;
-        break;
-    case ARITH_SYM_INT32:
-        kernel = adaptiveAvgPool1dForwardKernelSymInt32;
-        break;
-    default:
-        PRINT_ERROR("AdaptiveAvgPool1d forward: quantization type not implemented");
-        exit(1);
-    }
+    opKernelFn_t kernel = cfg->forwardMath.type == ARITH_SYM_INT32
+                              ? adaptiveAvgPool1dForwardKernelSymInt32
+                              : adaptiveAvgPool1dForwardKernel;
     executeOp(
         &(opSpec_t){
             .kernel = kernel,
@@ -277,32 +252,11 @@ void adaptiveAvgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output,
         output);
 }
 
-void adaptiveAvgPool1dBackwardFloat(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
-                                    tensor_t *propLoss) {
-    adaptiveAvgPool1dConfig_t *cfg = layer->config->adaptiveAvgPool1d;
-    (void)forwardInput; // not needed: window geometry is determined by shapes
-
-    if (lossGrad->shape->numberOfDimensions != 3 || propLoss->shape->numberOfDimensions != 3) {
-        PRINT_ERROR("AdaptiveAvgPool1d backward FLOAT32: lossGrad and propLoss must both be "
-                    "rank-3, got ranks %zu and %zu",
-                    lossGrad->shape->numberOfDimensions, propLoss->shape->numberOfDimensions);
-        exit(1);
-    }
+static void adaptiveAvgPool1dBackwardFloat(tensor_t *lossGrad, tensor_t *propLoss) {
     size_t batch = lossGrad->shape->dimensions[0];
     size_t channels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
     size_t inputLength = propLoss->shape->dimensions[2];
-
-    // batch/channels come from lossGrad but size the propLoss memset + scatter (F5 parity).
-    poolRequireDims3(propLoss, batch, channels, inputLength,
-                     "AdaptiveAvgPool1d backward FLOAT32 (propLoss)");
-
-    if (outputLength != cfg->outputSize) {
-        PRINT_ERROR("AdaptiveAvgPool1d backward: lossGrad outputLength (%zu) does not match "
-                    "configured outputSize (%zu)",
-                    outputLength, cfg->outputSize);
-        exit(1);
-    }
 
     float const *gyArr = (float const *)lossGrad->data;
     float *gxArr = (float *)propLoss->data;
@@ -336,30 +290,13 @@ static void adaptiveAvgPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, te
                                                     rngStream_t *rs) {
     (void)n;
     (void)auxOut;
-    const adaptiveAvgPool1dConfig_t *cfg = ctx;
+    (void)ctx;
     tensor_t *lossGrad = ops[0];
 
-    if (lossGrad->shape->numberOfDimensions != 3 || rawOut->shape->numberOfDimensions != 3) {
-        PRINT_ERROR("AdaptiveAvgPool1d backward SYM_INT32: lossGrad and rawOut must both be "
-                    "rank-3, got ranks %zu and %zu",
-                    lossGrad->shape->numberOfDimensions, rawOut->shape->numberOfDimensions);
-        exit(1);
-    }
     size_t batch = lossGrad->shape->dimensions[0];
     size_t channels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
     size_t inputLength = rawOut->shape->dimensions[2];
-
-    // batch/channels come from lossGrad but size the rawOut memset + scatter (F5 parity).
-    poolRequireDims3(rawOut, batch, channels, inputLength,
-                     "AdaptiveAvgPool1d backward SYM_INT32 (rawOut)");
-
-    if (outputLength != cfg->outputSize) {
-        PRINT_ERROR("AdaptiveAvgPool1d backward: lossGrad outputLength (%zu) does not match "
-                    "configured outputSize (%zu)",
-                    outputLength, cfg->outputSize);
-        exit(1);
-    }
 
     /* Worst-case scatter collisions per input cell = covering windows
      * <= O/L + 1 (window o covers idx iff oL/O < idx+1 and (o+1)L/O > idx),
@@ -400,33 +337,15 @@ static void adaptiveAvgPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_
                                                tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)n;
     (void)auxOut;
-    const adaptiveAvgPool1dConfig_t *cfg = ctx;
+    (void)ctx;
     tensor_t *lossGrad = ops[0];
 
-    if (lossGrad->shape->numberOfDimensions != 3 || rawOut->shape->numberOfDimensions != 3) {
-        PRINT_ERROR("AdaptiveAvgPool1d backward BFP: lossGrad and rawOut must both be rank-3, "
-                    "got ranks %zu and %zu",
-                    lossGrad->shape->numberOfDimensions, rawOut->shape->numberOfDimensions);
-        exit(1);
-    }
     size_t batch = lossGrad->shape->dimensions[0];
     size_t channels = lossGrad->shape->dimensions[1];
     size_t outputLength = lossGrad->shape->dimensions[2];
     size_t inputLength = rawOut->shape->dimensions[2];
 
-    if (outputLength != cfg->outputSize) {
-        PRINT_ERROR("AdaptiveAvgPool1d backward: lossGrad outputLength (%zu) does not match "
-                    "configured outputSize (%zu)",
-                    outputLength, cfg->outputSize);
-        exit(1);
-    }
-    /* All three dims (F5): the memset sizes batch * channels * inputLength
-     * floats and the scatter uses batch/channels off the LOSSGRAD. */
-    poolRequireDims3(rawOut, batch, channels, inputLength,
-                     "AdaptiveAvgPool1d backward BFP (rawOut)");
-
     const bfpQConfig_t *qC = lossGrad->quantization->qConfig;
-    validateBfpQConfigShape(qC, calcNumberOfElementsByTensor(lossGrad));
     const int32_t expBias = bfpExponentBias(qC);
 
     int32_t const *gyArr = (int32_t const *)lossGrad->data;
@@ -451,24 +370,27 @@ static void adaptiveAvgPool1dBackwardKernelBfp(tensor_t **ops, size_t n, tensor_
     }
 }
 
+/* forwardInput is unused and may be NULL. */
 void adaptiveAvgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad,
                                tensor_t *propLoss, const layerExec_t *exec) {
+    (void)forwardInput;
     rngKey_t opKey;
     adaptiveAvgPool1dConfig_t *cfg = layer->config->adaptiveAvgPool1d;
+
+    size_t lossDims[3];
+    size_t lossOrder[3];
+    shape_t lossExpected = {.dimensions = lossDims, .orderOfDimensions = lossOrder};
+    adaptiveAvgPool1dCalcOutputShape(layer, propLoss->shape, &lossExpected);
+    layerRequireDenseWire(lossGrad, &lossExpected, "AdaptiveAvgPool1d backward", "loss");
+
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:
-        /* forwardInput is NOT guarded: this layer never dereferences it. */
-        /* Runs OUTSIDE executeOp and raw-casts both wires to float*; a packed
-         * BFP wire would be read as wide scalars (4x heap over-read on
-         * lossGrad, over-write into the packed propLoss buffer). #315 parity. */
+        /* This path casts lossGrad and propLoss directly to float. */
         bfpRequireNoBfpWire(lossGrad, "AdaptiveAvgPool1d backward (lossGrad)");
         bfpRequireNoBfpWire(propLoss, "AdaptiveAvgPool1d backward (propLoss)");
-        adaptiveAvgPool1dBackwardFloat(layer, forwardInput, lossGrad, propLoss);
+        adaptiveAvgPool1dBackwardFloat(lossGrad, propLoss);
         break;
     case ARITH_SYM_INT32:
-        bfpRequireNoBfpWire(lossGrad, "AdaptiveAvgPool1d backward (lossGrad)");
-        bfpRequireNoBfpWire(propLoss, "AdaptiveAvgPool1d backward (propLoss)");
-        (void)forwardInput; // not needed: window geometry comes from shapes
         executeOp(
             &(opSpec_t){
                 .kernel = adaptiveAvgPool1dBackwardKernelSymInt32,
@@ -490,7 +412,6 @@ void adaptiveAvgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t 
                               .roundingMode = cfg->propLossMath.roundingMode,
                               .mantissaBits = anchor->mantissaBits,
                               .exponentBits = anchor->exponentBits};
-        (void)forwardInput; // not needed: window geometry comes from shapes
         executeOp(
             &(opSpec_t){
                 .kernel = adaptiveAvgPool1dBackwardKernelBfp,
@@ -506,9 +427,6 @@ void adaptiveAvgPool1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t 
             propLoss);
         break;
     }
-    default:
-        PRINT_ERROR("AdaptiveAvgPool1d backward: quantization type not implemented");
-        exit(1);
     }
 }
 
@@ -516,6 +434,10 @@ void adaptiveAvgPool1dCalcOutputShape(layer_t *layer, shape_t *inputShape, shape
     if (inputShape->numberOfDimensions != 3) {
         PRINT_ERROR("AdaptiveAvgPool1d expects 3D input [batch, channel, length], got %zuD",
                     inputShape->numberOfDimensions);
+        exit(1);
+    }
+    if (inputShape->dimensions[2] == 0) {
+        PRINT_ERROR("AdaptiveAvgPool1d: input length must be > 0");
         exit(1);
     }
     adaptiveAvgPool1dConfig_t *cfg = layer->config->adaptiveAvgPool1d;

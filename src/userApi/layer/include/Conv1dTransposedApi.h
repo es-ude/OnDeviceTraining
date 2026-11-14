@@ -19,8 +19,7 @@ _Static_assert(VALID == 0,
  *      }, lq);
  *
  *  REQUIRED fields fire PRINT_ERROR + exit(1) if zero. Only VALID padding is
- *  supported: output-shape inference assumes VALID, and the factory does not
- *  reject other values, so the caller must not pass them. */
+ *  supported; the factory and the model loader reject other values. */
 typedef struct conv1dTransposedInit {
     /* REQUIRED */
     size_t inChannels;

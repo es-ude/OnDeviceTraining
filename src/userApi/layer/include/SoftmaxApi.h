@@ -8,7 +8,8 @@
 
 /*! Borrowing variant: the layer keeps lq->outputQ / lq->propLossQ, which must outlive it.
  *  Use when the quantizations are shared or long-lived. Exits on an incoherent profile
- *  (softmaxValidateConfig). */
+ *  (softmaxValidateConfig): an ARITH_BFP math slot needs a BFP wire config, even a
+ *  propLossMath slot whose backward never runs (e.g. fused CrossEntropy). */
 layer_t *softmaxLayerInit(layerQuant_t *lq);
 
 /*! Owning variant: deep-copies both quantizations, so the caller may drop them at once;

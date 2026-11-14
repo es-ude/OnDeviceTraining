@@ -802,9 +802,10 @@ the one non-`src/` exception, and they go through
 
 Because the funnel's prologue is not there to reject a mismatched wire, each
 of the three layers carries its own gate, and they are NOT the same shape.
-Relu and Dropout have an `arithmetic_t` slot, so they guard PER ARM:
-`requireNoBfpWire` on the FLOAT32/SYM arms (which raw-cast to `float*` /
-`int32*`) and `requireBfpWire` on the `ARITH_BFP` arm. Flatten has NO
+Relu and Dropout have an `arithmetic_t` slot, so they guard PER ARM
+(`reluRequireWireTypes`, `dropoutRequireWires`): every wire must be stored in
+the arm's exact dtype, because the FLOAT32/SYM arms raw-cast to `float*` /
+`int32*` and the `ARITH_BFP` arm reads codes and exponents. Flatten has NO
 arithmetic slot at all (`layerForwardMath` returns the `NO_ARITHMETIC`
 constant) and therefore no arms to guard: its gate is a pair check —
 a BFP wire on one side demands a BFP wire on the other, and the two must then

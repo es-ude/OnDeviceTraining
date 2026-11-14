@@ -2794,6 +2794,34 @@ void testSymBackwardRejectsFloat32Wires(void) {
     runSymBackwardWithFloatWire(2, "propLoss must be SYM_INT32");
 }
 
+/* gamma may be requantized after construction (requantizeTensorInPlace), so the SYM backward
+ * checks its storage type at entry like the wires. */
+void testSymBackwardRejectsARequantizedFloat32Gamma(void) {
+    groupNormInit_t init = {.numGroups = 2, .numChannels = 4, .eps = 1e-5f};
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, symQ);
+    layer_t *layer = groupNormLayerInit(&init, &lq);
+    requantizeTensorInPlace(layer->config->groupNorm->gamma->param, floatQ);
+    size_t dims[] = {1, 4, 2};
+    float vals[8] = {1.f, -1.f, 2.f, -2.f, 3.f, -3.f, 4.f, -4.f};
+    tensor_t *wires[3];
+    for (int w = 0; w < 3; w++) {
+        wires[w] = buildSymInt32TensorND(3, dims, vals);
+    }
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "gamma must be SYM_INT32",
+                             groupNormBackward(layer, wires[0], wires[1], wires[2], NULL));
+
+    for (int w = 0; w < 3; w++) {
+        freeTensor(wires[w]);
+    }
+    freeGroupNormLayer(layer);
+    freeQuantization(floatQ);
+    freeQuantization(symQ);
+}
+
 /* The affine product q*gamma_q needs int12 operands: the backward entry bounds gamma and every
  * SYM wire. */
 static void runSymBackwardWithWideOperand(bool wideGamma, const char *expected) {
@@ -2894,6 +2922,7 @@ int main(void) {
     RUN_TEST(testFactoryRejectsUnsupportedArithmetic);
     RUN_TEST(testFactoryRejectsSymMathWithoutSymOperands);
     RUN_TEST(testSymBackwardRejectsFloat32Wires);
+    RUN_TEST(testSymBackwardRejectsARequantizedFloat32Gamma);
     RUN_TEST(testSymBackwardRejectsWideGammaAndLoss);
     return UNITY_END();
 }

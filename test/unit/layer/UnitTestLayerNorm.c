@@ -3828,6 +3828,34 @@ static void runSymBackwardWithWideOperand(bool wideGamma, const char *expected) 
     freeQuantization(symQ);
 }
 
+/* gamma may be requantized after construction (requantizeTensorInPlace), so the SYM backward
+ * checks its storage type at entry like the wires. */
+void testSymBackwardRejectsARequantizedFloat32Gamma(void) {
+    layerNormInit_t init = {.normalizedShape = (size_t[]){4}, .numNormDims = 1, .eps = 1e-5f};
+    quantization_t *symQ = quantizationInitSymInt32(HALF_AWAY);
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, symQ);
+    layer_t *layer = layerNormLayerInit(&init, &lq);
+    requantizeTensorInPlace(layer->config->layerNorm->gamma->param, floatQ);
+    size_t dims[] = {2, 4};
+    float vals[8] = {1.f, -1.f, 2.f, -2.f, 3.f, -3.f, 4.f, -4.f};
+    tensor_t *wires[3];
+    for (int w = 0; w < 3; w++) {
+        wires[w] = buildSymInt32TensorND(2, dims, vals);
+    }
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "gamma must be SYM_INT32",
+                             layerNormBackward(layer, wires[0], wires[1], wires[2], NULL));
+
+    for (int w = 0; w < 3; w++) {
+        freeTensor(wires[w]);
+    }
+    freeLayerNormLayer(layer);
+    freeQuantization(floatQ);
+    freeQuantization(symQ);
+}
+
 void testSymBackwardRejectsWideGammaAndLoss(void) {
     runSymBackwardWithWideOperand(true, "gamma qMaxBits");
     runSymBackwardWithWideOperand(false, "loss qMaxBits");
@@ -3957,6 +3985,7 @@ int main(void) {
     RUN_TEST(testFactoryRejectsSymMathWithoutSymOperands);
     RUN_TEST(testSymBackwardRejectsFloat32Wires);
     RUN_TEST(testSymBackwardRejectsWideGammaAndLoss);
+    RUN_TEST(testSymBackwardRejectsARequantizedFloat32Gamma);
     RUN_TEST(testBackwardFloatGuardsSymOperands);
     return UNITY_END();
 }

@@ -1035,7 +1035,7 @@ void groupNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
         if (propLoss != NULL) {
             groupNormRequireSymWire(propLoss, "propLoss");
         }
-        groupNormRequireSymWidth(cfg->gamma->param, "gamma");
+        groupNormRequireSymWire(cfg->gamma->param, "gamma");
         groupNormBackwardSymInt32(cfg, forwardInput, loss, propLoss, exec);
         break;
     case ARITH_BFP: {

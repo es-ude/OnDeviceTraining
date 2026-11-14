@@ -29,8 +29,10 @@ typedef struct layerQuant {
     quantization_t *weightGradStorage; /* grad storage knob; NULL = per-layer default */
     quantization_t *biasGradStorage;   /* grad storage knob; NULL = per-layer default */
 
-    outputMode_t weightGradAccMode; /* accumulate mode for weight/gamma grads (packed-grad D1) */
-    outputMode_t biasGradAccMode;   /* accumulate mode for bias/beta grads (packed-grad D1) */
+    /* A trainable layer whose backward accumulates these grads needs an OUT_ACC_* value here:
+     * the factory rejects the zero value (OUT_WRITE) even if backward never runs. */
+    outputMode_t weightGradAccMode; /* accumulate mode for weight/gamma grads */
+    outputMode_t biasGradAccMode;   /* accumulate mode for bias/beta grads */
 } layerQuant_t;
 
 /*! Populate `lq` from a single `q`: all four arithmetic slots derive via

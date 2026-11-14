@@ -50,7 +50,8 @@ typedef struct avgPool1dInit {
  *  propLossQ verbatim.
  *  Use when: outputQ/propLossQ are shared/long-lived (e.g. reused across
  *  several layers) and the caller manages their lifetime — they must
- *  outlive the layer. */
+ *  outlive the layer. An ARITH_BFP math slot needs a BFP wire config, even a
+ *  propLossMath slot whose backward never runs. */
 layer_t *maxPool1dLayerInit(maxPool1dInit_t *init, layerQuant_t *lq);
 layer_t *avgPool1dLayerInit(avgPool1dInit_t *init, layerQuant_t *lq);
 

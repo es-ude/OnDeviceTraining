@@ -961,7 +961,7 @@ void layerNormBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *loss, t
         if (propLoss != NULL) {
             layerNormRequireSymWire(propLoss, "propLoss");
         }
-        layerNormRequireSymWidth(cfg->gamma->param, "gamma");
+        layerNormRequireSymWire(cfg->gamma->param, "gamma");
         layerNormBackwardSymInt32(cfg, forwardInput, loss, propLoss, exec);
         break;
     case ARITH_BFP: {

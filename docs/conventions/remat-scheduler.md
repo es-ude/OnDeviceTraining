@@ -389,7 +389,9 @@ decisions and those with nothing in force yet are left out.
 - **remat D54** Two-phase bind: derive every key fact into stack scratch,
   compare the full key, including dtype, rank, byte count and `numGroups`
   against `expCapacity`, and only then write a header. `rematWireBind`'s
-  inherited GRAD derivation follows the same order.
+  inherited GRAD derivation takes the live source's config without
+  re-checking its dtype, rank or bytes: the table bind checked them, and they
+  stay fixed during the call.
 - **remat D55** ARENA init order: the offsets table in its own heap block,
   the placement into it (the smallest layout of five fixed placement orders,
   first-fit-decreasing first, the earlier order on equal bytes; their scratch,

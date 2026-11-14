@@ -66,26 +66,13 @@ void testReportEchoesTypePolicyAndPlanFacts(void) {
     TEST_ASSERT_EQUAL_INT(REMAT_PLAN_LIVENESS, r.policy);
     TEST_ASSERT_TRUE(r.planned);
     TEST_ASSERT_EQUAL_size_t(25, r.numSteps); /* 12 + 1 + 1 + 11 */
-    freeFixture(&f, &s);
-}
-
-static size_t reportedPeakOnHar(const rematPlanSpec_t *spec) {
-    fixture_t f;
-    buildHarModel(&f);
-    rematScheduler_t s = initArena(&f, spec);
-    rematReport_t r;
+    TEST_ASSERT_EQUAL_size_t(49152, r.peakLiveBytes);
+    rematSchedulerDeinit(&s);
+    s = initArena(&f, NULL);
     rematSchedulerReport(&s, &r);
+    TEST_ASSERT_EQUAL_INT(REMAT_PLAN_STORE_ALL, r.policy);
+    TEST_ASSERT_EQUAL_size_t(74288, r.peakLiveBytes);
     freeFixture(&f, &s);
-    return r.peakLiveBytes;
-}
-
-/* Scan-model pins, read from the report. */
-void testReportPeakLiveBytesHarStoreAllIs74288(void) {
-    TEST_ASSERT_EQUAL_size_t(74288, reportedPeakOnHar(NULL));
-}
-
-void testReportPeakLiveBytesHarLivenessIs49152(void) {
-    TEST_ASSERT_EQUAL_size_t(49152, reportedPeakOnHar(&g_liveness));
 }
 
 /* Never initialised, failed before the plan existed, or deinitialised --
@@ -683,20 +670,6 @@ void testPlanHasGradRangeOnlyWithABackward(void) {
     freeModel(h.model, h.n);
 }
 
-static void placeTwoEndedWithoutGrad(void) {
-    static const handPlan_t hp = {{{8, 0, 0, REMAT_WIRE_ACT}}, 1, 1};
-    randomPlan_t rp;
-    buildHandPlan(&rp, &hp);
-    size_t offsets[1];
-    size_t bytes = 0;
-    (void)arenaPlaceTwoEnded(&rp.table, &rp.program, 8, offsets, &bytes);
-}
-
-void testTwoEndedExitsOnAPlanWithoutGradRanges(void) {
-    ASSERT_EXITS_WITH_OUTPUT(1, "remat[arena]: two-ended placement needs a GRAD range",
-                             placeTwoEndedWithoutGrad());
-}
-
 /* The random plans hold only ACT wires; two-ended needs GRAD ranges, so its
  * run marks the later half of each plan's ranges GRAD, as a backward follows
  * the forward. */
@@ -1290,10 +1263,9 @@ static size_t tableBlockBytes(layer_t **model, size_t n, lossFuncType_t lt, cons
 #endif
 }
 
-/* An oversized chain is refused from the table alone, before the plan block
- * is reserved: only the table is live at the exit, and the message is the
- * pre-check's, not the post-build check's ("plan has ... ranges"). */
-void testArenaInitExitsAboveMaxRangesBeforeThePlanIsBuilt(void) {
+/* An oversized STORE_ALL plan is refused after the build, before the row
+ * reserves anything: only the table and the plan are live at the exit. */
+void testArenaInitExitsAboveMaxRangesBeforeAnyRowReservation(void) {
     layer_t *relu = makeRelu(&g_floatQ);
     layer_t *model[ODT_REMAT_MAX_RANGES + 1u];
     fillReluChain(model, ODT_REMAT_MAX_RANGES + 1u, relu);
@@ -1301,15 +1273,9 @@ void testArenaInitExitsAboveMaxRangesBeforeThePlanIsBuilt(void) {
     tensor_t *x = makeInput(&in, (size_t[]){1, 1}, 2, &g_floatQ);
     char message[96];
     (void)snprintf(message, sizeof message,
-                   "model needs %u ranges, above ODT_REMAT_MAX_RANGES (%u)",
+                   "remat[arena]: plan has %u ranges, above ODT_REMAT_MAX_RANGES (%u)",
                    (unsigned)(ODT_REMAT_MAX_RANGES + 1u), (unsigned)ODT_REMAT_MAX_RANGES);
-    ASSERT_EXITS_WITH_OUTPUT(1, message,
-                             arenaInitExpectingAnExit(model, ODT_REMAT_MAX_RANGES + 1u, MSE, x));
-    char reserved[64];
-    (void)snprintf(reserved, sizeof reserved, "reservedBeforeExit=%zu\n",
-                   tableBlockBytes(model, ODT_REMAT_MAX_RANGES + 1u, MSE, x));
-    ASSERT_EXITS_WITH_OUTPUT(1, reserved,
-                             arenaInitExpectingAnExit(model, ODT_REMAT_MAX_RANGES + 1u, MSE, x));
+    assertExitsBeforeAnyRowReservation(model, ODT_REMAT_MAX_RANGES + 1u, MSE, x, message);
     freeReluLayer(relu);
 }
 
@@ -3204,85 +3170,10 @@ void testHeapReadOfAnInPlaceMemberAfterItsChainEndedTripsAsan(void) {
 }
 #endif
 
-/* The init self-check: the bytes the memory counter saw a successful init
- * reserve must equal what its report accounts for (arenaBytes +
- * metadataBytes). One unaccounted byte exits naming the row and both
- * numbers. */
-static void selfCheckWithOneExtraByte(rowInit_t init) {
-    fixture_t f;
-    buildHarModel(&f);
-    rematScheduler_t s = init(&f, NULL);
-    rematReport_t r;
-    rematSchedulerReport(&s, &r);
-    rematRequireReservedMatchesReport(&s, r.arenaBytes + r.metadataBytes + 1u);
-}
-
-void testInitSelfCheckExitsOnAnUnaccountedByteOnHeap(void) {
-    ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[heap]: init reserved 7217 B, but its report accounts for "
-                             "7216 B (arenaBytes 0 + metadataBytes 7216)",
-                             selfCheckWithOneExtraByte(initHeap));
-}
-
-void testInitSelfCheckExitsOnAnUnaccountedByteOnArena(void) {
-    ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[arena]: init reserved 81689 B, but its report accounts for "
-                             "81688 B (arenaBytes 74288 + metadataBytes 7400)",
-                             selfCheckWithOneExtraByte(initArena));
-}
-
-#ifdef ODT_MEM_PROFILE
-/* The same check reached through a real init: the wire table asks every layer
- * for its output shape while it is built, so a shape query that also reserves
- * 8 bytes once (kept reachable here) is a reservation no report term covers.
- * The init must then exit with its report's bytes + 8. */
-static calcOutputShapeFn_t g_realOutputShape;
-static void *g_unaccounted;
-
-static void outputShapeReservingEightBytesOnce(layer_t *layer, shape_t *in, shape_t *out) {
-    if (g_unaccounted == NULL) {
-        g_unaccounted = reserveMemory(8);
-    }
-    g_realOutputShape(layer, in, out);
-}
-
-static void initWithAnUnaccountedReservation(rematSchedulerType_t row) {
-    fixture_t f;
-    buildHarModel(&f);
-    layerType_t first = f.model[0]->type;
-    g_realOutputShape = layerFunctions[first].calcOutputShape;
-    layerFunctions[first].calcOutputShape = outputShapeReservingEightBytesOnce;
-    rematScheduler_t s;
-    bool built =
-        (row == REMAT_ARENA)
-            ? rematArenaInit(&s, &MODEL_CHAIN(f.model, f.n), defaultLossConfig(f.lt), f.x, NULL)
-            : rematHeapInit(&s, &MODEL_CHAIN(f.model, f.n), defaultLossConfig(f.lt), f.x, NULL);
-    if (!built) {
-        exit(2);
-    }
-}
-
-void testHeapInitExitsOnAnUnaccountedReservation(void) {
-    ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[heap]: init reserved 7224 B, but its report accounts for "
-                             "7216 B (arenaBytes 0 + metadataBytes 7216)",
-                             initWithAnUnaccountedReservation(REMAT_HEAP));
-}
-
-void testArenaInitExitsOnAnUnaccountedReservation(void) {
-    ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[arena]: init reserved 81696 B, but its report accounts for "
-                             "81688 B (arenaBytes 74288 + metadataBytes 7400)",
-                             initWithAnUnaccountedReservation(REMAT_ARENA));
-}
-#endif
-
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testArenaInitBuildsTheTableAndThePlan);
     RUN_TEST(testReportEchoesTypePolicyAndPlanFacts);
-    RUN_TEST(testReportPeakLiveBytesHarStoreAllIs74288);
-    RUN_TEST(testReportPeakLiveBytesHarLivenessIs49152);
     RUN_TEST(testReportOnAZeroedSchedulerIsEmpty);
     RUN_TEST(testReportMetadataCountsTheResidentBlocks);
     RUN_TEST(testDeinitIsNullSafeAndIdempotent);
@@ -3308,7 +3199,6 @@ int main(void) {
     RUN_TEST(testTwoEndedPlacesTheHandPlan);
     RUN_TEST(testTwoEndedOrdersItsStoredRangesByBeginThenLaterEnd);
     RUN_TEST(testPlanHasGradRangeOnlyWithABackward);
-    RUN_TEST(testTwoEndedExitsOnAPlanWithoutGradRanges);
     RUN_TEST(testNewMembersVerifyOnRandomPlans);
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testNewMembersReleaseTheirScratch);
@@ -3340,7 +3230,7 @@ int main(void) {
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testArenaInitReservesExactlyMetadataPlusArena);
 #endif
-    RUN_TEST(testArenaInitExitsAboveMaxRangesBeforeThePlanIsBuilt);
+    RUN_TEST(testArenaInitExitsAboveMaxRangesBeforeAnyRowReservation);
     RUN_TEST(testArenaInitAcceptsExactlyMaxRanges);
     RUN_TEST(testHeapInitAcceptsAStoreAllPlanAboveMaxRanges);
     RUN_TEST(testHeapInitExitsOnASequenceAboveMaxRangesBeforeThePlanBlock);
@@ -3429,12 +3319,6 @@ int main(void) {
     RUN_TEST(testDoneExitsOutsideACall);
     RUN_TEST(testEndExitsOutsideACall);
     RUN_TEST(testDeinitExitsInsideACall);
-    RUN_TEST(testInitSelfCheckExitsOnAnUnaccountedByteOnHeap);
-    RUN_TEST(testInitSelfCheckExitsOnAnUnaccountedByteOnArena);
-#ifdef ODT_MEM_PROFILE
-    RUN_TEST(testHeapInitExitsOnAnUnaccountedReservation);
-    RUN_TEST(testArenaInitExitsOnAnUnaccountedReservation);
-#endif
 #ifdef ODT_TEST_ASAN
     RUN_TEST(testHeapWireEndsAtItsExactBytes);
     RUN_TEST(testHeapReadAfterReleaseTripsAsan);

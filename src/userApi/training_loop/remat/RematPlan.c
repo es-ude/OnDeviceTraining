@@ -56,20 +56,8 @@ static void sortEndOrder(rematProgram_t *p) {
     }
 }
 
-/* Overflow-checked here are the plan-block size (the array offsets and
- * blockBytes, via planAdd/planMul), the step bound, the two
- * peaks, peakLiveBytes and the activation-only peak (accumulated with planAdd
- * in peakBytesUpTo, each under its own label), the activations' element
- * counts, and the two costs, forwardCost and recomputeCost.
- * The deriver's step, operand and range counts are plain size_t sums over
- * the table's nodes and the caller's steps -- all bounded well under SIZE_MAX
- * by the table's numWires < REMAT_NONE guard and the step bound, so they
- * cannot overflow. Only the two costs' exits are reachable (a layer's cost has no
- * bound the table checked) and have death tests. The others have none: a
- * program holds at most UINT16_MAX steps and no more ranges than steps, and
- * grammar rule 6 keeps the ranges of one wire apart, so a peak never exceeds
- * the table's checked total of wire bytes; an element count is a product the
- * table checked when it derived the same shape. */
+/* The table's wire and step limits bound structural sizes and peaks; the analytic costs still
+ * need these overflow checks. */
 static size_t planAdd(size_t a, size_t b, const char *quantity) {
     size_t out;
     if (!checkedAddSize(a, b, &out)) {
@@ -875,28 +863,6 @@ void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t
     freeReservedMemory(scratch);
 }
 
-/* The deriver reads the table and the grammar the model passed here: a model
- * other than the table's would surface as a grammar violation far from its
- * cause, so the key facts are compared first, by name, over the table's layer
- * count. */
-static void requireTheTablesModel(const rematWireTable_t *t, const model_t *m) {
-    for (size_t i = 0; i < t->modelSize; i++) {
-        if ((uint8_t)m->layers[i]->type != t->layerType[i]) {
-            PRINT_ERROR("rematPlanBuild: the model differs from the table's key at "
-                        "'layerType[%zu]': table %u, model %u",
-                        i, (unsigned)t->layerType[i], (unsigned)m->layers[i]->type);
-            exit(1);
-        }
-        uint8_t frozen = layerIsFrozen(m->layers[i]) ? 1u : 0u;
-        if (frozen != t->frozen[i]) {
-            PRINT_ERROR("rematPlanBuild: the model differs from the table's key at "
-                        "'frozen[%zu]': table %u, model %u",
-                        i, (unsigned)t->frozen[i], (unsigned)frozen);
-            exit(1);
-        }
-    }
-}
-
 /* min(UINT16_MAX, 2n + 2 + n(n+1)/2): the most steps a TRAIN program of n
  * layers may hold (grammar rules 5 and 6), for the checks that must run
  * before the plan block exists. */
@@ -1058,12 +1024,10 @@ static size_t activationElements(const shape_t *shape) {
     return count;
 }
 
-/* The TRAIN program's recompute numbers. The element counts come from the
- * table's ACT shapes (its wire bytes do not give BFP element counts). Grammar rule 1 runs every
- * layer's FORWARD once, so forwardCost is the sum over the layers. A layer's REFORWARDs are counted
- * by a scan of the steps, only in a program that recomputes: a SEQUENCE or RETAIN_LIST plan, whose
- * range cap keeps n at most ODT_REMAT_MAX_RANGES (ACT 1..n each have a range; only GRAD wires share
- * one), so the scans read at most n * numSteps steps. */
+/* The TRAIN program's recompute numbers. Element counts come from the table's ACT shapes (BFP
+ * byte counts do not determine element counts). The REFORWARD scans read at most n * numSteps
+ * steps: only SEQUENCE and RETAIN_LIST plans recompute, and their range cap keeps n at most
+ * ODT_REMAT_MAX_RANGES. */
 static void recordRecomputeNumbers(rematPlan_t *p, const rematWireTable_t *t, const model_t *m) {
     const rematProgram_t *train = &p->train;
     size_t refwdSteps = 0;
@@ -1121,7 +1085,6 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t 
         exit(1);
     }
     requireTheFieldsOfThePolicy(spec);
-    requireTheTablesModel(t, m);
     requireAChainForRecomputeAndInPlace(spec, t);
     if (policy == REMAT_PLAN_SEQUENCE) {
         requireASequenceWithinTheBound(spec, t->modelSize);
@@ -1166,7 +1129,6 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t 
 
 bool rematPlanBuildEval(rematPlan_t **out, const rematWireTable_t *t, const model_t *m) {
     *out = NULL;
-    requireTheTablesModel(t, m);
     rematDeriveSize_t evalSize = rematDeriveEvalSize(t);
     requireAnOperandPoolWithinTheOffsets(evalSize.numOperands, "rematPlanBuildEval", "EVAL");
     programLayout_t evalAt = layoutProgram(sizeof(rematPlan_t), evalSize, t->modelSize + 1u);

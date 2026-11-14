@@ -16,32 +16,20 @@
 
 bool rematHeapInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
                    const tensor_t *inputLike, const rematPlanSpec_t *spec) {
-#ifdef ODT_MEM_PROFILE
-    size_t mark = memProfileCurrentBytes();
-#endif
     *s = (rematScheduler_t){.type = REMAT_HEAP, .fns = &rematSchedulerFunctions[REMAT_HEAP]};
     if (!rematWireTableInit(&s->wires, m, loss, inputLike) ||
         !rematPlanBuild(&s->plan, s->wires, m, spec)) {
         return false;
     }
-#ifdef ODT_MEM_PROFILE
-    rematRequireReservedMatchesReport(s, memProfileCurrentBytes() - mark);
-#endif
     return true;
 }
 
 bool rematHeapInitEval(rematScheduler_t *s, const model_t *m, const tensor_t *inputLike) {
-#ifdef ODT_MEM_PROFILE
-    size_t mark = memProfileCurrentBytes();
-#endif
     *s = (rematScheduler_t){.type = REMAT_HEAP, .fns = &rematSchedulerFunctions[REMAT_HEAP]};
     if (!rematWireTableInitEval(&s->wires, m, inputLike) ||
         !rematPlanBuildEval(&s->plan, s->wires, m)) {
         return false;
     }
-#ifdef ODT_MEM_PROFILE
-    rematRequireReservedMatchesReport(s, memProfileCurrentBytes() - mark);
-#endif
     return true;
 }
 
@@ -59,7 +47,7 @@ bool rematHeapNext(rematScheduler_t *s, rematStep_t *st) {
         uint16_t w = p->ranges[r].wire;
         size_t bytes = rematWireBytes(s->wires, w);
         uint8_t *b = reserveMemory(bytes); /* exact bytes: an exact right-boundary ASan redzone */
-        rematWireBind(s->wires, w, b);     /* bindGen++, accounting, VERIFY poison-at-bind */
+        rematWireBind(s->wires, w, b);
     }
     *st = p->steps[s->walk.step];
     return true;

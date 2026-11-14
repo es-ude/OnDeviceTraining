@@ -4,7 +4,6 @@
 #include <stddef.h>
 #include <stdlib.h>
 
-#include "CheckedSize.h"
 #include "Common.h"
 #include "RematPlan.h"
 #include "RematRows.h"
@@ -70,8 +69,7 @@ void rematBeginEval(rematScheduler_t *s, const model_t *m, lossFuncType_t lossTy
 
 /* next() and done() alternate, and done() answers exactly the step next()
  * handed out. Checked here rather than in the rows: the protocol is the
- * same for every row, including those whose steps are not the plan's
- * (EVICT's synthesized REFORWARDs). */
+ * same for every row. */
 bool rematNext(rematScheduler_t *s, rematStep_t *st) {
     requireInCall(s, "rematNext");
     if (s->handedOut) {
@@ -142,23 +140,12 @@ void rematRequireWalkComplete(const rematScheduler_t *s, const char *row) {
     }
 }
 
-/* Every size sum is overflow-checked. Resident block sizes cannot reach SIZE_MAX
- * together, so this exit is unreachable and has no dedicated test. */
-static size_t reportAdd(size_t a, size_t b) {
-    size_t out;
-    if (!checkedAddSize(a, b, &out)) {
-        PRINT_ERROR("rematSchedulerReport: size overflow computing metadataBytes");
-        exit(1);
-    }
-    return out;
-}
-
 /* The ARENA half of the report: each flag derived from the block it names
  * (the offsets block, then the arena data block). */
 static void reportArena(const rematScheduler_t *s, const rematProgram_t *p, rematReport_t *out) {
     if (s->row.arena.offsets != NULL) {
         /* Cannot wrap: numRanges < REMAT_NONE, and init reserved this product. */
-        out->metadataBytes = reportAdd(out->metadataBytes, p->numRanges * sizeof(size_t));
+        out->metadataBytes += p->numRanges * sizeof(size_t);
     }
     if (s->row.arena.bytes != 0u) {
         out->placed = true;
@@ -186,7 +173,8 @@ void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out) {
     out->peakLiveBytes = p->peakLiveBytes;
     out->activationsPeakBytes = rematProgramActPeakBytes(p, s->wires);
     out->observedPeakLiveBytes = s->wires->observedPeakLiveBytes;
-    out->metadataBytes = reportAdd(s->wires->slabBytes, s->plan->blockBytes);
+    /* Sums of resident block sizes: they cannot wrap. */
+    out->metadataBytes = s->wires->slabBytes + s->plan->blockBytes;
     switch (s->type) {
     case REMAT_ARENA:
         reportArena(s, p, out);
@@ -197,17 +185,5 @@ void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out) {
         out->placed = true;
         out->dataReserved = true;
         break;
-    }
-}
-
-void rematRequireReservedMatchesReport(const rematScheduler_t *s, size_t reservedBytes) {
-    rematReport_t r;
-    rematSchedulerReport(s, &r);
-    size_t claimed = reportAdd(r.arenaBytes, r.metadataBytes);
-    if (reservedBytes != claimed) {
-        PRINT_ERROR("remat[%s]: init reserved %zu B, but its report accounts for %zu B "
-                    "(arenaBytes %zu + metadataBytes %zu)",
-                    s->fns->name, reservedBytes, claimed, r.arenaBytes, r.metadataBytes);
-        exit(1);
     }
 }

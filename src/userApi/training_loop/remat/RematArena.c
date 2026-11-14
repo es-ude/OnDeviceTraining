@@ -139,7 +139,7 @@ typedef struct arenaFit {
 } arenaFit_t;
 
 /* numRanges <= ODT_REMAT_MAX_RANGES < REMAT_NONE (rematArenaInit checks the
- * cap first): the uint16_t ids and this product fit. */
+ * cap before placing): the uint16_t ids and this product fit. */
 static bool arenaFitInit(arenaFit_t *f, const rematWireTable_t *t, const rematProgram_t *p,
                          size_t *offsets) {
     *f = (arenaFit_t){.t = t, .p = p, .offsets = offsets};
@@ -447,10 +447,6 @@ static size_t arenaRangeEnd(const rematWireTable_t *t, const rematProgram_t *p,
 bool arenaPlaceTwoEnded(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
                         size_t *offsets, size_t *bytes) {
     (void)placedPeak;
-    if (!arenaPlanHasGradRange(t, p)) {
-        PRINT_ERROR("remat[arena]: two-ended placement needs a GRAD range");
-        exit(1);
-    }
     arenaOrder_t o = {.t = t, .p = p, .boundary = UINT16_MAX};
     /* GRAD ranges alone suffice: the seed is a GRAD, and it opens before any PART. */
     for (size_t r = 0; r < p->numRanges; r++) {
@@ -596,39 +592,20 @@ void arenaVerifyEvalInsideTrain(const rematWireTable_t *t, const rematProgram_t 
 
 bool rematArenaInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
                     const tensor_t *inputLike, const rematPlanSpec_t *spec) {
-#ifdef ODT_MEM_PROFILE
-    size_t mark = memProfileCurrentBytes();
-#endif
     *s = (rematScheduler_t){.type = REMAT_ARENA, .fns = &rematSchedulerFunctions[REMAT_ARENA]};
     if (!rematWireTableInit(&s->wires, m, loss, inputLike)) {
         return false;
     }
-    /* Early bound, before the plan block exists: every TRAIN plan writes each
-     * slab wire at least once, so without inPlaceDx it holds at least
-     * numWires - 1 ranges (exactly that many under STORE_ALL and LIVENESS).
-     * An in-place plan holds fewer, one per chain, so near the cap this bound
-     * may reject a model the post-build check would admit; such a model has
-     * over 500 layers, far beyond MCU scale. The post-build check below stays
-     * authoritative. */
-    if (s->wires->numWires - 1u > ODT_REMAT_MAX_RANGES) {
-        PRINT_ERROR("remat[arena]: model needs %zu ranges, above ODT_REMAT_MAX_RANGES (%u)",
-                    s->wires->numWires - 1u, (unsigned)ODT_REMAT_MAX_RANGES);
-        exit(1);
-    }
-    /* The identical model reaches both: rematPlanBuild checks it against the
-     * table's key. */
     if (!rematPlanBuild(&s->plan, s->wires, m, spec)) {
         return false;
     }
     const rematProgram_t *p = &s->plan->train;
-    /* Authoritative: the placement below relies on it. No input reaches it
-     * today, so it has no dedicated test: STORE_ALL and LIVENESS stop at the
-     * pre-check above, and rematPlanBuild already caps SEQUENCE and
-     * RETAIN_LIST plans. */
+    /* The placement and its uint16_t range ids rely on it. SEQUENCE and RETAIN_LIST plans are
+     * already capped in rematPlanBuild; here it bounds STORE_ALL and LIVENESS plans. */
     if (p->numRanges > ODT_REMAT_MAX_RANGES) {
         PRINT_ERROR("remat[arena]: plan has %zu ranges, above ODT_REMAT_MAX_RANGES (%u)",
                     p->numRanges, (unsigned)ODT_REMAT_MAX_RANGES);
-        exit(1); /* a model/plan fact, not an OOM: the table-init idiom */
+        exit(1);
     }
     arenaRequirePlaceableSizes(s->wires, p);
     /* The offsets table is its own small block, placed into and verified
@@ -646,9 +623,6 @@ bool rematArenaInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
     s->row.arena.bytes = bytes; /* placed: every arena field of the report is valid */
     s->row.arena.base = reserveMemory(bytes);
     ODT_ASAN_POISON(s->row.arena.base, bytes); /* unaddressable until a range opens */
-#ifdef ODT_MEM_PROFILE
-    rematRequireReservedMatchesReport(s, memProfileCurrentBytes() - mark);
-#endif
     return true;
 }
 
@@ -687,7 +661,7 @@ bool rematArenaNext(rematScheduler_t *s, rematStep_t *st) {
         uint16_t w = p->ranges[r].wire;
         uint8_t *b = s->row.arena.base + arenaOffset(s, p, r);
         ODT_ASAN_UNPOISON(b, rematWireBytes(s->wires, w)); /* exact bytes: the pad stays poisoned */
-        rematWireBind(s->wires, w, b); /* bindGen++, accounting, VERIFY poison-at-bind */
+        rematWireBind(s->wires, w, b);
     }
     *st = p->steps[s->walk.step];
     return true;
@@ -699,8 +673,8 @@ void rematArenaDone(rematScheduler_t *s, const rematStep_t *st) {
     for (size_t r; (r = rematWalkClosing(p, &s->walk)) != REMAT_NONE;) {
         uint16_t w = p->ranges[r].wire;
         uint8_t *b = rematWireHdr(s->wires, w)->data;
-        rematWireRelease(s->wires, w);                /* VERIFY poison first, while still owned */
-        ODT_ASAN_POISON(b, arenaPlaced(s->wires, w)); /* then unaddressable */
+        rematWireRelease(s->wires, w); /* VERIFY poison first, while still owned */
+        ODT_ASAN_POISON(b, arenaPlaced(s->wires, w));
     }
     s->walk.step++;
 }

@@ -7,9 +7,8 @@
 
 #include "RematPlan.h"
 
-/* ARENA placement (#4), private to the ARENA row; PAGED reuses it
- * later. Offsets never leave the row: the shared table and plan stay
- * placement-free. */
+/* ARENA placement, private to the ARENA row. Offsets never leave the row:
+ * the shared table and plan stay placement-free. */
 
 /* Fixed, NOT -D-overridable: dumps, Python mirror, oracle and rig must agree.
  * A packed BFP wire can end at any byte; 8 keeps every offset legal for the
@@ -19,14 +18,13 @@ _Static_assert((ODT_WIRE_ALIGN & (ODT_WIRE_ALIGN - 1u)) == 0u, "power of two");
 _Static_assert(ODT_WIRE_ALIGN >= _Alignof(float) && ODT_WIRE_ALIGN >= _Alignof(int32_t),
                "fits every wire dtype");
 _Static_assert(ODT_WIRE_ALIGN <= _Alignof(max_align_t),
-               "reserveMemory block starts are max-aligned: calloc (StorageApi.c:72-74), or the "
-               "max_align_t header under ODT_MEM_PROFILE (StorageApi.c:15-18, :32-45)");
+               "reserveMemory block starts are max-aligned: calloc, or the max_align_t header "
+               "under ODT_MEM_PROFILE");
 
 /* Manual poisoning of the resident arena. The runtime entry points
  * are declared here rather than taken from <sanitizer/asan_interface.h>, which
- * the pinned devenv clang does not ship (the AsanDeath.h precedent). 8 is the
- * ASan shadow granule, so every range starts granule-aligned and an exact
- * unpoison leaves the pad poisoned. */
+ * the pinned devenv clang does not ship. 8 is the ASan shadow granule, so every
+ * range starts granule-aligned and an exact unpoison leaves the pad poisoned. */
 #if defined(__SANITIZE_ADDRESS__)
 #define ODT_REMAT_ASAN 1
 #elif defined(__has_feature)
@@ -91,8 +89,9 @@ bool arenaPlaceBreadthArea(const rematWireTable_t *t, const rematProgram_t *p, s
  * GRAD range) first fit from the bottom in (begin, end descending, range id);
  * the others first fit on their own in (begin, end descending, placed size
  * descending, range id) and are mirrored from the top of the lowest height at
- * which no co-live pair of the two groups overlaps. A plan without a GRAD
- * range exits naming it (arenaPlanHasGradRange). */
+ * which no co-live pair of the two groups overlaps. The caller guarantees a
+ * GRAD range (arenaPlanHasGradRange); arenaPlacePortfolio skips this member
+ * otherwise. */
 bool arenaPlaceTwoEnded(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
                         size_t *offsets, size_t *bytes);
 

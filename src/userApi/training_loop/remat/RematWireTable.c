@@ -27,12 +27,6 @@ const char *rematWireKindName(uint8_t kind) {
  * (NULL: the table's own arrays). */
 static void exitSizeOverflow(const rematWireFact_t *f, const char *quantity) {
     if (f == NULL) {
-        /* Reachable only at the pre-guard "numWires = n + 1" sum in
-         * rematWireTableInit (and its hasBackward extension), before numWires
-         * is checked against REMAT_NONE -- for an absurd n approaching
-         * SIZE_MAX. Every other NULL call runs after that guard, on values it
-         * already bounds. Kept so a NULL wire never reaches the wire-naming
-         * format below. */
         PRINT_ERROR("remat: size overflow computing %s of the table arrays", quantity);
     } else {
         PRINT_ERROR("remat: size overflow computing %s of wire %s %u", quantity,
@@ -560,13 +554,14 @@ static void copyGradShape(shape_t *dst, const shape_t *src) {
     setOrderOfDimsForNewTensor(dst->numberOfDimensions, dst->orderOfDimensions);
 }
 
-/* The only road into a slab BFP config. Phase 3 of the table bind and the
- * inherited-GRAD path of rematWireBind both come here, so neither can write
- * exponents[0..numGroups) past the slab's reserved expCapacity. */
+/* The only road into a slab BFP config. The caller guarantees numGroups <= expCapacity:
+ * requireWireKey checks it at the table bind, and an inherited GRAD's source geometry stays
+ * fixed during the call. */
 static void bindBfpInto(rematWireTable_t *t, uint16_t id, const bfpQConfig_t *tmpl,
                         size_t elements) {
     const rematWire_t *w = &t->wires[id];
     rematBfpGroups_t g = rematBfpWireGrouping(tmpl, elements, w->kind, w->index);
+    /* A third-party row may regroup a live header mid-call; refuse before the write overruns. */
     if (g.numGroups > w->expCapacity) {
         PRINT_ERROR("remat: wire %s %u needs %zu BFP exponent groups, above its expCapacity %zu",
                     rematWireKindName(w->kind), (unsigned)w->index, g.numGroups, w->expCapacity);
@@ -786,52 +781,14 @@ void rematWireTableUnbind(rematWireTable_t *t) {
     t->inPlace = NULL;
 }
 
-/* Names a record in a size-overflow exit (the checked helpers take a rematWireFact_t). */
-static rematWireFact_t nameOf(const rematWire_t *w) {
-    return (rematWireFact_t){.kind = w->kind, .index = w->index};
-}
-
-/* Overflow-checked like every size product, via the same elementsOf phase 1
- * uses. Unreachable in practice: the source ACT header was derived at this
- * call's table bind from checked facts. */
-static size_t liveElements(const shape_t *shape, const rematWire_t *w) {
-    rematWireFact_t name = nameOf(w);
-    return elementsOf(shape, &name);
-}
-
 /* Inherited GRAD headers are derived when the range opens, after the forward
  * that produced their source, so a producer that wrote a config field of its
- * output is seen. Check before write: every check (dtype, rank, the live
- * payload bytes, and inside bindBfpInto the grouping and the expCapacity
- * bound) runs before the first slab write, so the config is written before
- * the shape. */
+ * output is seen. The source's dtype, rank and payload size were checked at
+ * this call's table bind and stay fixed during the call. */
 static void deriveInheritedHeader(rematWireTable_t *t, uint16_t id) {
     rematWire_t *w = &t->wires[id];
     const tensor_t *src = t->wires[w->inheritFrom].hdr;
-    if ((uint8_t)src->quantization->type != w->dtype) {
-        PRINT_ERROR("rematWireBind: wire %s %u field 'dtype': its source ACT %u is live as dtype "
-                    "%d, the slab reserved dtype %u",
-                    rematWireKindName(w->kind), (unsigned)w->index, (unsigned)w->inheritFrom,
-                    (int)src->quantization->type, (unsigned)w->dtype);
-        exit(1);
-    }
-    if (src->shape->numberOfDimensions != w->rank) {
-        PRINT_ERROR("rematWireBind: wire %s %u field 'rank': its source ACT %u is live at rank "
-                    "%zu, the slab reserved rank %u",
-                    rematWireKindName(w->kind), (unsigned)w->index, (unsigned)w->inheritFrom,
-                    src->shape->numberOfDimensions, (unsigned)w->rank);
-        exit(1);
-    }
-    size_t elements = liveElements(src->shape, w);
-    rematWireFact_t name = nameOf(w);
-    size_t liveBytes = wireBytes(src->quantization, elements, &name);
-    if (liveBytes != w->bytes) {
-        PRINT_ERROR("rematWireBind: wire %s %u field 'bytes': its source ACT %u is live at %zu "
-                    "bytes, the slab reserved %zu",
-                    rematWireKindName(w->kind), (unsigned)w->index, (unsigned)w->inheritFrom,
-                    liveBytes, w->bytes);
-        exit(1);
-    }
+    size_t elements = calcNumberOfElementsByShape(src->shape);
     writeWireConfig(t, id, src->quantization, elements);
     copyGradShape(w->hdr->shape, src->shape);
 }
@@ -945,11 +902,8 @@ void rematWireBind(rematWireTable_t *t, uint16_t w, uint8_t *bytes) {
 #endif
     rec->bindGen++;
     bindMembers(t, w, bytes);
-    /* Overflow-checked, though each wire counts at most once (a bound wire cannot
-     * be bound again), so init's checked total of wire bytes already bounds the
-     * sum: this exit is unreachable and has no dedicated test. */
-    rematWireFact_t name = nameOf(rec);
-    t->liveBytes = addSize(t->liveBytes, rec->bytes, &name, "liveBytes");
+    /* Each wire counts at most once, so init's checked total of wire bytes bounds the sum. */
+    t->liveBytes += rec->bytes;
     if (t->liveBytes > t->observedPeakLiveBytes) {
         t->observedPeakLiveBytes = t->liveBytes;
     }

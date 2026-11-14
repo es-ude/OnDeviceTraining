@@ -864,8 +864,8 @@ checkpointing, limitations, literature).
   wires peak, activation-only peak, arena size, padding, placement gap, metadata,
   and the plan's recompute count with the multiply-accumulate cost of its forwards
   and of its recomputes, from `layerForwardCost`, an analytic count per layer);
-  in builds with the memory counter every init checks that it reserved exactly
-  what its report claims. The HAR main trainer, finetune stage 2 and `mnist_cnn`
+  every init reserves exactly what its report claims (a memory-counter test
+  pins it). The HAR main trainer, finetune stage 2 and `mnist_cnn`
   choose the scheme at start-up (`REMAT_STORAGE=arena|heap`,
   `REMAT_PLAN=store_all|liveness|retain:<j>[,<j>...]|retain:sqrt|retain:speed`,
   each optionally followed by `+inplace`,

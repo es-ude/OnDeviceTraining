@@ -10,9 +10,9 @@
 #include "Model.h"
 #include "Tensor.h"
 
-/* The remat scheduler's public header (#4): the step, policy, spec
- * and walk types the static plan shares, and the scheduler with its rows
- * (ARENA, HEAP), its const vtable and the rematBegin/Next/Done/End dispatch. */
+/* The remat scheduler's public header: the step, policy, spec and walk types
+ * the static plan shares, and the scheduler with its rows (ARENA, HEAP), its
+ * const vtable and the rematBegin/Next/Done/End dispatch. */
 
 /* APPEND-ONLY: stored in plan tables and in caller step lists (REMAT_PLAN_SEQUENCE). */
 typedef enum rematStepKind {
@@ -59,14 +59,10 @@ typedef enum rematPlanPolicy {
  * (C cannot detect a shorter buffer), and 1 <= sequenceLen <= min(UINT16_MAX,
  * 2n + 2 + n(n+1)/2) for a model of n layers. Its records set kind and layer
  * only (zero-initialise them): one with a non-zero numReads, numWrites,
- * reserved or operands exits. rematPlanBuild copies the steps into the plan
- * and keeps no pointer to them: the caller may free or reuse the buffer once
- * it returns. The buffer must stay unchanged while rematPlanBuild runs:
- * rematPlanBuild reads the steps three times, to check the records, to count
- * the ranges and to copy them. retain points at n + 1 flags, retain[j] for
- * ACT j (retain[0] is ignored: the input is the caller's), read only while rematPlanBuild runs; it
- * is read more than once too (to check, to count, to write the steps), so it
- * must also stay unchanged meanwhile. A dropped ACT that a backward step
+ * reserved or operands exits. retain points at n + 1 flags, retain[j] for ACT
+ * j (retain[0] is ignored: the input is the caller's). Both buffers must stay
+ * readable and unchanged while the init runs; the plan copies the steps and
+ * keeps neither buffer. A dropped ACT that a backward step
  * reads is recomputed just before that step from the nearest ACT below it
  * that is present; the build exits where no REFORWARD may run (a loss
  * backward and no backward layer step) and where that would recompute a
@@ -158,11 +154,9 @@ struct rematScheduler {
 
 /* One init per row (the LrScheduler idiom). Always returns true: a failed
  * reservation exits in reserveMemory. A model the table cannot describe,
- * or whose size arithmetic overflows, exits naming it. In builds with the
- * memory counter (ODT_MEM_PROFILE) a successful init checks that it reserved
- * exactly its report's arenaBytes + metadataBytes and exits naming both
- * otherwise. The counter is process-wide: no other thread may reserve or free
- * memory while an init runs. */
+ * or whose size arithmetic overflows, exits naming it. ARENA also exits on a
+ * plan above ODT_REMAT_MAX_RANGES ranges. A successful init reserves exactly
+ * its report's arenaBytes + metadataBytes. */
 bool rematArenaInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
                     const tensor_t *inputLike, const rematPlanSpec_t *spec);
 /* The peer row: table and plan only; one exactly-sized block per

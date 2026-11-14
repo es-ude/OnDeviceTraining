@@ -12,18 +12,16 @@
 #include "RematScheduler.h"
 #include "Tensor.h"
 
-/* Internal to the remat libraries (#4): the row inits, the
- * dispatch, RematCheck and tests include it. Placement-free: no byte offset
- * lives here (ARENA keeps its offsets privately).
+/* Internal to the remat libraries: the row inits, the dispatch, RematCheck
+ * and tests include it. Placement-free: no byte offset lives here (ARENA
+ * keeps its offsets privately).
  *
- * BORROWED STORAGE: every slab header's shape arrays,
- * quantization_t, qConfig and BFP exponent array is interior storage of the
- * ONE table block. A slab header, or any quantization_t reachable from one,
- * must never reach freeTensor, freeShape, freeQuantization,
- * freeReservedMemory or a deserialize destination (deserializeQConfig
- * reallocates exponents): rematWireTableFree releases the whole table with a
- * single freeReservedMemory. bfpQConfig_t has no owning/borrowed flag, so this
- * rule is the only guard.
+ * BORROWED STORAGE: every slab header's shape arrays, quantization_t, qConfig
+ * and BFP exponent array is interior storage of the ONE table block. Never
+ * pass a slab header, or a quantization_t reachable from one, to freeTensor,
+ * freeShape, freeQuantization, freeReservedMemory or a deserialize
+ * destination (deserializeQConfig reallocates exponents). bfpQConfig_t has no
+ * owning/borrowed flag, so this rule is the only guard.
  *
  * SIZE ARITHMETIC: every size product and sum RematPlan
  * computes itself is overflow-checked and exits naming the wire and the
@@ -163,16 +161,14 @@ void rematWireTableBind(rematWireTable_t *t, const model_t *m, lossFuncType_t lt
                         tensor_t *input);
 void rematWireTableUnbind(rematWireTable_t *t); /* ACT 0 hdr = NULL, inPlace = NULL */
 
-/* The row SDK: the ONLY writers of a header's ->data. A bind
- * requires this table's rematWireTableBind to have already run earlier in the
- * same call; bytes must be non-NULL and aligned for the wire's dtype. Bind
- * derives an inherited GRAD header (the seed, Flatten's dx) from the LIVE ACT
- * header -- this call's header content: the source ACT's data does not have
- * to be bound (under LIVENESS a Flatten dx GRAD binds after its source ACT
- * died, and PR1d must not require the source to be resident) -- checking
- * dtype, rank, the live payload bytes and BFP capacity before any write.
- * Both exit on the borrowed ACT 0, on an unbalanced call, on a NULL
- * bytes and on a wire id at or above numWires. While the table borrows a
+/* The row SDK: the ONLY writers of a header's ->data. Call after this
+ * call's rematWireTableBind; bind and release chain roots only; bytes must be
+ * non-NULL and satisfy the wire's size and alignment. Bind derives an
+ * inherited GRAD header (the seed, Flatten's dx) from the LIVE ACT header,
+ * whose data need not be resident (under LIVENESS a Flatten dx GRAD binds
+ * after its source ACT died); the source's dtype, rank and payload size are
+ * the ones the table bind checked. Both exit on the borrowed ACT 0, on an
+ * unbalanced call, on a NULL bytes and on a wire id at or above numWires. While the table borrows a
  * plan's in-place marks (a training call), Bind and Release of a chain's root
  * also bind and release its members: each member takes the root's bytes and
  * keeps its own header, liveBytes counts the chain once, and both calls exit
@@ -254,12 +250,12 @@ typedef struct rematPlan {
 } rematPlan_t;
 
 /* Generates the TRAIN and the EVAL program for the table's built model in ONE
- * reserveMemory block. `m` must be the model the table was built on: the
- * deriver reads only the table, `m` feeds the grammar and the costs, and a
- * layerType/frozen mismatch exits by name. A DAG model plans under STORE_ALL
- * and LIVENESS only: SEQUENCE, RETAIN_LIST and inPlaceDx exit on it, since
- * recompute and in-place read chain positions. Always returns true: a failed
- * reservation exits in reserveMemory. */
+ * reserveMemory block. The caller guarantees `m` is the model the table was
+ * just built on: the deriver reads only the table, `m` feeds the grammar and
+ * the costs, so a different model is not detected. A DAG model plans under
+ * STORE_ALL and LIVENESS only: SEQUENCE, RETAIN_LIST and inPlaceDx exit on it,
+ * since recompute and in-place read chain positions. Always returns true: a
+ * failed reservation exits in reserveMemory. */
 bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t *m,
                     const rematPlanSpec_t *spec);
 /* The plan of an eval-only table: the EVAL program alone, the same as rematPlanBuild's, and a
@@ -282,38 +278,15 @@ size_t rematProgramActPeakBytes(const rematProgram_t *p, const rematWireTable_t 
 size_t rematWalkOpening(const rematProgram_t *p, rematWalk_t *w);
 size_t rematWalkClosing(const rematProgram_t *p, rematWalk_t *w);
 
-/* Grammar validation (rules 1-4 and 6-8). Deliberately independent of
- * RematCheck and of the deriver, so a mutation in one is caught by the other:
- * it reads wiring, read-set and needs-grad off `m` with its own code, never
- * the table's flags or dx slots, and takes the table's gradIdOf only where
- * the wire records confirm it. rematPlanBuild runs it on every program it
- * generates; tests run it on tampered programs. Exits naming the step index
- * (or the range index) and the rule. An EVAL program has no backward step:
- * rule 2 rejects LOSS_BACKWARD and BACKWARD there, rule 6 rejects REFORWARD,
- * and rule 3 does not apply. Rule 3 runs BACKWARD over the grammar's own set
- * of nodes that run backward, descending. Rule 8 holds every step's operand
- * slice inside the pool, at its node's nodeOps entry (a SUM at its sum
- * entry), and equal to the operands the model gives that step, except the dx
- * slots of buffers that need a gradient, which rule 7 judges. Rule 7, the
- * fan-out rule, tracks each GRAD over the program: one WRITE opens it, later
- * contributions ACC into it only from a row with accumulatesDx, any other
- * later contribution writes a PART once that the SUM at the very next step
- * adds in, and no BACKWARD reads a GRAD before every contribution the model
- * gives it has arrived. Rules 4 and 6 then read the slice. Rule 6 also bounds
- * the step count (SUM steps aside: rule 7 admits at most one per BACKWARD),
- * admits a REFORWARD only inside the backward window and never for a layer
- * whose training forward updates its state (layerForwardUpdatesState), makes
- * every WRITE open a range of its own, opens each range at a step whose write
- * set holds its wire with WRITE (an ACC only extends one), and keeps the
- * ranges on wires of the table, begin-sorted and inside the stream. inPlace
- * is the plan's marks (NULL: none), checked first on their own: the model is
- * a chain (the alias rules read chain positions; a DAG exits), and each mark
- * sits on a ReLU, Dropout or Flatten dx wire whose BACKWARD reads wire - 1,
- * both of one dtype, FLOAT32 or SYM_INT32, and equal bytes. A member's reads
- * and its write then count against its chain root's range, its write lands in
- * that range although the root opened it, and no range names a member. The
- * checker's own counts live in one transient reserveMemory block, freed
- * before it returns; without memory it exits. */
+/* Validates a completed program once, before it can run: step ordering,
+ * operand coverage, recomputation legality, the fan-out contributions of a
+ * GRAD (one WRITE opens it; later ones ACC from an accumulating row or write a
+ * PART the next step SUMs in) and alias-chain lifetimes (rules 1-4 and 6-8).
+ * Independent of RematCheck and of the deriver -- it reads wiring, read-set
+ * and needs-grad off `m` with its own code -- so a mutation in one is caught
+ * by the other; tests also run it on tampered programs. Exits naming the step
+ * or range index and the rule. inPlace is the plan's marks (NULL: none); marks
+ * on a DAG exit. Its counts live in one transient reserveMemory block. */
 void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, const model_t *m,
                               rematMode_t mode, const uint8_t *inPlace);
 

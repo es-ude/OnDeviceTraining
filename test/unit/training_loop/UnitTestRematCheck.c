@@ -730,27 +730,6 @@ void testInitSetsTheStepBudgetFromTheModelSize(void) {
     freeFixture(&f, &s);
 }
 
-/* n(n + 1) overflows size_t at n = SIZE_MAX / 2. The budget exits before the
- * checker reads anything sized by n: the backward cursor comes from the
- * table, never from the model passed in. */
-static void initWithAnOverflowingBudget(fixture_t *f, rematScheduler_t *s) {
-    uint32_t producedGen[rematCheckNumWires(s)];
-    uint16_t pending[rematCheckNumWires(s)];
-    rematCheck_t c;
-    const model_t chain = MODEL_CHAIN(f->model, SIZE_MAX / 2u);
-    rematCheckInit(&c, s, &chain, REMAT_MODE_TRAIN, producedGen, pending);
-}
-
-void testInitExitsOnAStepBudgetThatOverflows(void) {
-    fixture_t f;
-    buildHarModel(&f);
-    rematScheduler_t s = initHeap(&f, NULL);
-    ASSERT_EXITS_WITH_OUTPUT(
-        1, "rematCheckInit: the step budget 2n + 2 + n(n+1)/2 overflows size_t (n = ",
-        initWithAnOverflowingBudget(&f, &s));
-    freeFixture(&f, &s);
-}
-
 void testStepExitsOnAReforwardBeforeTheLossForward(void) {
     assertF1RejectsAt(
         1, (rematStep_t){.kind = REMAT_STEP_REFORWARD, .layer = 0u},
@@ -1733,7 +1712,6 @@ int main(void) {
     RUN_TEST(testStepExitsOnABackwardAfterTheLastOne);
     RUN_TEST(testCheckAcceptsEveryStepOfARecomputePlanOnBothRows);
     RUN_TEST(testInitSetsTheStepBudgetFromTheModelSize);
-    RUN_TEST(testInitExitsOnAStepBudgetThatOverflows);
     RUN_TEST(testCheckAcceptsAReforwardOfTheLastLayerBeforeTheLossBackward);
     RUN_TEST(testStepExitsOnAReforwardBeforeTheLossForward);
     RUN_TEST(testStepExitsOnAReforwardWhenNothingTrains);

@@ -37,14 +37,8 @@ void rematHeapEnd(rematScheduler_t *s);
  * its range. */
 void rematHeapDeinit(rematScheduler_t *s);
 
-/* For rows that walk the static plan (ARENA, HEAP; PAGED later): every step
- * done and every range closed, else exits naming the row. EVICT ignores the
- * walk and checks its own end. */
+/* For rows that walk the static plan: every step done and every range
+ * closed, else exits naming the row. */
 void rematRequireWalkComplete(const rematScheduler_t *s, const char *row);
-
-/* The row inits call it under ODT_MEM_PROFILE once they succeed, with the
- * bytes the memory counter saw them reserve: exits naming the row when that
- * differs from what the report accounts for (arenaBytes + metadataBytes). */
-void rematRequireReservedMatchesReport(const rematScheduler_t *s, size_t reservedBytes);
 
 #endif // ODT_REMAT_ROWS_H

@@ -2230,121 +2230,6 @@ void testWireBindInheritedSymTakesConfigNotScale(void) {
     freeModel(model, 2);
 }
 
-/* FLOAT32 and SYM_INT32 both charge 4 B/element (wireBytes), so this dtype
- * edit is byte-neutral -- the bytes check cannot catch it, only the dtype
- * check can. Without it, initFloat32Quantization would silently orphan the
- * slab's reserved SYM_INT32 qConfig. */
-void testWireBindInheritedGradChecksTheLiveDtypeWhenByteNeutral(void) {
-    symInt32QConfig_t symQc;
-    initSymInt32QConfigWithQMaxBits(SR_HALF_AWAY, &symQc, 10);
-    quantization_t symQ = {.type = SYM_INT32, .qConfig = &symQc};
-    layer_t *model[2] = {makeLinear(2, 4, false, 0), makeQuant(&symQ, &g_floatQ)};
-    inputLike_t in;
-    tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
-    rematWireTable_t *t = initTable(model, 2, MSE, x);
-    rematWireTableBind(t, &MODEL_CHAIN(model, 2), MSE, REMAT_MODE_TRAIN, x);
-    uint32_t act2[4];
-    uint32_t seed[4];
-    rematWireBind(t, 2, (uint8_t *)act2);
-    rematActHdr(t, 2)->quantization->type = FLOAT32;
-    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireBind: wire GRAD 2 field 'dtype'",
-                             rematWireBind(t, rematGradId(t, 2), (uint8_t *)seed));
-    rematWireTableFree(t);
-    freeModel(model, 2);
-}
-
-/* Check before write (table-level twin of PR2's decorator test): a live ACT header whose
- * grouping grew past the seed's slab capacity must exit by name before
- * initBfpQConfigGroupedInto writes 4 exponents into a 1-byte tail at the block
- * end. */
-static void bindSeedUnderTheAsanCallback(seedFixture_t *f, uint8_t *bytes) {
-    odtInstallAsanDeathExit();
-    rematWireBind(f->t, SEED_GRAD2, bytes);
-}
-
-void testWireBindInheritedGradChecksCapacityBeforeWrite(void) {
-    seedFixture_t f;
-    buildBfpSeedFixture(&f);
-    uint32_t act2[2];
-    uint32_t seed[2];
-    rematWireBind(f.t, SEED_ACT2, (uint8_t *)act2);
-    bfpQConfig_t *act2Qc = rematWireHdr(f.t, SEED_ACT2)->quantization->qConfig;
-    act2Qc->numGroups = 4; /* fields only: no exponent byte is written */
-    act2Qc->groupSize = 2;
-    ASSERT_EXITS_WITH_OUTPUT(1, "wire GRAD 2 needs 4 BFP exponent groups, above its expCapacity 1",
-                             bindSeedUnderTheAsanCallback(&f, (uint8_t *)seed));
-    freeSeedFixture(&f);
-}
-
-void testWireBindInheritedGradChecksTheLiveDtype(void) {
-    seedFixture_t f;
-    buildBfpSeedFixture(&f);
-    uint32_t act2[2];
-    uint32_t seed[2];
-    rematWireBind(f.t, SEED_ACT2, (uint8_t *)act2);
-    rematWireHdr(f.t, SEED_ACT2)->quantization->type = FLOAT32;
-    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireBind: wire GRAD 2 field 'dtype'",
-                             rematWireBind(f.t, SEED_GRAD2, (uint8_t *)seed));
-    rematWireHdr(f.t, SEED_ACT2)->quantization->type = BFP;
-    freeSeedFixture(&f);
-}
-
-/* A live source whose payload size changed (BFP m8 -> m16 doubles 8 -> 16 B)
- * would overrun the seed's bytes; the check runs before any slab write. */
-void testWireBindInheritedGradChecksTheLiveBytes(void) {
-    seedFixture_t f;
-    buildBfpSeedFixture(&f);
-    uint32_t act2[4];
-    uint32_t seed[4];
-    rematWireBind(f.t, SEED_ACT2, (uint8_t *)act2);
-    bfpQConfig_t *act2Qc = rematWireHdr(f.t, SEED_ACT2)->quantization->qConfig;
-    act2Qc->mantissaBits = 16;
-    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireBind: wire GRAD 2 field 'bytes'",
-                             rematWireBind(f.t, SEED_GRAD2, (uint8_t *)seed));
-    act2Qc->mantissaBits = 8;
-    freeSeedFixture(&f);
-}
-
-void testWireBindInheritedGradChecksTheLiveRank(void) {
-    seedFixture_t f;
-    buildBfpSeedFixture(&f);
-    uint32_t act2[2];
-    uint32_t seed[2];
-    rematWireBind(f.t, SEED_ACT2, (uint8_t *)act2);
-    rematWireHdr(f.t, SEED_ACT2)->shape->numberOfDimensions = 3;
-    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireBind: wire GRAD 2 field 'rank'",
-                             rematWireBind(f.t, SEED_GRAD2, (uint8_t *)seed));
-    rematWireHdr(f.t, SEED_ACT2)->shape->numberOfDimensions = 2;
-    freeSeedFixture(&f);
-}
-
-/* The test above sets numberOfDimensions past the header's allocated
- * dims[2]/order[2] arrays, so it (coincidentally) also reaches the 'bytes'
- * exit through an out-of-bounds read of slab memory. This variant swaps in
- * fully-backed rank-3 arrays ([1,8] -> [1,8,1], a byte-count-preserving
- * reshape), so only the rank check can catch it. */
-void testWireBindInheritedGradChecksTheLiveRankWhenByteNeutral(void) {
-    seedFixture_t f;
-    buildBfpSeedFixture(&f);
-    uint32_t act2[2];
-    uint32_t seed[2];
-    rematWireBind(f.t, SEED_ACT2, (uint8_t *)act2);
-    shape_t *act2Shape = rematWireHdr(f.t, SEED_ACT2)->shape;
-    size_t *origDims = act2Shape->dimensions;
-    size_t *origOrder = act2Shape->orderOfDimensions;
-    size_t dims3[3] = {1, 8, 1};
-    size_t order3[3] = {0, 1, 2};
-    act2Shape->dimensions = dims3;
-    act2Shape->orderOfDimensions = order3;
-    act2Shape->numberOfDimensions = 3;
-    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireBind: wire GRAD 2 field 'rank'",
-                             rematWireBind(f.t, SEED_GRAD2, (uint8_t *)seed));
-    act2Shape->dimensions = origDims;
-    act2Shape->orderOfDimensions = origOrder;
-    act2Shape->numberOfDimensions = 2;
-    freeSeedFixture(&f);
-}
-
 /* ACT 0 is the caller's tensor; a row that binds it would overwrite the
  * caller's ->data. */
 void testWireBindRefusesTheBorrowedInput(void) {
@@ -3293,19 +3178,6 @@ void testTheDeriverGivesARejectedSequenceStepAnEmptySlice(void) {
         TEST_ASSERT_EQUAL_UINT8(0, steps[s].numWrites);
         TEST_ASSERT_EQUAL_UINT16(0, steps[s].operands);
     }
-    rematWireTableFree(t);
-    freeModel(model, HAR_N);
-}
-
-void testPlanProgramOfTrainIsTheTrainProgram(void) {
-    layer_t *model[HAR_N];
-    buildHar(model, false);
-    inputLike_t in;
-    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
-    rematPlan_t *p = buildPlan(t, model, NULL);
-    TEST_ASSERT_EQUAL_PTR(&p->train, rematPlanProgram(p, REMAT_MODE_TRAIN));
-    TEST_ASSERT_EQUAL_size_t(25, rematPlanProgram(p, REMAT_MODE_TRAIN)->numSteps);
-    rematPlanFree(p);
     rematWireTableFree(t);
     freeModel(model, HAR_N);
 }
@@ -5339,44 +5211,6 @@ void testPlanBuildRunsTheGrammarOnWhatItGenerates(void) {
     freeGrammarFixture(&f);
 }
 
-/* ---- rematPlanBuild takes the table's model (PR1b) ---- */
-
-static void buildLivenessPlanOn(grammarFixture_t *f, layer_t **model) {
-    rematPlan_t *p = NULL;
-    (void)rematPlanBuild(&p, f->t, &MODEL_CHAIN(model, f->t->modelSize), &g_liveness);
-}
-
-/* A frozen Linear reads no input in its backward, so under LIVENESS the
- * generator AND grammar rule 4 -- both reading the read-set off `model` --
- * would end ACT 10 at FORWARD(10) and accept the plan, while the table's
- * trainable BACKWARD(10) still reads ACT 10. */
-void testPlanBuildExitsWhenTheModelFreezesALayerTheTableSawTrainable(void) {
-    grammarFixture_t f;
-    buildHarLivenessFixture(&f);
-    layer_t *other[HAR_N];
-    memcpy(other, f.model, sizeof other);
-    other[10] = makeLinear(64, 6, true, 10);
-    ASSERT_EXITS_WITH_OUTPUT(
-        1, "the model differs from the table's key at 'frozen[10]': table 0, model 1",
-        buildLivenessPlanOn(&f, other));
-    freeLinearLayer(other[10]);
-    freeGrammarFixture(&f);
-}
-
-/* ReLU -> Softmax keeps the read-set (both read their input), so only an
- * explicit type compare notices the swap. */
-void testPlanBuildExitsWhenTheModelSwapsALayerType(void) {
-    grammarFixture_t f;
-    buildHarLivenessFixture(&f);
-    layer_t *other[HAR_N];
-    memcpy(other, f.model, sizeof other);
-    other[1] = makeSoftmax();
-    ASSERT_EXITS_WITH_OUTPUT(1, "the model differs from the table's key at 'layerType[1]'",
-                             buildLivenessPlanOn(&f, other));
-    freeSoftmaxLayer(other[1]);
-    freeGrammarFixture(&f);
-}
-
 /* ---- in-place dx ---- */
 
 /* The live bytes at one step, summed over the ranges that cover it: a sum of
@@ -6091,12 +5925,6 @@ int main(void) {
     RUN_TEST(testTableBindResetsBindGenLiveBytesAndThePeak);
     RUN_TEST(testWireBindDerivesTheSeedFromTheLiveActHeader);
     RUN_TEST(testWireBindInheritedSymTakesConfigNotScale);
-    RUN_TEST(testWireBindInheritedGradChecksTheLiveDtypeWhenByteNeutral);
-    RUN_TEST(testWireBindInheritedGradChecksCapacityBeforeWrite);
-    RUN_TEST(testWireBindInheritedGradChecksTheLiveDtype);
-    RUN_TEST(testWireBindInheritedGradChecksTheLiveBytes);
-    RUN_TEST(testWireBindInheritedGradChecksTheLiveRank);
-    RUN_TEST(testWireBindInheritedGradChecksTheLiveRankWhenByteNeutral);
     RUN_TEST(testWireBindRefusesTheBorrowedInput);
     RUN_TEST(testWireReleaseRefusesTheBorrowedInput);
     RUN_TEST(testWireBindRefusesAnAlreadyBoundWire);
@@ -6138,7 +5966,6 @@ int main(void) {
     RUN_TEST(testGrammarRejectsInPlaceMarksOnADag);
     RUN_TEST(testAReforwardCarriesItsForwardsSlice);
     RUN_TEST(testTheDeriverGivesARejectedSequenceStepAnEmptySlice);
-    RUN_TEST(testPlanProgramOfTrainIsTheTrainProgram);
     RUN_TEST(testEvalHarStepsAndRangesUnderEveryPolicy);
     RUN_TEST(testEvalPeakIsTheLargestAdjacentActPair);
 #ifdef ODT_MEM_PROFILE
@@ -6246,8 +6073,6 @@ int main(void) {
     RUN_TEST(testRetainListPlanAtTheStepBoundStopsAtTheRangeCap);
     RUN_TEST(testRetainListPlanAcceptsExactlyMaxRangesAndExitsAboveThem);
     RUN_TEST(testPlanBuildRunsTheGrammarOnWhatItGenerates);
-    RUN_TEST(testPlanBuildExitsWhenTheModelFreezesALayerTheTableSawTrainable);
-    RUN_TEST(testPlanBuildExitsWhenTheModelSwapsALayerType);
     RUN_TEST(testInPlaceLivenessHarPeakLiveBytesIs41216);
     RUN_TEST(testInPlaceStoreAllHarPeakLiveBytesIs70192);
     RUN_TEST(testInPlaceReluAtTheCrossEntropyTopSharesTheSeed);

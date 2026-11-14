@@ -16,144 +16,64 @@ typedef struct symInt32QConfig {
     uint8_t qMaxBits;
 } symInt32QConfig_t;
 
-/* DEFAULT SYM_INT32 operand staging width (#227), used by initSymInt32QConfig
- * and the FLOAT32 absmax encode. It is a default, not a rejection: operands
- * of any declared width are accepted, and the accumulator guard
- * (SymAccumGuard.h) decides per op. int12*int12 products are provably safe for
- * reductions N <= 511 (512*2^22 > INT32_MAX); longer or wider reductions run an
- * overflow-checked loop that aborts on the first real wrap -- narrow this knob
- * for wider layers. LayerNorm/GroupNorm/Reduce still cap operand width for
- * their own value-sum and affine-product arguments.
- * Override with -DODT_SYM_OPERAND_QMAXBITS=N. */
+/* Default SYM_INT32 operand staging width (initSymInt32QConfig, FLOAT32 absmax
+ * encode). A default, not a limit: the accumulator guard (SymAccumGuard.h)
+ * picks the unchecked or the checked loop per op from the declared widths and
+ * the reduction length (int12*int12 is proven safe up to N = 511). Narrow it
+ * for wider layers. LayerNorm/GroupNorm/Reduce cap operand width for their
+ * own sums. Override with -DODT_SYM_OPERAND_QMAXBITS=N. */
 #ifndef ODT_SYM_OPERAND_QMAXBITS
 #define ODT_SYM_OPERAND_QMAXBITS 12
 #endif
-/* SYM grad ACCUMULATION-TARGET width contract — NOT a backward-compute knob.
- * Backward kernels always run int32-mantissa math at operand width (see
- * ODT_SYM_OPERAND_QMAXBITS above); this bound instead caps the qMaxBits/qBits
- * a SYM_INT32/SYM grad TARGET may declare, enforced where increments are
- * accumulated into it (accumulateOut in ExecuteOp.c; ASYM grads are capped at
- * 16 bits by validateAsymQBits at init, so lowering N does not cap them) and baked into
- * gradInitSymInt32. Rationale is value-sum soundness: int16-range mantissas
- * accumulate in an int32 buffer with headroom; wider widths break that
- * argument. It is NOT a footprint knob either — SYM_INT32 grads stay 4
- * B/element at any width (#261); sub-float memory saving comes only from
- * packed SYM/ASYM grad storage (<= this bound). The pool/reduce value-sum
- * guards reuse the same numeric value under a different contract (Reduce.c).
+/* Width cap for a SYM_INT32/SYM grad accumulation TARGET, enforced in
+ * accumulateOut (ExecuteOp.c) and used by gradInitSymInt32. Not a backward
+ * precision knob (backward runs at operand width) and not a footprint knob
+ * (SYM_INT32 grads stay 4 B/element; only packed SYM/ASYM grads save memory).
+ * Reason: int16-range codes accumulate in int32 with headroom. ASYM grads are
+ * capped at 16 by validateAsymQBits at init, so a lower N does not cap them.
  * Override with -DODT_SYM_GRAD_QMAXBITS=N. */
 #ifndef ODT_SYM_GRAD_QMAXBITS
 #define ODT_SYM_GRAD_QMAXBITS 16
 #endif
 
-/* Group-quant PR1 (group-quant D3, docs/conventions/tensor.md): always-array representation,
- * behavior-identical for PR1 (numGroups is always 1; no grouping functionality yet -- PR2
- * introduces real groups). groupSize == 0 is the "whole tensor" sentinel: standalone-built configs
- * (initSymQConfig, without a tensor in hand) cannot know N, so per-tensor
- * quantization keeps groupSize == 0 ("spans everything"), exactly as
- * N-agnostic as the old scalar scale. Ownership: scales is heap-allocated
- * (reserveMemory) by whichever call filled the struct -- initSymQConfig /
- * initSymQConfigGrouped always allocate a fresh `numGroups`-element array;
- * pair with freeReservedMemory (bare qConfig) or freeQuantization (config
- * wrapped in a quantization_t, e.g. via quantizationInitSym / getQLike).
- * Stack test fixtures that only need a fixed per-tensor scale should build
- * the struct directly with a local backing array instead of calling
- * initSymQConfig (see docs/conventions/testing.md) -- such fixtures are
- * never passed to freeQuantization or freeReservedMemory.
+/* Shape: per-tensor {numGroups = 1, groupSize = 0} (groupSize 0 = "whole
+ * tensor", so a config built without a tensor needs no element count) or
+ * grouped {numGroups > 1, groupSize > 0} with numGroups * groupSize == N,
+ * checked where the config attaches to a tensor (validateSymQConfigShape,
+ * called by initTensor). {1, N > 0} is not a per-tensor spelling.
  *
- * Group-quant PR2: that "never passed to
- * freeQuantization or freeReservedMemory" rule is not just about explicit
- * free calls — it also rules out ANY use as a DESERIALIZE destination
- * (deserializeTensor / deserializeParameter / ppcaReplaySetDeserialize
- * skeletons, Deserialize.c / PpcaReplaySerialize.c). A file record whose
- * numGroups differs from the skeleton's own makes deserializeQConfig's SYM
- * arm freeReservedMemory() the skeleton's CURRENT scales pointer before
- * reserveMemory()ing a new one — implicitly, with no call-site free() to
- * spot. A stack-fixture symQConfig_t handed a mismatched grouped record
- * therefore has free() called on its stack-backed array: the same
- * undefined-behavior hazard the "never freed" rule already exists to avoid,
- * just reached through a deserialize call instead of an explicit free.
- * Deserialize destinations must be built via initSymQConfig /
- * initSymQConfigGrouped (or attached to a real tensor via initTensor).
+ * Ownership: the allocating inits reserve scales[numGroups]; free a bare
+ * config's array with freeReservedMemory, a wrapped one with freeQuantization.
+ * A stack fixture with a local backing array must never be freed AND never be
+ * a deserialize destination: deserializeQConfig frees and reallocates scales
+ * when the file's numGroups differs, which would free stack memory.
  *
- * Group-quant PR2 (Task 1): the shape invariant is now a real constraint,
- * not just a PR1 sentinel pin. Exactly two shapes are valid:
- *   - per-tensor: numGroups == 1 && groupSize == 0 (unchanged PR1 sentinel).
- *   - grouped:    numGroups > 1 && groupSize > 0, with
- *                 numGroups * groupSize == numberOfElements at attach time.
- * {1, N} (N > 0) is NOT a valid alternate per-tensor spelling -- the
- * canonical per-tensor form is always {1, 0}. initSymQConfigGrouped enforces
- * the shape at construction (no tensor in hand yet, so it cannot check
- * against N); validateSymQConfigShape enforces the numGroups*groupSize == N
- * identity where a config attaches to a tensor (initTensor, for SYM types).
- *
- * getQLike's SYM arm (TensorApi.c) branches on numGroups: numGroups == 1
- * keeps the existing "Precedent A" fresh-reset clone (scale -> 1.f, pinned by
- * testGetQLikeSymPreservesWidthAndRoundingResetsScale) since a per-tensor
- * clone has no group SHAPE to lose; numGroups > 1 instead deep-copies
- * numGroups/groupSize AND the scales VALUES (matching deepCopyQuantization's
- * semantics, LayerQuant.c:71-82) since a grouped clone's group grid is an
- * attach-time fact the clone must retain, not an ungridded zero-state.
- *
- * Carrier gate: groups are legal ONLY on GEMM-family weight tensors. Grad
- * tensors stay per-tensor unconditionally -- gradInit fail-fasts if handed a
- * SYM template with numGroups > 1 (grouped grads are a future #300 axis). */
+ * Groups are legal only on GEMM-family weights; gradInit rejects a grouped
+ * template, grads stay per-tensor. getQLike resets a per-tensor clone's scale
+ * to 1 but copies a grouped clone's geometry and scales. */
 typedef struct symQConfig {
     odtScale_t *scales; /* [numGroups], owned by the qconfig (see ownership note above) */
-    size_t numGroups;   /* 1 = per-tensor sentinel; >1 = real groups (PR2+) */
-    size_t groupSize;   /* 0 = "whole tensor" sentinel (per-tensor, N-agnostic);
-                          >0 only for real groups (PR2+), numGroups*groupSize == N */
+    size_t numGroups;   /* 1 = per-tensor; >1 = grouped */
+    size_t groupSize;   /* 0 = whole tensor; >0 grouped, numGroups*groupSize == N */
     roundingMode_t roundingMode;
     uint8_t qBits;
 } symQConfig_t;
 
-/* BFP epic PR1 (docs/conventions/arithmetic-bfp.md; group shape mechanics
- * below mirror group-quant's, docs/conventions/tensor.md):
- * block-floating-point storage -- one packed `mantissaBits`-wide mantissa per
- * element plus one shared `exponentBits`-wide biased exponent per GROUP
- * (value = mantissa * 2^(storedExponent - bias), bias = 2^(exponentBits-1)-1).
- * Group shape mirrors symQConfig_t exactly: `exponents` is heap-allocated
- * (reserveMemory) by the allocating inits (initBfpQConfig /
- * initBfpQConfigGrouped always allocate a fresh `numGroups`-element array).
- * A bare qConfig (not wrapped in a quantization_t) is freed directly with
- * freeReservedMemory on `exponents` -- every Task 1 test does exactly this.
- * freeQuantization has a BFP arm (owner-chain task, epic PR1 Task 6): a
- * BFP-wrapped quantization_t (e.g. via quantizationInitBfp /
- * quantizationInitBfpGrouped / getQLike) is freed with freeQuantization,
- * which frees `exponents` before the qConfig struct, mirroring the SYM
- * pairing rule above. Stack test fixtures that only need a fixed per-tensor
- * exponent should build the struct directly with a local backing array
- * instead of calling initBfpQConfig (see docs/conventions/testing.md) --
- * such fixtures are never passed to freeQuantization or freeReservedMemory,
- * and (mirroring the SYM deserialize-destination rule) are never handed to
- * a deserialize call as the destination skeleton. A config filled by
- * initBfpQConfigInto / initBfpQConfigGroupedInto borrows its caller's
- * exponent storage the same way and falls under the same three rules.
- *
- * Shape invariant (identical to symQConfig_t): exactly two shapes are valid --
- * per-tensor {numGroups=1, groupSize=0}, or grouped {numGroups>1, groupSize>0}
- * with numGroups*groupSize == numberOfElements at attach time. initBfpQConfigGrouped
- * enforces the shape at construction; validateBfpQConfigShape enforces the
- * numGroups*groupSize == N identity where a config attaches to a tensor
- * (initTensor, mirroring the SYM arm).
- *
- * Saturation semantics (BFP D6, forward reference -- the quantize/pack paths
- * land in epic PR1 Tasks 2-4, not here): VALUE-domain quantization (deriving
- * an exponent from float magnitudes) saturates by design -- an absmax that
- * would need an out-of-range exponent clamps mantissas to +-qMax on the high
- * side, flushes toward zero on the low side; the exponent byte itself is
- * clamped into [0, 2^exponentBits - 1]. CODE-domain packing (raw INT32 codes
- * into BFP mantissas, no exponent derivation) still ABORTS on overflow, same
- * #227 discipline as every other packChunkGuarded caller -- BFP D6 saturation
- * covers value-domain quantization only, never raw code packing. */
+/* Block floating point: one packed mantissaBits-wide mantissa per element and
+ * one biased exponentBits-wide exponent per group; value = mantissa *
+ * 2^(storedExponent - bias), bias = 2^(exponentBits-1) - 1 (see
+ * docs/conventions/arithmetic-bfp.md). Shape and ownership follow symQConfig_t;
+ * the ...Into inits borrow the caller's exponent storage instead, under the
+ * same never-free / never-deserialize-into rules. Value quantization (exponent
+ * derived from float magnitudes) saturates; raw-code packing into mantissas
+ * aborts on overflow. */
 typedef struct bfpQConfig {
     uint8_t *exponents; /* [numGroups], biased; heap (reserveMemory) and owned by the qconfig,
                          * or borrowed caller storage via the ...Into inits */
     size_t numGroups;   /* 1 = per-tensor */
     size_t groupSize;   /* 0 = whole-tensor sentinel; >0 grouped, numGroups*groupSize == N */
     roundingMode_t roundingMode;
-    uint8_t mantissaBits; /* [2, 16]; storage width -- also the ARITH_BFP compute contract's
-                           * operand width (kernel headroom, staging), see
-                           * docs/conventions/arithmetic-bfp.md */
+    uint8_t mantissaBits; /* [2, 16]; also the ARITH_BFP operand width */
     uint8_t exponentBits; /* [2, 8]; bias = 2^(exponentBits-1) - 1 */
 } bfpQConfig_t;
 
@@ -180,25 +100,10 @@ typedef struct bfpRawQConfig {
     size_t groupSize;   /* 0 = whole-tensor sentinel; >0 grouped */
 } bfpRawQConfig_t;
 
-/* Group-quant PR4 (Task 1, group-quant D6): always-array ASYM with a NUDGED
- * CODE-DOMAIN affine parametrization (TFLite-standard). Ownership and shape
- * grammar are exactly symQConfig_t's (see the block comment above): both
- * arrays are heap blocks owned by the config (reserveMemory, one block per
- * array), {1,0} is the per-tensor sentinel, {>1,>0} with
- * numGroups*groupSize == N the grouped form, {1,N>0} invalid; stack test
- * fixtures build the struct directly with local backing arrays and are never
- * freed / never used as deserialize destinations.
- *
- * zeroPoints are CODE-domain: dequant = (code - zp) * scale with
- * zp in [0, 2^qBits - 1]. The grid derivation nudges the band to include
- * zero (mn = min(mn, 0), mx = max(mx, 0)), which guarantees (a) 0.0 is
- * exactly representable (code == zp decodes to exactly 0.0f) and (b)
- * zpReal = -mn/scale lands in [0, 2^qBits - 1] BY CONSTRUCTION -- that
- * boundedness is what lets zp be uint16, and is also why qBits is now
- * capped at 16 (a 17-bit code domain would not fit uint16). This supersedes
- * the old value-domain int32 zeroPoint (dequant = (code + zp)*scale,
- * zp = round(min/scale)), whose #246 rationale -- wide all-negative bands
- * pushing zp past int16/int32 -- is void under the nudge. */
+/* Code-domain affine ASYM (TFLite style): value = (code - zeroPoint) * scale.
+ * Shape and ownership follow symQConfig_t (two owned arrays). The grid
+ * derivation widens the band to include zero, so 0.0 is exact and zeroPoint
+ * lies in [0, 2^qBits - 1]; uint16 zeroPoints cap qBits at 16. */
 typedef struct asymQConfig {
     odtScale_t *scales;   /* [numGroups], owned (symQConfig ownership rules) */
     uint16_t *zeroPoints; /* [numGroups], owned; CODE-domain zp in
@@ -206,7 +111,7 @@ typedef struct asymQConfig {
     size_t numGroups;     /* 1 = per-tensor sentinel; >1 = real groups */
     size_t groupSize;     /* 0 = "whole tensor" sentinel (per-tensor);
                             >0 only for real groups, numGroups*groupSize == N */
-    uint8_t qBits;        /* ASYM range [1, 16] (was [1, 30] pre-group-quant-D6) */
+    uint8_t qBits;        /* [1, 16] */
     roundingMode_t roundingMode;
 } asymQConfig_t;
 
@@ -215,84 +120,49 @@ typedef struct quantization {
     void *qConfig;
 } quantization_t;
 
-// Important: This sets qMaxBits to ODT_SYM_OPERAND_QMAXBITS (12)
+/*! Sets qMaxBits to ODT_SYM_OPERAND_QMAXBITS. */
 void initSymInt32QConfig(roundingMode_t roundingMode, symInt32QConfig_t *symInt32QConfig);
 void initSymInt32QConfigWithQMaxBits(roundingMode_t roundingMode,
                                      symInt32QConfig_t *symInt32QConfig, uint8_t qMaxBits);
-/*! Both SYM inits fail-fast (exit 1) on qBits outside [2, 31] (#479): 31 is the
- * SYM storage ceiling (the sub-byte packer and the SYM_INT32 qMaxBits cap, #202);
- * 0 would underflow the packer, and 1 has qMax = 0 (inf scale, NaN dequant).
- * The narrower operand (12) and grad-target (16) caps are enforced where those
- * contracts apply, not at init. */
+/*! SYM storage width is [2, 31]; the narrower operand and grad-target caps
+ * apply where those contracts apply. */
 void initSymQConfig(uint8_t qBits, roundingMode_t roundingMode, symQConfig_t *symQConfig);
-/*! Group-quant PR2: general-shape SYM config init. initSymQConfig delegates
- * here with (numGroups=1, groupSize=0). Allocates scales[numGroups] (each
- * 1.f); fail-fasts on qBits outside [2, 31] (see above), on numGroups == 0,
- * on (numGroups == 1) != (groupSize == 0), and on numGroups > 1 &&
- * groupSize == 0 -- i.e. only {1,0} (per-tensor) or {>1,>0} (grouped) are
- * constructible; {1,N>0} is rejected here even before any tensor exists to
- * validate group*groupSize against. */
+/*! Allocates scales[numGroups], each 1. Rejects a width outside [2, 31] and
+ * any shape other than {1, 0} or {>1, >0}. */
 void initSymQConfigGrouped(uint8_t qBits, roundingMode_t roundingMode, size_t numGroups,
                            size_t groupSize, symQConfig_t *qC);
-/*! Group-quant PR2: attach-time shape check for a SYM config against a
- * concrete element count. Fail-fasts unless (numGroups==1 && groupSize==0)
- * or (numGroups>1 && groupSize>0 && numGroups*groupSize==numberOfElements),
- * PLUS the #479 qBits-in-[2,31] re-check for field-assigned configs.
- * Called by initTensor for SYM tensors; also the choke point the ODTS
- * deserialize path (Deserialize.c's deserializeQConfig, Task 5) re-validates
- * against after reallocating a skeleton's scales[] to a file's numGroups --
- * the serial read-path relax this shape check underwrites is SHIPPED, not a
- * future concern. */
+/*! Use where a config attaches to a concrete element count (initTensor, the
+ * deserializer, requantize targets): checks width, shape, and the overflow-
+ * checked numGroups * groupSize == numberOfElements. */
 void validateSymQConfigShape(const symQConfig_t *qC, size_t numberOfElements);
 void initAsymQConfig(uint8_t qBits, roundingMode_t roundingMode, asymQConfig_t *asymQConfig);
-/*! Group-quant PR4: general-shape ASYM config init, the exact ASYM twin of
- * initSymQConfigGrouped (same shape grammar, same fail-fasts) plus the group-quant D6
- * qBits ceiling [1, 16]. Allocates scales[numGroups] (each 1.f) AND
- * zeroPoints[numGroups] (each 0) as two separate owned blocks.
- * initAsymQConfig delegates here with (numGroups=1, groupSize=0). */
+/*! Allocates scales[numGroups] = 1 and zeroPoints[numGroups] = 0. Rejects a
+ * width outside [1, 16] and any shape other than {1, 0} or {>1, >0}. */
 void initAsymQConfigGrouped(uint8_t qBits, roundingMode_t rm, size_t numGroups, size_t groupSize,
                             asymQConfig_t *qC);
-/*! Group-quant PR4: attach-time shape check for an ASYM config against a
- * concrete element count (validateSymQConfigShape twin), PLUS the group-quant D6
- * qBits-in-[1,16] re-check for field-assigned configs. Called by initTensor
- * for ASYM tensors. */
+/*! The ASYM twin of validateSymQConfigShape, width [1, 16]. */
 void validateAsymQConfigShape(const asymQConfig_t *qC, size_t numberOfElements);
 
-/*! BFP epic PR1: per-tensor BFP config init (numGroups=1, groupSize=0), delegates
- * to initBfpQConfigGrouped. Fail-fasts on mantissaBits outside [2,16] or
- * exponentBits outside [2,8]. Zero-state: exponents[0] = bias (scale 1.0). */
 void initBfpQConfig(uint8_t mantissaBits, uint8_t exponentBits, roundingMode_t roundingMode,
                     bfpQConfig_t *qC);
-/*! BFP epic PR1: general-shape BFP config init, mirroring initSymQConfigGrouped.
- * Allocates exponents[numGroups] (each = bias, i.e. scale 1.0). Fail-fasts on
- * width caps (mantissaBits outside [2,16], exponentBits outside [2,8]), on
- * numGroups == 0, and on (numGroups == 1) != (groupSize == 0) -- only {1,0}
- * (per-tensor) or {>1,>0} (grouped) are constructible; {1,N>0} is rejected
- * here even before any tensor exists to validate group*groupSize against. */
+/*! Allocates exponents[numGroups], each = bias (scale 1). Rejects mantissaBits
+ * outside [2, 16], exponentBits outside [2, 8], and any shape other than {1, 0}
+ * or {>1, >0}. initBfpQConfig is the {1, 0} case. */
 void initBfpQConfigGrouped(uint8_t mantissaBits, uint8_t exponentBits, roundingMode_t roundingMode,
                            size_t numGroups, size_t groupSize, bfpQConfig_t *qC);
-/*! Allocation-free twin of initBfpQConfigGrouped for callers that own the
- * exponent storage (the remat bind writes into its slab and must not
- * allocate). Same fail-fasts and the same zero state, written into
- * exponents[0..numGroups-1]; also fail-fasts on exponents == NULL. The
- * caller guarantees room for numGroups bytes. The filled config borrows
- * that storage (ownership rules at bfpQConfig_t). */
+/*! For callers that must not allocate (the remat bind writes into its slab):
+ * same checks and zero state, written into caller storage of numGroups bytes,
+ * which the config borrows. Rejects exponents == NULL. */
 void initBfpQConfigGroupedInto(uint8_t mantissaBits, uint8_t exponentBits,
                                roundingMode_t roundingMode, size_t numGroups, size_t groupSize,
                                uint8_t *exponents, bfpQConfig_t *qC);
 /*! Per-tensor ({1,0}) initBfpQConfigGroupedInto; exponents needs 1 byte. */
 void initBfpQConfigInto(uint8_t mantissaBits, uint8_t exponentBits, roundingMode_t roundingMode,
                         uint8_t *exponents, bfpQConfig_t *qC);
-/*! BFP epic PR1: attach-time shape check for a BFP config against a concrete
- * element count, mirroring validateSymQConfigShape. Fail-fasts unless
- * (numGroups==1 && groupSize==0) or (numGroups>1 && groupSize>0 &&
- * numGroups*groupSize==numberOfElements). Called by initTensor for BFP
- * tensors. */
+/*! Shape check where a BFP config attaches to a concrete element count. Does
+ * not re-check the widths. */
 void validateBfpQConfigShape(const bfpQConfig_t *qC, size_t numberOfElements);
-/*! BFP epic PR1: (1 << (exponentBits-1)) - 1 -- the biased-exponent zero point. */
 int32_t bfpExponentBias(const bfpQConfig_t *qC);
-/*! BFP epic PR1: ldexpf(1.f, storedExponent - bias) for the given group --
- * the float scale a group's stored (biased) exponent represents. */
 float bfpGroupScale(const bfpQConfig_t *qC, size_t group);
 
 void initInt32Quantization(quantization_t *quantization);

@@ -13,6 +13,8 @@
 #include "ScaleCanon.h"
 #include "SymAccumGuard.h"
 
+#include <string.h>
+
 size_t mulInstructionCounter = 0;
 
 int32_t mulIntsWithInstructionCounter(int32_t a, int32_t b) {
@@ -68,7 +70,7 @@ void mulSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
     /* read both widths before any config write: the output may alias an operand */
     uint8_t width = symProductWidth(aConfig->qMaxBits, bConfig->qMaxBits);
 
-    writeInt32ArrayToByteArray(numberOfValues, output, outputTensor->data);
+    memcpy(outputTensor->data, output, numberOfValues * sizeof(int32_t));
     symInt32QConfig_t *outputConfig = outputTensor->quantization->qConfig;
     storeCanonScale(&outputConfig->scale,
                     canonProductScale(loadCanonScale(&aConfig->scale),

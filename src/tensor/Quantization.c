@@ -15,17 +15,15 @@
 void initSymInt32QConfig(roundingMode_t roundingMode, symInt32QConfig_t *symInt32QConfig) {
     symInt32QConfig->roundingMode = roundingMode;
     odtScaleStore(&symInt32QConfig->scale, ODT_SCALE_ONE);
-    symInt32QConfig->qMaxBits = ODT_SYM_OPERAND_QMAXBITS; /* was 16 — #227 int12 operands */
+    symInt32QConfig->qMaxBits = ODT_SYM_OPERAND_QMAXBITS;
 }
 
 void initSymInt32QConfigWithQMaxBits(roundingMode_t roundingMode,
                                      symInt32QConfig_t *symInt32QConfig, uint8_t qMaxBits) {
-    /* 31 is the ceiling symGridBoundsOrExit (SymGridBounds.h) accepts; its comment
-     * carries the cast-safety rationale (#202, #515). 31 itself stays valid (raw-int/
-     * scale=1 regime, #227). This init is the single chokepoint every SYM_INT32
-     * qConfig passes through, so a wider width never reaches a converter. */
+    /* 31 is the widest width whose rounded float bounds stay representable in
+     * int32 (SymGridBounds.h); 32 marks a raw kernel output. */
     if (qMaxBits > 31) {
-        PRINT_ERROR("qMaxBits (%u) exceeds the cast-safe SYM_INT32 ceiling of 31 (#202); 32 marks "
+        PRINT_ERROR("qMaxBits (%u) exceeds the cast-safe SYM_INT32 ceiling of 31; 32 marks "
                     "a raw kernel output -- requantize it into a <= 31-bit tensor before cloning "
                     "it (getQLike) or requantizing into it",
                     (unsigned)qMaxBits);
@@ -37,10 +35,6 @@ void initSymInt32QConfigWithQMaxBits(roundingMode_t roundingMode,
 }
 
 void initSymQConfig(uint8_t qBits, roundingMode_t roundingMode, symQConfig_t *symQConfig) {
-    /* Group-quant PR2: delegates to the general-shape init with the PR1
-     * per-tensor sentinel (numGroups=1, groupSize=0) -- keeps this producer's
-     * behavior bit-identical to PR1 (the PR1 sentinel tests in
-     * UnitTestQuantization.c are the regression net for that claim). */
     initSymQConfigGrouped(qBits, roundingMode, 1, 0, symQConfig);
 }
 
@@ -57,10 +51,8 @@ static size_t groupProductOrExit(size_t numGroups, size_t groupSize, const char 
     return product;
 }
 
-/* #479 storage ceiling: 31 is what packChunkGuarded accepts and what a SYM->SYM_INT32 copy can
- * carry into qMaxBits (#202). The narrower operand (12) and grad-target (16) contracts are
- * enforced at the kernels and in ExecuteOp, not here. qBits == 0 would underflow the packer;
- * qBits == 1 has qMax = 2^0 - 1 = 0, so pack's scale = absMax / 0 = inf and dequant is NaN. */
+/* 31 is the widest width the packer and a SYM->SYM_INT32 copy carry. qBits == 0
+ * underflows the packer; qBits == 1 has qMax = 0, so the derived scale is inf. */
 static void validateSymQBits(uint8_t qBits, const char *what) {
     if (qBits < 2 || qBits > 31) {
         PRINT_ERROR("%s: qBits (%u) outside the SYM range [2, 31]", what, (unsigned)qBits);
@@ -86,12 +78,6 @@ void validateSymQConfigShape(const symQConfig_t *qC, size_t numberOfElements) {
 void initSymQConfigGrouped(uint8_t qBits, roundingMode_t roundingMode, size_t numGroups,
                            size_t groupSize, symQConfig_t *qC) {
     validateSymQBits(qBits, "initSymQConfigGrouped");
-    /* Caller allocates the outer struct; this init allocates the
-     * numGroups-element scales array (contract per the header doc) -- the
-     * filled config owns a heap scales array, pair with freeReservedMemory
-     * (bare qConfig) or freeQuantization (qConfig wrapped in a
-     * quantization_t). Only {1,0} (per-tensor) or {>1,>0} (grouped) are
-     * constructible -- {1,N>0} and {0,*} are rejected here. */
     if (numGroups == 0 || (numGroups == 1) != (groupSize == 0)) {
         PRINT_ERROR("initSymQConfigGrouped: invalid group shape numGroups=%zu groupSize=%zu "
                     "(per-tensor is {1,0}; grouped needs numGroups>1 and groupSize>0)",
@@ -109,17 +95,11 @@ void initSymQConfigGrouped(uint8_t qBits, roundingMode_t roundingMode, size_t nu
 }
 
 void initAsymQConfig(uint8_t qBits, roundingMode_t roundingMode, asymQConfig_t *asymQConfig) {
-    /* Group-quant PR4: delegates to the general-shape init with the
-     * per-tensor sentinel (numGroups=1, groupSize=0), mirroring
-     * initSymQConfig's delegation. */
     initAsymQConfigGrouped(qBits, roundingMode, 1, 0, asymQConfig);
 }
 
-/* group-quant D6 width ceiling shared by the init and attach-time funnels: the
- * code-domain zeroPoint is uint16, so qBits > 16 has codes/zp with no uint16
- * representation (supersedes the old [1, 30] #246 ceiling, whose wide-band
- * int32-zp rationale is void under the zero-inclusion nudge -- see
- * Quantization.h). qBits == 0 would underflow the sub-byte packer. */
+/* zeroPoints are uint16, so codes wider than 16 bits have no zero point;
+ * qBits == 0 underflows the packer. */
 static void validateAsymQBits(uint8_t qBits, const char *what) {
     if (qBits == 0 || qBits > 16) {
         PRINT_ERROR("%s: qBits (%u) outside the ASYM range [1, 16]", what, (unsigned)qBits);
@@ -129,11 +109,6 @@ static void validateAsymQBits(uint8_t qBits, const char *what) {
 
 void initAsymQConfigGrouped(uint8_t qBits, roundingMode_t rm, size_t numGroups, size_t groupSize,
                             asymQConfig_t *qC) {
-    /* Caller allocates the outer struct; this init allocates the two
-     * numGroups-element arrays (scales all 1.f, zeroPoints all 0 -- the
-     * zp==0 zero-state makes code 0 decode to exactly 0.0f). Shape grammar
-     * identical to initSymQConfigGrouped: only {1,0} (per-tensor) or
-     * {>1,>0} (grouped) are constructible. */
     validateAsymQBits(qBits, "initAsymQConfigGrouped");
     if (numGroups == 0 || (numGroups == 1) != (groupSize == 0)) {
         PRINT_ERROR("initAsymQConfigGrouped: invalid group shape numGroups=%zu groupSize=%zu "
@@ -168,9 +143,8 @@ void validateAsymQConfigShape(const asymQConfig_t *qC, size_t numberOfElements) 
     }
 }
 
-/* Width caps and the {1,0} / {>1,>0} shape grammar, shared by the allocating
- * and the allocation-free init. `what` names the entry point in the
- * diagnostic (validateAsymQBits precedent). */
+/* Shared by the allocating and the borrowed-storage BFP inits; `what` names
+ * the entry in the diagnostic. */
 static void validateBfpInitArgs(uint8_t mantissaBits, uint8_t exponentBits, size_t numGroups,
                                 size_t groupSize, const char *what) {
     if (mantissaBits < 2 || mantissaBits > 16) {
@@ -207,13 +181,14 @@ void initBfpQConfigGroupedInto(uint8_t mantissaBits, uint8_t exponentBits,
     qC->exponents = exponents;
     uint8_t bias = (uint8_t)((1 << (exponentBits - 1)) - 1);
     for (size_t g = 0; g < numGroups; g++) {
-        qC->exponents[g] = bias; /* zero-state: E = 0, scale 1.0 (SYM's scales=1.f parity) */
+        qC->exponents[g] = bias; /* zero state: scale 1 */
     }
 }
 
 void initBfpQConfigGrouped(uint8_t mantissaBits, uint8_t exponentBits, roundingMode_t roundingMode,
                            size_t numGroups, size_t groupSize, bfpQConfig_t *qC) {
-    /* Validate before reserving: a rejected shape exits without allocating. */
+    /* Validate before reserving, so a rejected shape allocates nothing; the Into
+     * call re-validates (init-time, cheap) and rejects a failed reservation. */
     validateBfpInitArgs(mantissaBits, exponentBits, numGroups, groupSize, "initBfpQConfigGrouped");
     uint8_t *exponents = reserveMemory(numGroups * sizeof(uint8_t));
     initBfpQConfigGroupedInto(mantissaBits, exponentBits, roundingMode, numGroups, groupSize,

@@ -13,6 +13,8 @@
 #include "DTypes.h"
 #include "ScaleCanon.h"
 
+#include <string.h>
+
 /* a / b of two stored scales, rounded once (NEAREST): MulRatio forms
  * ma * 2^ea * 2^14 / mb exactly rounded, and the power-of-two factor
  * 2^(-14 - eb) is exact. b >= 2^127 (eb = 113) has no POW2 factor and fails
@@ -64,7 +66,7 @@ void divSymInt32Tensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *outputTe
     symInt32QConfig_t *aConfig = aTensor->quantization->qConfig;
     symInt32QConfig_t *bConfig = bTensor->quantization->qConfig;
 
-    writeInt32ArrayToByteArray(numberOfValues, output, outputTensor->data);
+    memcpy(outputTensor->data, output, numberOfValues * sizeof(int32_t));
     symInt32QConfig_t *outputConfig = outputTensor->quantization->qConfig;
     storeCanonScale(&outputConfig->scale, canonQuotientScale(loadCanonScale(&aConfig->scale),
                                                              loadCanonScale(&bConfig->scale)));

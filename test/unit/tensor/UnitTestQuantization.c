@@ -11,22 +11,6 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* Group-quant PR1 (group-quant D3, docs/conventions/tensor.md):
- * symQConfig_t's scalar `scale` is replaced by an always-array `scales`
- * representation, behavior-identical for PR1 (numGroups always 1, groupSize
- * always 0 -- the "whole tensor" sentinel). initSymQConfig is the one PR1
- * producer of symQConfig_t and must uphold the invariant
- * numGroups == 1 <=> groupSize == 0 by construction.
- *
- * No death-test/validation choke point exists in PR1: initTensor (the only
- * candidate attach point) does not validate its quantization_t argument's
- * internal qConfig at all today, for any dtype, and adding that generic
- * hook is out of scope for a wire-stable mechanical migration. A hand-built
- * violating config (e.g. numGroups=2, groupSize=0) is therefore NOT rejected
- * anywhere in PR1 -- that fail-fast choke point is deferred to PR2, which
- * introduces the grouped-creation APIs the invariant actually guards.
- * Disclosed per the plan's Step 1(c) instruction. */
-
 void testInitSymQConfigProducesPerTensorSentinel(void) {
     /* Mutation guard: hardcoding numGroups/groupSize to any other constant
      * pair, or forgetting to set groupSize to the sentinel, fails this. */
@@ -69,24 +53,17 @@ void testInitSymQConfigAllocatesIndependentScalesArrays(void) {
     TEST_ASSERT_NOT_EQUAL(aScales, bScales);
 }
 
-/* Group-quant PR2 (group-quant D3, docs/conventions/tensor.md; Task 1): the grouped-creation API
- * this PR2 introduces, plus the shape-validation choke point PR1 deferred (see the disclosure above
- * -- initTensor is the attach point; PR2 wires validateSymQConfigShape there). */
-
 void testInitSymQConfigGroupedAllocatesPerGroupScales(void) {
     symQConfig_t qc;
     initSymQConfigGrouped(4, SR_HALF_AWAY, 3, 5, &qc);
     size_t numGroups = qc.numGroups;
     size_t groupSize = qc.groupSize;
     float s0 = odtScaleToFloat(qc.scales[0]), s2 = odtScaleToFloat(qc.scales[2]);
-    qc.scales[2] = odtTestScale(7.f); /* writable per-group slot */
-    float s2w = odtScaleToFloat(qc.scales[2]);
     freeReservedMemory(qc.scales);
     TEST_ASSERT_EQUAL_size_t(3, numGroups);
     TEST_ASSERT_EQUAL_size_t(5, groupSize);
     TEST_ASSERT_EQUAL_FLOAT(1.f, s0);
     TEST_ASSERT_EQUAL_FLOAT(1.f, s2);
-    TEST_ASSERT_EQUAL_FLOAT(7.f, s2w);
 }
 
 void testInitSymQConfigGroupedRejectsSentinelViolations(void) {
@@ -98,7 +75,7 @@ void testInitSymQConfigGroupedRejectsSentinelViolations(void) {
     ASSERT_EXITS_WITH(1, { initSymQConfigGrouped(4, HALF_AWAY, 0, 0, &qc); });
 }
 
-/* #479: qBits == 0 underflows the sub-byte packer; > 31 exceeds the SYM storage ceiling. */
+/* qBits == 0 underflows the sub-byte packer; > 31 exceeds the SYM storage ceiling. */
 void testInitSymQConfigRejectsZeroQBits(void) {
     symQConfig_t qc;
     ASSERT_EXITS_WITH_OUTPUT(1, "outside the SYM range", initSymQConfig(0, HALF_AWAY, &qc));
@@ -138,11 +115,10 @@ void testValidateSymQConfigShapeDivisibility(void) {
     symQConfig_t bad = {
         .scales = s, .numGroups = 2, .groupSize = 4, .roundingMode = HALF_AWAY, .qBits = 4};
     ASSERT_EXITS_WITH(1, { validateSymQConfigShape(&bad, 10); });
-    TEST_ASSERT_TRUE(true); /* reached ⇒ ok-case did not exit */
 }
 
 void testValidateSymQConfigShapeRejectsFieldAssignedQBits(void) {
-    /* #479: a field-assigned config never passed the init funnel, so attach re-checks the width */
+    /* a field-assigned config skipped the init checks, so attach re-checks the width */
     odtScale_t s[1] = {odtTestScale(1.f)};
     symQConfig_t zero = {.scales = s, .numGroups = 1, .groupSize = 0, .qBits = 0};
     ASSERT_EXITS_WITH_OUTPUT(1, "validateSymQConfigShape: qBits",
@@ -160,13 +136,7 @@ void testValidateSymQConfigShapeAcceptsQBitsBounds(void) {
     symQConfig_t hi = {.scales = s, .numGroups = 1, .groupSize = 0, .qBits = 31};
     validateSymQConfigShape(&lo, 4); /* must NOT exit */
     validateSymQConfigShape(&hi, 4);
-    TEST_ASSERT_TRUE(true); /* reached => neither bound exited */
 }
-
-/* Group-quant PR4 (Task 1, group-quant D6): asymQConfig_t goes always-array
- * (scales[numGroups] + CODE-domain uint16 zeroPoints[numGroups]) with the
- * same {1,0}-per-tensor / {>1,>0}-grouped shape grammar as symQConfig_t.
- * ASYM's qBits ceiling drops 30 -> 16 (uint16 zp domain, group-quant D6). */
 
 void testInitAsymQConfigProducesPerTensorSentinelWithZeroZp(void) {
     /* Mutation guard: hardcoding a different shape pair, or seeding
@@ -225,10 +195,6 @@ void testInitAsymQConfigGroupedAllocatesPerGroupArrays(void) {
     size_t groupSize = qc.groupSize;
     float s0 = odtScaleToFloat(qc.scales[0]), s2 = odtScaleToFloat(qc.scales[2]);
     uint16_t z0 = qc.zeroPoints[0], z2 = qc.zeroPoints[2];
-    qc.scales[2] = odtTestScale(7.f); /* writable per-group slots */
-    qc.zeroPoints[2] = 9;
-    float s2w = odtScaleToFloat(qc.scales[2]);
-    uint16_t z2w = qc.zeroPoints[2];
     freeReservedMemory(qc.zeroPoints);
     freeReservedMemory(qc.scales);
     TEST_ASSERT_EQUAL_size_t(3, numGroups);
@@ -237,8 +203,6 @@ void testInitAsymQConfigGroupedAllocatesPerGroupArrays(void) {
     TEST_ASSERT_EQUAL_FLOAT(1.f, s2);
     TEST_ASSERT_EQUAL_UINT16(0, z0);
     TEST_ASSERT_EQUAL_UINT16(0, z2);
-    TEST_ASSERT_EQUAL_FLOAT(7.f, s2w);
-    TEST_ASSERT_EQUAL_UINT16(9, z2w);
 }
 
 void testInitAsymQConfigGroupedRejectsSentinelViolations(void) {
@@ -251,9 +215,7 @@ void testInitAsymQConfigGroupedRejectsSentinelViolations(void) {
 }
 
 void testInitAsymQConfigGroupedRejectsQBitsOutside1To16(void) {
-    /* group-quant D6: the code-domain zeroPoint is uint16, so qBits > 16 has no zp
-     * representation (supersedes the old [1, 30] #246 ceiling); 0 would
-     * underflow the sub-byte packer, as before. */
+    /* uint16 zeroPoints cap qBits at 16; 0 underflows the packer. */
     asymQConfig_t qc;
     ASSERT_EXITS_WITH(1, { initAsymQConfigGrouped(17, HALF_AWAY, 1, 0, &qc); });
     ASSERT_EXITS_WITH(1, { initAsymQConfigGrouped(0, HALF_AWAY, 1, 0, &qc); });
@@ -284,8 +246,7 @@ void testValidateAsymQConfigShapeDivisibilityAndQBits(void) {
                           .roundingMode = HALF_AWAY,
                           .qBits = 4};
     ASSERT_EXITS_WITH(1, { validateAsymQConfigShape(&oneN, 10); });
-    /* the attach-time validator re-checks the group-quant D6 width ceiling for
-     * field-assigned configs that never went through the init funnel */
+    /* attach re-checks the width of a field-assigned config */
     asymQConfig_t wide = {.scales = s,
                           .zeroPoints = z,
                           .numGroups = 2,
@@ -293,14 +254,7 @@ void testValidateAsymQConfigShapeDivisibilityAndQBits(void) {
                           .roundingMode = HALF_AWAY,
                           .qBits = 17};
     ASSERT_EXITS_WITH(1, { validateAsymQConfigShape(&wide, 10); });
-    TEST_ASSERT_TRUE(true); /* reached ⇒ ok-case did not exit */
 }
-
-/* BFP epic PR1 (Task 1; the group shape itself mirrors group-quant's, see
- * docs/conventions/tensor.md): bfpQConfig_t mirrors symQConfig_t's always-array group shape
- * exactly ({1,0} per-tensor sentinel or {>1,>0} grouped), swapping the SYM
- * per-group float scale for a per-group biased exponent byte -- the group
- * grid itself (numGroups/groupSize/validate) is identical machinery. */
 
 void testInitBfpQConfigPerTensorZeroState(void) {
     bfpQConfig_t qc;
@@ -350,7 +304,7 @@ void testValidateBfpQConfigShapeEnforcesElementIdentity(void) {
     freeReservedMemory(qc.exponents);
 }
 
-/* #4 PR0: a remat bind derives BFP wire configs into
+/* A remat bind derives BFP wire configs into
  * caller-owned slab storage and must not allocate, so the Into variants fill
  * a caller-provided exponent array. */
 

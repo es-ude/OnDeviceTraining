@@ -51,6 +51,7 @@ layerLoadTargets_t layerLoadTargets(layer_t *layer) {
     case DROPOUT:
     case QUANTIZATION:
     case ADD:
+    case LAYER_TYPE_COUNT:
         break;
     }
     return targets;

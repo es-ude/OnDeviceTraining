@@ -185,6 +185,9 @@ static void serializeQConfig(quantization_t *q, FILE *f) {
         serialWriteU8((uint8_t)bfpQC->roundingMode, f);
         break;
     }
+    case BFP_RAW:
+        PRINT_ERROR("serializeQConfig: BFP_RAW is executeOp scratch, never stored");
+        exit(1);
     }
 }
 
@@ -358,5 +361,8 @@ static void serializeLayer(layer_t *layer, FILE *f) {
         serializeLayerTail(&c->forwardMath, &c->propLossMath, c->outputQ, c->propLossQ, f);
         break;
     }
+    case LAYER_TYPE_COUNT:
+        PRINT_ERROR("serializeLayer: LAYER_TYPE_COUNT is the enum's count, not a layer type");
+        exit(1);
     }
 }

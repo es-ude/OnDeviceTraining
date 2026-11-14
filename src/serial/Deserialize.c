@@ -416,6 +416,9 @@ static void deserializeQConfig(quantization_t *q, FILE *f, size_t numberOfElemen
         bfpQC->roundingMode = (roundingMode_t)serialReadU8(f);
         break;
     }
+    case BFP_RAW:
+        PRINT_ERROR("deserializeQConfig: BFP_RAW is executeOp scratch, never stored");
+        exit(1);
     }
 }
 
@@ -783,5 +786,8 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         }
         break;
     }
+    case LAYER_TYPE_COUNT:
+        PRINT_ERROR("deserializeLayer: LAYER_TYPE_COUNT is the enum's count, not a layer type");
+        exit(1);
     }
 }

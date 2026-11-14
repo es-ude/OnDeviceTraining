@@ -60,6 +60,9 @@ quantization_t *deepCopyQuantization(quantization_t *src) {
     case BFP:
         cfgSize = sizeof(bfpQConfig_t);
         break;
+    case BFP_RAW:
+        PRINT_ERROR("deepCopyQuantization: BFP_RAW is executeOp scratch, never copied");
+        exit(1);
     }
 
     if (cfgSize == 0) {

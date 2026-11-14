@@ -7,8 +7,9 @@
  *  trainingBatchDefault in chunks of microBatchSize rows (0 means 1), then
  *  mean-scaled (backwardReduction == REDUCTION_MEAN), stepped via
  *  optimizerStep and zeroed. dataLoader->batchSize must be divisible by
- *  microBatchSize (trainingRun checks it); fails fast when no batch can be
- *  formed. Returns the mean of the per-batch losses. Derives each batch's
+ *  microBatchSize, and at microBatchSize > 1 the model must be FLOAT32-only
+ *  (trainingRun checks both; a direct caller must too). Fails fast when no batch can
+ *  be formed. Returns the mean of the per-batch losses. Derives each batch's
  *  step key and each optimizer update's key from call->rng (call NULLable). */
 float trainingEpochDefault(const model_t *model, lossConfig_t lossConfig, dataLoader_t *dataLoader,
                            optimizer_t *optimizer, calculateGradsFn_t calculateGradsFn,

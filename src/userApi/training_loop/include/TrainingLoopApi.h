@@ -218,7 +218,7 @@ typedef struct trainingRunOptions {
                                     microBatchSize 1, [m, ...] at m > 1; the caller deinits it
                                     after the run. Evaluation shares it only when its micro-batch
                                     size matches training and its nominal sample count has no
-                                    tail; otherwise evaluation uses an ephemeral scheduler. Live
+                                    tail; otherwise evaluation runs without it. Live
                                     input/key mismatches fail. */
     trainingRng_t *rng;         /* NULLable; NULL runs without keys, so a shuffle = true train
                                     or eval loader stops at its shuffle. Otherwise

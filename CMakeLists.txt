@@ -6,6 +6,10 @@ include(cmake/helpers.cmake)
 
 project(OnDeviceTraining)
 
+# Every enum switch must name all cases and every non-void function must return: the
+# code removes defensive default: exits, so a new enum value must fail the build instead.
+add_compile_options("$<$<COMPILE_LANGUAGE:C>:-Werror=switch;-Werror=return-type>")
+
 odt_is_top_level_project(ODT_TOP_LEVEL_PROJECT)
 
 add_subdirectory(src)

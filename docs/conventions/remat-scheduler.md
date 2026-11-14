@@ -398,8 +398,7 @@ decisions and those with nothing in force yet are left out.
   a second offsets table among it, is freed before init returns, a short heap
   peak at init only), the placement verifier, then the arena data block. The
   report flags `planned`, `placed`, `dataReserved` imply one another in that
-  order, so a failed init still reports what
-  its flags allow. More than `ODT_REMAT_MAX_RANGES` (default 1024) ranges
+  order. An allocation failure exits in `reserveMemory`. More than `ODT_REMAT_MAX_RANGES` (default 1024) ranges
   exit at init, naming it.
 - **remat D57** The Legacy oracle is retired: keyed randomness reached the
   layer path, and Legacy hands its layers no key. Every fixture compares

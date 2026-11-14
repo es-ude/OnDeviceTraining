@@ -308,6 +308,7 @@ void collectTrainableParameters(const model_t *m, parameter_t **slots) {
         case DROPOUT:
         case QUANTIZATION:
         case ADD:
+        case LAYER_TYPE_COUNT:
             break;
         }
     }

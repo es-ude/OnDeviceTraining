@@ -715,8 +715,8 @@ trainingRunResult_t trainingRun(const model_t *model, lossConfig_t lossConfig,
         stackGatherRequireFloat32Model("trainingRun", "microBatchSize", model, microBatchSize,
                                        layerNonFloat32Field);
     }
-    /* The CrossEntropy backward writes the fused p - y gradient and skips the
-     * last layer, which is right only for a Softmax. */
+    /* The default driver's CrossEntropy backward writes the fused p - y gradient and
+     * skips the last layer (rematHasBackward), which is right only for a Softmax. */
     const layer_t *lastLayer = model->layers[model->numLayers - 1];
     if (lossConfig.funcType == CROSS_ENTROPY && lastLayer->type != SOFTMAX) {
         PRINT_ERROR("trainingRun: a CROSS_ENTROPY loss needs a Softmax as the model's last layer "

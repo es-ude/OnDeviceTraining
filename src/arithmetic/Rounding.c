@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "Common.h"
 #include "RNG.h"
@@ -13,17 +14,47 @@ int32_t roundHalfAway(float input) {
     return roundf(input);
 }
 
-/* Stochastic rounding: lift iff u < frac (law: Rounding.h, docs/conventions/arithmetic-sym.md).
- * Why this form and not floor(x + u): the up-probability is the same for |x| >= 0.5 (at most one
- * draw of the 2^-24 grid differs below), the sum x + u is never formed so an exact integer
- * (f == 0) never moves and no rounded sum can cross an integer, it is odd per draw
- * (SR(-x) = -SR(x)), and it is cheaper on Cortex-M than a floor(x + u)-mapping form
- * (M0+ 371 vs 457 cycles, M4F 15.3 vs 16.4). */
+/* Stochastic rounding: lift iff u < frac (law: Rounding.h, docs/conventions/arithmetic-sym.md),
+ * decided on the float's bits so a soft-float MCU makes no float call. Bit-identical to the float
+ * form t = trunc(x), f = x - t, f < 0 ? t - (u < -f) : t + (u < f): u = k * 2^-24 with integer
+ * k, so u < |f| <=> k < |f| * 2^24 <=> k < c = ceil(|f| * 2^24), which the branches compute
+ * exactly from the mantissa (c < 2^24 fits uint32, no int64). A negative x gives
+ * -(|t| + lift), the float form's t - lift; the negation runs in uint32 so x = -2^31 cannot
+ * overflow. Exactly one draw per call, whatever x is; the caller guarantees a finite
+ * x in [-2^31, 2^31) (+2^31 would wrap to INT32_MIN). */
 static int32_t roundSRHalfAway(const float input, rngStream_t *rs) {
-    const float u = rngNextUnitFloat(rs); /* exactly one draw, whatever x is */
-    const int32_t t = (int32_t)input;     /* truncates toward zero */
-    const float f = input - (float)t;     /* exact */
-    return f < 0.0f ? t - (u < -f) : t + (u < f);
+    const uint32_t k = rngNextU32(rs) >> 8;
+    uint32_t bits;
+    memcpy(&bits, &input, sizeof bits);
+    const uint32_t biased = (bits >> 23) & 0xFFu;
+    const uint32_t mantissa = bits & 0x7FFFFFu;
+    uint32_t t = 0u;
+    uint32_t c;
+    if (biased == 0u) {
+        c = mantissa != 0u; /* zero: c = 0; subnormal: 0 < |f| < 2^-24, so c = 1 */
+    } else {
+        const uint32_t m = mantissa | 0x800000u;
+        const int32_t e = (int32_t)biased - 127;
+        if (e >= 23) {
+            t = m << (e - 23);
+            c = 0u;
+        } else if (e >= 0) {
+            const uint32_t dropped = (uint32_t)(23 - e);
+            t = m >> dropped;
+            c = (m & ((1u << dropped) - 1u)) << (e + 1);
+        } else {
+            const uint32_t sh = (uint32_t)(-(e + 1)); /* |f| * 2^24 = m / 2^sh */
+            if (sh == 0u) {
+                c = m;
+            } else if (sh >= 24u) {
+                c = 1u;
+            } else {
+                c = (m >> sh) + ((m & ((1u << sh) - 1u)) != 0u);
+            }
+        }
+    }
+    const uint32_t r = t + (k < c);
+    return (bits >> 31) ? (int32_t)(0u - r) : (int32_t)r;
 }
 
 int32_t roundByMode(const float input, const roundingMode_t roundingMode, rngStream_t *rs) {

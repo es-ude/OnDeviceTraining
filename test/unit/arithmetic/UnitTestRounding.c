@@ -1,6 +1,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "DeathTest.h"
@@ -179,6 +180,61 @@ void testRoundByModeSrIsOddPerDraw() {
     }
 }
 
+/* Oracle for the SR pin: the float form of the law, lift iff u < frac. */
+static int32_t srFloatOracle(const float x, rngStream_t *rs) {
+    const float u = rngNextUnitFloat(rs);
+    const int32_t t = (int32_t)x;
+    const float f = x - (float)t;
+    return f < 0.0f ? t - (u < -f) : t + (u < f);
+}
+
+/* Drives the draw to c - 1, c, c + 1 around the decision boundary c = ceil(|frac| * 2^24)
+ * (random draws hit it with p ~ 2^-24) plus both extremes; the low 8 bits keep it nonzero. */
+static void assertSrMatchesFloatOracle(const float x) {
+    const double frac = fabs((double)x - trunc((double)x));
+    const int32_t c = (int32_t)ceil(frac * 0x1p24);
+    const int32_t ks[] = {c - 1, c, c + 1, 0, 0xFFFFFF};
+    for (size_t i = 0; i < sizeof ks / sizeof ks[0]; i++) {
+        const int32_t k = ks[i] < 0 ? 0 : (ks[i] > 0xFFFFFF ? 0xFFFFFF : ks[i]);
+        const uint32_t draw = ((uint32_t)k << 8) | 0x5Au;
+        rngStream_t a = rngStreamWithNextDraw(draw);
+        rngStream_t b = rngStreamWithNextDraw(draw);
+        const int32_t expected = srFloatOracle(x, &b);
+        const int32_t actual = roundByMode(x, SR_HALF_AWAY, &a);
+        if (actual != expected || a.state != b.state) {
+            char msg[64];
+            snprintf(msg, sizeof msg, "x=%a k=0x%06X", (double)x, (unsigned)k);
+            TEST_ASSERT_EQUAL_INT32_MESSAGE(expected, actual, msg);
+            TEST_ASSERT_EQUAL_HEX32_MESSAGE(b.state, a.state, msg);
+        }
+    }
+}
+
+/* SR rounding must give the float form's result and consume exactly its one draw, for every
+ * finite x in [-2^31, 2^31), at the decision boundary of each x. */
+void testRoundByModeSrIntegerDecisionMatchesFloatForm() {
+    const float edges[] = {0.0f,        -0.0f,         0x1p-149f,      0x1.fffffcp-127f,
+                           0x1p-25f,    0x1p-24f,      0x1.8p-24f,     0.5f,
+                           -0.5f,       1.0f,          1.5f,           2.5f,
+                           -2.5f,       8388607.5f,    8388608.0f,     8388609.0f,
+                           16777216.0f, 2147483520.0f, -2147483520.0f, -2147483648.0f};
+    for (size_t i = 0; i < sizeof edges / sizeof edges[0]; i++) {
+        assertSrMatchesFloatOracle(edges[i]);
+    }
+
+    uint32_t lcg = 12345u;
+    for (int32_t e = -26; e <= 30; e++) {
+        for (int32_t j = 0; j < 2000; j++) {
+            lcg = lcg * 1664525u + 1013904223u;
+            const uint32_t bits = ((uint32_t)(e + 127) << 23) | (lcg >> 9);
+            float x;
+            memcpy(&x, &bits, sizeof x);
+            assertSrMatchesFloatOracle(x);
+            assertSrMatchesFloatOracle(-x);
+        }
+    }
+}
+
 static void roundSrWithoutAStream(void) {
     (void)roundByMode(352.5f, SR_HALF_AWAY, NULL);
 }
@@ -230,6 +286,7 @@ int main(void) {
     RUN_TEST(testRoundByModeSrTinyNegativeRoundsDownOnlyForZeroDraw);
     RUN_TEST(testRoundByModeSrLiftsIffDrawBelowFraction);
     RUN_TEST(testRoundByModeSrIsOddPerDraw);
+    RUN_TEST(testRoundByModeSrIntegerDecisionMatchesFloatForm);
 
     return UNITY_END();
 }

@@ -39,12 +39,16 @@ The up-probability is the fractional part, as for `floor(x + u)`, for
 (`2^-24`). The sum `x + u` is never formed (a float32 add would round up across
 the next integer for `u > 1 - ulp/2`, `2^-14` at 2047, `1/2` on `[2^23, 2^24)`,
 a magnitude-growing upward bias), so an exact integer (`f == 0`) never moves.
-It is odd per draw: `SR(-x) = -SR(x)` for the same `u`. This form is cheaper
-than the `floor(x + u)`-mapping one on Cortex-M (M0+ 371 vs 457, M4F 15.3 vs
-16.4 cycles).
-`u = rngNextUnitFloat(rs)` is drawn from the op's stream, exactly one draw per
-call: `u = (top 24 bits of a U32) / 2^24`, so `u` is in `[0, 1 - 2^-24]` (never
-1, `0` possible). An `input` that is already an integer `k`
+It is odd per draw: `SR(-x) = -SR(x)` for the same `u`.
+The implementation decides in integers on the float's bits: with `k` = the top
+24 bits of the op stream's next `rngNextU32` draw, `u = k / 2^24`, so
+`u < |f|` holds exactly iff `k < ceil(|f| * 2^24)`; that ceiling is computed
+from the mantissa (uint32, no int64), and a negative `x` gives `-(|t| + lift)`.
+The result is bit-identical to the float form above, with no float operation
+(on M0+ soft-float this removes the six library calls of the float form:
+`ui2f`, `fmul`, `f2iz`, `i2f`, `fsub`, `fcmplt`). Exactly one draw per call,
+whatever `x` is; the domain is finite `x` in `[-2^31, 2^31)`. `u` is in
+`[0, 1 - 2^-24]` (never 1, `0` possible). An `input` that is already an integer `k`
 rounds to `k` for every `u`, for `k` of either sign (#510). Consequently an
 exactly representable saturated value (`qMax` or `qMin` after the float clamp)
 never moves under SR; the integer clamps after SR emit sites are defensive

@@ -14,6 +14,7 @@
 #include "Layer.h"
 #include "LayerExec.h"
 #include "LayerWireGuards.h"
+#include "PoolSymGuard.h"
 #include "Quantization.h"
 #include "ScaleCanon.h"
 #include "SlidingWindow1d.h"
@@ -33,13 +34,7 @@ void initMaxPool1dConfig(maxPool1dConfig_t *cfg, kernel_t *kernel, tensor_t *arg
     cfg->ownsQuantizations = false;
 }
 
-/* executeOp forward kernel adapter — ctx = maxPool1dConfig_t* for kernel_t
- * geometry (mirrors AvgPool1d/Conv1d's ctx convention). auxOut = the layer's
- * pre-allocated argmaxIndices tensor (opSpec_t.auxOut, PR1b.2 D1): the funnel
- * never converts it (kernel-written verbatim, in ITS OWN storage format,
- * INT32) — this is exactly the dual-output shape auxOut was added for (PR1b.2
- * D1: "MaxPool argmaxIndices lives here"). The SYM_INT32 arm lives in
- * maxPool1dForwardKernelSymInt32 below (#205). */
+/* auxOut is INT32 index state and is never converted. */
 static void maxPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                    const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -78,8 +73,7 @@ static void maxPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, t
                     yArr[outIdx] = bestVal;
                     argmaxArr[outIdx] = bestInputIdx;
                 } else {
-                    // An empty window is theoretically possible but in
-                    // practice unreachable; log + sentinel-encode rather than exit
+                    // Empty dilated windows emit zero and argmax -1.
                     yArr[outIdx] = 0.0f;
                     argmaxArr[outIdx] = -1;
                     PRINT_ERROR("MaxPool1d: empty window at outPos=%zu — likely user misconfig",
@@ -90,13 +84,10 @@ static void maxPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, t
     }
 }
 
-/* SYM_INT32 arm (#205): pure mantissa select — argmax over int32 mantissas is
- * argmax over values (scale > 0 preserves order), scale copied to the raw
- * intermediate (ReLU idiom); the OUT_WRITE epilogue width-restores at the
- * producer like every funnel SYM path. Tie-break matches the FLOAT32 arm:
- * strict >, first occurrence wins — but ties happen in the QUANTIZED domain,
- * so inputs that quantize to the same mantissa tie here even when their float
- * values differ. */
+/* Mantissa select is value select (scale > 0 preserves order); the scale is
+ * copied to the raw. Strict > keeps the first winner, but ties happen in the
+ * QUANTIZED domain: inputs that quantize to the same mantissa tie even when
+ * their float values differ. */
 static void maxPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *rawOut,
                                            tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -135,8 +126,7 @@ static void maxPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *r
                     yArr[outIdx] = bestVal;
                     argmaxArr[outIdx] = bestInputIdx;
                 } else {
-                    // An empty window is theoretically possible but in
-                    // practice unreachable; log + sentinel-encode rather than exit
+                    // Empty dilated windows emit zero and argmax -1.
                     yArr[outIdx] = 0;
                     argmaxArr[outIdx] = -1;
                     PRINT_ERROR("MaxPool1d: empty window at outPos=%zu — likely user misconfig",
@@ -244,8 +234,7 @@ void maxPool1dForwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, te
                         rawE[targetGroup] = (int16_t)bestE;
                     }
                 } else {
-                    // An empty window is theoretically possible but in
-                    // practice unreachable; log + sentinel-encode rather than exit
+                    // Empty dilated windows emit zero and argmax -1.
                     mant[outIdx] = 0;
                     argmaxArr[outIdx] = -1;
                     PRINT_ERROR("MaxPool1d: empty window at outPos=%zu — likely user misconfig",
@@ -282,14 +271,12 @@ void maxPool1dForwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, te
     }
 }
 
-/* #152 PR3b: size the argmax for THIS call's batch before any arm
- * runs, so every arm (FLOAT32, SYM_INT32, BFP) and inference() see a buffer
- * holding B rows. Growth reserves the new [B, C, Lout] block BEFORE freeing
- * the old one (a failed reservation leaves the layer intact) and the element
- * and byte counts are overflow-checked. Only dims[0] is rewritten (the forward
- * gate rejects a wrong-channel or wrong-length argmax afterwards), and only
- * when the batch changes, so a fixed-batch forward writes nothing into the
- * config beyond the argmax contents. Concurrency: see maxPool1dConfig_t. */
+/* Grow argmax storage for this batch before any arm runs, preserving capacity
+ * on smaller calls. Check allocation-size overflow before reserving, and
+ * reserve the new block before freeing the old one so a failed reservation
+ * leaves the layer intact. Only dims[0] is rewritten, and only when B changes
+ * (the forward gate rejects wrong channels or length afterwards).
+ * Concurrency: see maxPool1dConfig_t. */
 static void maxPoolEnsureArgmaxRows(maxPool1dConfig_t *cfg, const shape_t *outputShape) {
     tensor_t *argmax = cfg->argmaxIndices;
     size_t batch = outputShape->dimensions[0];
@@ -350,10 +337,9 @@ void maxPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
 
     if (cfg->forwardMath.type == ARITH_BFP) {
         const bfpQConfig_t *anchor = bfpWireAnchor(cfg->outputQ, "MaxPool1d forward");
-        /* Stack template: lifetime covers the executeOp call (same frame).
-         * Always per-tensor {1,0} — the anchor supplies WIDTHS only; the
-         * funnel owns exponent backing and rounds by the OP (#282). A
-         * BFP-stored operand gets NULL: borrowed zero-copy, never re-blocked. */
+        /* Stage FLOAT32 operands per-tensor at the produced-wire widths; borrow
+         * BFP operands without reblocking. The stack template lives through
+         * the executeOp call. */
         bfpQConfig_t stage = {.exponents = NULL,
                               .numGroups = 1,
                               .groupSize = 0,
@@ -403,7 +389,7 @@ static void maxPool1dBackwardFloat(maxPool1dConfig_t *cfg, tensor_t *lossGrad, t
     int32_t const *argmaxArr = (int32_t const *)cfg->argmaxIndices->data;
     float *gxArr = (float *)propLoss->data;
 
-    // OUT_WRITE: propLoss may hold stale bytes (#4 arena reuse); the scatter accumulates.
+    // propLoss may hold stale bytes; clear before accumulating overlapping contributions.
     memset(gxArr, 0, batch * channels * inputLength * sizeof(float));
 
     for (size_t b = 0; b < batch; b++) {
@@ -420,39 +406,9 @@ static void maxPool1dBackwardFloat(maxPool1dConfig_t *cfg, tensor_t *lossGrad, t
     }
 }
 
-/* Pool SYM value-sum guard (Reduce.c precedent: reduceValidateSymOperand +
- * meanOverTrailingAxesSymInt32's N-bound): the scatter accumulates a VALUE-sum
- * of operand-width mantissas in an int32 — sound only for qMaxBits in [1,16]
- * and worst-case terms < 2^(32-qMaxBits). qMaxBits == 0 is degenerate and
- * would make the shift UB. No dtype check: the executeOp prologue guarantees
- * a SYM_INT32 operand inside an ARITH_SYM_INT32 kernel. */
-#define POOL_SYM_VALUESUM_QMAXBITS 16u
-static void poolValidateSymValueSum(const tensor_t *operand, size_t maxTerms, const char *op) {
-    const symInt32QConfig_t *qc = operand->quantization->qConfig;
-    if (qc->qMaxBits == 0 || qc->qMaxBits > POOL_SYM_VALUESUM_QMAXBITS) {
-        PRINT_ERROR("%s: operand qMaxBits (%u) outside the value-sum bound [1,%u]", op,
-                    (unsigned)qc->qMaxBits, (unsigned)POOL_SYM_VALUESUM_QMAXBITS);
-        exit(1);
-    }
-    size_t bound = (size_t)1 << (32u - qc->qMaxBits);
-    if (maxTerms >= bound) {
-        PRINT_ERROR("%s: worst-case summed terms (%zu) reach the value-sum bound for "
-                    "qMaxBits (%u) -- must be < 2^(32-qMaxBits) (%zu)",
-                    op, maxTerms, (unsigned)qc->qMaxBits, bound);
-        exit(1);
-    }
-}
-
-/* SYM_INT32 dx kernel (#205): zero + scatter loss-grad mantissas to the argmax
- * positions recorded by the forward (scale copied from the loss grad — pure
- * select transpose). Funnel-routed like Conv1d's dx wire: the prologue
- * converts a mismatched-dtype lossGrad into SYM scratch, the OUT_WRITE
- * epilogue width-restores propLoss at the producer. ops = {lossGrad}; the
- * argmax tensor arrives via ctx (kernel-written by forward, never
- * funnel-converted), auxOut is unused. rawOut is the funnel's uninitialized
- * Phase-2 scratch, so the kernel memsets it before the scatter `+=`
- * (overlapping windows may hit the same input index — Conv1d weight-grad
- * kernel precedent). */
+/* Scatter loss-grad mantissas to the forward's argmax positions; the scale is
+ * copied from lossGrad. argmax arrives via ctx; auxOut is unused. rawOut is
+ * uninitialized scratch: clear before accumulating overlapping contributions. */
 static void maxPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *rawOut,
                                             tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)n;

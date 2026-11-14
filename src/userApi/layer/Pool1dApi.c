@@ -5,6 +5,7 @@
 
 #include "ArithmeticType.h"
 #include "AvgPool1d.h"
+#include "CheckedSize.h"
 #include "Common.h"
 #include "Kernel.h"
 #include "Layer.h"
@@ -12,6 +13,7 @@
 #include "MaxPool1d.h"
 #include "Pool1dApi.h"
 #include "QuantizationApi.h"
+#include "SlidingWindow1d.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
@@ -20,28 +22,25 @@
  * Shared helpers
  * ========================================================================== */
 
-/*! Compute output length per the geometry rule used by the internal
- *  windowGeometry1dCalc, replicated here for factory pre-allocation
- *  without bringing in SlidingWindow1d.
- *
- *  VALID: outputLength = (inputLength - dilation*(kernelSize - 1) - 1) / stride + 1
- *  SAME:  outputLength = ceil(inputLength / stride)
- *
- *  Matches the runtime windowGeometry1dCalc result used by both pool
- *  layers' forward paths. */
-static size_t computePool1dOutputLength(paddingType_t padding, size_t inputLength,
-                                        size_t kernelSize, size_t dilation, size_t stride) {
-    if (padding == SAME) {
-        return (inputLength + stride - 1) / stride;
+/*! Derive the initial argmax length from the pooling geometry. Unlike the
+ *  runtime geometry, which yields zero outputs, the factory rejects a non-SAME
+ *  effective kernel longer than the declared input. kernel->size must be > 0. */
+static size_t computePool1dOutputLength(const kernel_t *kernel, size_t inputLength) {
+    size_t span = 0;
+    size_t effectiveK = 0;
+    if (!checkedMulSize(kernel->dilation, kernel->size - 1, &span) ||
+        !checkedAddSize(span, 1, &effectiveK)) {
+        PRINT_ERROR("Pool1d: effective kernel dilation (%zu) * (kernelSize (%zu) - 1) + 1 "
+                    "overflows size_t",
+                    kernel->dilation, kernel->size);
+        exit(1);
     }
-    /* VALID */
-    size_t effectiveK = dilation * (kernelSize - 1) + 1;
-    if (effectiveK > inputLength) {
+    if (kernel->paddingType != SAME && effectiveK > inputLength) {
         PRINT_ERROR("Pool1d: effective kernel %zu exceeds inputLength %zu", effectiveK,
                     inputLength);
         exit(1);
     }
-    return (inputLength - effectiveK) / stride + 1;
+    return windowGeometry1dCalc(inputLength, kernel).outputLength;
 }
 
 static bool isPoolArithmetic(arithmeticType_t type) {
@@ -120,8 +119,8 @@ static shape_t *buildOwnedShape(const size_t *srcDims, size_t numberOfDims) {
 
 static tensor_t *buildMaxPool1dArgmax(size_t inputChannels, size_t outputLength) {
     /* Created for batch=1: [1, inputChannels, outputLength]. maxPool1dForward
-     * grows it on demand to the largest batch it is called with (#152 PR3b),
-     * e.g. a stacked micro-batch or a batched inference() call. */
+     * grows it on demand to the largest batch it is called with, e.g. a
+     * stacked micro-batch or a batched inference() call. */
     shape_t *shape = buildOwnedShape((size_t[]){1, inputChannels, outputLength}, 3);
     quantization_t *q = quantizationInitInt32();
     return initTensor(shape, q, NULL);
@@ -134,8 +133,7 @@ static layer_t *buildMaxPool1dLayerSkeleton(maxPool1dInit_t *init) {
     kernel_t *kernel = reserveMemory(sizeof(kernel_t));
     initKernel(kernel, init->kernelSize, init->padding, dilation, stride);
 
-    size_t outputLength = computePool1dOutputLength(init->padding, init->inputLength,
-                                                    init->kernelSize, dilation, stride);
+    size_t outputLength = computePool1dOutputLength(kernel, init->inputLength);
     tensor_t *argmax = buildMaxPool1dArgmax(init->inputChannels, outputLength);
 
     layer_t *layer = reserveMemory(sizeof(layer_t));
@@ -250,7 +248,7 @@ static layer_t *buildAvgPool1dLayerSkeleton(avgPool1dInit_t *init) {
     size_t stride = init->stride == 0 ? init->kernelSize : init->stride;
 
     kernel_t *kernel = reserveMemory(sizeof(kernel_t));
-    /* AvgPool1d has no dilation (kernel doesn't support it); pass 1. */
+    /* The public AvgPool1d factory fixes dilation to 1. */
     initKernel(kernel, init->kernelSize, init->padding, /*dilation*/ 1, stride);
 
     layer_t *layer = reserveMemory(sizeof(layer_t));

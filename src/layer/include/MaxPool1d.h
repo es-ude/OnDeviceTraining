@@ -11,23 +11,20 @@
 #include "Tensor.h"
 
 /* argmaxIndices: INT32 [B, C, Lout] index state written by every forward and
- * read by the backward. The caller pre-allocates it (the factory sizes it for
- * B = 1); maxPool1dForward grows it on demand to the largest B seen and keeps
- * dims[0] = B, writing it only when B changes (#152 PR3b), so its
- * ->data must come from reserveMemory: a growing forward frees and replaces it.
- * argmaxCapacity is the element count of the allocation argmaxCapacityData
- * points at. Capacity is trusted only while argmaxCapacityData ==
- * argmaxIndices->data; any other buffer (zero-initialised config, argmax
- * swapped in by hand) is adopted at its own element count on the next forward.
- * When replacing argmaxIndices by hand, also set argmaxCapacityData = NULL (or
- * re-run initMaxPool1dConfig): a replacement whose ->data reuses the freed
- * buffer's address would otherwise inherit that buffer's stale capacity.
+ * read by the matching backward. The factory sizes it for B = 1; the forward
+ * grows it to the largest B seen, keeps capacity on smaller batches and
+ * rewrites dims[0] only when B changes. Its ->data must come from reserveMemory
+ * because a growing forward frees and replaces it.
+ * argmaxCapacity is valid only while argmaxCapacityData == argmaxIndices->data;
+ * any other buffer (zero-initialised config, argmax swapped in by hand) is
+ * adopted at its own element count on the next forward.
+ * When replacing argmaxIndices by hand, set argmaxCapacityData = NULL (or re-run
+ * initMaxPool1dConfig): a replacement that reuses the freed address would
+ * otherwise inherit the stale capacity.
  *
- * CONCURRENCY INVARIANT: one MaxPool layer instance must never run two
- * forwards concurrently, nor a forward concurrently with its backward. This
- * already held before growth -- the forward writes the argmax CONTENTS into
- * this config -- so growing the buffer in place adds no new hazard. Concurrent
- * forwards need separate layer instances. */
+ * Serialize access per layer instance: no two concurrent forwards, and no
+ * forward concurrent with its backward. Concurrent forwards need separate
+ * layer instances. */
 typedef struct maxPool1dConfig {
     kernel_t *kernel;
     tensor_t *argmaxIndices;           // INT32 [B, C, Lout]; see the block comment above

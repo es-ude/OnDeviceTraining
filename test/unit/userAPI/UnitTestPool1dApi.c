@@ -318,7 +318,7 @@ void testAvgPool1dLayerInitRejectsBfpMathWithoutBfpWire(void) {
 }
 
 /* ============================================================================
- * MaxPool1d argmax grow-on-demand (#152 PR3b)
+ * MaxPool1d argmax grow-on-demand
  * ========================================================================== */
 
 static tensor_t *buildPoolTensor(size_t batch, size_t channels, size_t length, const float *src) {

@@ -237,7 +237,7 @@ void testBackwardUpsample(void) {
     }
 }
 
-/* #4 PR0 (C13): the FLOAT32 dx arm must OUT_WRITE propLoss -- the remat arena
+/* The FLOAT32 dx arm must OUT_WRITE propLoss -- the remat arena
  * hands it bytes a previous step left behind. Adaptive windows tile the whole
  * input, and 0xA5A5A5A5 read as a float is -2.87e-16, which `+=` of an O(1)
  * gradient absorbs exactly, so the first call exposes stale bytes only where
@@ -319,10 +319,8 @@ void testCalcOutputShapeFixedRegardlessOfInput(void) {
     freeQuantization(q);
 }
 
-// Smoke test for the funnel's new SYM-input capability (spec Testing list) —
-// same rationale as AvgPool1d's twin test (UnitTestAvgPool1d.c): forwardMath
-// stays FLOAT32 (no SYM kernel body), but a SYM_INT32 producer tensor must
-// now be dequantized by the executeOp prologue rather than reinterpreted as
+// forwardMath stays FLOAT32, but a SYM_INT32 producer tensor must be
+// dequantized by the executeOp prologue rather than reinterpreted as
 // raw float bits. absMax(1,2,3,4)=4.0 -> scale=4/2047; per-element error
 // <= 0.5*scale ~ 9.8e-4 -> 5e-3 leaves a >5x margin.
 void testAdaptiveAvgPool1dForwardWithSymInt32Input(void) {
@@ -358,10 +356,10 @@ void testAdaptiveAvgPool1dForwardWithSymInt32Input(void) {
     }
 }
 
-/* ---- SYM_INT32 arm (#205) ---- */
+/* ---- SYM_INT32 arm ---- */
 
-/* Build a SYM_INT32 (HALF_AWAY, qMaxBits=12) tensor from a float fixture —
- * UnitTestConv1d.c helper pattern; fixtures are dequant-round-trip-stable
+/* Build a SYM_INT32 (HALF_AWAY, qMaxBits=12) tensor from a float fixture;
+ * fixtures are dequant-round-trip-stable
  * (sym_gold.stable_dequant_i12) so the C side lands on exactly the gold
  * mantissas+scale. NULL vals -> zero mantissas, scale 1.0. */
 static tensor_t *buildSymTensor(size_t const *dims, size_t numDims, float const *vals) {
@@ -503,9 +501,9 @@ void testBackwardSymRejectsWideLossGrad(void) {
         adaptiveAvgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 }
 
-/* ---- BFP epic PR4 (R-P1/R-P4): native ARITH_BFP arms ---- */
+/* ---- native ARITH_BFP arms ---- */
 
-/* BFP epic PR4: build a BFP wire with EXACT codes and per-group exponents.
+/* Build a BFP wire with EXACT codes and per-group exponents.
  * Writing the packed payload directly (byteConversion) instead of quantizing
  * keeps the fixture independent of the quantizer and lets the test pin the
  * borrowed exponents the kernel folds with. */
@@ -533,7 +531,7 @@ static tensor_t *buildBfpWireWithCodes(size_t const *dims, size_t numDims, uint8
     return t;
 }
 
-/* BFP epic PR4 (R-P1): pools have no weight operand, so the width anchor for
+/* Pools have no weight operand, so the width anchor for
  * staging is the layer's OWN produced-wire config — outputQ for the forward,
  * propLossQ for the backward. initAdaptiveAvgPool1dConfig derives both math
  * slots from it, so passing a BFP wireQ selects the native arms. */
@@ -547,8 +545,8 @@ static layer_t *adaptiveBuildBfpLayer(adaptiveAvgPool1dConfig_t *cfgStore, layer
     return layerStore;
 }
 
-/* Borrowed BFP-stored grouped input (BFP D8: never re-blocked): the kernel folds
- * same-group segments with ldexpf into the FLOAT32 raw (BFP D7) and divides by
+/* Borrowed BFP-stored grouped input (never re-blocked): the kernel folds
+ * same-group segments with ldexpf into the FLOAT32 raw and divides by
  * EACH window's own count there — L=8, O=3 gives counts 3/4/3, so a constant
  * divisor is observably wrong. A FLOAT32 output wire makes the OUT_WRITE
  * epilogue a memmove, so the comparison is bit-exact. */
@@ -607,10 +605,8 @@ void testAdaptiveAvgPool1dBackwardBfpScattersIntoFloat32Raw(void) {
      * second call is also the best available observability for the kernel's
      * memset of the funnel's uninitialized Phase-2 scratch: that stack VLA can
      * read as zero (it holds whatever the prologue's callee frames left at
-     * this stack depth), so a single call may not notice a missing memset. For
-     * THIS layer the doubled call did not kill the dropped-memset mutant in
-     * one build — the observability is stack-layout dependent. The durable fix
-     * is funnel-level zeroing of the Phase-2 raw (PR4 follow-up FU-1). */
+     * this stack depth), so a single call may not notice a missing memset;
+     * whether it does depends on the stack layout. */
     adaptiveAvgPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL);
     adaptiveAvgPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL);
 
@@ -785,7 +781,6 @@ void testAdaptiveAvgPool1dSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
     freeQuantization(q);
 }
 
-/* #440: see testLinearInitConfigClearsOwnsQuantizations. */
 void testAdaptiveAvgPool1dInitConfigClearsOwnsQuantizations(void) {
     adaptiveAvgPool1dConfig_t cfg;
     memset(&cfg, 0xFF, sizeof cfg);

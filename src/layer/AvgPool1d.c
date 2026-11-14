@@ -12,6 +12,7 @@
 #include "Layer.h"
 #include "LayerExec.h"
 #include "LayerWireGuards.h"
+#include "PoolSymGuard.h"
 #include "Quantization.h"
 #include "ScaleCanon.h"
 #include "SlidingWindow1d.h"
@@ -27,9 +28,6 @@ void initAvgPool1dConfig(avgPool1dConfig_t *cfg, kernel_t *kernel, quantization_
     cfg->ownsQuantizations = false;
 }
 
-/* executeOp forward kernel adapter — ctx = avgPool1dConfig_t* for kernel_t
- * geometry (mirrors Conv1d's ctx convention, Conv1d.c); 1 input, no auxOut.
- * The SYM_INT32 arm lives in avgPool1dForwardKernelSymInt32 below (#205). */
 static void avgPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
                                    const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -66,37 +64,9 @@ static void avgPool1dForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, t
     }
 }
 
-/* Pool SYM value-sum guard (Reduce.c precedent: reduceValidateSymOperand +
- * meanOverTrailingAxesSymInt32's N-bound): the window sum / backward scatter
- * accumulates a VALUE-sum of operand-width mantissas in an int32 — sound only
- * for qMaxBits in [1,16] and worst-case terms < 2^(32-qMaxBits). qMaxBits == 0
- * is degenerate and would make the shift UB. No dtype check: the executeOp
- * prologue guarantees a SYM_INT32 operand inside an ARITH_SYM_INT32 kernel. */
-#define POOL_SYM_VALUESUM_QMAXBITS 16u
-static void poolValidateSymValueSum(const tensor_t *operand, size_t maxTerms, const char *op) {
-    const symInt32QConfig_t *qc = operand->quantization->qConfig;
-    if (qc->qMaxBits == 0 || qc->qMaxBits > POOL_SYM_VALUESUM_QMAXBITS) {
-        PRINT_ERROR("%s: operand qMaxBits (%u) outside the value-sum bound [1,%u]", op,
-                    (unsigned)qc->qMaxBits, (unsigned)POOL_SYM_VALUESUM_QMAXBITS);
-        exit(1);
-    }
-    size_t bound = (size_t)1 << (32u - qc->qMaxBits);
-    if (maxTerms >= bound) {
-        PRINT_ERROR("%s: worst-case summed terms (%zu) reach the value-sum bound for "
-                    "qMaxBits (%u) -- must be < 2^(32-qMaxBits) (%zu)",
-                    op, maxTerms, (unsigned)qc->qMaxBits, bound);
-        exit(1);
-    }
-}
-
-/* SYM_INT32 arm (#205): exact int32 mantissa window sum + exact scale fold
- * s_out = s_in / K (Dropout idiom) — the /K division never touches the
- * mantissas, so the kernel carries ZERO rounding. count_include_pad=true
- * falls out for free: padded positions contribute 0 to the sum while the
- * fold keeps the divisor at K. The window sum is a value-sum of at most K
- * operand-width mantissas (no products — the no-int64 rule is trivially
- * satisfied), guarded by poolValidateSymValueSum above. The OUT_WRITE
- * epilogue width-restores the accumulator-range sums at the producer. */
+/* Exact int32 window sum; fold 1/K into the scale (s_out = s_in / K) so the
+ * mantissas carry no rounding. The divisor is K including padding: padded
+ * positions add 0 to the sum. At most K terms per sum. */
 static void avgPool1dForwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *rawOut,
                                            tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)n;
@@ -303,10 +273,9 @@ void avgPool1dForward(layer_t *layer, tensor_t *input, tensor_t *output, const l
 
     if (cfg->forwardMath.type == ARITH_BFP) {
         const bfpQConfig_t *anchor = bfpWireAnchor(cfg->outputQ, "AvgPool1d forward");
-        /* Stack template: lifetime covers the executeOp call (same frame).
-         * Always per-tensor {1,0} — the anchor supplies WIDTHS only; the
-         * funnel owns exponent backing and rounds by the OP (#282). A
-         * BFP-stored operand gets NULL: borrowed zero-copy, never re-blocked. */
+        /* Stage FLOAT32 operands per-tensor at the produced-wire widths; borrow
+         * BFP operands without reblocking. The stack template lives through
+         * the executeOp call. */
         bfpQConfig_t stage = {.exponents = NULL,
                               .numGroups = 1,
                               .groupSize = 0,
@@ -357,7 +326,7 @@ static void avgPool1dBackwardFloat(const avgPool1dConfig_t *cfg, tensor_t *lossG
     float *gxArr = (float *)propLoss->data;
     float divisor = (float)cfg->kernel->size;
 
-    // OUT_WRITE: propLoss may hold stale bytes (#4 arena reuse); the scatter accumulates.
+    // propLoss may hold stale bytes; clear before accumulating overlapping contributions.
     memset(gxArr, 0, batch * channels * inputLength * sizeof(float));
 
     for (size_t b = 0; b < batch; b++) {
@@ -376,13 +345,9 @@ static void avgPool1dBackwardFloat(const avgPool1dConfig_t *cfg, tensor_t *lossG
     }
 }
 
-/* SYM_INT32 dx kernel (#205): zero + scatter loss-grad mantissas into every
- * valid window member; the 1/K contribution folds EXACTLY into the raw scale
- * (s_dx = s_gy / K) — the transpose of the forward's fold, zero kernel
- * rounding. Funnel-routed like Conv1d's dx wire (prologue converts a
- * mismatched-dtype lossGrad, OUT_WRITE epilogue width-restores propLoss at
- * the producer). rawOut is the funnel's uninitialized Phase-2 scratch, so
- * the kernel memsets it before the scatter `+=` (overlapping windows). */
+/* Scatter loss-grad mantissas into every valid window member and fold 1/K into
+ * the scale (s_dx = s_gy / K) to avoid mantissa rounding. rawOut is
+ * uninitialized scratch: clear before accumulating overlapping contributions. */
 static void avgPool1dBackwardKernelSymInt32(tensor_t **ops, size_t n, tensor_t *rawOut,
                                             tensor_t *auxOut, const void *ctx, rngStream_t *rs) {
     (void)n;

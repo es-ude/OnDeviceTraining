@@ -124,6 +124,7 @@ target_link_libraries(Pool1dApi PRIVATE
         Quantization
         QuantizationApi
         Rounding
+        SlidingWindow1d
         StorageApi
         Tensor
         TensorApi

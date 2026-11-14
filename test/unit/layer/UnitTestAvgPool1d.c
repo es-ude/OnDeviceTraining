@@ -7,7 +7,6 @@
 #include <string.h>
 
 #include "AvgPool1d.h"
-#include "BfpKernelSupport.h"
 #include "DeathTest.h"
 #include "KeyedDrawCheck.h"
 #include "Layer.h"
@@ -255,7 +254,7 @@ void testAvgPool1dEdgeCases(void) {
     }
 }
 
-/* #4 PR0 (C13): the FLOAT32 dx arm must OUT_WRITE propLoss -- the remat arena
+/* The FLOAT32 dx arm must OUT_WRITE propLoss -- the remat arena
  * hands it bytes a previous step left behind. 0xA5A5A5A5 read as a float is
  * -2.87e-16, which `+=` of an O(1) gradient absorbs exactly, so the first call
  * exposes stale bytes only in cells no window covers: K=2, dilation=2,
@@ -305,11 +304,9 @@ void testAvgPool1dBackwardFloatOverwritesStalePropLoss(void) {
                                      "a repeated backward must reproduce dx (OUT_WRITE)");
 }
 
-// Smoke test for the funnel's new SYM-input capability (spec Testing list):
-// the layer's own forwardMath stays FLOAT32 (no SYM kernel body exists for
-// this op), but a SYM_INT32-typed *producer* tensor feeding it must now be
-// dequantized by the executeOp prologue rather than silently reinterpreted
-// as raw float bits (the pre-migration direct-cast hazard). Tolerance is
+// The layer's forwardMath stays FLOAT32, but a SYM_INT32-typed producer
+// tensor feeding it must be dequantized by the executeOp prologue rather than
+// reinterpreted as raw float bits. Tolerance is
 // widened relative to the FLOAT32 fixture tests above: it must cover the
 // SYM_INT32@12 quantization step (qMax=2047) on top of the exact average,
 // not just float rounding noise. absMax(1,4,2,3)=4.0 -> scale=4/2047;
@@ -351,10 +348,10 @@ void testAvgPool1dForwardWithSymInt32Input(void) {
     }
 }
 
-/* ---- SYM_INT32 arm (#205) ---- */
+/* ---- SYM_INT32 arm ---- */
 
-/* Build a SYM_INT32 (HALF_AWAY, qMaxBits=12) tensor from a float fixture —
- * UnitTestConv1d.c helper pattern; fixtures are dequant-round-trip-stable
+/* Build a SYM_INT32 (HALF_AWAY, qMaxBits=12) tensor from a float fixture;
+ * fixtures are dequant-round-trip-stable
  * (sym_gold.stable_dequant_i12) so the C side lands on exactly the gold
  * mantissas+scale. NULL vals -> zero mantissas, scale 1.0. */
 static tensor_t *buildSymTensor(size_t const *dims, size_t numDims, float const *vals) {
@@ -462,8 +459,8 @@ void testAvgPool1dSymStrideDilationForwardBackward(void) {
     size_t inputDims[] = {1, 1, 9};
     size_t outputDims[] = {1, 1, 3};
 
-    // K=2, stride=3, dilation=2 — random gold lossGrad so positional mutations
-    // on the SYM scatter path are non-vacuous.
+    // K=2, stride=3, dilation=2 — random gold lossGrad so a misplaced SYM scatter
+    // changes the result.
     avgPool1dSymRun_t r = avgPool1dBuildSym(input_avgPool1dSym_symStrideDilation, inputDims, 2,
                                             VALID, 2, 3, outputDims);
 
@@ -535,9 +532,9 @@ void testAvgPool1dBackwardSymRejectsTermsOverBound(void) {
     ASSERT_EXITS_WITH_FAILURE(avgPool1dBackward(r.layer, r.input, lossGrad, propLoss, NULL));
 }
 
-/* ---- BFP epic PR4 (R-P1/R-P4): native ARITH_BFP arms ---- */
+/* ---- native ARITH_BFP arms ---- */
 
-/* BFP epic PR4: build a BFP wire with EXACT codes and per-group exponents.
+/* Build a BFP wire with EXACT codes and per-group exponents.
  * Writing the packed payload directly (byteConversion) instead of quantizing
  * keeps the fixture independent of the quantizer and lets the test pin the
  * borrowed exponents the kernel folds with. */
@@ -565,7 +562,7 @@ static tensor_t *buildBfpWireWithCodes(size_t const *dims, size_t numDims, uint8
     return t;
 }
 
-/* BFP epic PR4 (R-P1): pools have no weight operand, so the width anchor for
+/* Pools have no weight operand, so the width anchor for
  * staging is the layer's OWN produced-wire config — outputQ for the forward,
  * propLossQ for the backward. initAvgPool1dConfig derives both math slots
  * from it, so passing a BFP wireQ selects the native arms. */
@@ -581,7 +578,7 @@ static layer_t *avgPool1dBuildBfpLayer(avgPool1dConfig_t *cfgStore, kernel_t *ke
     return layerStore;
 }
 
-/* Borrowed BFP-stored grouped input (BFP D8: never re-blocked): the integer
+/* Borrowed BFP-stored grouped input (never re-blocked): the integer
  * kernel folds same-group segments into the per-tensor BFP_RAW (a FLOAT32
  * target has no groups) and folds -log2 K into the exponent; the epilogue
  * dequantizes ldexpf((float)mant, E). Bit-exact against the integer mirror. */
@@ -617,7 +614,7 @@ void testAvgPool1dForwardBfpBorrowedGroupedInput(void) {
     freeTensor(input);
 }
 
-/* R-P1 staging: a FLOAT32-stored operand is quantized into BFP scratch
+/* Staging: a FLOAT32-stored operand is quantized into BFP scratch
  * per-tensor at the PRODUCED WIRE's widths (m=6 here). The gold's generator
  * asserts that staging at m=8 instead would change these numbers. */
 void testAvgPool1dForwardBfpStagesFloat32InputAtWireWidths(void) {
@@ -640,14 +637,14 @@ void testAvgPool1dForwardBfpStagesFloat32InputAtWireWidths(void) {
     TEST_ASSERT_EQUAL_MEMORY_MESSAGE(kBfpAvgPoolExpectedStaged, output->data,
                                      kBfpAvgPoolExpectedStaged_len * sizeof(float),
                                      "the FLOAT32 operand must stage PER-TENSOR at the "
-                                     "produced-wire widths (R-P1)");
+                                     "produced-wire widths");
     freeQuantization(wireQ);
     freeTensor(output);
     freeTensor(input);
 }
 
 /* OUT_WRITE onto a BFP wire: the raw takes the target's blocking and the
- * epilogue re-blocks it in integer with the OP's rounding (#282). */
+ * epilogue re-blocks it in integer with the OP's rounding. */
 void testAvgPool1dForwardBfpPacksOutputWire(void) {
     size_t inputDims[] = {1, 2, 8};
     size_t outputDims[] = {1, 2, 4};
@@ -1263,7 +1260,7 @@ void testAvgPool1dBackwardBfpRawRejectsAFloatRaw(void) {
         apFloatRawBody());
 }
 
-/* BFP epic PR4 (R-P4 backward): the dx arm is FUNNEL-ROUTED, mirroring the
+/* The dx arm is FUNNEL-ROUTED, mirroring the
  * existing ARITH_SYM_INT32 arm — the prologue unpacks the BFP-stored lossGrad
  * and the OUT_WRITE epilogue writes propLoss. Into a FLOAT32 propLoss the
  * integer raw is per tensor ({1, 0}) and the epilogue dequantizes
@@ -1296,9 +1293,7 @@ void testAvgPool1dBackwardBfpScattersIntoFloat32Raw(void) {
      * second call is also the best available observability for the kernel's
      * memset of the funnel's uninitialized Phase-2 scratch: that stack VLA can
      * read as zero (it holds whatever the prologue's callee frames left at
-     * this stack depth), so a single call may not notice a missing memset.
-     * Not a deterministic kill either way — the durable fix is funnel-level
-     * zeroing of the Phase-2 raw (PR4 follow-up FU-1). */
+     * this stack depth), so a single call may not notice a missing memset. */
     avgPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL);
     avgPool1dBackward(&layer, NULL, lossGrad, propLoss, NULL);
 
@@ -1336,51 +1331,37 @@ void testAvgPool1dBackwardBfpScattersIntoFloat32Raw(void) {
     freeTensor(lossGrad);
 }
 
-/* The SUM headroom guard (bfpValidateSumHeadroom -- the sum limit
- * INT32_MAX >> (m-1), NOT the product limit). It cannot be tripped through a
- * legal AvgPool fixture: mantissaBits is capped at 16 at construction, so the
- * limit is at least 65535 codes per same-exponent segment, and the segment is
- * bounded by the kernel size -- a 65536-tap pool is not constructible on any
- * realistic input length. That is exactly the spec's statement that "with
- * typical block sizes the contract only binds at very wide mantissas". So the
- * test pins BOTH halves honestly: the kernel's call site does NOT fire for a
- * normal fixture, and the guard itself dies when its own bound is exceeded
- * (called directly -- it is a public static inline in BfpKernelSupport.h). */
-void testAvgPool1dForwardBfpSumHeadroomGuardIsWired(void) {
-    size_t inputDims[] = {1, 1, 8};
+/* The window sum's int32 partial is bounded by the sum limit INT32_MAX >> (m-1)
+ * codes per same-exponent segment, not the product limit: 65535 at m = 16. A
+ * per-tensor input makes the whole K-tap window one segment; BFP math takes a
+ * power-of-two K only, so K = 32768 runs and K = 65536 must die in the
+ * forward. */
+static void avgPool1dForwardBfpOneSegment(size_t kSize) {
+    size_t inputDims[] = {1, 1, kSize};
     size_t outputDims[] = {1, 1, 1};
-    int32_t codes[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-    uint8_t exps[1] = {127};
-    tensor_t *input = buildBfpWireWithCodes(inputDims, 3, 16, 8, 1, 0, codes, exps);
+    tensor_t *input = buildBfpWireWithCodes(inputDims, 3, 16, 8, 1, 0, NULL, NULL);
     tensor_t *output = makeFloatTensor(outputDims, 3, NULL);
     quantization_t *wireQ = quantizationInitBfp(16, 8, HALF_AWAY);
     kernel_t k;
     avgPool1dConfig_t cfg;
     layerConfig_t lc;
     layer_t layer;
-    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, 8, VALID, 1, 1, wireQ);
+    avgPool1dBuildBfpLayer(&cfg, &k, &lc, &layer, kSize, VALID, 1, 1, wireQ);
 
-    /* bfpSumSegmentLimit(16) = INT32_MAX >> 15 = 65535; 8 terms is far inside
-     * it, so the guarded call must SUCCEED (36 / 8 = 4.5 at scale 1.0). */
     avgPool1dForward(&layer, input, output, NULL);
-    TEST_ASSERT_EQUAL_FLOAT(4.5f, ((float *)output->data)[0]);
-
-    /* The guard's own bound, exercised directly. */
-    uint8_t wideExps[1] = {127};
-    bfpQConfig_t wideQC = {.exponents = wideExps,
-                           .numGroups = 1,
-                           .groupSize = 0,
-                           .roundingMode = HALF_AWAY,
-                           .mantissaBits = 16,
-                           .exponentBits = 8};
-    ASSERT_EXITS_WITH_FAILURE(bfpValidateSumHeadroom(&wideQC, 70000, "test"));
 
     freeQuantization(wireQ);
     freeTensor(output);
     freeTensor(input);
 }
 
-/* R-P7: the "BFP wire under a PINNED ARITH_FLOAT32" fake-quant path, the
+void testAvgPool1dForwardBfpSumHeadroomGuardIsWired(void) {
+    avgPool1dForwardBfpOneSegment(32768);
+    ASSERT_EXITS_WITH_OUTPUT(1, "BFP sum partial would overflow int32",
+                             avgPool1dForwardBfpOneSegment(65536));
+}
+
+/* The "BFP wire under a PINNED ARITH_FLOAT32" fake-quant path, the
  * direct mirror of testAvgPool1dForwardWithSymInt32Input. Pinning the math
  * slot (instead of deriving it) sends the BFP-stored operand through the
  * funnel's ARITH_FLOAT32 prologue, which dequants it via
@@ -1573,7 +1554,6 @@ void testAvgPool1dSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
     freeQuantization(q);
 }
 
-/* #440: see testLinearInitConfigClearsOwnsQuantizations. */
 void testAvgPool1dInitConfigClearsOwnsQuantizations(void) {
     kernel_t kernel;
     initKernel(&kernel, 2, VALID, 1, 1);

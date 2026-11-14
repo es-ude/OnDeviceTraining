@@ -15,8 +15,7 @@ _Static_assert(VALID == 0,
  *  Requires input geometry (inputChannels, inputLength) because the
  *  factory pre-allocates an argmaxIndices INT32 tensor sized for the
  *  layer's output shape at batch 1; maxPool1dForward grows it on demand
- *  to the largest batch it sees (#152 PR3b: stacked micro-batches,
- *  batched inference()).
+ *  to the largest batch it sees (stacked micro-batches, batched inference()).
  *
  *  Usage:
  *
@@ -37,8 +36,7 @@ typedef struct maxPool1dInit {
 } maxPool1dInit_t;
 
 /*! AvgPool1d factory configuration. No argmax tensor needed, hence no
- *  input geometry. Note: dilation field omitted because AvgPool1d
- *  arithmetic kernel does not support dilation. */
+ *  input geometry. The public AvgPool1d factory fixes dilation to 1. */
 typedef struct avgPool1dInit {
     /* REQUIRED */
     size_t kernelSize;
@@ -63,10 +61,8 @@ layer_t *avgPool1dLayerInit(avgPool1dInit_t *init, layerQuant_t *lq);
 layer_t *maxPool1dLayerInitOwning(maxPool1dInit_t *init, layerQuant_t *lq);
 layer_t *avgPool1dLayerInitOwning(avgPool1dInit_t *init, layerQuant_t *lq);
 
-/*! Tears down everything the factory allocated. For MaxPool, this
- *  includes the argmax tensor. Reads config->ownsQuantizations to
- *  decide whether to also free the two math quantizations and their
- *  qConfigs. */
+/*! Tears down everything the factory allocated, including MaxPool's argmax
+ *  tensor; frees the two math quantizations only when ownsQuantizations is set. */
 void freeMaxPool1dLayer(layer_t *layer);
 void freeAvgPool1dLayer(layer_t *layer);
 

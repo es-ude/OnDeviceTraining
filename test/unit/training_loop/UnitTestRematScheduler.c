@@ -1219,42 +1219,6 @@ void testArenaInitReservesExactlyMetadataPlusArena(void) {
 }
 #endif
 
-#ifndef ODT_TEST_ASAN
-/* Did-not-run pin. ReLU over a borrowed [1, 2^60] FLOAT32 input
- * (never read at init) under MSE passes table init unchanged: one 2^62-byte wire, one range, no
- * backward. Reserving 2^62 B fails on every 64-bit host, and the report must still carry every
- * analytic field. Host-only (LP64); skipped under ASan, which aborts on oversized requests unless
- * allocator_may_return_null=1. macOS malloc prints a "can't allocate region" warning to stderr
- * here; that is expected. */
-void testArenaInitFailureKeepsAnalyticReport(void) {
-    layer_t *model[1] = {makeRelu(&g_floatQ)};
-    inputLike_t in;
-    tensor_t *x = makeInput(&in, (size_t[]){1, (size_t)1 << 60}, 2, &g_floatQ);
-    size_t before = memProfileCurrentBytes();
-    rematScheduler_t s;
-    TEST_ASSERT_FALSE(rematArenaInit(&s, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), x, NULL));
-    rematReport_t r;
-    rematSchedulerReport(&s, &r);
-    TEST_ASSERT_TRUE(r.planned);
-    TEST_ASSERT_TRUE(r.placed);
-    TEST_ASSERT_FALSE(r.dataReserved);
-    TEST_ASSERT_EQUAL_size_t(2, r.numSteps);
-    TEST_ASSERT_EQUAL_size_t((size_t)1 << 62, r.peakLiveBytes);
-    TEST_ASSERT_EQUAL_size_t(0, r.refwdSteps);
-    TEST_ASSERT_EQUAL_size_t((size_t)1 << 60, r.forwardCost);
-    TEST_ASSERT_EQUAL_size_t(0, r.recomputeCost);
-    TEST_ASSERT_EQUAL_size_t((size_t)1 << 62, r.arenaBytes);
-    TEST_ASSERT_EQUAL_size_t(0, r.arenaPadBytes);
-    TEST_ASSERT_EQUAL_size_t(0, r.arenaGapBytes);
-    TEST_ASSERT_EQUAL_size_t(s.wires->slabBytes + s.plan->blockBytes + sizeof(size_t),
-                             r.metadataBytes);
-    TEST_ASSERT_TRUE(r.metadataBytes > 0u);
-    rematSchedulerDeinit(&s);
-    TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
-    freeModel(model, 1);
-}
-#endif
-
 /* ---- init's named exits before any row reservation ---- */
 
 /* The child prints how many bytes are live when it exits, so the parent can
@@ -2871,33 +2835,6 @@ void testBeginEvalExitsWhenReEntered(void) {
     freeFixture(&f, &s);
 }
 
-#ifndef ODT_TEST_ASAN
-static void heapFirstNextOnAHugeWire(fixture_t *f, rematScheduler_t *s) {
-    bindAndBegin(f, s);
-    rematStep_t st;
-    (void)rematNext(s, &st);
-}
-
-/* The row owns resource exits. ReLU over a borrowed [1, 2^60] FLOAT32
- * input under MSE (the did-not-run fixture): HEAP init reserves only the
- * table and plan, and FORWARD 0's 2^62-byte ACT 1 cannot be reserved on any
- * 64-bit host. Skipped under ASan, which aborts on oversized requests; macOS
- * malloc prints a "can't allocate region" warning to stderr here. */
-void testHeapNextExitsNamingTheStepAndTheWireWhenAReservationFails(void) {
-    fixture_t f;
-    f.model[0] = makeRelu(&g_floatQ);
-    f.n = 1;
-    f.lt = MSE;
-    f.x = makeInput(&f.in, (size_t[]){1, (size_t)1 << 60}, 2, &g_floatQ);
-    rematScheduler_t s = initHeap(&f, NULL);
-    ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[heap]: reserveMemory(4611686018427387904) failed at step #0 "
-                             "for wire ACT 1",
-                             heapFirstNextOnAHugeWire(&f, &s));
-    freeFixture(&f, &s);
-}
-#endif
-
 /* ---- the const vtable and the dispatch ---- */
 
 void testEachInitInstallsItsRowsFunctionTable(void) {
@@ -3403,9 +3340,6 @@ int main(void) {
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testArenaInitReservesExactlyMetadataPlusArena);
 #endif
-#ifndef ODT_TEST_ASAN
-    RUN_TEST(testArenaInitFailureKeepsAnalyticReport);
-#endif
     RUN_TEST(testArenaInitExitsAboveMaxRangesBeforeThePlanIsBuilt);
     RUN_TEST(testArenaInitAcceptsExactlyMaxRanges);
     RUN_TEST(testHeapInitAcceptsAStoreAllPlanAboveMaxRanges);
@@ -3483,9 +3417,6 @@ int main(void) {
     RUN_TEST(testHeapEndInEvalChecksTheEvalWalk);
     RUN_TEST(testBeginEvalExitsOnASchedulerThatIsNotInitialised);
     RUN_TEST(testBeginEvalExitsWhenReEntered);
-#ifndef ODT_TEST_ASAN
-    RUN_TEST(testHeapNextExitsNamingTheStepAndTheWireWhenAReservationFails);
-#endif
     RUN_TEST(testEachInitInstallsItsRowsFunctionTable);
     RUN_TEST(testEveryRowFillsEverySlot);
     RUN_TEST(testTheDispatchWalksEitherRow);

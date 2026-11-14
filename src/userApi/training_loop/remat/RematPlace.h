@@ -57,14 +57,14 @@ size_t arenaPlacedPeakBytes(const rematWireTable_t *t, const rematProgram_t *p);
 /* First-fit-decreasing into offsets[range id]: placed size descending, then
  * begin, then wire id; each range takes the lowest offset that is 0 or the end
  * of a co-live (inclusive) placed range and overlaps no co-live placed range.
- * bytes = max(offset + placed). Returns false only when its numRanges x
- * uint16_t scratch cannot be reserved. placedPeak is unused. */
+ * bytes = max(offset + placed). Always returns true: a failed reservation
+ * exits in reserveMemory. placedPeak is unused. */
 bool arenaPlaceFirstFitDecreasing(const rematWireTable_t *t, const rematProgram_t *p,
                                   size_t placedPeak, size_t *offsets, size_t *bytes);
 
 /* The other portfolio members. Each places every range into
- * offsets[range id], sets bytes = max(offset + placed) and returns false only
- * when its scratch cannot be reserved. placedPeak is the peak of the placed
+ * offsets[range id], sets bytes = max(offset + placed) and always returns
+ * true. placedPeak is the peak of the placed
  * sums over the steps, which ping-pong uses as its height. */
 
 /* First fit in the order: placed size descending, then end descending, then
@@ -104,10 +104,10 @@ bool arenaPlanHasGradRange(const rematWireTable_t *t, const rematProgram_t *p);
  * two-ended (only on a plan with a GRAD range) and size-then-end, in that
  * fixed order, and keeps the layout with the fewest bytes; on equal bytes the
  * earlier member's. So no layout is larger than first-fit-decreasing's.
- * peakPlacedBytes = arenaPlacedPeakBytes. Returns false only when
- * a scratch block cannot be reserved: the trial layouts' numRanges x size_t
- * block, or a member's own; every one is released before it returns, so the
- * init reserves no byte its report does not account for. */
+ * peakPlacedBytes = arenaPlacedPeakBytes. Always returns true. Its scratch
+ * blocks (the trial layouts' numRanges x size_t block, and each member's own)
+ * are released before it returns, so the init reserves no byte its report
+ * does not account for. */
 bool arenaPlacePortfolio(const rematWireTable_t *t, const rematProgram_t *p, size_t *offsets,
                          size_t *bytes, size_t *peakPlacedBytes);
 

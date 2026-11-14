@@ -418,9 +418,6 @@ static bool tableInit(rematWireTable_t **out, const model_t *m, lossFuncType_t l
                 addSize(mulSize(n, 2u, NULL, "gradient flags"), 1u, NULL, "gradient flags"), NULL,
                 "gradient flags");
     uint8_t *flagBlock = reserveMemory(flagBytes);
-    if (flagBlock == NULL) {
-        return false;
-    }
     uint16_t *dxWire = (uint16_t *)flagBlock;
     uint8_t *needsGrad = flagBlock + slots * sizeof(uint16_t);
     uint8_t *runsBackward = needsGrad + n + 1u;
@@ -460,18 +457,9 @@ static bool tableInit(rematWireTable_t **out, const model_t *m, lossFuncType_t l
      * before returning. Every bind derives into the table's own copies. */
     rematWireFact_t *facts =
         reserveMemory(mulSize(numWires, sizeof(rematWireFact_t), NULL, "derivation scratch"));
-    if (facts == NULL) {
-        freeReservedMemory(flagBlock);
-        return false;
-    }
     slabLayout_t shapeSizing = {.base = NULL, .cursor = 0};
     (void)placeShapes(&shapeSizing, n + 1u, maxRank);
     uint8_t *shapeBlock = reserveMemory(shapeSizing.cursor);
-    if (shapeBlock == NULL) {
-        freeReservedMemory(facts);
-        freeReservedMemory(flagBlock);
-        return false;
-    }
     slabLayout_t shapePlacing = {.base = shapeBlock, .cursor = 0};
     shape_t *shapes = placeShapes(&shapePlacing, n + 1u, maxRank);
     modelShapePass(m, inputLike->shape, shapes);
@@ -501,12 +489,6 @@ static bool tableInit(rematWireTable_t **out, const model_t *m, lossFuncType_t l
     slabLayout_t sizing = {.base = NULL, .cursor = 0};
     (void)layoutTable(&sizing, facts, numWires, n, isChain, numEdges, inputRank, maxRank);
     uint8_t *block = reserveMemory(sizing.cursor);
-    if (block == NULL) {
-        freeReservedMemory(shapeBlock);
-        freeReservedMemory(facts);
-        freeReservedMemory(flagBlock);
-        return false;
-    }
     slabLayout_t placing = {.base = block, .cursor = 0};
     rematWireTable_t *t =
         layoutTable(&placing, facts, numWires, n, isChain, numEdges, inputRank, maxRank);

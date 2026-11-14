@@ -77,11 +77,6 @@ static char *npyReadHeaderText(FILE *f, const char *path) {
     }
 
     char *header = reserveMemory((size_t)length + 1u);
-    if (header == NULL) {
-        PRINT_ERROR("npyReadHeader: %s: cannot reserve %u bytes for the header", path,
-                    (unsigned)length + 1u);
-        exit(1);
-    }
     if (fread(header, 1, length, f) != length) {
         PRINT_ERROR("npyReadHeader: %s: short read of the %u-byte header", path, (unsigned)length);
         exit(1);

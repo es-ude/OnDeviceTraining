@@ -144,9 +144,6 @@ static bool arenaFitInit(arenaFit_t *f, const rematWireTable_t *t, const rematPr
                          size_t *offsets) {
     *f = (arenaFit_t){.t = t, .p = p, .offsets = offsets};
     f->byOffset = reserveMemory(p->numRanges * sizeof(uint16_t));
-    if (f->byOffset == NULL) {
-        return false;
-    }
     for (size_t r = 0; r < p->numRanges; r++) {
         offsets[r] = ARENA_UNPLACED;
     }
@@ -390,9 +387,6 @@ bool arenaPlaceBreadthArea(const rematWireTable_t *t, const rematProgram_t *p, s
     (void)placedPeak;
     size_t *stepLive =
         reserveMemory(p->numSteps * sizeof(size_t) + p->numRanges * sizeof(uint16_t));
-    if (stepLive == NULL) {
-        return false;
-    }
     uint16_t *busiestStep = (uint16_t *)(stepLive + p->numSteps);
     (void)arenaStepLivePlaced(t, p, stepLive);
     for (size_t r = 0; r < p->numRanges; r++) {
@@ -526,9 +520,6 @@ bool arenaPlacePortfolio(const rematWireTable_t *t, const rematProgram_t *p, siz
         return false;
     }
     size_t *trial = reserveMemory(p->numRanges * sizeof(size_t));
-    if (trial == NULL) {
-        return false;
-    }
     bool hasGradRange = arenaPlanHasGradRange(t, p);
     bool placed = true;
     for (size_t m = 1; placed && m < sizeof arenaMembers / sizeof arenaMembers[0]; m++) {
@@ -640,27 +631,20 @@ bool rematArenaInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
         exit(1); /* a model/plan fact, not an OOM: the table-init idiom */
     }
     arenaRequirePlaceableSizes(s->wires, p);
-    /* The offsets table is its own small block,
-     * placed into and verified before the arena data block exists, so a
-     * failed data reservation still reports every analytic field. The limit
-     * above bounds the product. numRanges >= 1: ACT n always has a range, so
-     * neither reservation below is reserveMemory(0). */
+    /* The offsets table is its own small block, placed into and verified
+     * before the arena data block exists. The limit above bounds the product.
+     * numRanges >= 1: ACT n always has a range, so neither reservation below
+     * is reserveMemory(0). */
     s->row.arena.offsets = reserveMemory(p->numRanges * sizeof(size_t));
-    if (s->row.arena.offsets == NULL) {
-        return false; /* planned, !placed */
-    }
     size_t bytes;
     if (!arenaPlacePortfolio(s->wires, p, s->row.arena.offsets, &bytes,
                              &s->row.arena.peakPlacedBytes)) {
-        return false; /* the placement's scratch: planned, !placed */
+        return false;
     }
     arenaVerifyPlacement(s->wires, p, s->row.arena.offsets, bytes);
     arenaVerifyEvalInsideTrain(s->wires, p, &s->plan->eval);
     s->row.arena.bytes = bytes; /* placed: every arena field of the report is valid */
     s->row.arena.base = reserveMemory(bytes);
-    if (s->row.arena.base == NULL) {
-        return false; /* planned, placed, !dataReserved */
-    }
     ODT_ASAN_POISON(s->row.arena.base, bytes); /* unaddressable until a range opens */
 #ifdef ODT_MEM_PROFILE
     rematRequireReservedMatchesReport(s, memProfileCurrentBytes() - mark);

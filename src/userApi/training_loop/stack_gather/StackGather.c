@@ -17,14 +17,7 @@ uint8_t *stackGatherReserveBuffer(const char *caller, const char *knob, size_t m
                     caller, what, knob, m, perSampleBytes);
         exit(1);
     }
-    uint8_t *buffer = reserveMemory(bytes);
-    if (buffer == NULL) {
-        PRINT_ERROR("%s: reserving the %s gather buffer failed (%s "
-                    "%zu x %zu bytes per sample)",
-                    caller, what, knob, m, perSampleBytes);
-        exit(1);
-    }
-    return buffer;
+    return reserveMemory(bytes);
 }
 
 void stackGatherRequireFloat32Model(const char *caller, const char *knob, const model_t *model,

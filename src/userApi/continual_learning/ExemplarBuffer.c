@@ -12,15 +12,6 @@
 #include "StorageApi.h"
 #include "TensorApi.h"
 
-static void *reserveOrExit(size_t bytes, const char *what) {
-    void *p = reserveMemory(bytes);
-    if (p == NULL) {
-        PRINT_ERROR("exemplarBufferCreate: cannot reserve %zu bytes for the %s", bytes, what);
-        exit(1);
-    }
-    return p;
-}
-
 exemplarBuffer_t *exemplarBufferCreate(size_t numClasses, size_t capacity) {
     if (numClasses == 0 || capacity == 0) {
         PRINT_ERROR("exemplarBufferCreate: numClasses and capacity must be >= 1");
@@ -35,11 +26,11 @@ exemplarBuffer_t *exemplarBufferCreate(size_t numClasses, size_t capacity) {
                     numClasses, capacity);
         exit(1);
     }
-    exemplarBuffer_t *buf = reserveOrExit(sizeof(exemplarBuffer_t), "buffer");
+    exemplarBuffer_t *buf = reserveMemory(sizeof(exemplarBuffer_t));
     buf->numClasses = numClasses;
     buf->capacity = capacity;
-    buf->items = reserveOrExit(slotBytes, "exemplar slots");
-    buf->counts = reserveOrExit(numClasses * sizeof(uint32_t), "class counts");
+    buf->items = reserveMemory(slotBytes);
+    buf->counts = reserveMemory(numClasses * sizeof(uint32_t));
     for (size_t i = 0; i < slots; i++) {
         buf->items[i] = NULL;
     }

@@ -138,8 +138,8 @@ rematBfpGroups_t rematBfpWireGrouping(const bfpQConfig_t *tmpl, size_t elements,
 
 /* Sizes and places the whole table in ONE reserveMemory block: records, key,
  * and one header per slab wire. The headers are linked, but their content
- * (dims, config) is written by every rematWireTableBind. Returns false only
- * when reserveMemory fails. Under CROSS_ENTROPY, when a backward runs, the
+ * (dims, config) is written by every rematWireTableBind. Always returns true:
+ * a failed reservation exits in reserveMemory. Under CROSS_ENTROPY, when a backward runs, the
  * skipped last layer must be the Softmax and declare one of the two model heads
  * (requireCrossEntropyHead), else it exits; every bind checks the live model
  * the same way. */
@@ -258,9 +258,8 @@ typedef struct rematPlan {
  * deriver reads only the table, `m` feeds the grammar and the costs, and a
  * layerType/frozen mismatch exits by name. A DAG model plans under STORE_ALL
  * and LIVENESS only: SEQUENCE, RETAIN_LIST and inPlaceDx exit on it, since
- * recompute and in-place read chain positions. Returns false only when
- * reserving the plan block fails; the grammar checker's transient scratch
- * exits on allocation failure instead. */
+ * recompute and in-place read chain positions. Always returns true: a failed
+ * reservation exits in reserveMemory. */
 bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t *m,
                     const rematPlanSpec_t *spec);
 /* The plan of an eval-only table: the EVAL program alone, the same as rematPlanBuild's, and a

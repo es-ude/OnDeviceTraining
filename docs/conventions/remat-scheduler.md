@@ -63,11 +63,9 @@ Every row satisfies these before it joins the conformance matrix.
 - **R7 Readiness.** When `next` returns a step, every byte it reads is
   complete and every buffer it writes is bound.
 - **R8 Failure ownership.** The validator exits on grammar, residency or
-  bind-generation violations (a scheduler bug). The row exits on
-  resource failure (`reserveMemory` NULL mid-call), naming the step and the
-  wire. Only an allocation failure at init is recoverable (the init returns
-  `false`); an unsupported model or a broken size or range limit exits at
-  init too.
+  bind-generation violations (a scheduler bug). An allocation failure, at
+  init or mid-call, exits in `reserveMemory`; an unsupported model or a
+  broken size or range limit exits at init too.
 - **Lifecycle.** Every `rematSchedulerFunctions_t` slot is mandatory. `end`
   leaves no non-borrowed wire resident. `deinit` frees only row-private blocks
   and is safe after a failed init. One scheduler instance per concurrently
@@ -349,9 +347,9 @@ decisions and those with nothing in force yet are left out.
 - **remat D28** The validator (`RematCheck`) is always compiled in,
   firmware included. There is no opt-out macro.
 - **remat D29** A violation mid-call exits (`exit(1)`), naming the row, the
-  step and the rule. Only an allocation failure at init is recoverable: the
-  init returns `false`, and nothing ran. An unsupported model or a broken
-  size or range limit exits at init too (remat D55, D60).
+  step and the rule. An allocation failure exits in `reserveMemory`, at init
+  too. An unsupported model or a broken size or range limit exits at init
+  too (remat D55, D60).
 - **remat D30** A NULL scheduler means an ephemeral HEAP scheduler per
   grads call, built from the training call's default plan (remat D15) and
   torn down inside the call; its values are bit-identical to the pre-remat
@@ -442,9 +440,8 @@ decisions and those with nothing in force yet are left out.
   is always re-verified.
 - **remat R7** When `next` returns a step, every byte it reads is complete
   and every buffer it writes is bound.
-- **remat R8** The validator exits on scheduler bugs, the row on resource
-  failure mid-call; only an allocation failure at init is recoverable (the
-  init returns `false`). Its lifecycle: every vtable slot is mandatory, `end`
+- **remat R8** The validator exits on scheduler bugs; an allocation failure
+  exits in `reserveMemory`, at init or mid-call. Its lifecycle: every vtable slot is mandatory, `end`
   leaves no non-borrowed wire resident, and `deinit` is safe after a failed
   init.
 

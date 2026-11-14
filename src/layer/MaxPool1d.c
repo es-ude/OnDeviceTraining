@@ -300,12 +300,6 @@ static void maxPoolEnsureArgmaxRows(maxPool1dConfig_t *cfg, const shape_t *outpu
     }
     if (needed > cfg->argmaxCapacity) {
         uint8_t *grown = reserveMemory(bytes);
-        if (grown == NULL) {
-            PRINT_ERROR("MaxPool1d forward: reserving the [%zu, %zu, %zu] argmax (%zu bytes) "
-                        "failed",
-                        batch, channels, outputLength, bytes);
-            exit(1);
-        }
         freeReservedMemory(argmax->data);
         argmax->data = grown;
         cfg->argmaxCapacityData = grown;

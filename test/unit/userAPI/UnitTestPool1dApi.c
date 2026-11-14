@@ -574,37 +574,6 @@ void testMaxPool1dArgmaxAdoptsASwappedInBuffer(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(expectedB4, argmaxB4, 8);
 }
 
-void testMaxPool1dArgmaxGrowthFailsFastWhenReservationFails(void) {
-    /* B = SIZE_MAX / 4 with C * Lout = 1 * 1: B * C * Lout * 4 bytes =
-     * SIZE_MAX - 3 does NOT wrap, but no allocator can serve it. reserveMemory
-     * returns NULL (its own size-wrap guard under ODT_MEM_PROFILE, calloc
-     * failure otherwise) and growth must fail fast instead of installing a
-     * NULL argmax. Stack-built shapes: nothing is read. */
-    quantization_t *q = quantizationInitFloat();
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, q);
-    layer_t *layer = maxPool1dLayerInit(
-        &(maxPool1dInit_t){.kernelSize = 2, .stride = 2, .inputChannels = 1, .inputLength = 2},
-        &lq);
-    size_t hugeBatch = SIZE_MAX / 4;
-    float inData[2] = {0};
-    float outData[1] = {0};
-    size_t inDims[3] = {hugeBatch, 1, 2};
-    size_t outDims[3] = {hugeBatch, 1, 1};
-    size_t order[3] = {0, 1, 2};
-    shape_t inShape = {.numberOfDimensions = 3, .dimensions = inDims, .orderOfDimensions = order};
-    shape_t outShape = {.numberOfDimensions = 3, .dimensions = outDims, .orderOfDimensions = order};
-    quantization_t floatQ;
-    initFloat32Quantization(&floatQ);
-    tensor_t input = {.data = (uint8_t *)inData, .shape = &inShape, .quantization = &floatQ};
-    tensor_t output = {.data = (uint8_t *)outData, .shape = &outShape, .quantization = &floatQ};
-
-    ASSERT_EXITS_WITH_FAILURE(maxPool1dForward(layer, &input, &output, NULL));
-
-    freeMaxPool1dLayer(layer);
-    freeQuantization(q);
-}
-
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testMaxPool1dLayerInitBorrowingBuildsLayerWithKernelAndArgmax);
@@ -625,6 +594,5 @@ int main(void) {
     RUN_TEST(testInferenceAtBatch4GrowsFactoryMaxPool);
     RUN_TEST(testMaxPool1dArgmaxGrowthRejectsSizeOverflow);
     RUN_TEST(testMaxPool1dArgmaxAdoptsASwappedInBuffer);
-    RUN_TEST(testMaxPool1dArgmaxGrowthFailsFastWhenReservationFails);
     return UNITY_END();
 }

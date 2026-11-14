@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "AsanDeath.h"
 #include "DataLoaderApi.h"
 #include "DeathTest.h"
 #include "PpcaReplay.h"
@@ -361,16 +360,6 @@ void testExemplarBufferCreateRejectsSlotCountOverflow(void) {
 void testExemplarBufferCreateRejectsSlotByteOverflow(void) {
     ASSERT_EXITS_WITH_FAILURE(exemplarBufferCreate(1, SIZE_MAX / sizeof(tensor_t *) + 1u));
 }
-
-#ifndef ODT_TEST_ASAN
-/* #475: 2^62 slot bytes do not wrap but cannot be reserved on any 64-bit host.
- * Skipped under ASan, which aborts on oversized requests unless
- * allocator_may_return_null=1. macOS malloc prints a "can't allocate region"
- * warning to stderr here; that is expected. */
-void testExemplarBufferCreateFailsFastWhenReservationFails(void) {
-    ASSERT_EXITS_WITH_FAILURE(exemplarBufferCreate(1, (size_t)1 << 59));
-}
-#endif
 #endif
 
 void testExemplarModeReplaysStoredSamplesZeroCopy(void) {
@@ -749,17 +738,6 @@ void testGetBatchRejectsBaseSizeByteOverflow(void) {
         fetchExemplarReplayOverBaseBatchClaiming(SIZE_MAX / sizeof(sample_t *)));
 }
 
-#if SIZE_MAX > UINT32_MAX
-#ifndef ODT_TEST_ASAN
-/* 2^62 bytes neither wrap nor fit on any 64-bit host. Skipped under ASan,
- * which aborts on oversized requests unless allocator_may_return_null=1. */
-void testGetBatchFailsFastWhenReservationFails(void) {
-    ASSERT_EXITS_WITH_OUTPUT(1, "cannot reserve",
-                             fetchExemplarReplayOverBaseBatchClaiming((size_t)1 << 59));
-}
-#endif
-#endif
-
 /* #152 PR3a: the training loop adds the batch axis to EVERY sample it is
  * handed, real or replayed -- so a replayed sample must carry exactly the real
  * samples' natural shape. A pool (or exemplar copy) with a flattened [dim]
@@ -898,9 +876,6 @@ int main(void) {
 #if SIZE_MAX > UINT32_MAX
     RUN_TEST(testExemplarBufferCreateRejectsSlotCountOverflow);
     RUN_TEST(testExemplarBufferCreateRejectsSlotByteOverflow);
-#ifndef ODT_TEST_ASAN
-    RUN_TEST(testExemplarBufferCreateFailsFastWhenReservationFails);
-#endif
 #endif
     RUN_TEST(testExemplarModeReplaysStoredSamplesZeroCopy);
     RUN_TEST(testExemplarPicksFollowTheSlotKeys);
@@ -916,11 +891,6 @@ int main(void) {
     RUN_TEST(testWrapRejectsBatchArrayOverflow);
     RUN_TEST(testGetBatchRejectsBaseSizeAddOverflow);
     RUN_TEST(testGetBatchRejectsBaseSizeByteOverflow);
-#if SIZE_MAX > UINT32_MAX
-#ifndef ODT_TEST_ASAN
-    RUN_TEST(testGetBatchFailsFastWhenReservationFails);
-#endif
-#endif
     RUN_TEST(testPpcaReplayedSamplesKeepTheRealSamplesNaturalShape);
     RUN_TEST(testExemplarReplayedSamplesKeepTheRealSamplesNaturalShape);
     return UNITY_END();

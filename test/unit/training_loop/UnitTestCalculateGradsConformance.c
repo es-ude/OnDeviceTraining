@@ -7,7 +7,6 @@
 #include <string.h>
 
 #include "AdaptivePool1dApi.h"
-#include "AsanDeath.h"
 #include "BatchNorm1dApi.h"
 #include "CalculateGradsSequential.h"
 #include "Common.h"
@@ -1101,31 +1100,6 @@ void testAMarkedInputYieldsAnUnmarkedOutputAndLeaksNothing(void) {
     TEST_ASSERT_EQUAL_size_t_MESSAGE(before, after, "no marker is reserved, so none leaks");
     assertSameValues(NULL);
 }
-
-#ifndef ODT_TEST_ASAN
-/* A failed ephemeral build exits naming it. HEAP init reserves no wire data,
- * only the table slab and the plan block, so the slab must fail: one
- * Quantization layer to a BFP wire grouped by 2, over a borrowed [1, 2^60]
- * input (never read at init), puts 2^59 exponent bytes of ACT 1 in the slab,
- * which no 64-bit host can reserve. Host-only (LP64); skipped under ASan,
- * which aborts on oversized requests (the #4 PR1 tests that pin remat R8's
- * recoverable init failure do the same). macOS malloc prints a "can't
- * allocate region" warning to stderr here. */
-void testAFailedEphemeralBuildExitsNamingIt(void) {
-    quantization_t *bfp = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 2);
-    layer_t *model[1] = {makeQuant(bfp, &g_floatQ)};
-    inputLike_t in;
-    tensor_t *x = makeInput(&in, (size_t[]){1, (size_t)1 << 60}, 2, &g_floatQ);
-    tensor_t *y = makeFloatTensor((size_t[]){1, 1}, 2, 0.5f);
-    ASSERT_EXITS_WITH_OUTPUT(
-        1, "calculateGrads: ephemeral HEAP scheduler: reserveMemory failed",
-        freeTrainingStats(calculateGradsSequential(&MODEL_CHAIN(model, 1), defaultLossConfig(MSE),
-                                                   REDUCTION_MEAN, x, y, NULL)));
-    freeTensor(y);
-    freeModel(model, 1);
-    freeQuantization(bfp);
-}
-#endif
 
 /* ---- a caller's scheduler through the call struct: borrowed, never torn down ---- */
 
@@ -2672,9 +2646,6 @@ int main(void) {
     RUN_TEST(testAnInputWithoutBytesExitsBeforeLayer0Runs);
     RUN_TEST(testAnEmptyModelExitsNamingIt);
     RUN_TEST(testAMarkedInputYieldsAnUnmarkedOutputAndLeaksNothing);
-#ifndef ODT_TEST_ASAN
-    RUN_TEST(testAFailedEphemeralBuildExitsNamingIt);
-#endif
     RUN_TEST(testCalculateGradsSequentialRunsOnTheCallersScheduler);
     RUN_TEST(testTracedGradsRunsOnTheCallersScheduler);
     RUN_TEST(testTheCallersSchedulerSurvivesTheCall);

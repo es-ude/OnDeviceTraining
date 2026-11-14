@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 
+/* Zeroed memory. Exits (PRINT_ERROR + exit(1)) when the request cannot be met,
+ * so callers never check for NULL; a 0-byte request may return NULL (#160). */
 void *reserveMemory(size_t numberOfBytes);
 
 /* NULL-safe (mirrors free(NULL)). */

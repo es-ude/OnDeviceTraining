@@ -2,7 +2,13 @@
 
 #include <stdlib.h>
 
+#include "Common.h"
 #include "StorageApi.h"
+
+static void exitUnreservable(size_t numberOfBytes) {
+    PRINT_ERROR("reserveMemory: cannot reserve %zu bytes", numberOfBytes);
+    exit(1);
+}
 
 #ifdef ODT_MEM_PROFILE
 #include <stdatomic.h>
@@ -31,11 +37,11 @@ static void bumpPeak(size_t cur) {
 
 void *reserveMemory(size_t numberOfBytes) {
     if (numberOfBytes > SIZE_MAX - sizeof(memHeader_t)) {
-        return NULL; /* size_t wrap would under-allocate the payload */
+        exitUnreservable(numberOfBytes); /* the header would wrap the size_t */
     }
     memHeader_t *base = calloc(1, sizeof(memHeader_t) + numberOfBytes);
     if (base == NULL) {
-        return NULL;
+        exitUnreservable(numberOfBytes);
     }
     base->size = numberOfBytes;
     size_t cur = atomic_fetch_add_explicit(&g_currentBytes, numberOfBytes, memory_order_relaxed) +
@@ -67,10 +73,15 @@ size_t memProfileMark(void) {
     return memProfileCurrentBytes();
 }
 
-#else /* !ODT_MEM_PROFILE — bit-identical to the pre-facility behavior */
+#else /* !ODT_MEM_PROFILE */
 
 void *reserveMemory(size_t numberOfBytes) {
-    return calloc(1, numberOfBytes);
+    void *p = calloc(1, numberOfBytes);
+    /* Size 0 is not a failure: calloc(1, 0) may return NULL on newlib (#160). */
+    if (p == NULL && numberOfBytes != 0) {
+        exitUnreservable(numberOfBytes);
+    }
+    return p;
 }
 void freeReservedMemory(void *ptr) {
     free(ptr);

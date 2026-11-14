@@ -23,15 +23,6 @@ typedef struct {
     tensor_t **labelPool; /* [numClasses] shared one-hot labels */
 } replayLoader_t;
 
-static void *reserveOrExit(size_t bytes, const char *what) {
-    void *p = reserveMemory(bytes);
-    if (p == NULL) {
-        PRINT_ERROR("replayDataLoader: cannot reserve %zu bytes for the %s", bytes, what);
-        exit(1);
-    }
-    return p;
-}
-
 static size_t loaderNumClasses(const replayLoader_t *rl) {
     return rl->cfg.mode == REPLAY_MODE_EXEMPLAR ? rl->cfg.exemplars->numClasses
                                                 : rl->cfg.set->numClasses;
@@ -70,7 +61,7 @@ static void initPoolsFromFirstSample(replayLoader_t *rl, const sample_t *first) 
             exit(1);
         }
         /* the wrap-time batch-array bound also bounds this product */
-        rl->itemPool = reserveOrExit(numClasses * r * sizeof(tensor_t *), "replay item pool");
+        rl->itemPool = reserveMemory(numClasses * r * sizeof(tensor_t *));
         for (size_t c = 0; c < numClasses; c++) {
             for (size_t i = 0; i < r; i++) {
                 rl->itemPool[c * r + i] = initTensor(getShapeLike(first->item->shape),
@@ -136,7 +127,7 @@ static batch_t *replayGetBatch(dataLoader_t *dl, size_t index, const rngKey_t *s
                     baseBatch->size, eligible * r);
         exit(1);
     }
-    sample_t **samples = reserveOrExit(bytes, "replayed batch");
+    sample_t **samples = reserveMemory(bytes);
     for (size_t i = 0; i < baseBatch->size; i++) {
         samples[i] = baseBatch->samples[i]; /* REAL FIRST (labelRef contract) */
     }

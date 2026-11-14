@@ -1144,9 +1144,6 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t 
     size_t blockBytes =
         spec->inPlaceDx ? planAdd(evalAt.end, t->numWires, "blockBytes") : evalAt.end;
     uint8_t *block = reserveMemory(blockBytes);
-    if (block == NULL) {
-        return false;
-    }
     rematPlan_t *p = (rematPlan_t *)block;
     p->policy = policy;
     p->blockBytes = blockBytes;
@@ -1174,9 +1171,6 @@ bool rematPlanBuildEval(rematPlan_t **out, const rematWireTable_t *t, const mode
     requireAnOperandPoolWithinTheOffsets(evalSize.numOperands, "rematPlanBuildEval", "EVAL");
     programLayout_t evalAt = layoutProgram(sizeof(rematPlan_t), evalSize, t->modelSize + 1u);
     uint8_t *block = reserveMemory(evalAt.end);
-    if (block == NULL) {
-        return false;
-    }
     /* reserveMemory zeroes the block: STORE_ALL, an empty TRAIN program, no in-place marks. */
     rematPlan_t *p = (rematPlan_t *)block;
     p->blockBytes = evalAt.end;

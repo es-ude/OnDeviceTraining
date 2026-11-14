@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "AsanDeath.h"
+#include "DeathTest.h"
 #include "StorageApi.h"
 #include "unity.h"
 
@@ -44,6 +46,33 @@ void testReserveAndFreeRoundTrip(void) {
 void testFreeReservedMemoryIsNullSafe(void) {
     freeReservedMemory(NULL);
 }
+
+static void reserveAndFreeZeroBytes(void) {
+    freeReservedMemory(reserveMemory(0));
+}
+
+/* A 0-byte request is not a failure, even where calloc(1, 0) is NULL (#160). */
+void testReserveMemoryOfZeroBytesReturns(void) {
+    ASSERT_EXITS_WITH(0, reserveAndFreeZeroBytes());
+}
+
+#if defined(ODT_MEM_PROFILE) || !defined(ODT_TEST_ASAN)
+/* SIZE_MAX wraps the profiling header and no calloc serves it. Skipped for a
+ * plain calloc under ASan, which aborts on oversized requests. */
+void testReserveMemoryExitsOnAWrappingSize(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "reserveMemory: cannot reserve", (void)reserveMemory(SIZE_MAX));
+}
+#endif
+
+#if SIZE_MAX > UINT32_MAX && !defined(ODT_TEST_ASAN)
+/* 2^62 bytes wrap nothing but no 64-bit host can reserve them. Skipped under
+ * ASan, which aborts on oversized requests; macOS malloc prints a "can't
+ * allocate region" warning to stderr here. */
+void testReserveMemoryExitsWhenTheAllocationFails(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "reserveMemory: cannot reserve 4611686018427387904 bytes",
+                             (void)reserveMemory((size_t)1 << 62));
+}
+#endif
 
 #ifdef ODT_MEM_PROFILE
 /* GT-1: exact-integer heap accounting. No tolerance exists to fudge.
@@ -100,6 +129,13 @@ int main(void) {
     RUN_TEST(testReserveMemoryReturnsZeroedWritablePayload);
     RUN_TEST(testReserveAndFreeRoundTrip);
     RUN_TEST(testFreeReservedMemoryIsNullSafe);
+    RUN_TEST(testReserveMemoryOfZeroBytesReturns);
+#if defined(ODT_MEM_PROFILE) || !defined(ODT_TEST_ASAN)
+    RUN_TEST(testReserveMemoryExitsOnAWrappingSize);
+#endif
+#if SIZE_MAX > UINT32_MAX && !defined(ODT_TEST_ASAN)
+    RUN_TEST(testReserveMemoryExitsWhenTheAllocationFails);
+#endif
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testHeapCounterExactCurrentAndPeak);
     RUN_TEST(testReservedRegionUsableAndAligned);

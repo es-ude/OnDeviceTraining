@@ -820,44 +820,6 @@ void testStackedGatherSizeOverflowFailsFast(void) {
     freeQuantization(q);
 }
 
-static void trainTwoSamplesOrDie(layer_t **model, tensor_t **items, tensor_t **labels) {
-    batch_t *batch = buildBatch(items, labels, 2);
-    trainingBatchDefault(&MODEL_CHAIN(model, B_SIZE), defaultLossConfig(MSE), batch,
-                         calculateGradsSequential, REDUCTION_MEAN, 2, NULL);
-}
-
-void testStackedGatherReservationFailureFailsFast(void) {
-    /* m * per-sample bytes = 2 * (SIZE_MAX / 8) * 4 = SIZE_MAX - 7 does NOT
-     * wrap, but no allocator can serve it: reserveMemory returns NULL (its own
-     * size-wrap guard under ODT_MEM_PROFILE, calloc failure otherwise) and the
-     * gather must fail fast instead of copying through NULL. The
-     * item is stack-built with that huge shape; its data is never read, and
-     * b = m = 2 keeps every sample access in bounds. */
-    quantization_t *q = quantizationInitFloat();
-    layerQuant_t lq;
-    layerQuantInitUniform(&lq, q);
-    layer_t *model[B_SIZE];
-    buildModelB(model, &lq, 27u);
-    float itemData[B_IN] = {0};
-    size_t hugeDims[1] = {SIZE_MAX / 8};
-    size_t hugeOrder[1] = {0};
-    shape_t hugeShape = {
-        .numberOfDimensions = 1, .dimensions = hugeDims, .orderOfDimensions = hugeOrder};
-    quantization_t floatQ;
-    initFloat32Quantization(&floatQ);
-    tensor_t hugeItem = {.data = (uint8_t *)itemData, .shape = &hugeShape, .quantization = &floatQ};
-    float labelData[B_OUT] = {0};
-    tensor_t *label = buildFloatTensor((size_t[]){B_OUT}, 1, labelData);
-    tensor_t *items[2] = {&hugeItem, &hugeItem};
-    tensor_t *labels[2] = {label, label};
-
-    ASSERT_EXITS_WITH_FAILURE(trainTwoSamplesOrDie(model, items, labels));
-
-    freeTensor(label);
-    freeModelB(model);
-    freeQuantization(q);
-}
-
 static tensor_t *buildBoolMask(size_t n) {
     size_t *dims = reserveMemory(sizeof(size_t));
     dims[0] = n;
@@ -1879,7 +1841,6 @@ int main(void) {
     RUN_TEST(testTrainingBatchDefaultRejectsBatchNotDivisibleByMicroBatch);
     RUN_TEST(testStackedRejectsEmptyBatch);
     RUN_TEST(testStackedGatherSizeOverflowFailsFast);
-    RUN_TEST(testStackedGatherReservationFailureFailsFast);
     RUN_TEST(testStackedDropoutFailsFastOnItsMaskCount);
     RUN_TEST(testStackedRejectsItemWithDifferentDims);
     RUN_TEST(testStackedRejectsItemWithDifferentRank);

@@ -7,6 +7,8 @@
 #include "ArithmeticType.h"
 #include "BatchNorm1d.h"
 #include "BatchNorm1dApi.h"
+#include "Conv1d.h"
+#include "Conv1dApi.h"
 #include "Conv1dTransposed.h"
 #include "Conv1dTransposedApi.h"
 #include "DagFixtures.h"
@@ -2859,6 +2861,31 @@ static void testDeserializeConv1dTransposedRejectsGroupsNotDividingInChannels(vo
         "deserializeModel: CONV1D_TRANSPOSED: inChannels (2) must be divisible by groups (3)");
 }
 
+/* The CONV1D record carries groups, which every kernel divides channels by. */
+static void testDeserializeConv1dRejectsGroupsNotDividingOutChannels(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    conv1dInit_t init = {
+        .inChannels = 2, .outChannels = 2, .kernelSize = 3, .weightInit.key = &initKey};
+    layer_t *layer = conv1dLayerInitOwning(&init, &lq);
+    layer->config->conv1d->groups = 3;
+    layer_t *model[] = {layer};
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(&MODEL_CHAIN(model, 1), f);
+    fclose(f);
+    layer->config->conv1d->groups = 1;
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "deserializeModel: CONV1D: outChannels (2) must be divisible by groups (3)",
+        deserializeModel(&MODEL_CHAIN(model, 1), f));
+    fclose(f);
+    freeConv1dLayer(layer);
+    freeQuantization(floatQ);
+}
+
 #define BN_OFFSET_PROP_LOSS_MATH_TYPE (BN_OFFSET_FORWARD_MATH_TYPE + 2)
 
 static void testDeserializeBatchNormRejectsNonFloat32PropLossMath(void) {
@@ -3294,6 +3321,7 @@ int main(void) {
     RUN_TEST(testDeserializeLayerNormRejectsNormalizedShapeGammaMismatch);
     RUN_TEST(testDeserializeSoftmaxRejectsBfpMathOverANonBfpWire);
     RUN_TEST(testDeserializeDropoutRejectsAnOutOfRangeP);
+    RUN_TEST(testDeserializeConv1dRejectsGroupsNotDividingOutChannels);
     RUN_TEST(testDeserializeConv1dTransposedRejectsNonValidPadding);
     RUN_TEST(testDeserializeConv1dTransposedRejectsOutputPaddingAtStride);
     RUN_TEST(testDeserializeConv1dTransposedRejectsGroupsNotDividingInChannels);

@@ -41,11 +41,6 @@ static parameter_t *allocateConv1dWeights(size_t outChannels, size_t inChannels,
                     inChannels, groups);
         exit(1);
     }
-    if (outChannels % groups != 0) {
-        PRINT_ERROR("conv1dLayerInit: outChannels (%zu) must be divisible by groups (%zu)",
-                    outChannels, groups);
-        exit(1);
-    }
     size_t inPerGroup = inChannels / groups;
 
     shape_t *shape = buildOwnedShape((size_t[]){outChannels, inPerGroup, kernelSize}, 3);
@@ -170,6 +165,7 @@ static layer_t *buildConv1dLayerSkeleton(conv1dInit_t *init, layerQuant_t *lq, b
     freeQuantization(floatGradQ);
     cfg->groups = groups;
     cfg->frozen = !trainable;
+    conv1dValidateConfig(cfg, "conv1dLayerInit");
     return layer;
 }
 

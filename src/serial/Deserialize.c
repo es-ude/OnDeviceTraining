@@ -612,6 +612,7 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeArithmetic(&conv1dConfig->propLossMath, f);
         deserializeQuantization(conv1dConfig->outputQ, f, 0);
         deserializeQuantization(conv1dConfig->propLossQ, f, 0);
+        conv1dValidateConfig(conv1dConfig, "deserializeModel: CONV1D");
         break;
     }
     case CONV1D_TRANSPOSED: {

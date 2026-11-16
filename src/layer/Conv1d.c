@@ -23,19 +23,39 @@
 #include "SymGroupedWeight.h"
 #include "Tensor.h"
 
+void conv1dValidateConfig(const conv1dConfig_t *cfg, const char *who) {
+    const kernel_t *kernel = cfg->kernel;
+    const size_t *weightDims = cfg->weights->param->shape->dimensions;
+    if (kernel->stride == 0 || kernel->dilation == 0) {
+        PRINT_ERROR("%s: stride (%zu) and dilation (%zu) must be >= 1", who, kernel->stride,
+                    kernel->dilation);
+        exit(1);
+    }
+    if (cfg->groups == 0) {
+        PRINT_ERROR("%s: groups must be >= 1", who);
+        exit(1);
+    }
+    if (weightDims[0] % cfg->groups != 0) {
+        PRINT_ERROR("%s: outChannels (%zu) must be divisible by groups (%zu)", who, weightDims[0],
+                    cfg->groups);
+        exit(1);
+    }
+    if (kernel->size != weightDims[2]) {
+        PRINT_ERROR("%s: kernel->size (%zu) must equal weight kernelSize (%zu)", who, kernel->size,
+                    weightDims[2]);
+        exit(1);
+    }
+    if (cfg->bias != NULL && calcNumberOfElementsByTensor(cfg->bias->param) != weightDims[0]) {
+        PRINT_ERROR("%s: bias length (%zu) must equal outChannels (%zu)", who,
+                    calcNumberOfElementsByTensor(cfg->bias->param), weightDims[0]);
+        exit(1);
+    }
+}
+
 void initConv1dConfigWithWeightsAndBias(conv1dConfig_t *conv1dConfig, kernel_t *kernel,
                                         parameter_t *weights, parameter_t *bias, size_t groups,
                                         quantization_t *forwardQ, quantization_t *weightGradQ,
                                         quantization_t *biasGradQ, quantization_t *propLossQ) {
-    if (groups == 0) {
-        PRINT_ERROR("Conv1d: groups must be >= 1");
-        exit(1);
-    }
-    if (kernel->size != weights->param->shape->dimensions[2]) {
-        PRINT_ERROR("Conv1d: kernel->size (%zu) must equal weight kernelSize (%zu)", kernel->size,
-                    weights->param->shape->dimensions[2]);
-        exit(1);
-    }
     conv1dConfig->kernel = kernel;
     conv1dConfig->weights = weights;
     conv1dConfig->bias = bias;
@@ -50,6 +70,7 @@ void initConv1dConfigWithWeightsAndBias(conv1dConfig_t *conv1dConfig, kernel_t *
     conv1dConfig->weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
     conv1dConfig->biasGradAccMode = OUT_ACC_FIXED_SCALE;
     conv1dConfig->frozen = false;
+    conv1dValidateConfig(conv1dConfig, "Conv1d");
 }
 
 /* Carries the layer geometry plus, for a grouped SYM/ASYM weight, the stored

@@ -35,6 +35,13 @@ typedef struct conv1dConfig {
                     still propagate */
 } conv1dConfig_t;
 
+/*! The geometry contract forward/backward rely on: stride and dilation >= 1, groups dividing
+ *  outChannels (inChannels = weight dim 1 * groups divides by construction), kernel size matching
+ *  the weight, and a bias of outChannels elements. Call once where a config enters -- the
+ *  factory, the config initialiser and the deserializer -- never per step. `who` prefixes the
+ *  message. */
+void conv1dValidateConfig(const conv1dConfig_t *cfg, const char *who);
+
 void initConv1dConfigWithWeightsAndBias(conv1dConfig_t *conv1dConfig, kernel_t *kernel,
                                         parameter_t *weights, parameter_t *bias, size_t groups,
                                         quantization_t *forwardQ, quantization_t *weightGradQ,

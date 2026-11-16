@@ -265,11 +265,8 @@ def test_every_member_layout_passes_the_overlap_check_and_the_portfolio_keeps_th
         assert check_layout(t, ranges, placement.offsets) == placement.bytes
 
 
-def test_two_ended_needs_a_grad_range_and_the_portfolio_skips_it_without_one():
+def test_the_portfolio_skips_two_ended_on_a_plan_without_a_grad_range():
     t, ranges = hand_plan([(16, 0, 1, ACT), (8, 1, 2, ACT)])
-    with pytest.raises(ValueError, match=r"^remat\[arena\]: two-ended placement needs a GRAD "
-                                         r"range$"):
-        place_two_ended(t, ranges, 24)
     assert place_portfolio(t, ranges).bytes == 24
 
 

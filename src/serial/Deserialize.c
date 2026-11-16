@@ -617,8 +617,6 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
     case CONV1D_TRANSPOSED: {
         conv1dTransposedConfig_t *conv1dTransposedConfig = layer->config->conv1dTransposed;
         deserializeKernel(conv1dTransposedConfig->kernel, f);
-        conv1dTransposedRequireValidPadding(conv1dTransposedConfig->kernel->paddingType,
-                                            "deserializeModel: CONV1D_TRANSPOSED");
         conv1dTransposedConfig->groups = (size_t)serialReadU32LE(f);
         conv1dTransposedConfig->outputPadding = (size_t)serialReadU32LE(f);
         deserializeParameter(conv1dTransposedConfig->weights, f);
@@ -629,6 +627,8 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeArithmetic(&conv1dTransposedConfig->propLossMath, f);
         deserializeQuantization(conv1dTransposedConfig->outputQ, f, 0);
         deserializeQuantization(conv1dTransposedConfig->propLossQ, f, 0);
+        conv1dTransposedValidateConfig(conv1dTransposedConfig,
+                                       "deserializeModel: CONV1D_TRANSPOSED");
         break;
     }
     case MAXPOOL1D: {

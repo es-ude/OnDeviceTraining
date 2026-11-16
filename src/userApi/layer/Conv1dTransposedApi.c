@@ -44,12 +44,6 @@ static parameter_t *allocateConv1dTransposedWeights(size_t inChannels, size_t ou
                     outChannels, groups);
         exit(1);
     }
-    if (inChannels % groups != 0) {
-        PRINT_ERROR("conv1dTransposedLayerInit: inChannels (%zu) must be divisible by "
-                    "groups (%zu)",
-                    inChannels, groups);
-        exit(1);
-    }
     size_t outPerGroup = outChannels / groups;
 
     shape_t *shape = buildOwnedShape((size_t[]){inChannels, outPerGroup, kernelSize}, 3);
@@ -93,16 +87,6 @@ static void validateConv1dTransposedInit(conv1dTransposedInit_t *init) {
     }
     if (init->kernelSize == 0) {
         PRINT_ERROR("conv1dTransposedLayerInit: kernelSize must be > 0");
-        exit(1);
-    }
-    conv1dTransposedRequireValidPadding(init->padding, "conv1dTransposedLayerInit");
-    size_t stride = init->stride == 0 ? 1 : init->stride;
-    size_t dilation = init->dilation == 0 ? 1 : init->dilation;
-    size_t maxStep = stride > dilation ? stride : dilation;
-    if (init->outputPadding != 0 && init->outputPadding >= maxStep) {
-        PRINT_ERROR("conv1dTransposedLayerInit: outputPadding (%zu) must be < max(stride=%zu, "
-                    "dilation=%zu)",
-                    init->outputPadding, stride, dilation);
         exit(1);
     }
 }
@@ -178,6 +162,7 @@ static layer_t *buildConv1dTransposedLayerSkeleton(conv1dTransposedInit_t *init,
     cfg->groups = groups;
     cfg->outputPadding = init->outputPadding;
     cfg->frozen = !trainable;
+    conv1dTransposedValidateConfig(cfg, "conv1dTransposedLayerInit");
     return layer;
 }
 

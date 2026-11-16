@@ -37,14 +37,12 @@ typedef struct conv1dTransposedConfig {
                     still propagate */
 } conv1dTransposedConfig_t;
 
-/* The ConvTranspose kernels implement VALID geometry only. Check it wherever the kernel is
- * set: the factory, the config initialiser and the deserializer. */
-static inline void conv1dTransposedRequireValidPadding(paddingType_t paddingType, const char *who) {
-    if (paddingType != VALID) {
-        PRINT_ERROR("%s: only VALID paddingType is supported", who);
-        exit(1);
-    }
-}
+/*! The geometry contract forward/backward rely on: VALID padding (the only geometry the
+ *  ConvTranspose kernels implement), stride and dilation >= 1, groups dividing inChannels,
+ *  outputPadding < max(stride, dilation), kernel size matching the weight, and a bias of
+ *  outChannels elements. Call once where a config enters -- the factory, the config
+ *  initialiser and the deserializer -- never per step. `who` prefixes the message. */
+void conv1dTransposedValidateConfig(const conv1dTransposedConfig_t *cfg, const char *who);
 
 void initConv1dTransposedConfigWithWeightsAndBias(
     conv1dTransposedConfig_t *cfg, kernel_t *kernel, parameter_t *weights, parameter_t *bias,

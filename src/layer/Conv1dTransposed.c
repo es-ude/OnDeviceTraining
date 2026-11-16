@@ -22,28 +22,50 @@
 #include "SymGroupedWeight.h"
 #include "Tensor.h"
 
+void conv1dTransposedValidateConfig(const conv1dTransposedConfig_t *cfg, const char *who) {
+    const kernel_t *kernel = cfg->kernel;
+    const size_t *weightDims = cfg->weights->param->shape->dimensions;
+    if (kernel->paddingType != VALID) {
+        PRINT_ERROR("%s: only VALID paddingType is supported", who);
+        exit(1);
+    }
+    if (kernel->stride == 0 || kernel->dilation == 0) {
+        PRINT_ERROR("%s: stride (%zu) and dilation (%zu) must be >= 1", who, kernel->stride,
+                    kernel->dilation);
+        exit(1);
+    }
+    if (cfg->groups == 0) {
+        PRINT_ERROR("%s: groups must be >= 1", who);
+        exit(1);
+    }
+    if (weightDims[0] % cfg->groups != 0) {
+        PRINT_ERROR("%s: inChannels (%zu) must be divisible by groups (%zu)", who, weightDims[0],
+                    cfg->groups);
+        exit(1);
+    }
+    size_t maxStep = kernel->stride > kernel->dilation ? kernel->stride : kernel->dilation;
+    if (cfg->outputPadding >= maxStep) {
+        PRINT_ERROR("%s: outputPadding (%zu) must be < max(stride=%zu, dilation=%zu)", who,
+                    cfg->outputPadding, kernel->stride, kernel->dilation);
+        exit(1);
+    }
+    if (kernel->size != weightDims[2]) {
+        PRINT_ERROR("%s: kernel->size (%zu) must equal weight kernelSize (%zu)", who, kernel->size,
+                    weightDims[2]);
+        exit(1);
+    }
+    if (cfg->bias != NULL &&
+        calcNumberOfElementsByTensor(cfg->bias->param) != weightDims[1] * cfg->groups) {
+        PRINT_ERROR("%s: bias length (%zu) must equal outChannels (%zu)", who,
+                    calcNumberOfElementsByTensor(cfg->bias->param), weightDims[1] * cfg->groups);
+        exit(1);
+    }
+}
+
 void initConv1dTransposedConfigWithWeightsAndBias(
     conv1dTransposedConfig_t *cfg, kernel_t *kernel, parameter_t *weights, parameter_t *bias,
     size_t groups, size_t outputPadding, quantization_t *forwardQ, quantization_t *weightGradQ,
     quantization_t *biasGradQ, quantization_t *propLossQ) {
-    if (groups == 0) {
-        PRINT_ERROR("Conv1dTransposed: groups must be >= 1");
-        exit(1);
-    }
-    conv1dTransposedRequireValidPadding(kernel->paddingType, "Conv1dTransposed");
-    if (outputPadding != 0 &&
-        outputPadding >=
-            ((kernel->stride > kernel->dilation) ? kernel->stride : kernel->dilation)) {
-        PRINT_ERROR("Conv1dTransposed: outputPadding (%zu) must be < max(stride=%zu, "
-                    "dilation=%zu)",
-                    outputPadding, kernel->stride, kernel->dilation);
-        exit(1);
-    }
-    if (kernel->size != weights->param->shape->dimensions[2]) {
-        PRINT_ERROR("Conv1dTransposed: kernel->size (%zu) must equal weight kernelSize (%zu)",
-                    kernel->size, weights->param->shape->dimensions[2]);
-        exit(1);
-    }
     cfg->kernel = kernel;
     cfg->weights = weights;
     cfg->bias = bias;
@@ -59,6 +81,7 @@ void initConv1dTransposedConfigWithWeightsAndBias(
     cfg->weightGradAccMode = OUT_ACC_DYNAMIC_RESCALE;
     cfg->biasGradAccMode = OUT_ACC_FIXED_SCALE;
     cfg->frozen = false;
+    conv1dTransposedValidateConfig(cfg, "Conv1dTransposed");
 }
 
 /* Carries the layer geometry plus, for a grouped SYM/ASYM weight, the stored

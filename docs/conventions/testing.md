@@ -210,13 +210,14 @@ test files repeat the same construction.
 ### Rule 2 — Free in reverse-init order
 
 `freeTensor` cascades to data + shape (with its dims and order blocks) +
-quantization + sparsity + the tensor struct itself. Do not call
+quantization + the tensor struct itself. The sparsity marker is borrowed,
+not owned, so it is never freed with the tensor. Do not call
 `freeShape` or `freeQuantization` on a shape/quantization that was already
 consumed by `initTensor` — that is a double-free. The cascade table:
 
 | Allocation                                | Cleanup call         | Cascades to                         |
 |-------------------------------------------|----------------------|-------------------------------------|
-| `initTensor(s, q, sp)`                    | `freeTensor(t)`      | data, shape (+dims, +order), q, sp  |
+| `initTensor(s, q, sp)`                    | `freeTensor(t)`      | data, shape (+dims, +order), q      |
 | `parameterInit(p, g)`                     | `freeParameter(par)` | param tensor + grad (if non-NULL)   |
 | `softmaxLayerInit(...)`                   | `freeSoftmaxLayer(l)`| layer config wrapper only           |
 | `sgdMCreateOptim(...)`                    | `freeOptim(o)`       | all registered parameters + states  |

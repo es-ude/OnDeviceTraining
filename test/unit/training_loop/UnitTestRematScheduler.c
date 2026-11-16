@@ -1814,7 +1814,7 @@ static void walkWithTheContractChecks(fixture_t *f, rematScheduler_t *s, rematMo
 }
 
 /* Two calls: ARENA reuses its resident bytes without zeroing, HEAP reserves
- * fresh blocks (VERIFY poisons both at every bind on the test presets). */
+ * fresh blocks (ODT_REMAT_VERIFY poisons both at every bind on the test presets). */
 static void assertRowContract(rowInit_t init, void (*build)(fixture_t *),
                               const rematPlanSpec_t *spec) {
     fixture_t f;

@@ -272,7 +272,7 @@ void testARowThatRebindsWithoutProducingExitsOnBothRows(void) {
                                       "bindGen 1, bound now at bindGen 2)");
 }
 
-/* Large enough for ACT 1 (3 floats), which VERIFY poisons at bind. */
+/* Large enough for ACT 1 (3 floats), which ODT_REMAT_VERIFY poisons at bind. */
 static uint64_t g_strayBytes[2];
 
 static void leakyEnd(rematScheduler_t *s) {

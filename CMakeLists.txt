@@ -8,6 +8,8 @@ project(OnDeviceTraining)
 
 odt_is_top_level_project(ODT_TOP_LEVEL_PROJECT)
 
+include(cmake/compile_guards.cmake)
+
 add_subdirectory(src)
 
 set(DEBUG_LEVEL "0" CACHE STRING "Debug verbosity: 0=off, 1=error, 2=warn, 3=info")

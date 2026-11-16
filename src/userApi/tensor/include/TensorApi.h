@@ -6,16 +6,18 @@
 
 /*! Initializes a tensor that owns its data buffer.
  *
- * The tensor takes ownership of `shape`, `quantization`, and `sparsity` (if non-NULL).
- * The data buffer is allocated by initTensor itself (size derived from shape and
- * quantization) and is zero-initialized.
+ * The tensor takes ownership of `shape` and `quantization`; it only borrows
+ * `sparsity`, which freeTensor never frees. The data buffer is allocated by
+ * initTensor itself (size derived from shape and quantization) and is
+ * zero-initialized.
  *
- * After this call, freeTensor(t) is unconditionally safe and frees all four
- * ownership domains (data, shape, quantization, sparsity).
+ * After this call, freeTensor(t) is unconditionally safe and frees data, shape
+ * and quantization.
  *
  * \param shape: Caller-allocated shape; ownership transferred to the tensor.
  * \param quantization: Caller-allocated quantization; ownership transferred.
- * \param sparsity: Optional; ownership transferred (NULL means no sparsity).
+ * \param sparsity: Optional borrowed marker (NULL means no sparsity); the caller
+ *                  keeps it alive as long as the tensor.
  *
  * \returns Pointer to an initialized tensor with own-allocated zero data.
  */
@@ -83,8 +85,8 @@ parameter_t *parameterInit(tensor_t *param, tensor_t *grad);
  *  grid values. Use deepCopyQuantization for a full value copy. BOOL exits. */
 quantization_t *getQLike(quantization_t *quantization);
 /*! Fresh tensor with a copy of tensor's shape, a getQLike clone of its
- *  quantization and zeroed data; the values are not copied. A sparsity marker
- *  is borrowed and freeTensor never frees one, so the clone carries none. */
+ *  quantization and zeroed data; the values are not copied. The clone carries
+ *  no sparsity marker (a marker is borrowed, see initTensor). */
 tensor_t *getTensorLike(tensor_t *tensor);
 /*! Heap-allocates a shape with a copy of `dims` and identity order. Ownership passes to the
  *  tensor built on it: freeTensor frees the shape. */

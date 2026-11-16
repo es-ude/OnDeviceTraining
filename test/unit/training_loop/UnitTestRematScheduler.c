@@ -132,11 +132,14 @@ void testArenaDeinitIsIdempotentOnItsOwn(void) {
 void testDeinitReturnsEveryInitBlock(void) {
     fixture_t f;
     buildHarModel(&f);
-    size_t before = memProfileCurrentBytes();
-    rematScheduler_t s = initArena(&f, &g_liveness);
-    TEST_ASSERT_TRUE(memProfileCurrentBytes() > before);
-    rematSchedulerDeinit(&s);
-    TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
+    for (int heap = 0; heap < 2; heap++) {
+        size_t before = memProfileCurrentBytes();
+        rematScheduler_t s = heap ? initHeap(&f, &g_liveness) : initArena(&f, &g_liveness);
+        TEST_ASSERT_TRUE(memProfileCurrentBytes() > before);
+        rematSchedulerDeinit(&s);
+        TEST_ASSERT_NULL(s.fns);
+        TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
+    }
     freeModel(f.model, f.n);
 }
 #endif

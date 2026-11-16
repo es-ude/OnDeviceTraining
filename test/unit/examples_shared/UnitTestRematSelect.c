@@ -805,8 +805,7 @@ void testAnArenaWithinItsBudgetRuns(void) {
     ASSERT_EXITS_WITH(0, exitWithTheBudgetVerdict("16"));
 }
 
-/* One byte less stops the run before it starts, naming both numbers; the
- * scheduler is deinitialised, as on a failed reservation. */
+/* One byte less stops the run before it starts, naming both numbers. */
 void testAnArenaOverItsBudgetStopsNamingBoth(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "ERROR: remat arena 16 B exceeds REMAT_BUDGET_B=15 B",
                              exitWithTheBudgetVerdict("15"));

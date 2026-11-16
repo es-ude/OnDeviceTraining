@@ -83,7 +83,8 @@ parameter_t *parameterInit(tensor_t *param, tensor_t *grad);
  *  grid values. Use deepCopyQuantization for a full value copy. BOOL exits. */
 quantization_t *getQLike(quantization_t *quantization);
 /*! Fresh tensor with a copy of tensor's shape, a getQLike clone of its
- *  quantization and zeroed data; the values are not copied. */
+ *  quantization and zeroed data; the values are not copied. A sparsity marker
+ *  is borrowed and freeTensor never frees one, so the clone carries none. */
 tensor_t *getTensorLike(tensor_t *tensor);
 /*! Heap-allocates a shape with a copy of `dims` and identity order. Ownership passes to the
  *  tensor built on it: freeTensor frees the shape. */
@@ -94,8 +95,6 @@ shape_t *getShapeLike(shape_t *shape);
 /*! Zeroed data buffer for numberOfValues elements of quantization's dtype
  *  (freed with freeReservedMemory). BOOL exits. */
 uint8_t *getDataLike(quantization_t *quantization, size_t numberOfValues);
-/*! A fresh, unpopulated sparsity_t when sparsity is non-NULL, else NULL. */
-sparsity_t *getSparsityLike(sparsity_t *sparsity);
 
 /*! Frees only the data buffer; the tensor keeps its shape and quantization. */
 void freeData(tensor_t *tensor);

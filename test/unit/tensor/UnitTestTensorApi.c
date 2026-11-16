@@ -1272,6 +1272,25 @@ void testGetDataLikeRejectsBool(void) {
     freeQuantization(q);
 }
 
+/* A source's sparsity marker is borrowed (here from the stack), so neither the
+ * clone nor freeTensor may own one: cloning and freeing a marked tensor must
+ * leave no reserved bytes behind and must not free the marker. */
+void testGetTensorLikeOfAMarkedTensorLeaksNothing(void) {
+#ifndef ODT_MEM_PROFILE
+    TEST_IGNORE_MESSAGE("needs ODT_MEM_PROFILE counters");
+#else
+    sparsity_t marker = {.type = SPARSITY_TYPE_1, .config = NULL};
+    tensor_t *src =
+        initTensor(buildOwnedShape((size_t[]){2, 3}, 2), quantizationInitFloat(), &marker);
+    size_t before = memProfileCurrentBytes();
+    tensor_t *clone = getTensorLike(src);
+    freeTensor(clone);
+    size_t leaked = memProfileCurrentBytes() - before;
+    freeTensor(src);
+    TEST_ASSERT_EQUAL_size_t(0, leaked);
+#endif
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testTensorInitWithDistribution_Zeros_InitializesProductOfDimsValues);
@@ -1328,5 +1347,6 @@ int main(void) {
     RUN_TEST(testBuildOwnedShapeRejectsAnUnrepresentableRank);
     RUN_TEST(testGetDataLikeRejectsAnUnrepresentableByteCount);
     RUN_TEST(testGetDataLikeRejectsBool);
+    RUN_TEST(testGetTensorLikeOfAMarkedTensorLeaksNothing);
     return UNITY_END();
 }

@@ -341,20 +341,13 @@ uint8_t *getDataLike(quantization_t *quantization, size_t numberOfValues) {
     return reserveMemory(calcNumberOfBytesForData(quantization, numberOfValues));
 }
 
-sparsity_t *getSparsityLike(sparsity_t *sparsity) {
-    if (sparsity != NULL) {
-        return reserveMemory(sizeof(sparsity_t));
-    }
-    return NULL;
-}
-
 tensor_t *getTensorLike(tensor_t *tensor) {
     tensor_t *likeTensor = reserveMemory(sizeof(tensor_t));
     size_t numberOfValues = calcNumberOfElementsByShape(tensor->shape);
     likeTensor->data = getDataLike(tensor->quantization, numberOfValues);
     likeTensor->quantization = getQLike(tensor->quantization);
     likeTensor->shape = getShapeLike(tensor->shape);
-    likeTensor->sparsity = getSparsityLike(tensor->sparsity);
+    likeTensor->sparsity = NULL;
 
     return likeTensor;
 }

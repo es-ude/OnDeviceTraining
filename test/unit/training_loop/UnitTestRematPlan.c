@@ -2287,7 +2287,7 @@ void testWireReleaseRefusesAWireIdOutOfRange(void) {
     freeSeedFixture(&f);
 }
 
-/* m2: bytes == NULL would still increment liveBytes and bindGen, and under
+/* bytes == NULL would still increment liveBytes and bindGen, and under
  * ODT_REMAT_VERIFY poison a NULL pointer. */
 void testWireBindRefusesNullBytes(void) {
     seedFixture_t f;

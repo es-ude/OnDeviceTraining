@@ -836,8 +836,9 @@ static void requireNotAMember(const rematWireTable_t *t, uint16_t w, const char 
 /* A root's bind binds its chain: every member takes the root's bytes and a
  * bind generation of its own, and an inherited member (Flatten's dx) derives
  * its header here, through the path of every inherited wire, since it is
- * never bound on its own. Members follow their root in id order. The root's
- * bytes are poisoned and counted once. */
+ * never bound on its own. Members follow their root in id order. The caller
+ * counts the shared bytes once, for the root, and poisons them under
+ * ODT_REMAT_VERIFY. */
 static void bindMembers(rematWireTable_t *t, uint16_t root, uint8_t *bytes) {
     for (size_t m = root + 1u; isMember(t, m); m++) {
         rematWire_t *rec = &t->wires[m];

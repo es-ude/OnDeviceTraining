@@ -53,7 +53,7 @@ void rematHeapDone(rematScheduler_t *s, const rematStep_t *st) {
     for (size_t r; (r = rematWalkClosing(p, &s->walk)) != REMAT_NONE;) {
         uint16_t w = p->ranges[r].wire;
         uint8_t *b = rematWireHdr(s->wires, w)->data;
-        rematWireRelease(s->wires, w); /* VERIFY poison first, while still owned */
+        rematWireRelease(s->wires, w); /* ODT_REMAT_VERIFY poisons here, while still owned */
         freeReservedMemory(b);         /* then free: no write-after-free */
     }
     s->walk.step++;

@@ -790,6 +790,73 @@ void testConv1dBackwardExplicitPadding() {
     }
 }
 
+/* VALID stride 2 over L=6, K=3 leaves (6-3) % 2 = 1 input position no window
+ * reaches: dx keeps length 6 and that position's gradient is exactly 0. Every
+ * dx arithmetic shares the propLoss adapter's outputPadding, so each arm is
+ * checked against the PyTorch gold. ARITH_BFP requantizes the weights to BFP
+ * storage (the BFP arm's width anchor). */
+static void runConv1dStrideRemainderBackward(arithmetic_t dxMath, float tol) {
+    size_t weightDims[3] = {2, 2, 3};
+    size_t biasDims[1] = {2};
+    size_t inputDims[3] = {1, 2, 6};
+    size_t outputDims[3] = {1, 2, 2};
+    conv1dFixtureSetup_t s = {
+        .weightDims = weightDims,
+        .biasDims = biasDims,
+        .inputDims = inputDims,
+        .outputDims = outputDims,
+        .hasBias = 1,
+        .kSize = 3,
+        .padding = VALID,
+        .dilation = 1,
+        .stride = 2,
+        .groups = 1,
+        .weightData = weight_conv1d_strideRemainder,
+        .biasData = bias_conv1d_strideRemainder,
+        .inputData = input_conv1d_strideRemainder,
+    };
+    conv1dRunResult_t r = conv1dRunForward(s, NULL);
+    if (dxMath.type == ARITH_BFP) {
+        quantization_t *bfp = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 1, 0);
+        requantizeTensorInPlace(r.weights->param, bfp);
+        freeQuantization(bfp);
+    }
+    r.layer->config->conv1d->propLossMath = dxMath;
+    tensor_t *lossGrad = makeFloatTensor(outputDims, 3, lossGrad_conv1d_strideRemainder);
+    tensor_t *propLoss = makeFloatTensor(inputDims, 3, NULL);
+
+    conv1dBackward(r.layer, r.input, lossGrad, propLoss, NULL);
+
+    for (size_t i = 0; i < expectedPropLoss_conv1d_strideRemainder_len; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(tol, expectedPropLoss_conv1d_strideRemainder[i],
+                                 ((float *)propLoss->data)[i]);
+    }
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, ((float *)propLoss->data)[5]);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, ((float *)propLoss->data)[11]);
+    for (size_t i = 0; i < expectedWeightGrad_conv1d_strideRemainder_len; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedWeightGrad_conv1d_strideRemainder[i],
+                                 ((float *)r.weights->grad->data)[i]);
+    }
+    for (size_t i = 0; i < expectedBiasGrad_conv1d_strideRemainder_len; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-4f, expectedBiasGrad_conv1d_strideRemainder[i],
+                                 ((float *)r.bias->grad->data)[i]);
+    }
+}
+
+void testConv1dBackwardValidStrideRemainderFloat(void) {
+    runConv1dStrideRemainderBackward((arithmetic_t){.type = ARITH_FLOAT32}, 1e-4f);
+}
+
+void testConv1dBackwardValidStrideRemainderSym(void) {
+    runConv1dStrideRemainderBackward(
+        (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = HALF_AWAY}, 1e-2f);
+}
+
+void testConv1dBackwardValidStrideRemainderBfp(void) {
+    runConv1dStrideRemainderBackward((arithmetic_t){.type = ARITH_BFP, .roundingMode = HALF_AWAY},
+                                     5e-2f);
+}
+
 /* Expect produced-wire values after executeOp requantization, for this and the
  * other testConv1dForwardSym* tests. generate_expected_conv1d.py checks the
  * requantized values against the float64 PyTorch reference. */
@@ -4169,6 +4236,9 @@ int main() {
     RUN_TEST(testConv1dBackwardPointwise);
     RUN_TEST(testConv1dForwardExplicitPadding);
     RUN_TEST(testConv1dBackwardExplicitPadding);
+    RUN_TEST(testConv1dBackwardValidStrideRemainderFloat);
+    RUN_TEST(testConv1dBackwardValidStrideRemainderSym);
+    RUN_TEST(testConv1dBackwardValidStrideRemainderBfp);
     RUN_TEST(testConv1dForwardSymSingleChannelSingleBatch);
     RUN_TEST(testConv1dForwardSymSingleChannelWithBias);
     RUN_TEST(testConv1dForwardSymPointwise);

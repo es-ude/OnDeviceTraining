@@ -300,6 +300,22 @@ def fixture_explicit_padding():
     }
 
 
+def fixture_stride_remainder():
+    # VALID stride 2, L=6, K=3: (6-3) % 2 = 1 trailing input position no window
+    # reaches, so its dL/dx is 0 and dx must still have length 6.
+    torch.manual_seed(17)
+    x = torch.randn(1, 2, 6).requires_grad_(True)
+    w = torch.randn(2, 2, 3).requires_grad_(True)
+    b = torch.randn(2).requires_grad_(True)
+    loss_grad = torch.randn(1, 2, 2)
+    y = F.conv1d(x, w, bias=b, stride=2, padding=0, dilation=1, groups=1)
+    y.backward(loss_grad)
+    return {"name": "strideRemainder", "x": x.detach(), "w": w.detach(), "b": b.detach(),
+            "y": y.detach(), "dx": x.grad.detach(), "dw": w.grad.detach(), "db": b.grad.detach(),
+            "lossGrad": loss_grad.detach(),
+            "_params": {"stride": 2, "padding": 0, "dilation": 1, "groups": 1, "has_bias": True}}
+
+
 def fixture_stride_dilation_sym():
     # SYM twin of strideDilation with a RANDOM lossGrad (uniform-lossGrad vacuity).
     torch.manual_seed(11)
@@ -682,6 +698,7 @@ def main() -> int:
         fixture_same_padding_with_groups(),
         fixture_pointwise(),
         fixture_explicit_padding(),
+        fixture_stride_remainder(),
     ]
     for fx in fixtures:
         emit_fixture(parts, fx)

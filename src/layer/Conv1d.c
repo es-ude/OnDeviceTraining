@@ -62,6 +62,7 @@ typedef struct conv1dForwardCtx {
     const symGroupedWeight_t *groupedWeight; /* NULL unless the weight is grouped SYM or ASYM
                                                 (then STACK storage of the frame, see
                                                 symGroupedWeightOrNull) */
+    size_t dxOutputPadding; /* dx only: VALID input positions past the last window */
 } conv1dForwardCtx_t;
 
 /* Forward operands are {input, weights} or {input, weights, bias}; a missing
@@ -966,7 +967,8 @@ static void propLossKernelFloat(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     (void)auxOut;
     const conv1dForwardCtx_t *fctx = ctx;
     const conv1dConfig_t *cfg = fctx->cfg;
-    convTranspose1dKernelFloat32(ops[0], ops[1], NULL, cfg->kernel, cfg->groups, 0u, rawOut);
+    convTranspose1dKernelFloat32(ops[0], ops[1], NULL, cfg->kernel, cfg->groups,
+                                 fctx->dxOutputPadding, rawOut);
 }
 
 static void propLossKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
@@ -976,11 +978,12 @@ static void propLossKernelSym(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
     const conv1dForwardCtx_t *fctx = ctx;
     const conv1dConfig_t *cfg = fctx->cfg;
     if (fctx->groupedWeight != NULL) {
-        convTranspose1dKernelSymInt32Grouped(ops[0], ops[1], NULL, cfg->kernel, cfg->groups, 0u,
-                                             rawOut, fctx->groupedWeight, rs);
+        convTranspose1dKernelSymInt32Grouped(ops[0], ops[1], NULL, cfg->kernel, cfg->groups,
+                                             fctx->dxOutputPadding, rawOut, fctx->groupedWeight,
+                                             rs);
     } else {
-        convTranspose1dKernelSymInt32(ops[0], ops[1], NULL, cfg->kernel, cfg->groups, 0u, rawOut,
-                                      rs);
+        convTranspose1dKernelSymInt32(ops[0], ops[1], NULL, cfg->kernel, cfg->groups,
+                                      fctx->dxOutputPadding, rawOut, rs);
     }
 }
 
@@ -993,7 +996,8 @@ static void propLossKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
     (void)auxOut;
     const conv1dForwardCtx_t *fctx = ctx;
     const conv1dConfig_t *cfg = fctx->cfg;
-    convTranspose1dKernelBfpScatter(ops[0], ops[1], cfg->kernel, cfg->groups, 0u, rawOut);
+    convTranspose1dKernelBfpScatter(ops[0], ops[1], cfg->kernel, cfg->groups, fctx->dxOutputPadding,
+                                    rawOut);
 }
 
 void conv1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad, tensor_t *propLoss,
@@ -1099,7 +1103,16 @@ void conv1dBackward(layer_t *layer, tensor_t *forwardInput, tensor_t *lossGrad, 
         const symGroupedWeight_t *groupedWeight =
             symGroupedWeightOrNull(weightTensor, &asymWeightView, &groupedWeightCtx);
         bool grouped = groupedWeight != NULL;
-        conv1dForwardCtx_t fctx = {.cfg = cfg, .groupedWeight = groupedWeight};
+        /* A VALID stride can leave (L - effectiveK) % stride trailing input
+         * positions no window reached; the adjoint pads them (gradient 0). */
+        size_t dxOutputPadding = 0;
+        if (cfg->kernel->paddingType == VALID) {
+            dxOutputPadding =
+                forwardInput->shape->dimensions[2] -
+                convTranspose1dOutputLength(lossExpected.dimensions[2], cfg->kernel, 0);
+        }
+        conv1dForwardCtx_t fctx = {
+            .cfg = cfg, .groupedWeight = groupedWeight, .dxOutputPadding = dxOutputPadding};
 
         switch (cfg->propLossMath.type) {
         case ARITH_FLOAT32:

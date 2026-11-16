@@ -141,8 +141,6 @@ void rematRequireWalkComplete(const rematScheduler_t *s, const char *row) {
 static void reportArena(const rematScheduler_t *s, const rematProgram_t *p, rematReport_t *out) {
     /* Cannot wrap: numRanges < REMAT_NONE, and init reserved this product. */
     out->metadataBytes += p->numRanges * sizeof(size_t);
-    out->placed = true;
-    out->dataReserved = true;
     out->arenaBytes = s->row.arena.bytes;
     /* Neither difference can wrap: placed >= exact bytes per wire, and the
      * verified co-live ranges fit disjointly inside the arena. */
@@ -157,7 +155,6 @@ void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out) {
     }
     const rematProgram_t *p = &s->plan->train;
     out->policy = s->plan->policy;
-    out->planned = true;
     out->numSteps = p->numSteps;
     out->refwdSteps = s->plan->refwdSteps;
     out->forwardCost = s->plan->forwardCost;
@@ -173,8 +170,6 @@ void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out) {
         break;
     case REMAT_HEAP:
         /* No placement and no resident block: its arena fields are 0. */
-        out->placed = true;
-        out->dataReserved = true;
         break;
     }
 }

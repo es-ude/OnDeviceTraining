@@ -820,9 +820,9 @@ void testTheDryPlanLineNamesThePlanAndEndsWithTheRecomputeNumbers(void) {
     TEST_ASSERT_NOT_NULL(f);
     rematSelectPrintPlan(f, "har_classifier", &sel, &s);
     TEST_ASSERT_EQUAL_STRING(
-        "DRY_PLAN example=har_classifier storage=arena plan=retain:3,7,12 planned=0 placed=0 "
-        "data_reserved=0 steps=0 wires_peak_b=0 activations_peak_b=0 arena_b=0 arena_pad_b=0 "
-        "arena_gap_b=0 wire_metadata_b=0 refwd_steps=0 forward_cost=0 recompute_cost=0\n",
+        "DRY_PLAN example=har_classifier storage=arena plan=retain:3,7,12 steps=0 wires_peak_b=0 "
+        "activations_peak_b=0 arena_b=0 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=0 "
+        "refwd_steps=0 forward_cost=0 recompute_cost=0\n",
         readBack(f));
 }
 

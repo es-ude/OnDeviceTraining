@@ -397,9 +397,8 @@ decisions and those with nothing in force yet are left out.
   first-fit-decreasing first, the earlier order on equal bytes; their scratch,
   a second offsets table among it, is freed before init returns, a short heap
   peak at init only), the placement verifier, then the arena data block. An
-  initialised scheduler reports `planned`, `placed` and `dataReserved` all
-  true. An allocation failure exits in `reserveMemory`. More than `ODT_REMAT_MAX_RANGES` (default 1024) ranges
-  exit at init, naming it.
+  allocation failure exits in `reserveMemory`. More than
+  `ODT_REMAT_MAX_RANGES` (default 1024) ranges exit at init, naming it.
 - **remat D57** The Legacy oracle is retired: keyed randomness reached the
   layer path, and Legacy hands its layers no key. Every fixture compares
   against an explicit HEAP + STORE_ALL reference (the driver on an ephemeral

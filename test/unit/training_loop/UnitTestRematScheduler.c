@@ -64,7 +64,6 @@ void testReportEchoesTypePolicyAndPlanFacts(void) {
     rematSchedulerReport(&s, &r);
     TEST_ASSERT_EQUAL_INT(REMAT_ARENA, r.type);
     TEST_ASSERT_EQUAL_INT(REMAT_PLAN_LIVENESS, r.policy);
-    TEST_ASSERT_TRUE(r.planned);
     TEST_ASSERT_EQUAL_size_t(25, r.numSteps); /* 12 + 1 + 1 + 11 */
     TEST_ASSERT_EQUAL_size_t(49152, r.peakLiveBytes);
     rematSchedulerDeinit(&s);
@@ -82,7 +81,6 @@ void testReportOnAZeroedSchedulerIsEmpty(void) {
     rematReport_t r;
     memset(&r, 0xA5, sizeof r);
     rematSchedulerReport(&s, &r);
-    TEST_ASSERT_FALSE(r.planned);
     TEST_ASSERT_EQUAL_size_t(0, r.numSteps);
     TEST_ASSERT_EQUAL_size_t(0, r.peakLiveBytes);
     TEST_ASSERT_EQUAL_size_t(0, r.metadataBytes);
@@ -980,9 +978,6 @@ void testArenaInitPlacesVerifiesAndReservesTheArena(void) {
     rematScheduler_t s = initArena(&f, &g_liveness);
     rematReport_t r;
     rematSchedulerReport(&s, &r);
-    TEST_ASSERT_TRUE(r.planned);
-    TEST_ASSERT_TRUE(r.placed);
-    TEST_ASSERT_TRUE(r.dataReserved);
     TEST_ASSERT_NOT_NULL(s.row.arena.offsets);
     TEST_ASSERT_NOT_NULL(s.row.arena.base);
     TEST_ASSERT_EQUAL_size_t(s.row.arena.bytes, r.arenaBytes);
@@ -991,7 +986,6 @@ void testArenaInitPlacesVerifiesAndReservesTheArena(void) {
 
 static void assertArenaDecomposition(void (*build)(fixture_t *), const rematPlanSpec_t *spec) {
     rematReport_t r = reportAfterInit(build, spec);
-    TEST_ASSERT_TRUE(r.placed);
     TEST_ASSERT_EQUAL_size_t(r.arenaBytes, r.peakLiveBytes + r.arenaPadBytes + r.arenaGapBytes);
 }
 
@@ -2561,9 +2555,6 @@ static void assertHeapReport(const rematPlanSpec_t *spec, rematPlanPolicy_t poli
     rematSchedulerReport(&s, &r);
     TEST_ASSERT_EQUAL_INT(REMAT_HEAP, r.type);
     TEST_ASSERT_EQUAL_INT(policy, r.policy);
-    TEST_ASSERT_TRUE(r.planned);
-    TEST_ASSERT_TRUE(r.placed);
-    TEST_ASSERT_TRUE(r.dataReserved);
     TEST_ASSERT_EQUAL_size_t(25, r.numSteps);
     TEST_ASSERT_EQUAL_size_t(peakLiveBytes, r.peakLiveBytes);
     TEST_ASSERT_EQUAL_size_t(0, r.arenaBytes);

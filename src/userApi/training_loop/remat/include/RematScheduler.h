@@ -172,19 +172,11 @@ void rematHeapInitEval(rematScheduler_t *s, const model_t *m, const tensor_t *in
  * the table. Exits inside a call. */
 void rematSchedulerDeinit(rematScheduler_t *s);
 
-/* Feeds the harness keys. Every initialised scheduler reports all three flags
- * true; a zeroed or deinitialised one reports every field 0. */
+/* Feeds the harness keys. A zeroed or deinitialised scheduler reports every
+ * field 0. */
 typedef struct rematReport {
     rematSchedulerType_t type;
     rematPlanPolicy_t policy;
-    /* table + plan built: numSteps, the peaks, metadataBytes, the recompute numbers */
-    bool planned;
-    /* ARENA: placement computed + verified (the three arena fields). HEAP:
-     * arena fields 0; it places each range in its own block. */
-    bool placed;
-    /* ARENA: the resident arena block exists. HEAP: its blocks are reserved
-     * per range at each step, so init leaves nothing pending. */
-    bool dataReserved;
     size_t numSteps;
     /* Both of the TRAIN program, exact bytes, ACT 0 excluded: the wires peak
      * (the POET x-axis, wires_peak_b) and that of its ACT wires alone
@@ -192,9 +184,10 @@ typedef struct rematReport {
     size_t peakLiveBytes;
     size_t activationsPeakBytes;
     size_t observedPeakLiveBytes; /* SDK accounting over the last call, every row (P8) */
-    size_t arenaBytes;            /* = peakLiveBytes + arenaPadBytes + arenaGapBytes */
-    size_t arenaPadBytes;         /* peakPlacedBytes - peakLiveBytes (alignment) -> arena_pad_b */
-    size_t arenaGapBytes;         /* arenaBytes - peakPlacedBytes (placement gap) -> arena_gap_b */
+    /* The three arena fields are 0 under HEAP, which places each range in its own block. */
+    size_t arenaBytes;    /* = peakLiveBytes + arenaPadBytes + arenaGapBytes */
+    size_t arenaPadBytes; /* peakPlacedBytes - peakLiveBytes (alignment) -> arena_pad_b */
+    size_t arenaGapBytes; /* arenaBytes - peakPlacedBytes (placement gap) -> arena_gap_b */
     size_t metadataBytes; /* table block + plan block + the offsets block -> wire_metadata_b */
     /* The TRAIN program's REFORWARD steps (-> refwd_steps) and the forward cost
      * (layerForwardCost, a multiply-accumulate count) of its FORWARD steps

@@ -462,6 +462,40 @@ static void testDeserializeRejectsConv1dBiasPresenceMismatch(void) {
     assertConv1dBiasPresenceMismatchRejected(BIAS_TRUE, BIAS_FALSE);
 }
 
+/*! An out-of-range paddingType byte must not reach the window geometry, which
+ *  would silently give outputLength 0. */
+static void testDeserializeRejectsConv1dPaddingTypeOutOfRange(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+
+    const rngKey_t key = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    conv1dInit_t init = {.inChannels = 2,
+                         .outChannels = 3,
+                         .kernelSize = 3,
+                         .groups = 1,
+                         .bias = BIAS_TRUE,
+                         .weightInit.key = &key};
+    layer_t *serialLayer = conv1dLayerInitOwning(&init, &lq);
+    layer_t *skeletonLayer = conv1dLayerInitOwning(&init, &lq);
+    serialLayer->config->conv1d->kernel->paddingType = (paddingType_t)(EXPLICIT + 1);
+    layer_t *serialModel[] = {serialLayer};
+    layer_t *skeletonModel[] = {skeletonLayer};
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
+    fclose(f);
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: CONV1D: paddingType 3 is out of range",
+                             deserializeModel(&MODEL_CHAIN(skeletonModel, 1), f));
+    fclose(f);
+
+    freeConv1dLayer(skeletonLayer);
+    freeConv1dLayer(serialLayer);
+    freeQuantization(floatQ);
+}
+
 static void assertConv1dTransposedBiasPresenceMismatchRejected(bias_t serialBias,
                                                                bias_t skeletonBias) {
     quantization_t *floatQ = quantizationInitFloat();
@@ -3290,6 +3324,7 @@ int main(void) {
     RUN_TEST(testRoundTripLinearNoBias);
     RUN_TEST(testDeserializeRejectsLinearBiasPresenceMismatch);
     RUN_TEST(testDeserializeRejectsConv1dBiasPresenceMismatch);
+    RUN_TEST(testDeserializeRejectsConv1dPaddingTypeOutOfRange);
     RUN_TEST(testDeserializeRejectsConv1dTransposedBiasPresenceMismatch);
     RUN_TEST(testDeserializeRejectsLinearHasBiasByteOutOfRange);
     RUN_TEST(testSerializeModelValidatesTheWiring);

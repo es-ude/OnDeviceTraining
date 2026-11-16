@@ -17,6 +17,12 @@ exemplarBuffer_t *exemplarBufferCreate(size_t numClasses, size_t capacity) {
         PRINT_ERROR("exemplarBufferCreate: numClasses and capacity must be >= 1");
         exit(1);
     }
+    /* counts[c] is uint32_t and runs up to capacity */
+    if ((uint64_t)capacity > UINT32_MAX) {
+        PRINT_ERROR("exemplarBufferCreate: capacity %zu exceeds the uint32_t per-class count",
+                    capacity);
+        exit(1);
+    }
     /* the counts array cannot wrap once the slot bytes fit: numClasses <= slots
      * and sizeof(uint32_t) <= sizeof(tensor_t *) */
     size_t slots, slotBytes;

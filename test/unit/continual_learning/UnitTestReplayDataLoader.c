@@ -859,8 +859,16 @@ void testExemplarReplayedSamplesKeepTheRealSamplesNaturalShape(void) {
     assertSyntheticShapesAreNatural(itemRank, itemDims, labelRank, labelDim0);
 }
 
+/* The per-class counts are uint32_t and run up to capacity, so a larger
+ * capacity would wrap them before the class fills. */
+void testExemplarBufferRejectsACapacityAboveUint32(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "exemplarBufferCreate: capacity",
+                             exemplarBufferCreate(1, (size_t)UINT32_MAX + 1u));
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testExemplarBufferRejectsACapacityAboveUint32);
     RUN_TEST(testWrappedBatchAppendsSyntheticSamples);
     RUN_TEST(testMinCountGatesClasses);
     RUN_TEST(testNoEligibleClassPassesBaseBatchThrough);

@@ -1000,8 +1000,38 @@ void testUpdateIngestsInt32Samples(void) {
     freePpcaReplay(gI);
 }
 
+/* count is the n of every later merge weight and the minCount gate: an update
+ * that would wrap it must exit instead of restarting n near 0. */
+void testBatchUpdateThatWouldWrapCountExits(void) {
+    ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
+    ppcaReplay_t *g = ppcaReplayCreate(&cfg);
+    ppcaWorkspace_t *ws = ppcaWorkspaceCreate(6, 2, 8);
+    tensor_t *samples =
+        buildFloat32TensorND(2, (size_t[]){2, 6}, (float[]){1, 2, 3, 4, 5, 6, -1, 0, 2, 1, 3, -2});
+    g->count = UINT32_MAX - 1u;
+    ASSERT_EXITS_WITH_OUTPUT(1, "ppcaReplayUpdate: count", ppcaReplayUpdate(g, samples, ws));
+    freeTensor(samples);
+    freePpcaWorkspace(ws);
+    freePpcaReplay(g);
+}
+
+void testStreamingUpdateThatWouldWrapCountExits(void) {
+    ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
+    ppcaReplay_t *g = ppcaReplayCreate(&cfg);
+    ppcaWorkspace_t *ws = ppcaWorkspaceCreate(6, 2, 8);
+    tensor_t *x = buildFloat32TensorND(1, (size_t[]){6}, (float[]){1, 2, 3, 4, 5, 6});
+    g->count = UINT32_MAX;
+    ASSERT_EXITS_WITH_OUTPUT(1, "ppcaReplayUpdateStreaming: count",
+                             ppcaReplayUpdateStreaming(g, x, ws));
+    freeTensor(x);
+    freePpcaWorkspace(ws);
+    freePpcaReplay(g);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testBatchUpdateThatWouldWrapCountExits);
+    RUN_TEST(testStreamingUpdateThatWouldWrapCountExits);
     RUN_TEST(testCreateInitializesState);
     RUN_TEST(testWorkspaceBytesMatchCreateFootprint);
     RUN_TEST(testWorkspaceBytesRejectsSizeOverflow);

@@ -1,6 +1,7 @@
 #define SOURCE_FILE "PPCA_REPLAY"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 #include "Axpby.h"
@@ -17,6 +18,15 @@
 #include "RowBroadcast.h"
 #include "Tensor.h"
 #include "TensorConversion.h"
+
+/* The one place count grows: it is uint32_t, so exit before m samples would wrap it. */
+static void ppcaAdvanceCount(ppcaReplay_t *g, size_t m, const char *who) {
+    if (m > UINT32_MAX - g->count) {
+        PRINT_ERROR("%s: count %u + %zu samples would wrap uint32_t", who, (unsigned)g->count, m);
+        exit(1);
+    }
+    g->count += (uint32_t)m;
+}
 
 ppcaWorkspaceLayout_t ppcaWorkspaceLayout(size_t dim, size_t rank, size_t maxSessionSamples) {
     ppcaWorkspaceLayout_t l = {.rows = 0};
@@ -423,7 +433,7 @@ void ppcaReplayUpdate(ppcaReplay_t *g, const tensor_t *samples, ppcaWorkspace_t 
 
     g->sigma2 = ws->sigma2Out;
     g->totalVar = ws->totalVarOut;
-    g->count += (uint32_t)m;
+    ppcaAdvanceCount(g, m, "ppcaReplayUpdate");
 }
 
 typedef struct {
@@ -608,5 +618,5 @@ void ppcaReplayUpdateStreaming(ppcaReplay_t *g, const tensor_t *x, ppcaWorkspace
     } else {
         g->sigma2 = g->sigma2Floor;
     }
-    g->count += 1;
+    ppcaAdvanceCount(g, 1, "ppcaReplayUpdateStreaming");
 }

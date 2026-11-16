@@ -235,7 +235,13 @@ static void deserializeArithmetic(arithmetic_t *arithmetic, FILE *f) {
 
 static void deserializeKernel(kernel_t *kernel, FILE *f) {
     kernel->size = (size_t)serialReadU32LE(f);
-    kernel->paddingType = (paddingType_t)serialReadU8(f);
+    uint8_t paddingTag = serialReadU8(f);
+    if (paddingTag > (uint8_t)EXPLICIT) {
+        PRINT_ERROR("deserializeKernel: paddingType %u is out of range (max %u)", paddingTag,
+                    (unsigned)EXPLICIT);
+        exit(1);
+    }
+    kernel->paddingType = (paddingType_t)paddingTag;
     kernel->stride = (size_t)serialReadU32LE(f);
     kernel->dilation = (size_t)serialReadU32LE(f);
     kernel->padding = (size_t)serialReadU32LE(f);

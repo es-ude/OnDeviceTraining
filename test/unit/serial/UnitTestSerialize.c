@@ -487,12 +487,40 @@ static void testDeserializeRejectsConv1dPaddingTypeOutOfRange(void) {
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: CONV1D: paddingType 3 is out of range",
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeKernel: paddingType 3 is out of range",
                              deserializeModel(&MODEL_CHAIN(skeletonModel, 1), f));
     fclose(f);
 
     freeConv1dLayer(skeletonLayer);
     freeConv1dLayer(serialLayer);
+    freeQuantization(floatQ);
+}
+
+/*! The pools have no config validator, so the load-time byte check is their
+ *  only guard against an out-of-range paddingType. */
+static void testDeserializeRejectsMaxPool1dPaddingTypeOutOfRange(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+
+    maxPool1dInit_t init = {.kernelSize = 3, .inputChannels = 4, .inputLength = 10, .stride = 2};
+    layer_t *serialLayer = maxPool1dLayerInitOwning(&init, &lq);
+    layer_t *skeletonLayer = maxPool1dLayerInitOwning(&init, &lq);
+    serialLayer->config->maxPool1d->kernel->paddingType = (paddingType_t)(EXPLICIT + 1);
+    layer_t *serialModel[] = {serialLayer};
+    layer_t *skeletonModel[] = {skeletonLayer};
+
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
+    fclose(f);
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeKernel: paddingType 3 is out of range",
+                             deserializeModel(&MODEL_CHAIN(skeletonModel, 1), f));
+    fclose(f);
+
+    freeMaxPool1dLayer(skeletonLayer);
+    freeMaxPool1dLayer(serialLayer);
     freeQuantization(floatQ);
 }
 
@@ -3325,6 +3353,7 @@ int main(void) {
     RUN_TEST(testDeserializeRejectsLinearBiasPresenceMismatch);
     RUN_TEST(testDeserializeRejectsConv1dBiasPresenceMismatch);
     RUN_TEST(testDeserializeRejectsConv1dPaddingTypeOutOfRange);
+    RUN_TEST(testDeserializeRejectsMaxPool1dPaddingTypeOutOfRange);
     RUN_TEST(testDeserializeRejectsConv1dTransposedBiasPresenceMismatch);
     RUN_TEST(testDeserializeRejectsLinearHasBiasByteOutOfRange);
     RUN_TEST(testSerializeModelValidatesTheWiring);

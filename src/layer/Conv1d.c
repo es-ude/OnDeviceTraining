@@ -26,11 +26,6 @@
 void conv1dValidateConfig(const conv1dConfig_t *cfg, const char *who) {
     const kernel_t *kernel = cfg->kernel;
     const size_t *weightDims = cfg->weights->param->shape->dimensions;
-    if ((unsigned)kernel->paddingType > (unsigned)EXPLICIT) {
-        PRINT_ERROR("%s: paddingType %u is out of range (max %u)", who,
-                    (unsigned)kernel->paddingType, (unsigned)EXPLICIT);
-        exit(1);
-    }
     if (kernel->stride == 0 || kernel->dilation == 0) {
         PRINT_ERROR("%s: stride (%zu) and dilation (%zu) must be >= 1", who, kernel->stride,
                     kernel->dilation);

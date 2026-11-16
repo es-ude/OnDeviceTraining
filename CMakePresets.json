@@ -139,6 +139,14 @@
         "ODT_BUILD_TESTS": "OFF",
         "CMAKE_C_FLAGS": "-mcpu=cortex-m0plus -mthumb -O2 -ffp-contract=off"
       }
+    },
+    {
+      "name": "arm_cross_nocheck",
+      "displayName": "ARM cross-compile without the remat validator (ODT_REMAT_CHECK=OFF)",
+      "inherits": "arm_cross",
+      "cacheVariables": {
+        "ODT_REMAT_CHECK": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -239,6 +247,11 @@
       "name": "arm_cross_m0plus",
       "inherits": "arm_cross",
       "configurePreset": "arm_cross_m0plus"
+    },
+    {
+      "name": "arm_cross_nocheck",
+      "inherits": "arm_cross",
+      "configurePreset": "arm_cross_nocheck"
     }
   ],
   "testPresets": [

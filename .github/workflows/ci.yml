@@ -1010,6 +1010,12 @@ jobs:
           export PATH="$HOME/arm-gnu-toolchain/bin:$PATH"
           cmake --build --preset arm_cross
 
+      - name: Cross-compile with ODT_REMAT_CHECK=OFF (compile-only, -Werror)
+        run: |
+          export PATH="$HOME/arm-gnu-toolchain/bin:$PATH"
+          cmake --preset arm_cross_nocheck
+          cmake --build --preset arm_cross_nocheck
+
   # Portability-FLOOR cross-build (#352): the oldest arm-gcc we support.
   # The 13.3 parity job above ACCEPTS pre-C23 constructs (e.g. a declaration
   # placed directly after a `case`/`default` label) silently, as a C23

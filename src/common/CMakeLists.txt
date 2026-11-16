@@ -9,6 +9,11 @@ target_link_libraries(Common INTERFACE Common__hdrs)
 # unless explicitly silenced (no opt-out preset today; revisit when MCU presets land).
 target_compile_definitions(Common__hdrs INTERFACE DEBUG_MODE_ERROR=true)
 
+# Lives here, not in the root, so consumers that only add_subdirectory(src) get it too.
+if(NOT HOST)
+    target_compile_definitions(Common__hdrs INTERFACE BUILDING_FOR_REMOTE)
+endif()
+
 if(DEBUG_MODE_INFO)
     target_compile_definitions(Common__hdrs INTERFACE DEBUG_MODE_INFO=true)
 endif()

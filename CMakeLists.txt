@@ -13,10 +13,6 @@ include(cmake/compile_guards.cmake)
 
 add_subdirectory(src)
 
-if(NOT HOST)
-    add_compile_definitions(BUILDING_FOR_REMOTE)
-endif()
-
 
 if(ODT_TOP_LEVEL_PROJECT)
     if(NOT ODT_PATH)

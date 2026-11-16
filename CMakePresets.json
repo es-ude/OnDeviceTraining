@@ -39,10 +39,7 @@
     {
       "name": "unit_test_error",
       "displayName": "Unit-Test-Error",
-      "inherits": "host",
-      "cacheVariables": {
-        "DEBUG_MODE_ERROR": "ON"
-      }
+      "inherits": "host"
     },
     {
       "name": "unit_test_info",

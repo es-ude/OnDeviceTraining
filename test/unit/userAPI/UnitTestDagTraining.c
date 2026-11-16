@@ -226,9 +226,11 @@ static void runParity(const model_t *m, lossConfig_t loss, tensor_t *x, tensor_t
         zeroGrads(m);
         rematScheduler_t s;
         const rematPlanSpec_t spec = {.policy = kCells[c].policy};
-        bool ok = kCells[c].arena ? rematArenaInit(&s, m, loss, x, &spec)
-                                  : rematHeapInit(&s, m, loss, x, &spec);
-        TEST_ASSERT_TRUE_MESSAGE(ok, kCells[c].name);
+        if (kCells[c].arena) {
+            rematArenaInit(&s, m, loss, x, &spec);
+        } else {
+            rematHeapInit(&s, m, loss, x, &spec);
+        }
         trainingStats_t *cellSt =
             calculateGradsSequential(m, loss, REDUCTION_MEAN, x, y, &(trainingCall_t){.remat = &s});
         float cellLoss = cellSt->loss;
@@ -717,9 +719,11 @@ static runOut_t runResidualTraining(rematScheduler_t *s, const dagCell_t *cell,
         batchView_t view;
         const rematPlanSpec_t spec = {.policy = cell->policy};
         const tensor_t *x0 = batchViewOf(&view, runItems[0]);
-        bool ok = cell->arena ? rematArenaInit(s, &f.m, defaultLossConfig(MSE), x0, &spec)
-                              : rematHeapInit(s, &f.m, defaultLossConfig(MSE), x0, &spec);
-        TEST_ASSERT_TRUE_MESSAGE(ok, cell->name);
+        if (cell->arena) {
+            rematArenaInit(s, &f.m, defaultLossConfig(MSE), x0, &spec);
+        } else {
+            rematHeapInit(s, &f.m, defaultLossConfig(MSE), x0, &spec);
+        }
     }
 
     dataLoader_t *trainDl =
@@ -851,7 +855,7 @@ void testTrainingRunWithEvaluationIsBitIdenticalOnEveryScheduler(void) {
 static rematReport_t planReport(const model_t *m, lossConfig_t loss, tensor_t *xView,
                                 rematPlanPolicy_t p) {
     rematScheduler_t s;
-    TEST_ASSERT_TRUE(rematHeapInit(&s, m, loss, xView, &(rematPlanSpec_t){.policy = p}));
+    rematHeapInit(&s, m, loss, xView, &(rematPlanSpec_t){.policy = p});
     rematReport_t rep;
     rematSchedulerReport(&s, &rep);
     rematSchedulerDeinit(&s);
@@ -916,9 +920,8 @@ void testPartWireLivesExactlyTwoSteps(void) {
     size_t partBytes[2] = {0, 0};
     for (size_t k = 0; k < 2; k++) {
         rematScheduler_t s;
-        TEST_ASSERT_TRUE_MESSAGE(rematHeapInit(&s, &f.m, defaultLossConfig(MSE), xView,
-                                               &(rematPlanSpec_t){.policy = policies[k]}),
-                                 name[k]);
+        rematHeapInit(&s, &f.m, defaultLossConfig(MSE), xView,
+                      &(rematPlanSpec_t){.policy = policies[k]});
         const rematProgram_t *p = rematPlanProgram(s.plan, REMAT_MODE_TRAIN);
         for (size_t r = 0; r < p->numRanges; r++) {
             const rematWire_t *w = &s.wires->wires[p->ranges[r].wire];
@@ -957,8 +960,7 @@ void testObservedPeakEqualsPlanPeakOnADag(void) {
     const lossConfig_t mse = defaultLossConfig(MSE);
 
     rematScheduler_t s;
-    TEST_ASSERT_TRUE(
-        rematHeapInit(&s, &f.m, mse, xView, &(rematPlanSpec_t){.policy = REMAT_PLAN_LIVENESS}));
+    rematHeapInit(&s, &f.m, mse, xView, &(rematPlanSpec_t){.policy = REMAT_PLAN_LIVENESS});
     freeTrainingStats(calculateGradsSequential(
         &f.m, mse, REDUCTION_MEAN, xView, batchViewOf(&yv, y), &(trainingCall_t){.remat = &s}));
     rematReport_t rep;

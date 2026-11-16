@@ -21,7 +21,7 @@ void rematArenaDone(rematScheduler_t *s, const rematStep_t *step);
 /* Before the shared rematWireTableUnbind: every step done, every range closed. */
 void rematArenaEnd(rematScheduler_t *s);
 
-/* The row's own blocks only; safe after a failed init and repeatable. */
+/* The row's own blocks only; repeatable. */
 void rematArenaDeinit(rematScheduler_t *s);
 
 /* After the shared rematWireTableBind: restarts the walk. */

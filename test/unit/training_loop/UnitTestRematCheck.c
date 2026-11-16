@@ -51,25 +51,11 @@ static void numWiresOfAZeroedScheduler(void) {
     (void)rematCheckNumWires(&s);
 }
 
-/* The state rematHeapInit leaves when its plan block fails: fns and table set,
- * plan NULL. */
-static void numWiresOfAHeapWhosePlanFailed(fixture_t *f) {
-    rematScheduler_t s = initHeap(f, NULL);
-    rematPlanFree(s.plan);
-    s.plan = NULL;
-    (void)rematCheckNumWires(&s);
-}
-
 /* The guard runs before the VLA it sizes exists, so the VLA is
  * never built from a NULL table. */
 void testNumWiresExitsOnASchedulerThatIsNotInitialised(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "rematCheckNumWires: scheduler not initialised",
                              numWiresOfAZeroedScheduler());
-    fixture_t f;
-    buildF1Model(&f);
-    ASSERT_EXITS_WITH_OUTPUT(1, "rematCheckNumWires: scheduler not initialised",
-                             numWiresOfAHeapWhosePlanFailed(&f));
-    freeModel(f.model, f.n);
 }
 
 /* The cursors come from the keyed table the checker reads, built on the same
@@ -1447,7 +1433,7 @@ typedef struct dagRun {
 static void dagRunInit(dagRun_t *r, void (*build)(dagFixture_t *)) {
     build(&r->f);
     r->x = dagInput(&r->xs, 1.0f, 2.0f);
-    TEST_ASSERT_TRUE(rematHeapInit(&r->s, &r->f.m, defaultLossConfig(MSE), r->x, NULL));
+    rematHeapInit(&r->s, &r->f.m, defaultLossConfig(MSE), r->x, NULL);
 }
 
 static void dagRunFree(dagRun_t *r) {

@@ -18,8 +18,8 @@
 
 size_t rematCheckNumWires(const rematScheduler_t *s) {
     if (s->fns == NULL || s->wires == NULL || s->plan == NULL) {
-        PRINT_ERROR("rematCheckNumWires: scheduler not initialised (never initialised, or its "
-                    "init failed before the plan was built)");
+        PRINT_ERROR("rematCheckNumWires: scheduler not initialised (never initialised, or "
+                    "deinitialised)");
         exit(1);
     }
     return s->wires->numWires;

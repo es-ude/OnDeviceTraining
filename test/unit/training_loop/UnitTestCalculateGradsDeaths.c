@@ -605,10 +605,8 @@ void testAGroupingPastTheCapacityExitsIdenticallyOnBothRows(void) {
 
 static void initDagRows(dagFixture_t *f, rematScheduler_t rows[2]) {
     dagTensor_t xs;
-    TEST_ASSERT_TRUE(
-        rematArenaInit(&rows[0], &f->m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), NULL));
-    TEST_ASSERT_TRUE(
-        rematHeapInit(&rows[1], &f->m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), NULL));
+    rematArenaInit(&rows[0], &f->m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), NULL);
+    rematHeapInit(&rows[1], &f->m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), NULL);
 }
 
 /* Under the ASan callback, so a bind that writes from the live wiring before the key exits
@@ -663,8 +661,7 @@ void testFreezingTheDagRootExitsOnRunsBackward(void) {
  * before rematBegin, so its text is the one a caller sees. An automatic
  * struct no init ever touched is indeterminate: undefined, not pinned. */
 #define NOT_INITIALISED                                                                            \
-    "rematCheckNumWires: scheduler not initialised (never initialised, or its init failed "        \
-    "before the plan was built)"
+    "rematCheckNumWires: scheduler not initialised (never initialised, or deinitialised)"
 
 void testAZeroedOrDeinitialisedSchedulerExitsNamingIt(void) {
     fixture_t f;

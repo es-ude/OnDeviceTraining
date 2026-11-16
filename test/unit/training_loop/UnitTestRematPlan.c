@@ -52,7 +52,7 @@ void tearDown(void) {}
 static rematWireTable_t *initTable(layer_t **model, size_t n, lossFuncType_t lt,
                                    const tensor_t *input) {
     rematWireTable_t *t = NULL;
-    TEST_ASSERT_TRUE(rematWireTableInit(&t, &MODEL_CHAIN(model, n), defaultLossConfig(lt), input));
+    rematWireTableInit(&t, &MODEL_CHAIN(model, n), defaultLossConfig(lt), input);
     TEST_ASSERT_NOT_NULL(t);
     return t;
 }
@@ -99,7 +99,7 @@ static void freeSeedFixture(seedFixture_t *f) {
 static rematPlan_t *buildPlan(const rematWireTable_t *t, layer_t **model,
                               const rematPlanSpec_t *spec) {
     rematPlan_t *p = NULL;
-    TEST_ASSERT_TRUE(rematPlanBuild(&p, t, &MODEL_CHAIN(model, t->modelSize), spec));
+    rematPlanBuild(&p, t, &MODEL_CHAIN(model, t->modelSize), spec);
     TEST_ASSERT_NOT_NULL(p);
     return p;
 }
@@ -953,7 +953,7 @@ void testTableInitExitsOnAnEmptyModel(void) {
     rematWireTable_t *t = NULL;
     ASSERT_EXITS_WITH_OUTPUT(
         1, "modelSize == 0: nothing to schedule",
-        (void)rematWireTableInit(&t, &MODEL_CHAIN(model, 0), defaultLossConfig(MSE), x));
+        rematWireTableInit(&t, &MODEL_CHAIN(model, 0), defaultLossConfig(MSE), x));
     freeModel(model, 1);
 }
 
@@ -966,7 +966,7 @@ void testTableInitValidatesTheWiring(void) {
     rematWireTable_t *t = NULL;
     ASSERT_EXITS_WITH_OUTPUT(
         1, "rematWireTableInit: wiring: buffer 1 has no consumer",
-        (void)rematWireTableInit(&t, &(model_t){model, 2, start, ids}, defaultLossConfig(MSE), x));
+        rematWireTableInit(&t, &(model_t){model, 2, start, ids}, defaultLossConfig(MSE), x));
     freeModel(model, 2);
 }
 
@@ -986,7 +986,7 @@ void testTableInitExitsWhenWireIdsWouldReachRematNone(void) {
     rematWireTable_t *t = NULL;
     ASSERT_EXITS_WITH_OUTPUT(
         1, "65535 wires reach REMAT_NONE (0xFFFF)",
-        (void)rematWireTableInit(&t, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x));
+        rematWireTableInit(&t, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x));
     freeReservedMemory(model);
     freeReluLayer(relu);
 }
@@ -1004,7 +1004,7 @@ void testTableInitExitsOnAnInputRankAboveTheRankField(void) {
     rematWireTable_t *t = NULL;
     ASSERT_EXITS_WITH_OUTPUT(
         1, "wire ACT 0 has rank 256, above the uint8_t rank field",
-        (void)rematWireTableInit(&t, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), &x));
+        rematWireTableInit(&t, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), &x));
     freeModel(model, 1);
 }
 
@@ -1019,7 +1019,7 @@ void testTableInitExitsOnAnUnsupportedWireDtype(void) {
     rematWireTable_t *t = NULL;
     ASSERT_EXITS_WITH_OUTPUT(
         1, "wire ACT 1 has dtype 3; remat wires are FLOAT32, SYM_INT32 or BFP",
-        (void)rematWireTableInit(&t, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), x));
+        rematWireTableInit(&t, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), x));
     freeModel(model, 1);
 }
 
@@ -1031,7 +1031,7 @@ void testTableInitExitsOnAZeroByteWire(void) {
     rematWireTable_t *t = NULL;
     ASSERT_EXITS_WITH_OUTPUT(
         1, "wire ACT 1 has zero bytes (#160)",
-        (void)rematWireTableInit(&t, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), x));
+        rematWireTableInit(&t, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), x));
     freeModel(model, 1);
 }
 
@@ -1055,7 +1055,7 @@ void testTableInitExitsOnAReluOutputNarrowerThanItsInput(void) {
         1,
         "layer 0 (Relu) forward: its destination wire is declared SYM_INT32 "
         "qMaxBits 8, narrower than its source wire's 16",
-        (void)rematWireTableInit(&t, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), x));
+        rematWireTableInit(&t, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), x));
     freeModel(model, 1);
 }
 
@@ -1078,7 +1078,7 @@ void testTableInitExitsOnAFlattenDxNarrowerThanTheLossItCopies(void) {
         1,
         "layer 2 (Flatten) backward: its destination wire is declared "
         "SYM_INT32 qMaxBits 8, narrower than its source wire's 16",
-        (void)rematWireTableInit(&t, &MODEL_CHAIN(model, 4), defaultLossConfig(MSE), x));
+        rematWireTableInit(&t, &MODEL_CHAIN(model, 4), defaultLossConfig(MSE), x));
     freeModel(model, 4);
 }
 
@@ -1146,7 +1146,7 @@ void testTableInitExitsOnAnUnknownInputQtype(void) {
     rematWireTable_t *t = NULL;
     ASSERT_EXITS_WITH_OUTPUT(
         1, "wire ACT 0 has unknown qtype 99",
-        (void)rematWireTableInit(&t, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), x));
+        rematWireTableInit(&t, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), x));
     freeModel(model, 1);
 }
 
@@ -1165,7 +1165,7 @@ static void initExpectingAnExit(layer_t **model, size_t n, const tensor_t *x) {
     rematWireTable_t *t = NULL;
     g_memBeforeExit = memProfileCurrentBytes();
     (void)atexit(printReservedBeforeExit);
-    (void)rematWireTableInit(&t, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x);
+    rematWireTableInit(&t, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x);
 }
 
 /* A borrowed [1, SIZE_MAX/4 + 2] FLOAT32 input: 4 * N wraps to 4. */
@@ -1551,7 +1551,7 @@ void testTableCopiesTheWiringOfADag(void) {
     dagBuildF3(&f, false);
     dagTensor_t xs;
     rematWireTable_t *t;
-    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2)));
+    rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2));
     TEST_ASSERT_EQUAL_UINT8(0, t->isChain);
     TEST_ASSERT_EQUAL_size_t(6, t->numEdges);
     TEST_ASSERT_TRUE(t->inputStart != f.m.inputStart);
@@ -1581,7 +1581,7 @@ void testTableOfAChainKeepsNoWiring(void) {
     }
     model_t built = graphFinish(&g);
     rematWireTable_t *csr = NULL;
-    TEST_ASSERT_TRUE(rematWireTableInit(&csr, &built, defaultLossConfig(CROSS_ENTROPY), x));
+    rematWireTableInit(&csr, &built, defaultLossConfig(CROSS_ENTROPY), x);
 
     const rematWireTable_t *tables[2] = {chain, csr};
     for (size_t k = 0; k < 2u; k++) {
@@ -1608,7 +1608,7 @@ void testF3TableNumbersGradsThenThePartInWalkOrder(void) {
     uint8_t rb[4];
     modelGradFlags(&f.m, MSE, ng, rb);
     rematWireTable_t *t;
-    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
+    rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x);
     TEST_ASSERT_EQUAL_size_t(10u, t->numWires);
     const uint8_t kind[] = {REMAT_WIRE_GRAD, REMAT_WIRE_GRAD, REMAT_WIRE_GRAD, REMAT_WIRE_GRAD,
                             REMAT_WIRE_PART};
@@ -1650,7 +1650,7 @@ void testAddOfTheSameBufferWritesThenAccumulates(void) {
     dagBuildY(&f);
     dagTensor_t xs;
     rematWireTable_t *t;
-    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2)));
+    rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2));
     TEST_ASSERT_EQUAL_size_t(5u, t->numWires);
     TEST_ASSERT_EQUAL_UINT8(REMAT_WIRE_GRAD, t->wires[4].kind);
     TEST_ASSERT_EQUAL_UINT16(1, t->wires[4].index);
@@ -1669,7 +1669,7 @@ void testSkipFromTheInputGetsNoDx(void) {
     dagBuildK(&f);
     dagTensor_t xs;
     rematWireTable_t *t;
-    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2)));
+    rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2));
     TEST_ASSERT_EQUAL_size_t(5u, t->numWires);
     TEST_ASSERT_EQUAL_UINT16_ARRAY(((uint16_t[]){4, REMAT_NONE}), &t->dxWire[2], 2);
     TEST_ASSERT_EQUAL_UINT8(OP_MODE_WRITE, t->dxMode[2]);
@@ -1689,7 +1689,7 @@ void testFlattenActTakesTheTemplateOfItsWiredInput(void) {
     dagTensor_t xs;
     tensor_t *x = dagInput(&xs, 1, 2);
     rematWireTable_t *t;
-    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
+    rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x);
     rematWireTableBind(t, &f.m, MSE, REMAT_MODE_TRAIN, x);
     TEST_ASSERT_TRUE(t->bindScratch[1].tmpl != x->quantization);
     TEST_ASSERT_TRUE(t->bindScratch[2].tmpl == x->quantization);
@@ -1713,7 +1713,7 @@ void testAPartAFlattenWritesInheritsItsInputsTemplate(void) {
     dagTensor_t xs;
     tensor_t *x = dagInput(&xs, 1, 2);
     rematWireTable_t *t;
-    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
+    rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x);
     TEST_ASSERT_EQUAL_size_t(8u, t->numWires);
     TEST_ASSERT_EQUAL_UINT8(REMAT_WIRE_GRAD, t->wires[6].kind);
     TEST_ASSERT_EQUAL_UINT16(1, t->wires[6].index);
@@ -1758,7 +1758,7 @@ void testTableInitRefusesASymInt32WireIntoAnAdd(void) {
     tensor_t *x = dagInput(&xs, 1, 2);
     rematWireTable_t *t = NULL;
     ASSERT_EXITS_WITH_OUTPUT(1, "non-FLOAT32 merge or accumulate: wire ACT 1 has dtype 2",
-                             (void)rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
+                             rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
     freeQuantLayer(f.layers[0]);
     freeAddLayer(f.layers[1]);
 }
@@ -1777,9 +1777,9 @@ void testEvalOnlyTableInitRefusesASymInt32WireIntoAnAdd(void) {
     tensor_t *x = dagInput(&xs, 1, 2);
     rematWireTable_t *t = NULL;
     ASSERT_EXITS_WITH_OUTPUT(1, "non-FLOAT32 merge or accumulate: wire ACT 1 has dtype 2",
-                             (void)rematWireTableInitEval(&t, &f.m, x));
+                             rematWireTableInitEval(&t, &f.m, x));
     ASSERT_EXITS_WITH_OUTPUT(1, "rematWireTableInitEval: non-FLOAT32",
-                             (void)rematWireTableInitEval(&t, &f.m, x));
+                             rematWireTableInitEval(&t, &f.m, x));
     freeQuantLayer(f.layers[0]);
     freeAddLayer(f.layers[1]);
 }
@@ -1801,7 +1801,7 @@ void testTableInitRefusesASymInt32Part(void) {
     tensor_t *x = dagInput(&xs, 1, 2);
     rematWireTable_t *t = NULL;
     ASSERT_EXITS_WITH_OUTPUT(1, "non-FLOAT32 merge or accumulate: wire PART 1 has dtype 2",
-                             (void)rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
+                             rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
     dagFree(&f);
 }
 
@@ -1823,7 +1823,7 @@ void testTableInitRefusesASymInt32GradASumAddsInto(void) {
     tensor_t *x = dagInput(&xs, 1, 2);
     rematWireTable_t *t = NULL;
     ASSERT_EXITS_WITH_OUTPUT(1, "non-FLOAT32 merge or accumulate: wire GRAD 1 has dtype 2",
-                             (void)rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
+                             rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
     dagFree(&f);
 }
 
@@ -1844,7 +1844,7 @@ void testTableInitRefusesASymInt32GradAnAddAccumulatesInto(void) {
     tensor_t *x = dagInput(&xs, 1, 2);
     rematWireTable_t *t = NULL;
     ASSERT_EXITS_WITH_OUTPUT(1, "non-FLOAT32 merge or accumulate: wire GRAD 1 has dtype 2",
-                             (void)rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
+                             rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
     dagFree(&f);
 }
 
@@ -1864,7 +1864,7 @@ void testTableInitRefusesASymInt32DyOfAnAdd(void) {
     tensor_t *x = dagInput(&xs, 1, 2);
     rematWireTable_t *t = NULL;
     ASSERT_EXITS_WITH_OUTPUT(1, "non-FLOAT32 merge or accumulate: wire GRAD 2 has dtype 2",
-                             (void)rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
+                             rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
     dagFree(&f);
 }
 
@@ -1887,9 +1887,8 @@ void testTableInitRefusesASymInt32CrossEntropySeedIntoAnAdd(void) {
     dagTensor_t xs;
     tensor_t *x = dagInput(&xs, 1, 2);
     rematWireTable_t *t = NULL;
-    ASSERT_EXITS_WITH_OUTPUT(
-        1, "non-FLOAT32 merge or accumulate: wire GRAD 3 has dtype 2",
-        (void)rematWireTableInit(&t, &f.m, defaultLossConfig(CROSS_ENTROPY), x));
+    ASSERT_EXITS_WITH_OUTPUT(1, "non-FLOAT32 merge or accumulate: wire GRAD 3 has dtype 2",
+                             rematWireTableInit(&t, &f.m, defaultLossConfig(CROSS_ENTROPY), x));
     freeLinearLayer(f.layers[0]);
     freeAddLayer(f.layers[1]);
     freeSoftmaxLayer(f.layers[2]);
@@ -2682,7 +2681,7 @@ void testEvalSlicesOfADagReadTheWiring(void) {
     dagBuildF3(&f, false);
     dagTensor_t xs;
     rematWireTable_t *t;
-    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2)));
+    rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2));
     rematDeriveSize_t size = rematDeriveEvalSize(t);
     TEST_ASSERT_EQUAL_size_t(5, size.numSteps);
     TEST_ASSERT_EQUAL_size_t(11, size.numOperands);
@@ -2764,7 +2763,7 @@ void testDeriveF3TrainProgram(void) {
     dagBuildF3(&f, false);
     dagTensor_t xs;
     rematWireTable_t *t;
-    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2)));
+    rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2));
     const rematPlanSpec_t spec = {.policy = REMAT_PLAN_STORE_ALL};
     rematDeriveSize_t z = rematDeriveTrainSize(t, &spec);
     TEST_ASSERT_EQUAL_size_t(11u, z.numSteps);
@@ -2802,7 +2801,7 @@ void testDeriveF3EvalIsTheTrainPrefix(void) {
     dagBuildF3(&f, false);
     dagTensor_t xs;
     rematWireTable_t *t;
-    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2)));
+    rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2));
     dagProgram_t train;
     deriveDagTrain(t, &g_storeAllSpec, rematDeriveTrainSize(t, &g_storeAllSpec), &train);
     rematDeriveSize_t z = rematDeriveEvalSize(t);
@@ -2834,7 +2833,7 @@ void testDeriveSkipsTheFrozenSkipNode(void) {
     dagBuildS(&f);
     dagTensor_t xs;
     rematWireTable_t *t;
-    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2)));
+    rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2));
     TEST_ASSERT_EQUAL_UINT16(5, t->gradIdOf[1]);
     rematDeriveSize_t z =
         rematDeriveTrainSize(t, &(rematPlanSpec_t){.policy = REMAT_PLAN_STORE_ALL});
@@ -2886,8 +2885,7 @@ static void scanDagRanges(dagGrammar_t *g, rematPlanPolicy_t policy) {
 
 static void buildDagGrammar(dagGrammar_t *g, void (*build)(dagFixture_t *)) {
     build(&g->f);
-    TEST_ASSERT_TRUE(
-        rematWireTableInit(&g->t, &g->f.m, defaultLossConfig(MSE), dagInput(&g->xs, 1, 2)));
+    rematWireTableInit(&g->t, &g->f.m, defaultLossConfig(MSE), dagInput(&g->xs, 1, 2));
     deriveDagTrain(g->t, &g_storeAllSpec, rematDeriveTrainSize(g->t, &g_storeAllSpec), &g->d);
     scanDagRanges(g, REMAT_PLAN_STORE_ALL);
 }
@@ -3278,10 +3276,9 @@ void testPlanBuildExitsOnAnUnknownPolicy(void) {
     inputLike_t in;
     rematWireTable_t *t = initTable(model, 1, MSE, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
     rematPlan_t *p = NULL;
-    ASSERT_EXITS_WITH_OUTPUT(
-        1, "rematPlanBuild: unknown policy 7",
-        (void)rematPlanBuild(&p, t, &MODEL_CHAIN(model, t->modelSize),
-                             &(rematPlanSpec_t){.policy = (rematPlanPolicy_t)7}));
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematPlanBuild: unknown policy 7",
+                             rematPlanBuild(&p, t, &MODEL_CHAIN(model, t->modelSize),
+                                            &(rematPlanSpec_t){.policy = (rematPlanPolicy_t)7}));
     rematWireTableFree(t);
     freeModel(model, 1);
 }
@@ -4341,7 +4338,7 @@ static void planBuildExpectingAnExit(const rematWireTable_t *t, layer_t **model,
     rematPlan_t *p = NULL;
     g_memBeforeExit = memProfileCurrentBytes();
     (void)atexit(printReservedBeforeExit);
-    (void)rematPlanBuild(&p, t, &MODEL_CHAIN(model, t->modelSize), spec);
+    rematPlanBuild(&p, t, &MODEL_CHAIN(model, t->modelSize), spec);
 }
 
 /* A step list written for the full HAR model, used after its convolutions
@@ -4407,7 +4404,7 @@ static void sequenceWithOperandsOn(size_t at, rematStep_t carried) {
                           {.kind = REMAT_STEP_BACKWARD, .layer = 0}};
     seq[at] = carried;
     rematPlan_t *p;
-    (void)rematPlanBuild(
+    rematPlanBuild(
         &p, t, &MODEL_CHAIN(model, 1),
         &(rematPlanSpec_t){.policy = REMAT_PLAN_SEQUENCE, .sequence = seq, .sequenceLen = 4});
 }
@@ -5154,9 +5151,9 @@ void testPlanCostsADagNodeOnItsWiredInput(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 3, 8}, 3, &g_floatQ);
     rematWireTable_t *t = NULL;
-    TEST_ASSERT_TRUE(rematWireTableInit(&t, &m, defaultLossConfig(MSE), x));
+    rematWireTableInit(&t, &m, defaultLossConfig(MSE), x);
     rematPlan_t *p = NULL;
-    TEST_ASSERT_TRUE(rematPlanBuild(&p, t, &m, NULL));
+    rematPlanBuild(&p, t, &m, NULL);
     TEST_ASSERT_EQUAL_size_t(60, p->forwardCost);
     rematPlanFree(p);
     rematWireTableFree(t);
@@ -5174,7 +5171,7 @@ static void buildMlp3PlanWithLayer0Width(const rematPlanSpec_t *spec, size_t inF
     model[0]->config->linear->weights->param->shape->dimensions[1] = inFeatures;
     t->inputDims[1] = inFeatures;
     rematPlan_t *p = NULL;
-    (void)rematPlanBuild(&p, t, &MODEL_CHAIN(model, t->modelSize), spec);
+    rematPlanBuild(&p, t, &MODEL_CHAIN(model, t->modelSize), spec);
 }
 
 void testPlanBuildExitsOnAForwardCostAboveSizeMax(void) {
@@ -5198,7 +5195,7 @@ void testPlanBuildExitsOnARecomputeCostAboveSizeMax(void) {
 static void clearConv3ReadsInputAndBuild(grammarFixture_t *f) {
     f->t->readsInput[3] = 0;
     rematPlan_t *p = NULL;
-    (void)rematPlanBuild(&p, f->t, &MODEL_CHAIN(f->model, f->t->modelSize), &g_liveness);
+    rematPlanBuild(&p, f->t, &MODEL_CHAIN(f->model, f->t->modelSize), &g_liveness);
 }
 
 void testPlanBuildRunsTheGrammarOnWhatItGenerates(void) {
@@ -5735,14 +5732,13 @@ typedef struct dagPlan {
 
 static void dagTableOf(dagPlan_t *d, void (*build)(dagFixture_t *)) {
     build(&d->f);
-    TEST_ASSERT_TRUE(
-        rematWireTableInit(&d->t, &d->f.m, defaultLossConfig(MSE), dagInput(&d->xs, 1, 2)));
+    rematWireTableInit(&d->t, &d->f.m, defaultLossConfig(MSE), dagInput(&d->xs, 1, 2));
     d->p = NULL;
 }
 
 static void dagPlanOf(dagPlan_t *d, void (*build)(dagFixture_t *), const rematPlanSpec_t *spec) {
     dagTableOf(d, build);
-    TEST_ASSERT_TRUE(rematPlanBuild(&d->p, d->t, &d->f.m, spec));
+    rematPlanBuild(&d->p, d->t, &d->f.m, spec);
 }
 
 static void freeDagPlan(dagPlan_t *d) {
@@ -5776,7 +5772,7 @@ void testPlanBuildF3StoreAllExtendsEveryActToTheEnd(void) {
 }
 
 static void dagPlanBuildExpectingAnExit(dagPlan_t *d, const rematPlanSpec_t *spec) {
-    (void)rematPlanBuild(&d->p, d->t, &d->f.m, spec);
+    rematPlanBuild(&d->p, d->t, &d->f.m, spec);
 }
 
 /* Recompute and in-place read chain positions; on a DAG they exit, even for a mask or a step

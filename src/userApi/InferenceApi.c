@@ -247,16 +247,6 @@ static tensor_t *forwardOnScheduler(const model_t *m, rematScheduler_t *s, tenso
     return output;
 }
 
-/* A non-chain model runs on a scheduler. Its init validates m once more: inference callers
- * validate at their own entry so a malformed model exits under their name. */
-static void initDagScheduler(rematScheduler_t *s, const model_t *m, const tensor_t *inputLike,
-                             const char *caller) {
-    if (!rematHeapInitEval(s, m, inputLike)) {
-        PRINT_ERROR("%s: no memory for the eval-only scheduler of a non-chain model", caller);
-        exit(1);
-    }
-}
-
 /* The key-less, loss-free forward of a non-chain model on s; the caller has validated m. */
 static tensor_t *inferenceDagOnScheduler(const model_t *m, rematScheduler_t *s, tensor_t *input) {
     return forwardOnScheduler(m, s, input, NULL, MSE, REDUCTION_MEAN, NULL, NULL);
@@ -268,7 +258,7 @@ tensor_t *inference(const model_t *m, tensor_t *input) {
         return inferChain(m, input);
     }
     rematScheduler_t s;
-    initDagScheduler(&s, m, input, "inference");
+    rematHeapInitEval(&s, m, input);
     tensor_t *output = inferenceDagOnScheduler(m, &s, input);
     rematSchedulerDeinit(&s);
     return output;
@@ -299,7 +289,7 @@ tensor_t **inferenceBatched(const model_t *m, batch_t *batch) {
      * shape and dtype or exits at bind. */
     batchView_t keyView;
     rematScheduler_t s;
-    initDagScheduler(&s, m, batchViewOf(&keyView, batch->samples[0]->item), "inferenceBatched");
+    rematHeapInitEval(&s, m, batchViewOf(&keyView, batch->samples[0]->item));
     for (size_t i = 0; i < batch->size; i++) {
         batchView_t itemView;
         tensorArr[i] =
@@ -350,7 +340,7 @@ inferenceStats_t *inferenceWithLoss(const model_t *m, tensor_t *input, tensor_t 
     modelRequireValid(m, "inferenceWithLoss");
     if (!modelIsChain(m)) {
         rematScheduler_t s;
-        initDagScheduler(&s, m, input, "inferenceWithLoss");
+        rematHeapInitEval(&s, m, input);
         inferenceStats_t *inferenceStats =
             inferenceOnScheduler(m, input, label, funcType, forwardReduction, &s, callKey);
         rematSchedulerDeinit(&s);

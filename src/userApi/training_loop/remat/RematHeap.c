@@ -14,23 +14,17 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 
-bool rematHeapInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
+void rematHeapInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
                    const tensor_t *inputLike, const rematPlanSpec_t *spec) {
     *s = (rematScheduler_t){.type = REMAT_HEAP, .fns = &rematSchedulerFunctions[REMAT_HEAP]};
-    if (!rematWireTableInit(&s->wires, m, loss, inputLike) ||
-        !rematPlanBuild(&s->plan, s->wires, m, spec)) {
-        return false;
-    }
-    return true;
+    rematWireTableInit(&s->wires, m, loss, inputLike);
+    rematPlanBuild(&s->plan, s->wires, m, spec);
 }
 
-bool rematHeapInitEval(rematScheduler_t *s, const model_t *m, const tensor_t *inputLike) {
+void rematHeapInitEval(rematScheduler_t *s, const model_t *m, const tensor_t *inputLike) {
     *s = (rematScheduler_t){.type = REMAT_HEAP, .fns = &rematSchedulerFunctions[REMAT_HEAP]};
-    if (!rematWireTableInitEval(&s->wires, m, inputLike) ||
-        !rematPlanBuildEval(&s->plan, s->wires, m)) {
-        return false;
-    }
-    return true;
+    rematWireTableInitEval(&s->wires, m, inputLike);
+    rematPlanBuildEval(&s->plan, s->wires, m);
 }
 
 void rematHeapBegin(rematScheduler_t *s) {

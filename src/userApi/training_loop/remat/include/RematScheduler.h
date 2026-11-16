@@ -152,40 +152,38 @@ struct rematScheduler {
     } row;
 };
 
-/* One init per row (the LrScheduler idiom). Always returns true: a failed
- * reservation exits in reserveMemory. A model the table cannot describe,
+/* One init per row (the LrScheduler idiom). A model the table cannot describe,
  * or whose size arithmetic overflows, exits naming it. ARENA also exits on a
  * plan above ODT_REMAT_MAX_RANGES ranges. A successful init reserves exactly
  * its report's arenaBytes + metadataBytes. */
-bool rematArenaInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
+void rematArenaInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
                     const tensor_t *inputLike, const rematPlanSpec_t *spec);
 /* The peer row: table and plan only; one exactly-sized block per
  * range, reserved when the range opens and freed when it closes. */
-bool rematHeapInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
+void rematHeapInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
                    const tensor_t *inputLike, const rematPlanSpec_t *spec);
 /* The inference scheduler: a HEAP row for a model without a loss or gradients (a DAG
  * included), so it builds only the ACT wires and the EVAL program. Only rematBeginEval runs on
  * it (rematBegin exits); the loss type it is given is not keyed. Validates the model, refuses a
- * non-FLOAT32 ACT that an ADD reads, and returns and self-checks like rematHeapInit; its report
+ * non-FLOAT32 ACT that an ADD reads, and otherwise initialises like rematHeapInit; its report
  * has the TRAIN numbers 0 and metadataBytes as usual. */
-bool rematHeapInitEval(rematScheduler_t *s, const model_t *m, const tensor_t *inputLike);
+void rematHeapInitEval(rematScheduler_t *s, const model_t *m, const tensor_t *inputLike);
 /* NULL-safe and idempotent: the row's blocks (fns->deinit), then the plan and
  * the table. Exits inside a call. */
 void rematSchedulerDeinit(rematScheduler_t *s);
 
-/* Feeds the harness keys; a field is valid only under the flag that
- * declares it. The three flags imply one another in order; a did-not-run point records what its
- * flags allow. */
+/* Feeds the harness keys. Every initialised scheduler reports all three flags
+ * true; a zeroed or deinitialised one reports every field 0. */
 typedef struct rematReport {
     rematSchedulerType_t type;
     rematPlanPolicy_t policy;
     /* table + plan built: numSteps, the peaks, metadataBytes, the recompute numbers */
     bool planned;
     /* ARENA: placement computed + verified (the three arena fields). HEAP:
-     * == planned, arena fields 0; it places each range in its own block. */
+     * arena fields 0; it places each range in its own block. */
     bool placed;
-    /* ARENA: the resident arena block exists. HEAP: == planned; its blocks are
-     * reserved per range at each step, so init leaves nothing pending. */
+    /* ARENA: the resident arena block exists. HEAP: its blocks are reserved
+     * per range at each step, so init leaves nothing pending. */
     bool dataReserved;
     size_t numSteps;
     /* Both of the TRAIN program, exact bytes, ACT 0 excluded: the wires peak

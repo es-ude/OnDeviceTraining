@@ -3220,8 +3220,7 @@ static remRun_t runTwoEpochs(bool withScheduler, bool deinitBeforeTheRun) {
     rematScheduler_t s;
     if (withScheduler) {
         batchView_t view;
-        TEST_ASSERT_TRUE(rematHeapInit(&s, &MODEL_CHAIN(model, 1), cfg,
-                                       batchViewOf(&view, epochItems[0]), NULL));
+        rematHeapInit(&s, &MODEL_CHAIN(model, 1), cfg, batchViewOf(&view, epochItems[0]), NULL);
         if (deinitBeforeTheRun) {
             rematSchedulerDeinit(&s);
         }
@@ -3268,7 +3267,7 @@ void testTrainingRunTrainsOnTheOptionsScheduler(void) {
 void testTrainingRunExitsOnADeinitialisedOptionsScheduler(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
                              "rematCheckNumWires: scheduler not initialised (never initialised, "
-                             "or its init failed before the plan was built)",
+                             "or deinitialised)",
                              (void)runTwoEpochs(true, true));
 }
 
@@ -3336,7 +3335,7 @@ static remRun_t runMicroBatched(size_t m, size_t mEval, size_t evalCount,
     remRun_t run = {0};
     rematScheduler_t s;
     if (withScheduler) {
-        TEST_ASSERT_TRUE(rematHeapInit(&s, &MODEL_CHAIN(model, 1), cfg, trainBatchLike, NULL));
+        rematHeapInit(&s, &MODEL_CHAIN(model, 1), cfg, trainBatchLike, NULL);
     }
     g_forwardedCalls = 0;
     g_forwardedOnScheduler = 0;

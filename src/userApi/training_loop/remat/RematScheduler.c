@@ -34,9 +34,7 @@ static void requireInCall(const rematScheduler_t *s, const char *call) {
 static void beginCall(rematScheduler_t *s, const char *verb, const model_t *m, lossFuncType_t lt,
                       rematMode_t mode, tensor_t *input) {
     if (s->fns == NULL || s->wires == NULL || s->plan == NULL) {
-        PRINT_ERROR("%s: scheduler not initialised (never initialised, or its init "
-                    "returned false and was ignored)",
-                    verb);
+        PRINT_ERROR("%s: scheduler not initialised (never initialised, or deinitialised)", verb);
         exit(1);
     }
     if (s->inCall) {
@@ -140,28 +138,22 @@ void rematRequireWalkComplete(const rematScheduler_t *s, const char *row) {
     }
 }
 
-/* The ARENA half of the report: each flag derived from the block it names
- * (the offsets block, then the arena data block). */
 static void reportArena(const rematScheduler_t *s, const rematProgram_t *p, rematReport_t *out) {
-    if (s->row.arena.offsets != NULL) {
-        /* Cannot wrap: numRanges < REMAT_NONE, and init reserved this product. */
-        out->metadataBytes += p->numRanges * sizeof(size_t);
-    }
-    if (s->row.arena.bytes != 0u) {
-        out->placed = true;
-        out->arenaBytes = s->row.arena.bytes;
-        /* Neither difference can wrap: placed >= exact bytes per wire, and the
-         * verified co-live ranges fit disjointly inside the arena. */
-        out->arenaPadBytes = s->row.arena.peakPlacedBytes - p->peakLiveBytes;
-        out->arenaGapBytes = s->row.arena.bytes - s->row.arena.peakPlacedBytes;
-    }
-    out->dataReserved = s->row.arena.base != NULL;
+    /* Cannot wrap: numRanges < REMAT_NONE, and init reserved this product. */
+    out->metadataBytes += p->numRanges * sizeof(size_t);
+    out->placed = true;
+    out->dataReserved = true;
+    out->arenaBytes = s->row.arena.bytes;
+    /* Neither difference can wrap: placed >= exact bytes per wire, and the
+     * verified co-live ranges fit disjointly inside the arena. */
+    out->arenaPadBytes = s->row.arena.peakPlacedBytes - p->peakLiveBytes;
+    out->arenaGapBytes = s->row.arena.bytes - s->row.arena.peakPlacedBytes;
 }
 
 void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out) {
     *out = (rematReport_t){.type = s->type};
     if (s->wires == NULL || s->plan == NULL) {
-        return; /* init stopped before the plan existed: no field is valid */
+        return; /* never initialised, or deinitialised: no field is valid */
     }
     const rematProgram_t *p = &s->plan->train;
     out->policy = s->plan->policy;
@@ -180,8 +172,7 @@ void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out) {
         reportArena(s, p, out);
         break;
     case REMAT_HEAP:
-        /* No placement and no resident block: a planned HEAP is ready to run,
-         * its arena fields 0 by definition. */
+        /* No placement and no resident block: its arena fields are 0. */
         out->placed = true;
         out->dataReserved = true;
         break;

@@ -360,8 +360,7 @@ typedef rematScheduler_t (*rowInit_t)(fixture_t *f, const rematPlanSpec_t *spec)
 
 static rematScheduler_t initArena(fixture_t *f, const rematPlanSpec_t *spec) {
     rematScheduler_t s;
-    TEST_ASSERT_TRUE(
-        rematArenaInit(&s, &MODEL_CHAIN(f->model, f->n), defaultLossConfig(f->lt), f->x, spec));
+    rematArenaInit(&s, &MODEL_CHAIN(f->model, f->n), defaultLossConfig(f->lt), f->x, spec);
     TEST_ASSERT_NOT_NULL(s.wires);
     TEST_ASSERT_NOT_NULL(s.plan);
     return s;
@@ -369,8 +368,7 @@ static rematScheduler_t initArena(fixture_t *f, const rematPlanSpec_t *spec) {
 
 static rematScheduler_t initHeap(fixture_t *f, const rematPlanSpec_t *spec) {
     rematScheduler_t s;
-    TEST_ASSERT_TRUE(
-        rematHeapInit(&s, &MODEL_CHAIN(f->model, f->n), defaultLossConfig(f->lt), f->x, spec));
+    rematHeapInit(&s, &MODEL_CHAIN(f->model, f->n), defaultLossConfig(f->lt), f->x, spec);
     TEST_ASSERT_NOT_NULL(s.wires);
     TEST_ASSERT_NOT_NULL(s.plan);
     return s;

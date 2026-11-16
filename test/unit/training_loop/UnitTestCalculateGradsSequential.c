@@ -1467,8 +1467,7 @@ void testF3GradsOnAHeapStoreAllScheduler(void) {
     dagBuildF3(&f, false);
     dagTensor_t xs;
     rematScheduler_t s;
-    TEST_ASSERT_TRUE(
-        rematHeapInit(&s, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), NULL));
+    rematHeapInit(&s, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), NULL);
     assertF3Grads(&f, &(trainingCall_t){.remat = &s});
     rematSchedulerDeinit(&s);
     dagFree(&f);
@@ -1516,8 +1515,7 @@ void testAllFrozenDagRunsForwardAndLossOnly(void) {
     }
     dagTensor_t xs;
     rematScheduler_t s;
-    TEST_ASSERT_TRUE(
-        rematHeapInit(&s, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), NULL));
+    rematHeapInit(&s, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), NULL);
     rematReport_t r;
     rematSchedulerReport(&s, &r);
     TEST_ASSERT_EQUAL_size_t(5, r.numSteps);
@@ -1578,7 +1576,7 @@ void testABuilderMadeChainBindsOnAModelChainScheduler(void) {
     tensor_t *x = makeRowVecN((const float[]){1.0f, -2.0f, 3.0f, 0.5f}, 4);
     tensor_t *label = makeRowVecN((const float[]){0.5f, -1.0f}, 2);
     rematScheduler_t s;
-    TEST_ASSERT_TRUE(rematHeapInit(&s, &MODEL_CHAIN(model, 3), defaultLossConfig(MSE), x, NULL));
+    rematHeapInit(&s, &MODEL_CHAIN(model, 3), defaultLossConfig(MSE), x, NULL);
 
     float chainGrads[CHAIN_GRADS];
     float builtGrads[CHAIN_GRADS];

@@ -1708,7 +1708,7 @@ static void initHeapForRows(rematScheduler_t *s, layer_t **model, size_t modelSi
     batchView_t view;
     tensor_t *inputLike = batchViewOf(&view, sampleItem);
     view.dimensions[0] = rows;
-    TEST_ASSERT_TRUE(rematHeapInit(s, &MODEL_CHAIN(model, modelSize), loss, inputLike, NULL));
+    rematHeapInit(s, &MODEL_CHAIN(model, modelSize), loss, inputLike, NULL);
 }
 
 /* Each bind resets the observed peak and the call's wires raise it to the
@@ -1752,7 +1752,7 @@ void testTrainingBatchDefaultHandsTheCallToEachChunk(void) {
     assertRanOnTheScheduler(&r);
 }
 
-typedef bool (*rematRowInit_t)(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
+typedef void (*rematRowInit_t)(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
                                const tensor_t *inputLike, const rematPlanSpec_t *spec);
 
 /* remat P7 through the batch path: a scheduler keyed to a batch view of
@@ -1771,7 +1771,7 @@ static void trainModelBOnAMiskeyedScheduler(rematRowInit_t init, size_t m, size_
     tensor_t *key = batchViewOf(&view, bItems[0]);
     view.dimensions[0] = keyedRows;
     rematScheduler_t s;
-    TEST_ASSERT_TRUE(init(&s, &MODEL_CHAIN(model, B_SIZE), defaultLossConfig(MSE), key, NULL));
+    init(&s, &MODEL_CHAIN(model, B_SIZE), defaultLossConfig(MSE), key, NULL);
     batch_t *batch = buildBatch(bItems, bLabels, B_N);
     trainingBatchDefault(&MODEL_CHAIN(model, B_SIZE), defaultLossConfig(MSE), batch,
                          calculateGradsSequential, REDUCTION_MEAN, m,

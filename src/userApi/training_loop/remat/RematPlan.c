@@ -1071,9 +1071,8 @@ static void buildEvalProgram(rematPlan_t *p, uint8_t *block, const programLayout
     eval->peakLiveBytes = peakLiveBytesOf(eval, t);
 }
 
-bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t *m,
+void rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t *m,
                     const rematPlanSpec_t *spec) {
-    *out = NULL;
     const rematPlanSpec_t storeAll = {.policy = REMAT_PLAN_STORE_ALL};
     if (spec == NULL) {
         spec = &storeAll;
@@ -1124,11 +1123,9 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t 
     recordRecomputeNumbers(p, t, m);
     buildEvalProgram(p, block, &evalAt, evalSize, t, m);
     *out = p;
-    return true;
 }
 
-bool rematPlanBuildEval(rematPlan_t **out, const rematWireTable_t *t, const model_t *m) {
-    *out = NULL;
+void rematPlanBuildEval(rematPlan_t **out, const rematWireTable_t *t, const model_t *m) {
     rematDeriveSize_t evalSize = rematDeriveEvalSize(t);
     requireAnOperandPoolWithinTheOffsets(evalSize.numOperands, "rematPlanBuildEval", "EVAL");
     programLayout_t evalAt = layoutProgram(sizeof(rematPlan_t), evalSize, t->modelSize + 1u);
@@ -1138,7 +1135,6 @@ bool rematPlanBuildEval(rematPlan_t **out, const rematWireTable_t *t, const mode
     p->blockBytes = evalAt.end;
     buildEvalProgram(p, block, &evalAt, evalSize, t, m);
     *out = p;
-    return true;
 }
 
 void rematPlanFree(rematPlan_t *p) {

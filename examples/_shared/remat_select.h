@@ -74,8 +74,7 @@ bool rematSelectFromEnv(rematSelection_t *sel, size_t modelSize);
 void rematSelectRetainMask(const rematSelection_t *sel, const model_t *m, bool *retain);
 
 /* Builds the chosen scheduler into s, keyed to inputLike (the [1, ...sample
- * shape] view of one training sample). A failed reservation prints the
- * did-not-run line to stderr, deinits s and returns false. A recompute plan
+ * shape] view of one training sample). A recompute plan
  * read for another layer count prints the mismatch and returns false before
  * s is touched. With REMAT_BUDGET_B set, an arena larger than the budget (the
  * arena only, not the metadata) prints both numbers to stderr, deinits s and

@@ -50,11 +50,9 @@ typedef struct rematCheck {
                               REMAT_NONE: a SUM must follow its own node's */
 } rematCheck_t;
 
-/* Sizes the caller's producedGen and pending VLAs. Exits first if the table and plan were
- * never built (never initialised, or init failed before the plan), so the
- * VLA is never sized from a NULL table and never empty. A row whose own
- * block failed after that -- e.g. ARENA's data block -- is caught by
- * rematBegin instead. */
+/* Sizes the caller's producedGen and pending VLAs. Exits first on a scheduler
+ * that is not initialised (zeroed or deinitialised), so the VLA is never sized
+ * from a NULL table and never empty. */
 size_t rematCheckNumWires(const rematScheduler_t *s);
 /* Before rematBegin / rematBeginEval, in the same mode. Zeroes
  * producedGen[0..numWires) (a VLA has no initialiser) and, in TRAIN, sets

@@ -65,11 +65,11 @@ Every row satisfies these before it joins the conformance matrix.
 - **R8 Failure ownership.** The validator exits on grammar, residency or
   bind-generation violations (a scheduler bug). An allocation failure, at
   init or mid-call, exits in `reserveMemory`; an unsupported model or a
-  broken size or range limit exits at init too.
+  broken size or range limit exits at init too. So an init has no failure
+  result: it completes or exits.
 - **Lifecycle.** Every `rematSchedulerFunctions_t` slot is mandatory. `end`
-  leaves no non-borrowed wire resident. `deinit` frees only row-private blocks
-  and is safe after a failed init. One scheduler instance per concurrently
-  running training stream.
+  leaves no non-borrowed wire resident. `deinit` frees only row-private blocks.
+  One scheduler instance per concurrently running training stream.
 
 ## The plan contract: a persistent scheduler
 
@@ -223,8 +223,7 @@ the job and stated here.
 - **Death strings live in the source**: the validator's rules in
   `RematCheck.c` (`remat[<row>]: step #<k> <KIND>(layer <l>) violates
   '<rule>'`), the dispatch's in `RematScheduler.c`, the key and bind exits in
-  `RematWireTable.c`, the driver's in `CalculateGradsSequential.c`, and each
-  row's resource exits in the row (R8). A death test
+  `RematWireTable.c`, and each row's resource exits in the row (R8). A death test
   (`ASSERT_EXITS_WITH_OUTPUT`, `UnitTestCalculateGradsDeaths.c`) copies a fixed
   substring from the source, never a paraphrase.
 - **Mutations** disable one rule with a `false && ` prefix, which keeps the
@@ -346,7 +345,8 @@ decisions and those with nothing in force yet are left out.
 - **remat D29** A violation mid-call exits (`exit(1)`), naming the row, the
   step and the rule. An allocation failure exits in `reserveMemory`, at init
   too. An unsupported model or a broken size or range limit exits at init
-  too (remat D55, D60).
+  too (remat D55, D60). No init can fail recoverably, so the inits, the
+  table and plan builders and the placers return `void`.
 - **remat D30** A NULL scheduler means an ephemeral HEAP scheduler per
   grads call, built from the training call's default plan (remat D15) and
   torn down inside the call; its values are bit-identical to the pre-remat
@@ -396,9 +396,9 @@ decisions and those with nothing in force yet are left out.
   the placement into it (the smallest layout of five fixed placement orders,
   first-fit-decreasing first, the earlier order on equal bytes; their scratch,
   a second offsets table among it, is freed before init returns, a short heap
-  peak at init only), the placement verifier, then the arena data block. The
-  report flags `planned`, `placed`, `dataReserved` imply one another in that
-  order. An allocation failure exits in `reserveMemory`. More than `ODT_REMAT_MAX_RANGES` (default 1024) ranges
+  peak at init only), the placement verifier, then the arena data block. An
+  initialised scheduler reports `planned`, `placed` and `dataReserved` all
+  true. An allocation failure exits in `reserveMemory`. More than `ODT_REMAT_MAX_RANGES` (default 1024) ranges
   exit at init, naming it.
 - **remat D57** The Legacy oracle is retired: keyed randomness reached the
   layer path, and Legacy hands its layers no key. Every fixture compares
@@ -440,8 +440,8 @@ decisions and those with nothing in force yet are left out.
   and every buffer it writes is bound.
 - **remat R8** The validator exits on scheduler bugs; an allocation failure
   exits in `reserveMemory`, at init or mid-call. Its lifecycle: every vtable slot is mandatory, `end`
-  leaves no non-borrowed wire resident, and `deinit` is safe after a failed
-  init.
+  leaves no non-borrowed wire resident, and `deinit` frees only row-private
+  blocks.
 
 **Conformance properties** (each row and plan against the explicit HEAP +
 STORE_ALL reference, remat D57).

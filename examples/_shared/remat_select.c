@@ -271,9 +271,7 @@ static void printPlanName(FILE *f, const rematSelection_t *sel) {
     }
 }
 
-/* The fields the report's flags declare valid are the analytic numbers; a
- * did-not-run point prints the same fields with its flags. The plan is the
- * selected one, also where the report's own policy is not valid yet. */
+/* The plan is the selected one, so a zeroed scheduler still prints it. */
 static void printFields(FILE *f, const char *lead, const char *example, const rematSelection_t *sel,
                         const rematReport_t *r) {
     fprintf(f, "%sexample=%s storage=%s plan=", lead, example, storageName(r->type));
@@ -302,14 +300,10 @@ bool rematSelectInit(rematScheduler_t *s, const rematSelection_t *sel, const cha
         rematSelectRetainMask(sel, m, retain);
         spec.retain = retain;
     }
-    bool built = (sel->storage == REMAT_ARENA) ? rematArenaInit(s, m, loss, inputLike, &spec)
-                                               : rematHeapInit(s, m, loss, inputLike, &spec);
-    if (!built) {
-        rematReport_t r;
-        rematSchedulerReport(s, &r);
-        printFields(stderr, "ERROR: remat scheduler init failed (did not run): ", example, sel, &r);
-        rematSchedulerDeinit(s);
-        return false;
+    if (sel->storage == REMAT_ARENA) {
+        rematArenaInit(s, m, loss, inputLike, &spec);
+    } else {
+        rematHeapInit(s, m, loss, inputLike, &spec);
     }
     if (sel->budgetBytes != 0u) {
         rematReport_t r;

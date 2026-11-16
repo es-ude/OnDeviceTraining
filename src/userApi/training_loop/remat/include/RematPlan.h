@@ -136,17 +136,15 @@ rematBfpGroups_t rematBfpWireGrouping(const bfpQConfig_t *tmpl, size_t elements,
 
 /* Sizes and places the whole table in ONE reserveMemory block: records, key,
  * and one header per slab wire. The headers are linked, but their content
- * (dims, config) is written by every rematWireTableBind. Always returns true:
- * a failed reservation exits in reserveMemory. Under CROSS_ENTROPY, when a backward runs, the
- * skipped last layer must be the Softmax and declare one of the two model heads
- * (requireCrossEntropyHead), else it exits; every bind checks the live model
- * the same way. */
-bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t loss,
+ * (dims, config) is written by every rematWireTableBind. Under CROSS_ENTROPY, when a backward
+ * runs, the skipped last layer must be the Softmax and declare one of the two model heads
+ * (requireCrossEntropyHead), else it exits; every bind checks the live model the same way. */
+void rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t loss,
                         const tensor_t *inputLike);
 /* The loss-free table of an inference scheduler: the ACT wires alone, no loss head check.
  * Validates the model like rematWireTableInit and refuses a non-FLOAT32 ACT that an ADD reads.
  * Its bind keys no loss type, and its plan comes from rematPlanBuildEval only. */
-bool rematWireTableInitEval(rematWireTable_t **out, const model_t *m, const tensor_t *inputLike);
+void rematWireTableInitEval(rematWireTable_t **out, const model_t *m, const tensor_t *inputLike);
 /* NULL-safe. One freeReservedMemory; never freeTensor on a slab header. */
 void rematWireTableFree(rematWireTable_t *t);
 
@@ -254,14 +252,13 @@ typedef struct rematPlan {
  * just built on: the deriver reads only the table, `m` feeds the grammar and
  * the costs, so a different model is not detected. A DAG model plans under
  * STORE_ALL and LIVENESS only: SEQUENCE, RETAIN_LIST and inPlaceDx exit on it,
- * since recompute and in-place read chain positions. Always returns true: a
- * failed reservation exits in reserveMemory. */
-bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t *m,
+ * since recompute and in-place read chain positions. */
+void rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t *m,
                     const rematPlanSpec_t *spec);
 /* The plan of an eval-only table: the EVAL program alone, the same as rematPlanBuild's, and a
  * zeroed TRAIN program (no steps, so every TRAIN number of the report is 0). Same `m` rule and
  * return value as rematPlanBuild. */
-bool rematPlanBuildEval(rematPlan_t **out, const rematWireTable_t *t, const model_t *m);
+void rematPlanBuildEval(rematPlan_t **out, const rematWireTable_t *t, const model_t *m);
 void rematPlanFree(rematPlan_t *p); /* NULL-safe */
 
 /* The program a call in `mode` walks. */

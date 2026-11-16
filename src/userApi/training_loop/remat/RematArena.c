@@ -140,14 +140,13 @@ typedef struct arenaFit {
 
 /* numRanges <= ODT_REMAT_MAX_RANGES < REMAT_NONE (rematArenaInit checks the
  * cap before placing): the uint16_t ids and this product fit. */
-static bool arenaFitInit(arenaFit_t *f, const rematWireTable_t *t, const rematProgram_t *p,
+static void arenaFitInit(arenaFit_t *f, const rematWireTable_t *t, const rematProgram_t *p,
                          size_t *offsets) {
     *f = (arenaFit_t){.t = t, .p = p, .offsets = offsets};
     f->byOffset = reserveMemory(p->numRanges * sizeof(uint16_t));
     for (size_t r = 0; r < p->numRanges; r++) {
         offsets[r] = ARENA_UNPLACED;
     }
-    return true;
 }
 
 /* The first-fit rule: the lowest offset that is 0 or the end of a co-live
@@ -228,37 +227,34 @@ static size_t arenaStepLivePlaced(const rematWireTable_t *t, const rematProgram_
     return peak;
 }
 
-static bool arenaFirstFitInOrder(const arenaOrder_t *o, arenaBefore_t before, size_t *offsets,
+static void arenaFirstFitInOrder(const arenaOrder_t *o, arenaBefore_t before, size_t *offsets,
                                  size_t *bytes) {
     arenaFit_t f;
-    if (!arenaFitInit(&f, o->t, o->p, offsets)) {
-        return false;
-    }
+    arenaFitInit(&f, o->t, o->p, offsets);
     while (f.numPlaced < o->p->numRanges) {
         size_t r = arenaNextToPlace(o, before, offsets);
         arenaFitRecord(&f, r, arenaLowestFit(&f, r));
     }
     freeReservedMemory(f.byOffset);
     *bytes = arenaExtent(o->t, o->p, offsets);
-    return true;
 }
 
 size_t arenaPlacedPeakBytes(const rematWireTable_t *t, const rematProgram_t *p) {
     return arenaStepLivePlaced(t, p, NULL);
 }
 
-bool arenaPlaceFirstFitDecreasing(const rematWireTable_t *t, const rematProgram_t *p,
+void arenaPlaceFirstFitDecreasing(const rematWireTable_t *t, const rematProgram_t *p,
                                   size_t placedPeak, size_t *offsets, size_t *bytes) {
     (void)placedPeak;
     const arenaOrder_t o = {.t = t, .p = p};
-    return arenaFirstFitInOrder(&o, arenaPlacesBefore, offsets, bytes);
+    arenaFirstFitInOrder(&o, arenaPlacesBefore, offsets, bytes);
 }
 
-bool arenaPlaceSizeThenEnd(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
+void arenaPlaceSizeThenEnd(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
                            size_t *offsets, size_t *bytes) {
     (void)placedPeak;
     const arenaOrder_t o = {.t = t, .p = p};
-    return arenaFirstFitInOrder(&o, arenaSizeThenEndBefore, offsets, bytes);
+    arenaFirstFitInOrder(&o, arenaSizeThenEndBefore, offsets, bytes);
 }
 
 static bool arenaBeganLater(const rematProgram_t *p, size_t a, size_t b) {
@@ -327,20 +323,17 @@ static size_t arenaPingPongOffset(const arenaFit_t *f, size_t r, size_t placedPe
     return lowerHalf ? high : low;
 }
 
-bool arenaPlacePingPong(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
+void arenaPlacePingPong(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
                         size_t *offsets, size_t *bytes) {
     const arenaOrder_t o = {.t = t, .p = p};
     arenaFit_t f;
-    if (!arenaFitInit(&f, t, p, offsets)) {
-        return false;
-    }
+    arenaFitInit(&f, t, p, offsets);
     while (f.numPlaced < p->numRanges) {
         size_t r = arenaNextToPlace(&o, arenaStreamBefore, offsets);
         arenaFitRecord(&f, r, arenaPingPongOffset(&f, r, placedPeak));
     }
     freeReservedMemory(f.byOffset);
     *bytes = arenaExtent(t, p, offsets);
-    return true;
 }
 
 /* placed x lifetime as hi * 2^16 + lo: exact for every placed size, because a
@@ -382,7 +375,7 @@ static bool arenaBreadthAreaBefore(const arenaOrder_t *o, size_t a, size_t b) {
 /* A range is ordered at the first visited step that holds it: its step of
  * most live bytes, the earliest on ties. One scratch block holds the live
  * bytes per step and that step per range. */
-bool arenaPlaceBreadthArea(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
+void arenaPlaceBreadthArea(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
                            size_t *offsets, size_t *bytes) {
     (void)placedPeak;
     size_t *stepLive =
@@ -399,9 +392,8 @@ bool arenaPlaceBreadthArea(const rematWireTable_t *t, const rematProgram_t *p, s
         busiestStep[r] = best;
     }
     const arenaOrder_t o = {.t = t, .p = p, .stepLive = stepLive, .busiestStep = busiestStep};
-    bool placed = arenaFirstFitInOrder(&o, arenaBreadthAreaBefore, offsets, bytes);
+    arenaFirstFitInOrder(&o, arenaBreadthAreaBefore, offsets, bytes);
     freeReservedMemory(stepLive);
-    return placed;
 }
 
 bool arenaPlanHasGradRange(const rematWireTable_t *t, const rematProgram_t *p) {
@@ -444,7 +436,7 @@ static size_t arenaRangeEnd(const rematWireTable_t *t, const rematProgram_t *p,
                     "offset + placed bytes");
 }
 
-bool arenaPlaceTwoEnded(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
+void arenaPlaceTwoEnded(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
                         size_t *offsets, size_t *bytes) {
     (void)placedPeak;
     arenaOrder_t o = {.t = t, .p = p, .boundary = UINT16_MAX};
@@ -456,9 +448,7 @@ bool arenaPlaceTwoEnded(const rematWireTable_t *t, const rematProgram_t *p, size
         }
     }
     arenaFit_t f;
-    if (!arenaFitInit(&f, t, p, offsets)) {
-        return false;
-    }
+    arenaFitInit(&f, t, p, offsets);
     bool others = false;
     for (size_t k = 0; k < p->numRanges; k++) {
         size_t r = arenaNextToPlace(&o, arenaTwoEndedBefore, offsets);
@@ -492,10 +482,9 @@ bool arenaPlaceTwoEnded(const rematWireTable_t *t, const rematProgram_t *p, size
         }
     }
     *bytes = arenaExtent(t, p, offsets);
-    return true;
 }
 
-typedef bool (*arenaMember_t)(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
+typedef void (*arenaMember_t)(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
                               size_t *offsets, size_t *bytes);
 
 /* Fixed at compile time; the order decides ties. A new member is one entry
@@ -509,29 +498,25 @@ static const struct arenaMemberEntry {
     {arenaPlaceSizeThenEnd, false},
 };
 
-bool arenaPlacePortfolio(const rematWireTable_t *t, const rematProgram_t *p, size_t *offsets,
+void arenaPlacePortfolio(const rematWireTable_t *t, const rematProgram_t *p, size_t *offsets,
                          size_t *bytes, size_t *peakPlacedBytes) {
     size_t placedPeak = arenaPlacedPeakBytes(t, p);
-    if (!arenaMembers[0].place(t, p, placedPeak, offsets, bytes)) {
-        return false;
-    }
+    arenaMembers[0].place(t, p, placedPeak, offsets, bytes);
     size_t *trial = reserveMemory(p->numRanges * sizeof(size_t));
     bool hasGradRange = arenaPlanHasGradRange(t, p);
-    bool placed = true;
-    for (size_t m = 1; placed && m < sizeof arenaMembers / sizeof arenaMembers[0]; m++) {
+    for (size_t m = 1; m < sizeof arenaMembers / sizeof arenaMembers[0]; m++) {
         if (arenaMembers[m].needsGradRange && !hasGradRange) {
             continue;
         }
         size_t trialBytes = 0;
-        placed = arenaMembers[m].place(t, p, placedPeak, trial, &trialBytes);
-        if (placed && trialBytes < *bytes) {
+        arenaMembers[m].place(t, p, placedPeak, trial, &trialBytes);
+        if (trialBytes < *bytes) {
             memcpy(offsets, trial, p->numRanges * sizeof(size_t));
             *bytes = trialBytes;
         }
     }
     freeReservedMemory(trial);
     *peakPlacedBytes = placedPeak;
-    return placed;
 }
 
 void arenaVerifyPlacement(const rematWireTable_t *t, const rematProgram_t *p, const size_t *offsets,
@@ -590,15 +575,11 @@ void arenaVerifyEvalInsideTrain(const rematWireTable_t *t, const rematProgram_t 
     }
 }
 
-bool rematArenaInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
+void rematArenaInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
                     const tensor_t *inputLike, const rematPlanSpec_t *spec) {
     *s = (rematScheduler_t){.type = REMAT_ARENA, .fns = &rematSchedulerFunctions[REMAT_ARENA]};
-    if (!rematWireTableInit(&s->wires, m, loss, inputLike)) {
-        return false;
-    }
-    if (!rematPlanBuild(&s->plan, s->wires, m, spec)) {
-        return false;
-    }
+    rematWireTableInit(&s->wires, m, loss, inputLike);
+    rematPlanBuild(&s->plan, s->wires, m, spec);
     const rematProgram_t *p = &s->plan->train;
     /* The placement and its uint16_t range ids rely on it. SEQUENCE and RETAIN_LIST plans are
      * already capped in rematPlanBuild; here it bounds STORE_ALL and LIVENESS plans. */
@@ -614,24 +595,15 @@ bool rematArenaInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
      * is reserveMemory(0). */
     s->row.arena.offsets = reserveMemory(p->numRanges * sizeof(size_t));
     size_t bytes;
-    if (!arenaPlacePortfolio(s->wires, p, s->row.arena.offsets, &bytes,
-                             &s->row.arena.peakPlacedBytes)) {
-        return false;
-    }
+    arenaPlacePortfolio(s->wires, p, s->row.arena.offsets, &bytes, &s->row.arena.peakPlacedBytes);
     arenaVerifyPlacement(s->wires, p, s->row.arena.offsets, bytes);
     arenaVerifyEvalInsideTrain(s->wires, p, &s->plan->eval);
-    s->row.arena.bytes = bytes; /* placed: every arena field of the report is valid */
+    s->row.arena.bytes = bytes;
     s->row.arena.base = reserveMemory(bytes);
     ODT_ASAN_POISON(s->row.arena.base, bytes); /* unaddressable until a range opens */
-    return true;
 }
 
 void rematArenaBegin(rematScheduler_t *s) {
-    if (s->row.arena.offsets == NULL || s->row.arena.base == NULL) {
-        PRINT_ERROR("remat[arena]: rematBegin on a scheduler whose arena was never reserved "
-                    "(rematArenaInit returned false)");
-        exit(1);
-    }
     s->walk = (rematWalk_t){0};
 }
 
@@ -684,7 +656,7 @@ void rematArenaEnd(rematScheduler_t *s) {
 }
 
 void rematArenaDeinit(rematScheduler_t *s) {
-    if (s->row.arena.base != NULL) { /* NULL after a failed data reservation */
+    if (s->row.arena.base != NULL) { /* NULL after an earlier row deinit */
         ODT_ASAN_UNPOISON(s->row.arena.base, s->row.arena.bytes);
         freeReservedMemory(s->row.arena.base);
     }

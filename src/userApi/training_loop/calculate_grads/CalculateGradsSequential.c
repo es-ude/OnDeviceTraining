@@ -72,10 +72,7 @@ static trainingStats_t *calculateGradsImpl(const model_t *m, lossConfig_t lossCo
     rematScheduler_t *s = (call != NULL) ? call->remat : NULL;
     const rngKey_t *callKey = (call != NULL) ? call->key : NULL;
     if (s == NULL) {
-        if (!rematHeapInit(&ephemeral, m, lossConfig, input, &defaultPlanSpec)) {
-            PRINT_ERROR("calculateGrads: ephemeral HEAP scheduler: reserveMemory failed");
-            exit(1);
-        }
+        rematHeapInit(&ephemeral, m, lossConfig, input, &defaultPlanSpec);
         s = &ephemeral;
     }
     uint32_t producedGen[rematCheckNumWires(s)];

@@ -75,8 +75,8 @@ void testReportEchoesTypePolicyAndPlanFacts(void) {
     freeFixture(&f, &s);
 }
 
-/* Never initialised, failed before the plan existed, or deinitialised --
- * the report reads nothing through the NULL table or plan. */
+/* Never initialised or deinitialised -- the report reads nothing through
+ * the NULL table or plan. */
 void testReportOnAZeroedSchedulerIsEmpty(void) {
     rematScheduler_t s = {0};
     rematReport_t r;
@@ -152,8 +152,8 @@ typedef struct builtPlan {
 static builtPlan_t buildTableAndPlan(layer_t **model, size_t n, lossFuncType_t lt,
                                      const tensor_t *x, const rematPlanSpec_t *spec) {
     builtPlan_t b = {NULL, NULL};
-    TEST_ASSERT_TRUE(rematWireTableInit(&b.t, &MODEL_CHAIN(model, n), defaultLossConfig(lt), x));
-    TEST_ASSERT_TRUE(rematPlanBuild(&b.p, b.t, &MODEL_CHAIN(model, b.t->modelSize), spec));
+    rematWireTableInit(&b.t, &MODEL_CHAIN(model, n), defaultLossConfig(lt), x);
+    rematPlanBuild(&b.p, b.t, &MODEL_CHAIN(model, b.t->modelSize), spec);
     return b;
 }
 
@@ -199,7 +199,7 @@ static void assertF1Placement(const rematPlanSpec_t *spec) {
     size_t offsets[3];
     size_t bytes = 0;
     size_t peak = arenaPlacedPeakBytes(b.t, p);
-    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, p, peak, offsets, &bytes));
+    arenaPlaceFirstFitDecreasing(b.t, p, peak, offsets, &bytes);
     TEST_ASSERT_EQUAL_size_t(0, offsets[0]);  /* ACT 1 */
     TEST_ASSERT_EQUAL_size_t(8, offsets[1]);  /* ACT 2; unaligned: 5 */
     TEST_ASSERT_EQUAL_size_t(16, offsets[2]); /* the seed; unaligned: 9 */
@@ -470,8 +470,7 @@ void testFfdMatchesTheNaiveOracleOnRandomPlans(void) {
         size_t actualPeak = 0;
         size_t expectedBytes = oracleFirstFitDecreasing(&rp, expected, &expectedPeak);
         actualPeak = arenaPlacedPeakBytes(&rp.table, &rp.program);
-        TEST_ASSERT_TRUE(
-            arenaPlaceFirstFitDecreasing(&rp.table, &rp.program, actualPeak, actual, &actualBytes));
+        arenaPlaceFirstFitDecreasing(&rp.table, &rp.program, actualPeak, actual, &actualBytes);
         for (size_t r = 0; r < rp.program.numRanges; r++) {
             TEST_ASSERT_EQUAL_size_t_MESSAGE(expected[r], actual[r],
                                              "offset differs from the oracle");
@@ -509,7 +508,7 @@ void testFfdReleasesItsScratch(void) {
     size_t bytes = 0;
     size_t peak = arenaPlacedPeakBytes(b.t, &b.p->train);
     size_t before = memProfileCurrentBytes();
-    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, &b.p->train, peak, offsets, &bytes));
+    arenaPlaceFirstFitDecreasing(b.t, &b.p->train, peak, offsets, &bytes);
     TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
     freeTableAndPlan(&b);
     freeModel(h.model, h.n);
@@ -518,7 +517,7 @@ void testFfdReleasesItsScratch(void) {
 
 /* ---- the portfolio's other members ---- */
 
-typedef bool (*placeMember_t)(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
+typedef void (*placeMember_t)(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
                               size_t *offsets, size_t *bytes);
 
 _Static_assert(_Generic(arenaPlaceFirstFitDecreasing, placeMember_t: 1, default: 0),
@@ -542,7 +541,7 @@ static size_t memberBytesOf(placeMember_t place, const handPlan_t *hp) {
     buildHandPlan(&rp, hp);
     size_t offsets[ORACLE_MAX_RANGES];
     size_t bytes = 0;
-    TEST_ASSERT_TRUE(place(&rp.table, &rp.program, oraclePeakPlaced(&rp), offsets, &bytes));
+    place(&rp.table, &rp.program, oraclePeakPlaced(&rp), offsets, &bytes);
     return bytes;
 }
 
@@ -552,7 +551,7 @@ static void assertMemberPlacesTheHandPlan(placeMember_t place, const handPlan_t 
     buildHandPlan(&rp, hp);
     size_t offsets[ORACLE_MAX_RANGES];
     size_t bytes = 0;
-    TEST_ASSERT_TRUE(place(&rp.table, &rp.program, oraclePeakPlaced(&rp), offsets, &bytes));
+    place(&rp.table, &rp.program, oraclePeakPlaced(&rp), offsets, &bytes);
     for (size_t r = 0; r < hp->numRanges; r++) {
         TEST_ASSERT_EQUAL_size_t_MESSAGE(expected[r], offsets[r], "offset differs");
     }
@@ -692,7 +691,7 @@ static void assertMemberVerifiesOnRandomPlans(placeMember_t place, bool withGrad
         size_t offsets[ORACLE_MAX_RANGES];
         size_t bytes = 0;
         size_t peak = oraclePeakPlaced(&rp);
-        TEST_ASSERT_TRUE(place(&rp.table, &rp.program, peak, offsets, &bytes));
+        place(&rp.table, &rp.program, peak, offsets, &bytes);
         arenaVerifyPlacement(&rp.table, &rp.program, offsets, bytes);
         size_t extent = 0;
         for (size_t r = 0; r < rp.program.numRanges; r++) {
@@ -720,8 +719,7 @@ static void assertMemberReleasesItsScratch(placeMember_t place) {
     size_t offsets[HAR_RANGES];
     size_t bytes = 0;
     size_t before = memProfileCurrentBytes();
-    TEST_ASSERT_TRUE(
-        place(b.t, &b.p->train, arenaPlacedPeakBytes(b.t, &b.p->train), offsets, &bytes));
+    place(b.t, &b.p->train, arenaPlacedPeakBytes(b.t, &b.p->train), offsets, &bytes);
     TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
     freeTableAndPlan(&b);
     freeModel(h.model, h.n);
@@ -755,9 +753,8 @@ void testPortfolioIsNeverWorseThanFfdOnRandomPlans(void) {
         size_t bytes = 0;
         size_t peak = 0;
         ffdPeak = arenaPlacedPeakBytes(&rp.table, &rp.program);
-        TEST_ASSERT_TRUE(
-            arenaPlaceFirstFitDecreasing(&rp.table, &rp.program, ffdPeak, ffd, &ffdBytes));
-        TEST_ASSERT_TRUE(arenaPlacePortfolio(&rp.table, &rp.program, best, &bytes, &peak));
+        arenaPlaceFirstFitDecreasing(&rp.table, &rp.program, ffdPeak, ffd, &ffdBytes);
+        arenaPlacePortfolio(&rp.table, &rp.program, best, &bytes, &peak);
         arenaVerifyPlacement(&rp.table, &rp.program, best, bytes);
         TEST_ASSERT_TRUE_MESSAGE(bytes <= ffdBytes, "portfolio larger than first-fit-decreasing");
         TEST_ASSERT_EQUAL_size_t(ffdPeak, peak);
@@ -778,17 +775,17 @@ void testPortfolioKeepsTheEarlierMemberOnATie(void) {
     size_t scratch = 0;
     size_t bytes = 0;
     size_t peak = arenaPlacedPeakBytes(b.t, p);
-    TEST_ASSERT_TRUE(arenaPlaceFirstFitDecreasing(b.t, p, peak, ffd, &scratch));
-    TEST_ASSERT_TRUE(arenaPlaceSizeThenEnd(b.t, p, peak, later, &scratch));
+    arenaPlaceFirstFitDecreasing(b.t, p, peak, ffd, &scratch);
+    arenaPlaceSizeThenEnd(b.t, p, peak, later, &scratch);
     static const size_t memberBytes[5] = {49152, 49152, 49152, 49688, 49152};
     for (size_t m = 0; m < sizeof kMembers / sizeof kMembers[0]; m++) {
         size_t trial[HAR_RANGES];
         size_t trialBytes = 0;
-        TEST_ASSERT_TRUE(kMembers[m].place(b.t, p, peak, trial, &trialBytes));
+        kMembers[m].place(b.t, p, peak, trial, &trialBytes);
         TEST_ASSERT_EQUAL_size_t_MESSAGE(memberBytes[m], trialBytes, kMembers[m].name);
     }
     TEST_ASSERT_TRUE(memcmp(ffd, later, p->numRanges * sizeof(size_t)) != 0);
-    TEST_ASSERT_TRUE(arenaPlacePortfolio(b.t, p, best, &bytes, &peak));
+    arenaPlacePortfolio(b.t, p, best, &bytes, &peak);
     TEST_ASSERT_EQUAL_size_t(49152, bytes);
     for (size_t r = 0; r < p->numRanges; r++) {
         TEST_ASSERT_EQUAL_size_t_MESSAGE(ffd[r], best[r], "not the first member's layout");
@@ -803,7 +800,7 @@ static size_t portfolioBytesOf(const handPlan_t *hp) {
     size_t offsets[ORACLE_MAX_RANGES];
     size_t bytes = 0;
     size_t peak = 0;
-    TEST_ASSERT_TRUE(arenaPlacePortfolio(&rp.table, &rp.program, offsets, &bytes, &peak));
+    arenaPlacePortfolio(&rp.table, &rp.program, offsets, &bytes, &peak);
     TEST_ASSERT_EQUAL_size_t(peak, bytes);
     return bytes;
 }
@@ -846,7 +843,7 @@ void testPortfolioReleasesItsScratch(void) {
     size_t bytes = 0;
     size_t peak = 0;
     size_t before = memProfileCurrentBytes();
-    TEST_ASSERT_TRUE(arenaPlacePortfolio(b.t, &b.p->train, offsets, &bytes, &peak));
+    arenaPlacePortfolio(b.t, &b.p->train, offsets, &bytes, &peak);
     TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
     freeTableAndPlan(&b);
     freeModel(h.model, h.n);
@@ -868,8 +865,7 @@ static void placeFixture(placedPlan_t *pp, void (*build)(fixture_t *),
     pp->b = buildTableAndPlan(pp->f.model, pp->f.n, pp->f.lt, pp->f.x, spec);
     size_t peak = arenaPlacedPeakBytes(pp->b.t, &pp->b.p->train);
     TEST_ASSERT_TRUE(pp->b.p->train.numRanges <= HAR_RANGES);
-    TEST_ASSERT_TRUE(
-        arenaPlaceFirstFitDecreasing(pp->b.t, &pp->b.p->train, peak, pp->offsets, &pp->bytes));
+    arenaPlaceFirstFitDecreasing(pp->b.t, &pp->b.p->train, peak, pp->offsets, &pp->bytes);
 }
 
 static void freePlacedFixture(placedPlan_t *pp) {
@@ -1159,10 +1155,8 @@ static void initMixedChainsAndExitWithTheAlignmentVerdict(void) {
         buildMixedChain(&c, &state);
         for (size_t policy = 0; policy < 2u; policy++) {
             rematScheduler_t s;
-            if (!rematArenaInit(&s, &MODEL_CHAIN(c.model, c.n), defaultLossConfig(MSE), c.x,
-                                policy == 0u ? NULL : &g_liveness)) {
-                _exit(3);
-            }
+            rematArenaInit(&s, &MODEL_CHAIN(c.model, c.n), defaultLossConfig(MSE), c.x,
+                           policy == 0u ? NULL : &g_liveness);
             for (size_t r = 0; r < s.plan->train.numRanges; r++) {
                 aligned = aligned && s.row.arena.offsets[r] % ODT_WIRE_ALIGN == 0u;
             }
@@ -1208,7 +1202,7 @@ static void arenaInitExpectingAnExit(layer_t **model, size_t n, lossFuncType_t l
     rematScheduler_t s;
     g_memBeforeExit = memProfileCurrentBytes();
     (void)atexit(printReservedBeforeExit);
-    (void)rematArenaInit(&s, &MODEL_CHAIN(model, n), defaultLossConfig(lt), x, NULL);
+    rematArenaInit(&s, &MODEL_CHAIN(model, n), defaultLossConfig(lt), x, NULL);
 }
 
 static size_t sharedBlockBytes(layer_t **model, size_t n, lossFuncType_t lt, const tensor_t *x) {
@@ -1250,7 +1244,7 @@ _Static_assert(ODT_REMAT_MAX_RANGES <= 4096u, "the ReLU-chain arrays live on the
 static size_t tableBlockBytes(layer_t **model, size_t n, lossFuncType_t lt, const tensor_t *x) {
 #ifdef ODT_MEM_PROFILE
     rematWireTable_t *t = NULL;
-    TEST_ASSERT_TRUE(rematWireTableInit(&t, &MODEL_CHAIN(model, n), defaultLossConfig(lt), x));
+    rematWireTableInit(&t, &MODEL_CHAIN(model, n), defaultLossConfig(lt), x);
     size_t bytes = t->slabBytes;
     rematWireTableFree(t);
     return bytes;
@@ -1281,8 +1275,8 @@ void testArenaInitExitsAboveMaxRangesBeforeAnyRowReservation(void) {
 
 static void initAndExitWithTheVerdict(layer_t **model, size_t n, const tensor_t *x) {
     rematScheduler_t s;
-    bool ok = rematArenaInit(&s, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x, NULL) &&
-              s.plan->train.numRanges == n;
+    rematArenaInit(&s, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x, NULL);
+    bool ok = s.plan->train.numRanges == n;
     rematSchedulerDeinit(&s);
     _exit(ok ? 0 : 2);
 }
@@ -1314,8 +1308,8 @@ static size_t fillChainSequence(rematStep_t *steps, size_t n) {
 static void heapInitAndExitWithTheVerdict(layer_t **model, size_t n, const tensor_t *x,
                                           const rematPlanSpec_t *spec, size_t numRanges) {
     rematScheduler_t s;
-    bool ok = rematHeapInit(&s, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x, spec) &&
-              s.plan->train.numRanges == numRanges;
+    rematHeapInit(&s, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x, spec);
+    bool ok = s.plan->train.numRanges == numRanges;
     rematSchedulerDeinit(&s);
     _exit(ok ? 0 : 2);
 }
@@ -1325,13 +1319,13 @@ static void heapInitWithSpecExpectingAnExit(layer_t **model, size_t n, const ten
     rematScheduler_t s;
     g_memBeforeExit = memProfileCurrentBytes();
     (void)atexit(printReservedBeforeExit);
-    (void)rematHeapInit(&s, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x, spec);
+    rematHeapInit(&s, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x, spec);
 }
 
 static void arenaInitWithSpecExpectingAnExit(layer_t **model, size_t n, const tensor_t *x,
                                              const rematPlanSpec_t *spec) {
     rematScheduler_t s;
-    (void)rematArenaInit(&s, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x, spec);
+    rematArenaInit(&s, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x, spec);
 }
 
 /* HEAP admits a STORE_ALL or LIVENESS plan of any size: the cap covers only
@@ -1605,20 +1599,6 @@ void testArenaEndExitsOnARangeLeftOpen(void) {
     ASSERT_EXITS_WITH_OUTPUT(
         1, "rematEnd before the walk completed: 5 of 5 steps done, 2 of 3 ranges closed",
         walkWithTheLastRangeLeftOpen(&f, &s));
-    freeFixture(&f, &s);
-}
-
-static void beginOnAnUnreservedArena(fixture_t *f, rematScheduler_t *s) {
-    s->row.arena.base = NULL; /* the state rematArenaInit leaves after a failed data block */
-    bindAndBegin(f, s);
-}
-
-void testArenaBeginExitsWhenTheArenaWasNeverReserved(void) {
-    fixture_t f;
-    buildF1Model(&f);
-    rematScheduler_t s = initArena(&f, NULL);
-    ASSERT_EXITS_WITH_OUTPUT(1, "rematBegin on a scheduler whose arena was never reserved",
-                             beginOnAnUnreservedArena(&f, &s));
     freeFixture(&f, &s);
 }
 
@@ -1947,8 +1927,7 @@ void testArenaEvaluatesF3OnItsTrainOffsets(void) {
         dagTensor_t xs;
         dagTensor_t ts;
         rematScheduler_t s;
-        TEST_ASSERT_TRUE(
-            rematArenaInit(&s, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), specs[k]));
+        rematArenaInit(&s, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), specs[k]);
         inferenceStats_t *r =
             inferenceWithLoss(&f.m, dagInput(&xs, 1.0f, 2.0f), dagInput(&ts, 3.0f, 8.0f), MSE,
                               REDUCTION_MEAN, &(trainingCall_t){.remat = &s});
@@ -1967,8 +1946,7 @@ void testEvalOutsideItsTrainRangeExits(void) {
     dagBuildF3(&f, false);
     dagTensor_t xs;
     rematScheduler_t s;
-    TEST_ASSERT_TRUE(
-        rematArenaInit(&s, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), &g_liveness));
+    rematArenaInit(&s, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), &g_liveness);
     const rematProgram_t *train = &s.plan->train;
     rematRange_t ranges[4];
     TEST_ASSERT_EQUAL_size_t(4, s.plan->eval.numRanges);
@@ -1991,7 +1969,7 @@ void testEvalOnlyHeapWalksF3sEvalProgram(void) {
     dagTensor_t xs;
     tensor_t *x = dagInput(&xs, 1.0f, 2.0f);
     rematScheduler_t s;
-    TEST_ASSERT_TRUE(rematHeapInitEval(&s, &f.m, x));
+    rematHeapInitEval(&s, &f.m, x);
     TEST_ASSERT_EQUAL_size_t(5u, s.wires->numWires);
     rematBeginEval(&s, &f.m, CROSS_ENTROPY, x);
     const uint8_t kinds[] = {REMAT_STEP_FORWARD, REMAT_STEP_FORWARD, REMAT_STEP_FORWARD,
@@ -2011,9 +1989,7 @@ static void beginOnAnEvalOnlyScheduler(dagFixture_t *f) {
     dagTensor_t xs;
     tensor_t *x = dagInput(&xs, 1.0f, 2.0f);
     rematScheduler_t s;
-    if (!rematHeapInitEval(&s, &f->m, x)) {
-        exit(2);
-    }
+    rematHeapInitEval(&s, &f->m, x);
     rematBegin(&s, &f->m, defaultLossConfig(MSE), x);
 }
 
@@ -2028,9 +2004,7 @@ static void walkEvalAfterFreezingN0(dagFixture_t *f) {
     dagTensor_t xs;
     tensor_t *x = dagInput(&xs, 1.0f, 2.0f);
     rematScheduler_t s;
-    if (!rematHeapInitEval(&s, &f->m, x)) {
-        exit(2);
-    }
+    rematHeapInitEval(&s, &f->m, x);
     f->layers[0]->config->linear->frozen = true;
     rematBeginEval(&s, &f->m, CROSS_ENTROPY, x);
     for (rematStep_t st; rematNext(&s, &st);) {
@@ -2573,10 +2547,8 @@ void testHeapInitReservesOnlyTheTableAndThePlan(void) {
 }
 #endif
 
-/* On HEAP placed == planned and the arena fields are 0. HEAP keeps
- * no resident data block, so a successful init has nothing left to reserve:
- * dataReserved == planned. REMAT_HEAP != 0 makes the type
- * echo observable for the first time. */
+/* On HEAP the arena fields are 0: it keeps no resident data block. REMAT_HEAP
+ * != 0 makes the type echo observable for the first time. */
 static void assertHeapReport(const rematPlanSpec_t *spec, rematPlanPolicy_t policy,
                              size_t peakLiveBytes) {
     fixture_t f;
@@ -2623,13 +2595,11 @@ void testHeapPlanBlockHoldsTheSequenceSteps(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
     rematScheduler_t all;
-    TEST_ASSERT_TRUE(
-        rematHeapInit(&all, &MODEL_CHAIN(model, MLP3_N), defaultLossConfig(MSE), x, NULL));
+    rematHeapInit(&all, &MODEL_CHAIN(model, MLP3_N), defaultLossConfig(MSE), x, NULL);
     const rematPlanSpec_t spec = {
         .policy = REMAT_PLAN_SEQUENCE, .sequence = steps, .sequenceLen = COUNT_OF(steps)};
     rematScheduler_t seq;
-    TEST_ASSERT_TRUE(
-        rematHeapInit(&seq, &MODEL_CHAIN(model, MLP3_N), defaultLossConfig(MSE), x, &spec));
+    rematHeapInit(&seq, &MODEL_CHAIN(model, MLP3_N), defaultLossConfig(MSE), x, &spec);
     TEST_ASSERT_EQUAL_size_t(all.plan->blockBytes + 48u, seq.plan->blockBytes);
     rematReport_t r;
     rematSchedulerReport(&seq, &r);
@@ -2642,7 +2612,7 @@ void testHeapPlanBlockHoldsTheSequenceSteps(void) {
 
 static void heapInitExpectingAnExit(layer_t **model, const tensor_t *x) {
     rematScheduler_t s;
-    (void)rematHeapInit(&s, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), x, NULL);
+    rematHeapInit(&s, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), x, NULL);
 }
 
 /* A borrowed [1, SIZE_MAX/4 + 2] FLOAT32 input (4 * N wraps to 4)
@@ -2782,7 +2752,7 @@ void testBeginEvalExitsOnASchedulerThatIsNotInitialised(void) {
     buildF1Model(&f);
     ASSERT_EXITS_WITH_OUTPUT(1,
                              "rematBeginEval: scheduler not initialised (never initialised, or "
-                             "its init returned false and was ignored)",
+                             "deinitialised)",
                              beginEvalOnAZeroedScheduler(&f));
     freeModel(f.model, f.n);
 }
@@ -2918,27 +2888,6 @@ void testBeginExitsOnASchedulerThatWasNeverInitialised(void) {
     buildF1Model(&f);
     ASSERT_EXITS_WITH_OUTPUT(1, "rematBegin: scheduler not initialised",
                              beginOnAZeroedScheduler(&f));
-    freeModel(f.model, f.n);
-}
-
-/* The state rematHeapInit leaves when its plan block fails (fns and
- * table set, plan NULL); a caller that ignored the false must not enter a call. */
-static void beginOnAHeapWhosePlanFailed(fixture_t *f, rematScheduler_t *s) {
-    rematBegin(s, &MODEL_CHAIN(f->model, f->n), defaultLossConfig(f->lt), f->x);
-}
-
-void testBeginExitsOnAHeapWhoseInitReturnedFalse(void) {
-    fixture_t f;
-    buildF1Model(&f);
-    size_t before = memProfileCurrentBytes();
-    rematScheduler_t s = initHeap(&f, NULL);
-    rematPlanFree(s.plan);
-    s.plan = NULL;
-    ASSERT_EXITS_WITH_OUTPUT(1, "rematBegin: scheduler not initialised",
-                             beginOnAHeapWhosePlanFailed(&f, &s));
-    rematSchedulerDeinit(&s); /* M-b: deinit after a failed HEAP init */
-    TEST_ASSERT_NULL(s.fns);
-    TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
     freeModel(f.model, f.n);
 }
 
@@ -3248,7 +3197,6 @@ int main(void) {
     RUN_TEST(testDoneExitsAfterTheStreamCompleted);
     RUN_TEST(testArenaEndExitsOnAnIncompleteWalk);
     RUN_TEST(testArenaEndExitsOnARangeLeftOpen);
-    RUN_TEST(testArenaBeginExitsWhenTheArenaWasNeverReserved);
     RUN_TEST(testRowContractArenaHarStoreAll);
     RUN_TEST(testRowContractArenaHarLiveness);
     RUN_TEST(testRowContractArenaF1StoreAll);
@@ -3312,7 +3260,6 @@ int main(void) {
     RUN_TEST(testTheDispatchWalksEitherRow);
     RUN_TEST(testTheDispatchCallsThroughTheInstancesFunctionTable);
     RUN_TEST(testBeginExitsOnASchedulerThatWasNeverInitialised);
-    RUN_TEST(testBeginExitsOnAHeapWhoseInitReturnedFalse);
     RUN_TEST(testBeginExitsWhenTheCallIsReEntered);
     RUN_TEST(testNextExitsOutsideACall);
     RUN_TEST(testNextExitsOnAnUninitialisedScheduler);

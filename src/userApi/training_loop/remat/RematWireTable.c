@@ -398,9 +398,8 @@ static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t
 /* evalOnly: every gradient flag stays 0 (reserveMemory zeroes the flag block), so the derivation
  * numbers no GRAD or PART wire and fills every dx slot with NONE, and the merge gate is left with
  * the ACTs the ADDs read. */
-static bool tableInit(rematWireTable_t **out, const model_t *m, lossFuncType_t lt, bool evalOnly,
+static void tableInit(rematWireTable_t **out, const model_t *m, lossFuncType_t lt, bool evalOnly,
                       const tensor_t *inputLike, const char *caller) {
-    *out = NULL;
     modelRequireValid(m, caller);
     size_t n = m->numLayers;
 
@@ -531,17 +530,16 @@ static bool tableInit(rematWireTable_t **out, const model_t *m, lossFuncType_t l
     freeReservedMemory(facts);
     freeReservedMemory(flagBlock);
     *out = t;
-    return true;
 }
 
-bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t loss,
+void rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t loss,
                         const tensor_t *inputLike) {
-    return tableInit(out, m, loss.funcType, false, inputLike, "rematWireTableInit");
+    tableInit(out, m, loss.funcType, false, inputLike, "rematWireTableInit");
 }
 
 /* MSE: with no gradient flag set, the loss type reaches nothing. */
-bool rematWireTableInitEval(rematWireTable_t **out, const model_t *m, const tensor_t *inputLike) {
-    return tableInit(out, m, MSE, true, inputLike, "rematWireTableInitEval");
+void rematWireTableInitEval(rematWireTable_t **out, const model_t *m, const tensor_t *inputLike) {
+    tableInit(out, m, MSE, true, inputLike, "rematWireTableInitEval");
 }
 
 void rematWireTableFree(rematWireTable_t *t) {

@@ -766,8 +766,7 @@ static void assertConforms(const char *cell) {
  * that every scheduler shares cannot show here; the layer and loss golds
  * catch those. */
 static void initReference(rematScheduler_t *s, zooFixture_t *f) {
-    TEST_ASSERT_TRUE_MESSAGE(rematHeapInit(s, &MODEL_CHAIN(f->model, f->n), f->loss, f->x, NULL),
-                             "the reference's init");
+    rematHeapInit(s, &MODEL_CHAIN(f->model, f->n), f->loss, f->x, NULL);
 }
 
 #define ZOO_KEY_SEED 0x2a5eu
@@ -1126,7 +1125,7 @@ static void captureReferenceValues(zooFixture_t *f, runCapture_t *cap) {
 /* Built from the fixture's own model and input, so the first bind's key check
  * passes. */
 static void initFixtureHeap(rematScheduler_t *s, zooFixture_t *f) {
-    TEST_ASSERT_TRUE(rematHeapInit(s, &MODEL_CHAIN(f->model, f->n), f->loss, f->x, NULL));
+    rematHeapInit(s, &MODEL_CHAIN(f->model, f->n), f->loss, f->x, NULL);
 }
 
 static rematReport_t reportOf(const rematScheduler_t *s) {
@@ -1262,7 +1261,7 @@ static liveSampler_t sampleHarCnn(bool explicitScheduler, const rematPlanSpec_t 
     rematScheduler_t s = {0};
     size_t meta = 0;
     if (explicitScheduler) {
-        TEST_ASSERT_TRUE(rematHeapInit(&s, &MODEL_CHAIN(f.model, f.n), f.loss, f.x, spec));
+        rematHeapInit(&s, &MODEL_CHAIN(f.model, f.n), f.loss, f.x, spec);
         meta = reportOf(&s).metadataBytes;
     }
     const trainingCall_t call = {.remat = explicitScheduler ? &s : NULL};
@@ -1328,10 +1327,11 @@ static const matrixCell_t g_cells[MATRIX_CELLS] = {
 /* A persistent scheduler of the cell, built from the fixture's own model and
  * input. */
 static void initCell(rematScheduler_t *s, const matrixCell_t *cell, zooFixture_t *f) {
-    bool built = (cell->row == REMAT_ARENA)
-                     ? rematArenaInit(s, &MODEL_CHAIN(f->model, f->n), f->loss, f->x, cell->spec)
-                     : rematHeapInit(s, &MODEL_CHAIN(f->model, f->n), f->loss, f->x, cell->spec);
-    TEST_ASSERT_TRUE_MESSAGE(built, say(cell->name, "init"));
+    if (cell->row == REMAT_ARENA) {
+        rematArenaInit(s, &MODEL_CHAIN(f->model, f->n), f->loss, f->x, cell->spec);
+    } else {
+        rematHeapInit(s, &MODEL_CHAIN(f->model, f->n), f->loss, f->x, cell->spec);
+    }
 }
 
 /* One cell's own observations; the call's remat P1, P3-P5 and P9 land in g_driver. */
@@ -1933,8 +1933,8 @@ void testEvalOverTheZooMatchesTheNullPathOnHeap(void) {
  * (arenaBytes + metadataBytes), on every zoo fixture and cell. Measured here
  * with the memory counter, so the rule stays tested apart from the check
  * inside each init. In a child, so an exit reads as this test's verdict: 1 =
- * the check inside an init stopped it, 2 = a failed init (not expected), 3 =
- * this measurement disagrees with the report. */
+ * the check inside an init stopped it, 3 = this measurement disagrees with
+ * the report. */
 static void initEveryZooCell(void) {
     for (size_t z = 0; z < ZOO_FIXTURES; z++) {
         for (size_t k = 0; k < MATRIX_CELLS; k++) {
@@ -1943,14 +1943,8 @@ static void initEveryZooCell(void) {
             g_zoo[z].build(&f);
             rematScheduler_t s;
             size_t mark = memProfileCurrentBytes();
-            bool built =
-                (cell->row == REMAT_ARENA)
-                    ? rematArenaInit(&s, &MODEL_CHAIN(f.model, f.n), f.loss, f.x, cell->spec)
-                    : rematHeapInit(&s, &MODEL_CHAIN(f.model, f.n), f.loss, f.x, cell->spec);
+            initCell(&s, cell, &f);
             size_t reserved = memProfileCurrentBytes() - mark;
-            if (!built) {
-                exit(2);
-            }
             rematReport_t r;
             rematSchedulerReport(&s, &r);
             if (reserved != r.arenaBytes + r.metadataBytes) {
@@ -2124,7 +2118,7 @@ void testRecomputePlanTraceOrderOnTheMlp(void) {
     zooFixture_t f;
     buildMlp(&f);
     rematScheduler_t s;
-    TEST_ASSERT_TRUE(rematHeapInit(&s, &MODEL_CHAIN(f.model, f.n), f.loss, f.x, &g_mlp3Recompute));
+    rematHeapInit(&s, &MODEL_CHAIN(f.model, f.n), f.loss, f.x, &g_mlp3Recompute);
     traceOrder_t o = {.used = 0};
     freeTrainingStats(tracedGrads(&MODEL_CHAIN(f.model, f.n), f.loss, REDUCTION_MEAN, f.x, f.y,
                                   traceOrderSink, &o, &(trainingCall_t){.remat = &s, .key = &key}));
@@ -2147,8 +2141,7 @@ static void runWithTrackingSwitchedOnAfterTheBuild(zooFixture_t *f) {
     batchNorm1dConfig_t *bn = f->model[1]->config->batchNorm1d;
     bn->trackRunningStats = false;
     rematScheduler_t s;
-    TEST_ASSERT_TRUE(
-        rematHeapInit(&s, &MODEL_CHAIN(f->model, f->n), f->loss, f->x, &g_mlp3Recompute));
+    rematHeapInit(&s, &MODEL_CHAIN(f->model, f->n), f->loss, f->x, &g_mlp3Recompute);
     bn->trackRunningStats = true;
     g_bnAtExit = bn;
     (void)atexit(printBatchesTrackedAtExit);

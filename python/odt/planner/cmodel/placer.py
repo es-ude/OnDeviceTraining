@@ -114,10 +114,11 @@ def place_ping_pong(t, ranges, placed_peak) -> list[int]:
 
 def place_two_ended(t, ranges, placed_peak) -> list[int]:
     """Ranges alive across the first backward step first fit from the bottom; the others
-    first fit on their own and are mirrored down from the top. The caller guarantees a GRAD
-    range (has_grad_range); place_portfolio skips this member otherwise."""
+    first fit on their own and are mirrored down from the top. place_portfolio skips this
+    member without a GRAD range; called directly without one, the boundary stays at C's
+    UINT16_MAX start, so no range is stored and every range is mirrored."""
     s = _sizes(t, ranges)
-    boundary = min(r.begin for r in ranges if t.wires[r.wire].kind == "GRAD")
+    boundary = min((r.begin for r in ranges if t.wires[r.wire].kind == "GRAD"), default=0xFFFF)
     stored = [boundary > r.begin and boundary <= r.end for r in ranges]
     bottom = sorted((r for r in range(len(ranges)) if stored[r]),
                     key=lambda r: (ranges[r].begin, -ranges[r].end, r))

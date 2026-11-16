@@ -270,6 +270,14 @@ def test_the_portfolio_skips_two_ended_on_a_plan_without_a_grad_range():
     assert place_portfolio(t, ranges).bytes == 24
 
 
+def test_two_ended_called_directly_without_a_grad_range_mirrors_every_range_like_c():
+    # C starts the boundary at UINT16_MAX, so no range is stored: all first fit and mirror.
+    t, ranges = hand_plan([(16, 0, 1, ACT), (8, 1, 2, ACT)])
+    offsets = place_two_ended(t, ranges, 24)
+    assert offsets == [8, 0]
+    assert check_layout(t, ranges, offsets) == 24
+
+
 FORWARD_COST_OF_C = {"LINEAR": 21, "CONV1D": 21, "CONV1D_TRANSPOSED": 30, "MAXPOOL1D": 21,
                      "AVGPOOL1D": 21, "ADAPTIVE_AVGPOOL1D": 10, "FLATTEN": 0}
 

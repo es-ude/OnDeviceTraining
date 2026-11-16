@@ -4,8 +4,12 @@
 
 # Test builds poison wire bytes at bind and release. ON in the
 # unit_test, unit_test_debug and unit_test_asan presets (unit_test_ubsan
-# inherits debug); OFF in firmware and the examples.
+# inherits debug, unit_test_nocheck unit_test); OFF in firmware and the examples.
 option(ODT_REMAT_VERIFY "Poison remat wire bytes at bind and release (test builds)" OFF)
+
+# The step validator (RematCheck.c). ON by default, firmware included; OFF
+# compiles it out and keeps only the operand resolver (RematResolve.c).
+option(ODT_REMAT_CHECK "Validate every remat step before the driver runs it" ON)
 
 add_library(RematPlan RematWireTable.c RematDerive.c RematPlan.c RematPlanPolicy.c)
 target_include_directories(RematPlan PUBLIC include)
@@ -36,6 +40,8 @@ target_link_libraries(RematScheduler PRIVATE
         RematPlan
         StorageApi
         Layer
+        LayerConfigAccess
+        ArithmeticType
         LossFunction
         Tensor
         Quantization
@@ -43,12 +49,15 @@ target_link_libraries(RematScheduler PRIVATE
         Common
 )
 
-# Remat (#4): the validating interpreter's checker. Rows never link it, and
-# it links no RNG. Besides its direct dependencies it links the owners of
-# the headers its includes pull in (LossFunction.h; Tensor.h -> Quantization.h
-# -> Rounding.h; LayerConfigAccess.h -> ArithmeticType.h).
-add_library(RematCheck RematCheck.c)
+# Remat (#4): the driver's operand resolver, plus the validator when
+# ODT_REMAT_CHECK is ON. Rows never link it, and it links no RNG. Besides its
+# direct dependencies it links the owners of the headers its includes pull in
+# (LossFunction.h; Tensor.h -> Quantization.h -> Rounding.h;
+# LayerConfigAccess.h -> ArithmeticType.h).
+add_library(RematCheck RematResolve.c $<$<BOOL:${ODT_REMAT_CHECK}>:RematCheck.c>)
 target_include_directories(RematCheck PUBLIC include)
+# PUBLIC: RematCheck.h switches on it, so every includer must see the same value.
+target_compile_definitions(RematCheck PUBLIC $<$<BOOL:${ODT_REMAT_CHECK}>:ODT_REMAT_CHECK>)
 target_link_libraries(RematCheck PRIVATE
         RematPlan
         RematScheduler

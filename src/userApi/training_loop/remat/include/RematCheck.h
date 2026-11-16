@@ -10,10 +10,15 @@
 #include "RematScheduler.h"
 #include "Tensor.h"
 
-/* The validating interpreter's checker (#4): the driver hands every
- * step a row's next() returns to rematCheckStep before any layer runs. Always
- * on, firmware included; every violation exits naming the row, the step
- * and the rule. Rows never link it, and it links no RNG. */
+/* The driver's half of the validating interpreter (#4): it hands every step a
+ * row's next() returns to rematCheckStep before any layer runs, and executes
+ * the step on the operands it resolves. The operand resolver (RematResolve.c)
+ * is always compiled. The validator (RematCheck.c) is a build option,
+ * ODT_REMAT_CHECK, ON by default, firmware included; ON, every violation
+ * exits naming the row, the step and the rule. OFF, rematCheckInit and
+ * rematCheckStep only resolve, rematCheckFinish and rematCheckReleased are
+ * empty, and the driver passes no producedGen or pending. Rows never link it, and it
+ * links no RNG. */
 
 /* The operands of one step, looked up from the step's operand slice in the
  * plan; the driver executes the step on exactly these. NULL where the step has
@@ -29,7 +34,8 @@ typedef struct rematOperands {
     uint8_t dxMode[MODEL_MAX_ARITY]; /* opMode_t of dx[i] */
 } rematOperands_t;
 
-/* One call's checker state, on the driver's frame. */
+/* One call's state, on the driver's frame. The resolver reads sched, mode and
+ * m; the rest is the validator's. */
 typedef struct rematCheck {
     rematScheduler_t *sched; /* borrowed: the table, and the row name for messages */
     rematMode_t mode;        /* EVAL admits FORWARD and LOSS_FORWARD only */
@@ -52,8 +58,17 @@ typedef struct rematCheck {
 
 /* Sizes the caller's producedGen and pending VLAs. Exits first on a scheduler
  * that is not initialised (zeroed or deinitialised), so the VLA is never sized
- * from a NULL table and never empty. */
+ * from a NULL table and never empty; rematResolveInit runs the same guard. */
 size_t rematCheckNumWires(const rematScheduler_t *s);
+/* The resolver's part of rematCheckInit: sched, mode and m; every other field
+ * zero. */
+void rematResolveInit(rematCheck_t *c, rematScheduler_t *s, const model_t *m, rematMode_t mode);
+/* Looks the step's operands up from its operand slice in the plan into *ops.
+ * Trusts the step: a slice outside the pool or not its node's is the
+ * validator's to reject, before this runs. */
+void rematResolveStep(const rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops);
+
+#ifdef ODT_REMAT_CHECK
 /* Before rematBegin / rematBeginEval, in the same mode. Zeroes
  * producedGen[0..numWires) (a VLA has no initialiser) and, in TRAIN, sets
  * pending[0..numWires) from the keyed table: one per consumer edge whose node
@@ -71,5 +86,25 @@ void rematCheckStep(rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops
 void rematCheckFinish(const rematCheck_t *c);
 /* After rematEnd: no non-borrowed wire is bound and ACT 0 is unbound. */
 void rematCheckReleased(const rematCheck_t *c);
+#else
+static inline void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, const model_t *m,
+                                  rematMode_t mode, uint32_t *producedGen, uint16_t *pending) {
+    (void)producedGen;
+    (void)pending;
+    rematResolveInit(c, s, m, mode);
+}
+
+static inline void rematCheckStep(rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops) {
+    rematResolveStep(c, st, ops);
+}
+
+static inline void rematCheckFinish(const rematCheck_t *c) {
+    (void)c;
+}
+
+static inline void rematCheckReleased(const rematCheck_t *c) {
+    (void)c;
+}
+#endif
 
 #endif // ODT_REMAT_CHECK_H

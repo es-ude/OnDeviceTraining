@@ -61,6 +61,10 @@ static void trainOn(fixture_t *f, rematScheduler_t *s) {
 
 /* ---- tampered plans: the order and range rules fire first ---- */
 
+/* The validator's deaths need it compiled in; the key, protocol, guard and
+ * unknown-kind deaths below run with ODT_REMAT_CHECK=OFF too. */
+#ifdef ODT_REMAT_CHECK
+
 /* Edited through RematPlan.h after init, which bypasses the init verifier,
  * so the run-time rule is the one that fires. */
 typedef void (*tamperFn_t)(rematScheduler_t *s);
@@ -196,6 +200,7 @@ void testArenaOffsetsOverlappingABackwardsInAndDxExit(void) {
                            "remat[arena]: step #5 BACKWARD(layer 2) violates 'operands share "
                            "bytes: in/out' (ACT 2 and GRAD 2)");
 }
+#endif // ODT_REMAT_CHECK
 
 /* ---- decorator rows that break the row contract (remat D24) ---- */
 
@@ -220,6 +225,29 @@ static void assertDecoratedRunExitsOnBothRows(const rematSchedulerFunctions_t *f
     assertDecoratedRunExits(initHeap, fns, violation);
 }
 
+/* Rewrites the first step to a kind no enum member has. The validator names
+ * it first when compiled in; without it, the driver does. */
+static bool unknownKindNext(rematScheduler_t *s, rematStep_t *st) {
+    bool first = s->walk.step == 0u;
+    bool more = decoratedNext(s, st);
+    if (more && first) {
+        st->kind = 9u;
+    }
+    return more;
+}
+
+static const rematSchedulerFunctions_t g_unknownKind = {.name = "unknown-kind",
+                                                        .begin = decoratedBegin,
+                                                        .next = unknownKindNext,
+                                                        .done = decoratedDone,
+                                                        .end = decoratedEnd,
+                                                        .deinit = decoratedDeinit};
+
+void testARowThatHandsOutAnUnknownKindExitsOnBothRows(void) {
+    assertDecoratedRunExitsOnBothRows(&g_unknownKind, "unknown step kind");
+}
+
+#ifdef ODT_REMAT_CHECK
 /* Releases ACT 1 once FORWARD(1) is done; the ReLU's BACKWARD(1) still reads
  * it. */
 static void releasingDone(rematScheduler_t *s, const rematStep_t *st) {
@@ -317,6 +345,7 @@ void testARowThatEatsTheLastStepExitsOnBothRows(void) {
         &g_eating, "remat[eating]: stream of 7 steps violates 'incomplete stream: missing "
                    "BACKWARD(0)'");
 }
+#endif // ODT_REMAT_CHECK
 
 /* rematBegin's arguments for the re-entering row; set by its test. */
 static fixture_t *g_reentered;
@@ -701,6 +730,11 @@ static void assertDecoratedEvalExitsOnBothRows(const rematSchedulerFunctions_t *
     }
 }
 
+void testARowThatHandsOutAnUnknownKindInEvalExitsOnBothRows(void) {
+    assertDecoratedEvalExitsOnBothRows(&g_unknownKind, "unknown step kind");
+}
+
+#ifdef ODT_REMAT_CHECK
 /* Hands out a BACKWARD where the EVAL program has its LOSS_FORWARD. */
 static bool backwardInEvalNext(rematScheduler_t *s, rematStep_t *st) {
     bool more = decoratedNext(s, st);
@@ -730,6 +764,7 @@ void testARowThatEatsTheLossForwardOfAnEvalCallExitsOnBothRows(void) {
         &g_eating,
         "remat[eating]: stream of 3 steps violates 'incomplete stream: missing LOSS_FORWARD'");
 }
+#endif // ODT_REMAT_CHECK
 
 /* remat P7 in eval: a batch of two against a scheduler keyed to one exits at
  * the bind with the same text on both rows (the key check is shared). */
@@ -765,6 +800,7 @@ void testAnEvalCallOnADeinitialisedSchedulerExitsNamingIt(void) {
 
 int main(void) {
     UNITY_BEGIN();
+#ifdef ODT_REMAT_CHECK
     RUN_TEST(testASwappedStepExitsOnBothRows);
     RUN_TEST(testADuplicatedStepExitsOnBothRows);
     RUN_TEST(testADroppedLastStepExitsOnBothRows);
@@ -777,6 +813,11 @@ int main(void) {
     RUN_TEST(testARowThatRebindsWithoutProducingExitsOnBothRows);
     RUN_TEST(testARowThatLeavesAWireResidentAtEndExitsOnBothRows);
     RUN_TEST(testARowThatEatsTheLastStepExitsOnBothRows);
+    RUN_TEST(testARowThatHandsOutABackwardInEvalExitsOnBothRows);
+    RUN_TEST(testARowThatEatsTheLossForwardOfAnEvalCallExitsOnBothRows);
+#endif
+    RUN_TEST(testARowThatHandsOutAnUnknownKindExitsOnBothRows);
+    RUN_TEST(testARowThatHandsOutAnUnknownKindInEvalExitsOnBothRows);
     RUN_TEST(testARowThatReentersBeginExitsOnBothRows);
     RUN_TEST(testWireBindInheritedGradChecksBeforeWrite);
     RUN_TEST(testABatchChangeExitsIdenticallyOnBothRows);
@@ -790,8 +831,6 @@ int main(void) {
     RUN_TEST(testRewiringADagExitsAtBindOnBothRows);
     RUN_TEST(testFreezingTheDagRootExitsOnRunsBackward);
     RUN_TEST(testAZeroedOrDeinitialisedSchedulerExitsNamingIt);
-    RUN_TEST(testARowThatHandsOutABackwardInEvalExitsOnBothRows);
-    RUN_TEST(testARowThatEatsTheLossForwardOfAnEvalCallExitsOnBothRows);
     RUN_TEST(testAnEvalShapeOtherThanTheKeyExitsIdenticallyOnBothRows);
     RUN_TEST(testAnEvalCallOnADeinitialisedSchedulerExitsNamingIt);
     return UNITY_END();

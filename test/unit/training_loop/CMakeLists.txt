@@ -139,7 +139,9 @@ target_include_directories(UnitTestRematScheduler PRIVATE
 
 # Remat (#4): the RematCheck library, driven over real schedulers on
 # both rows. RematScheduler and RematPlan are listed because the tests build
-# schedulers and read the table (RematPlan.h).
+# schedulers and read the table (RematPlan.h). Only with the validator
+# compiled in (ODT_REMAT_CHECK).
+if(ODT_REMAT_CHECK)
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         RematCheck
@@ -178,16 +180,19 @@ add_elastic_ai_unit_test(
         odt_test_death
         odt_test_dag_fixtures
 )
+endif()
 
 # Remat PR2 (#4): every scheduler row and plan against an explicit HEAP +
 # STORE_ALL reference with the same call key (remat D57), over a fixture zoo.
 # Registered by hand, like UnitTestDeathTest: add_elastic_ai_unit_test names
 # the binary after its LIB_UNDER_TEST, and this binary tests the driver across
-# the scheduler libraries rather than one library on its own.
+# the scheduler libraries rather than one library on its own. RematCheck is
+# listed for its PUBLIC ODT_REMAT_CHECK.
 add_executable(UnitTestCalculateGradsConformance UnitTestCalculateGradsConformance.c)
 target_link_libraries(UnitTestCalculateGradsConformance PRIVATE
         CalculateGradsSequential
         unity
+        RematCheck
         RematScheduler
         RematPlan
         CommonLayerLibs
@@ -231,11 +236,13 @@ __register_target_as_unit_test(UnitTestCalculateGradsConformance)
 # schedule-key mismatches), each asserted on both rows. Registered by hand
 # like the conformance binary; a binary of its own because the deaths need
 # small models and decorator rows, not the zoo. RematPlan is listed
-# because the tamper tests edit the plan (RematPlan.h).
+# because the tamper tests edit the plan (RematPlan.h); RematCheck for its
+# PUBLIC ODT_REMAT_CHECK, which gates the validator's deaths.
 add_executable(UnitTestCalculateGradsDeaths UnitTestCalculateGradsDeaths.c)
 target_link_libraries(UnitTestCalculateGradsDeaths PRIVATE
         CalculateGradsSequential
         unity
+        RematCheck
         RematScheduler
         RematPlan
         CommonLayerLibs

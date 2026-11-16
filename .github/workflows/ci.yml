@@ -289,6 +289,7 @@ jobs:
           # never a row, because:
           #   RematCheck.c         the validator, run by the driver
           #   RematDerive.c        shared, because it is the deriver (the one operand writer)
+          #   RematResolve.c       the operand resolver, run by the driver
           #   RematPlan.c          the static-plan generator
           #   RematPlanPolicy.c/.h the plan policies, private to RematPlan
           #   RematScheduler.c     the shared dispatch and the row vtable
@@ -301,6 +302,7 @@ jobs:
             git -C "$root" "$@" -- "$REMAT/*.c" "$REMAT/*.h" \
               ":!$REMAT/RematCheck.c" \
               ":!$REMAT/RematDerive.c" \
+              ":!$REMAT/RematResolve.c" \
               ":!$REMAT/RematPlan.c" \
               ":!$REMAT/RematPlanPolicy.c" \
               ":!$REMAT/RematPlanPolicy.h" \
@@ -641,6 +643,18 @@ jobs:
 
       - name: Test
         run: ctest --preset unit_test
+
+      # The validator compiled out (ODT_REMAT_CHECK=OFF): the conformance, gold
+      # and bit-identical remat tests must pass unchanged, which proves OFF
+      # changes no numbers.
+      - name: Configure (unit_test_nocheck)
+        run: cmake --preset unit_test_nocheck
+
+      - name: Build (unit_test_nocheck)
+        run: cmake --build --preset unit_test_nocheck
+
+      - name: Test (unit_test_nocheck)
+        run: ctest --preset unit_test_nocheck
 
   c-asan-build-and-test:
     needs: gate

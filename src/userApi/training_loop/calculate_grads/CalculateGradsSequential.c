@@ -75,8 +75,13 @@ static trainingStats_t *calculateGradsImpl(const model_t *m, lossConfig_t lossCo
         rematHeapInit(&ephemeral, m, lossConfig, input, &defaultPlanSpec);
         s = &ephemeral;
     }
+#ifdef ODT_REMAT_CHECK
     uint32_t producedGen[rematCheckNumWires(s)];
     uint16_t pending[rematCheckNumWires(s)];
+#else
+    uint32_t *producedGen = NULL;
+    uint16_t *pending = NULL;
+#endif
     rematCheck_t chk;
     rematCheckInit(&chk, s, m, REMAT_MODE_TRAIN, producedGen, pending);
 
@@ -143,7 +148,10 @@ static trainingStats_t *calculateGradsImpl(const model_t *m, lossConfig_t lossCo
             addAccumulate(op.in[0], op.out);
             break;
         default:
-            break; /* unreachable: rematCheckStep exits on an unknown kind */
+            /* The validator names it first when compiled in. */
+            PRINT_ERROR("remat[%s]: unknown step kind (kind %u, layer %u)", s->fns->name,
+                        (unsigned)st.kind, (unsigned)st.layer);
+            exit(1);
         }
         rematDone(s, &st);
     }

@@ -1043,7 +1043,8 @@ void testAgradFiresBeforeTheLayersBackward(void) {
 /* ---- what the validating interpreter changes: checked inputs, named exits ---- */
 
 /* ACT 0 is borrowed, so it is exempt from the bind generation but not from
- * residency. */
+ * residency. A validator rule: with ODT_REMAT_CHECK=OFF nothing names it. */
+#ifdef ODT_REMAT_CHECK
 void testAnInputWithoutBytesExitsBeforeLayer0Runs(void) {
     zooFixture_t f;
     buildMlp(&f);
@@ -1056,6 +1057,7 @@ void testAnInputWithoutBytesExitsBeforeLayer0Runs(void) {
     f.x->data = bytes;
     freeZoo(&f);
 }
+#endif
 
 /* The wire table cannot describe an empty model. The label has the input's
  * shape, so only the model size keeps the call from running. */
@@ -2128,9 +2130,8 @@ void testRecomputePlanTraceOrderOnTheMlp(void) {
 }
 
 /* trackRunningStats is not in the table's key: a caller that switches it on
- * after the build reaches the run, and the checker stops the REFORWARD before
- * the second forward moves the running statistics (the one training forward
- * so far has moved the batch counter to 1). */
+ * after the build reaches the call, and rematBegin stops it before any
+ * forward moves the running statistics. Kept with ODT_REMAT_CHECK=OFF. */
 static const batchNorm1dConfig_t *g_bnAtExit;
 
 static void printBatchesTrackedAtExit(void) {
@@ -2149,15 +2150,15 @@ static void runWithTrackingSwitchedOnAfterTheBuild(zooFixture_t *f) {
     (void)runOnce(f, &(trainingCall_t){.remat = &s, .key = &key});
 }
 
-void testATrackedBatchNormSwitchedOnAfterTheBuildExitsBeforeItsSecondForward(void) {
+void testATrackedBatchNormSwitchedOnAfterTheBuildExitsBeforeItsFirstForward(void) {
     zooFixture_t f;
     buildMlpWithBatchNorm(&f, true, false);
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[heap]: step #6 REFORWARD(layer 1) violates 'reforward of a "
-                             "state-updating layer' (layer 1 updates its state in every training "
-                             "forward: a tracked, unfrozen BatchNorm1d; keep ACT 2)",
+                             "rematBegin: remat[heap] plan step #6 REFORWARD(layer 1) is a "
+                             "'reforward of a state-updating layer' (layer 1 updates its state in "
+                             "every training forward: a tracked, unfrozen BatchNorm1d; keep ACT 2)",
                              runWithTrackingSwitchedOnAfterTheBuild(&f));
-    ASSERT_EXITS_WITH_OUTPUT(1, "numBatchesTracked=1\n",
+    ASSERT_EXITS_WITH_OUTPUT(1, "numBatchesTracked=0\n",
                              runWithTrackingSwitchedOnAfterTheBuild(&f));
     freeZoo(&f);
 }
@@ -2636,7 +2637,9 @@ int main(void) {
     RUN_TEST(testTwoCallsInARowMatchTheReferenceOnBatchNorm);
     RUN_TEST(testTwoCallsInARowMatchTheReferenceOnDropout);
     RUN_TEST(testAgradFiresBeforeTheLayersBackward);
+#ifdef ODT_REMAT_CHECK
     RUN_TEST(testAnInputWithoutBytesExitsBeforeLayer0Runs);
+#endif
     RUN_TEST(testAnEmptyModelExitsNamingIt);
     RUN_TEST(testAMarkedInputYieldsAnUnmarkedOutputAndLeaksNothing);
     RUN_TEST(testCalculateGradsSequentialRunsOnTheCallersScheduler);
@@ -2715,7 +2718,7 @@ int main(void) {
     RUN_TEST(testRecomputingAFrozenBatchNormMatchesTheReferenceOnArena);
     RUN_TEST(testRecomputingAFrozenBatchNormMatchesTheReferenceOnHeap);
     RUN_TEST(testRecomputePlanTraceOrderOnTheMlp);
-    RUN_TEST(testATrackedBatchNormSwitchedOnAfterTheBuildExitsBeforeItsSecondForward);
+    RUN_TEST(testATrackedBatchNormSwitchedOnAfterTheBuildExitsBeforeItsFirstForward);
     RUN_TEST(testRematGradsBitIdenticalToStoreAllOnArena);
     RUN_TEST(testRematGradsBitIdenticalToStoreAllOnHeap);
     RUN_TEST(testRecomputingTheDropoutMatchesTheReferenceOnArena);

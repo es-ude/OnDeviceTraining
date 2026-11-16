@@ -29,6 +29,14 @@
       }
     },
     {
+      "name": "unit_test_nocheck",
+      "displayName": "Unit-Test without the remat validator (ODT_REMAT_CHECK=OFF)",
+      "inherits": "unit_test",
+      "cacheVariables": {
+        "ODT_REMAT_CHECK": "OFF"
+      }
+    },
+    {
       "name": "unit_test_error",
       "displayName": "Unit-Test-Error",
       "inherits": "host",
@@ -147,6 +155,12 @@
       "targets": "all_unit_tests"
     },
     {
+      "name": "unit_test_nocheck",
+      "inherits": "host",
+      "configurePreset": "unit_test_nocheck",
+      "targets": "all_unit_tests"
+    },
+    {
       "name": "unit_test_error",
       "inherits": "host",
       "configurePreset": "unit_test_error",
@@ -232,6 +246,20 @@
       "name": "unit_test",
       "displayName": "Unit Tests",
       "configurePreset": "unit_test",
+      "output": {
+        "outputJUnitFile": "unit-test.junit",
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "unit"
+        }
+      }
+    },
+    {
+      "name": "unit_test_nocheck",
+      "displayName": "Unit Tests (ODT_REMAT_CHECK=OFF)",
+      "configurePreset": "unit_test_nocheck",
       "output": {
         "outputJUnitFile": "unit-test.junit",
         "outputOnFailure": true

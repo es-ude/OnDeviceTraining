@@ -245,6 +245,7 @@ in
 					# never a row, because:
 					#   RematCheck.c         the validator, run by the driver
 					#   RematDerive.c        shared, because it is the deriver (the one operand writer)
+					#   RematResolve.c       the operand resolver, run by the driver
 					#   RematPlan.c          the static-plan generator
 					#   RematPlanPolicy.c/.h the plan policies, private to RematPlan
 					#   RematScheduler.c     the shared dispatch and the row vtable
@@ -257,6 +258,7 @@ in
 						git -C "$root" "$@" -- "$REMAT/*.c" "$REMAT/*.h" \
 							":!$REMAT/RematCheck.c" \
 							":!$REMAT/RematDerive.c" \
+							":!$REMAT/RematResolve.c" \
 							":!$REMAT/RematPlan.c" \
 							":!$REMAT/RematPlanPolicy.c" \
 							":!$REMAT/RematPlanPolicy.h" \
@@ -519,6 +521,9 @@ in
 				CC=gcc cmake --preset unit_test
 				cmake --build --preset unit_test
 				ctest --preset unit_test
+				CC=gcc cmake --preset unit_test_nocheck
+				cmake --build --preset unit_test_nocheck
+				ctest --preset unit_test_nocheck
 				CC=${asanClang}/bin/clang cmake --preset unit_test_asan
 				cmake --build --preset unit_test_asan
 				ctest --preset unit_test_asan

@@ -212,8 +212,13 @@ static tensor_t *forwardOnScheduler(const model_t *m, rematScheduler_t *s, tenso
                                     tensor_t *label, lossFuncType_t funcType,
                                     reduction_t forwardReduction, const rngKey_t *callKey,
                                     float *loss) {
+#ifdef ODT_REMAT_CHECK
     uint32_t producedGen[rematCheckNumWires(s)];
     uint16_t pending[rematCheckNumWires(s)];
+#else
+    uint32_t *producedGen = NULL;
+    uint16_t *pending = NULL;
+#endif
     rematCheck_t chk;
     rematCheckInit(&chk, s, m, REMAT_MODE_EVAL, producedGen, pending);
     rematBeginEval(s, m, funcType, input);
@@ -228,16 +233,25 @@ static tensor_t *forwardOnScheduler(const model_t *m, rematScheduler_t *s, tenso
         /* From the checked step's layer index only, as in the training driver. */
         layerExec_t exStorage;
         const layerExec_t *ex = layerExecForLayer(callKey, st.layer, &exStorage);
-        if (st.kind == REMAT_STEP_FORWARD) {
+        switch (st.kind) {
+        case REMAT_STEP_FORWARD: {
             layer_t *layer = m->layers[st.layer];
             opFunctions[layer->type].forward(layer, op.in, op.k, op.out, ex);
-        } else { /* LOSS_FORWARD: the checker admits nothing else in EVAL */
+            break;
+        }
+        case REMAT_STEP_LOSS_FORWARD:
             /* All of it before rematDone releases ACT n. */
             if (label != NULL) {
                 *loss = lossFunctions[funcType].forward(op.in[0], label, forwardReduction, ex);
             }
             output = getTensorLike(op.in[0]);
             convertTensor(op.in[0], output, NULL);
+            break;
+        default:
+            /* The validator names it first when compiled in. */
+            PRINT_ERROR("remat[%s]: unknown step kind for eval (kind %u, layer %u)", s->fns->name,
+                        (unsigned)st.kind, (unsigned)st.layer);
+            exit(1);
         }
         rematDone(s, &st);
     }

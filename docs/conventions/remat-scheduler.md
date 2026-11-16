@@ -4,8 +4,8 @@ The training driver (`CalculateGradsSequential.c`) runs every grads call as a
 stream of steps that a **remat scheduler** hands out
 (`src/userApi/training_loop/remat/`, #4). A scheduler is one **row** (ARENA or
 HEAP today) over shared code: the buffer table and the static plan
-(`RematPlan`), the dispatch (`RematScheduler.c`) and the validator
-(`RematCheck`). A caller initialises one with `rematArenaInit` or
+(`RematPlan`), the dispatch (`RematScheduler.c`), the operand resolver and
+the validator (`RematCheck`; the validator is a build option, remat D28). A caller initialises one with `rematArenaInit` or
 `rematHeapInit`, passes it as `trainingCall_t.remat` (`TrainingCall.h`), and
 deinitialises it with `rematSchedulerDeinit`. A NULL scheduler means an
 ephemeral HEAP scheduler per grads call on the training call's default
@@ -86,12 +86,13 @@ A scheduler binds against the model as it is at each call.
 - A scheduler keyed to a different input shape than the one the grads level
   receives exits on its first call, naming ACT 0's field.
 - **A BatchNorm1d that starts tracking running statistics after the build**
-  exits at the first REFORWARD of that layer, before its second forward moves
-  the statistics: `trackRunningStats` is not a key fact, so the checker
-  re-checks the layer at run time. A plan never recomputes a BatchNorm1d that
-  tracks running statistics and is not frozen; untracked and frozen ones are
-  recomputed. The re-check does not make a configuration change during a call
-  safe.
+  exits at the next training call's `rematBegin`, after the bind and before
+  any forward moves the statistics, when the plan recomputes that layer:
+  `trackRunningStats` is not a key fact, so `rematBegin` re-checks the plan's
+  REFORWARD layers once per call (with `ODT_REMAT_CHECK=OFF` too). A plan never
+  recomputes a BatchNorm1d that tracks running statistics and is not frozen;
+  untracked and frozen ones are recomputed. The re-check does not make a
+  configuration change during a call safe.
 - **The report's recompute numbers are those of the init** (`refwdSteps`,
   `forwardCost`, `recomputeCost`): a later edit that changes a layer's forward
   cost but no key fact shows in them only after a fresh init.
@@ -110,13 +111,23 @@ A scheduler binds against the model as it is at each call.
 
 ## Two tiers of checking
 
-- **Always on**, release and firmware included: the validator's step rules
-  and stream checks, and ARENA's init-time placement verifier. There is no
-  opt-out macro.
+- **`ODT_REMAT_CHECK`** (a CMake option, default ON, firmware included): the
+  validator's step rules (kind, layer range, order, step budget, residency,
+  bind generation, operand overlap), its stream-finish and release checks.
+  OFF compiles `RematCheck.c` out, with its flash, the drivers' `producedGen`
+  VLA and the per-step work; the drivers still resolve operands through
+  `RematResolve.c`. The `unit_test_nocheck` preset (CI) runs the suite OFF:
+  `UnitTestRematCheck` and the validator's deaths are not built, and the
+  conformance, gold and bit-identical remat tests pass unchanged. What OFF
+  never compiles out is listed under remat D28. It is a PUBLIC compile
+  definition on `RematCheck`, which `RematCheck.h` switches on: every
+  includer links `RematCheck`.
+- **Always on**: ARENA's init-time placement verifier, the plan grammar at
+  build, the dispatch protocol checks and the key check at every bind.
 - **`ODT_REMAT_VERIFY`** (a CMake option, default OFF): dtype-aware poison of
   wire bytes at bind and at release.
   ON in the `unit_test`, `unit_test_debug` and `unit_test_asan` presets, and in
-  `unit_test_ubsan` through `unit_test_debug`; OFF in `unit_test_error`,
+  `unit_test_ubsan` through `unit_test_debug` and `unit_test_nocheck` through `unit_test`; OFF in `unit_test_error`,
   `unit_test_info` and every non-test preset. It is a PUBLIC compile definition
   on `RematPlan`: a test whose `LIB_UNDER_TEST` is `RematScheduler` or
   `RematCheck` lists `RematPlan` in `MORE_LIBS` before it `#ifdef`s on it.
@@ -128,7 +139,8 @@ A scheduler binds against the model as it is at each call.
   init declaration. Its entry points go into the private `RematRows.h`, its
   vtable entry into `RematScheduler.c`, whose `_Static_assert` swaps one
   token for the new last `rematSchedulerType_t` member (no count member).
-  `CalculateGradsSequential.c` and `RematCheck.c` stay unchanged.
+  `CalculateGradsSequential.c`, `RematResolve.c` and `RematCheck.c` stay
+  unchanged.
 - **The proof.** The row joins the conformance matrix (new cells in `g_cells`,
   `test/unit/training_loop/UnitTestCalculateGradsConformance.c`) and every
   both-rows death in `UnitTestCalculateGradsDeaths.c`.
@@ -148,8 +160,9 @@ continues, while the CI job fails closed.
 
 **Files.** Every `.c` and `.h` under `src/userApi/training_loop/remat/`,
 `include/` too, except an explicit list of shared files: `RematCheck.c`,
-`RematDerive.c` (the deriver, the one operand writer), `RematPlan.c`,
-`RematPlanPolicy.c`, `RematPlanPolicy.h`, `RematScheduler.c`,
+`RematResolve.c` (the operand resolver), `RematDerive.c` (the deriver, the one
+operand writer), `RematPlan.c`, `RematPlanPolicy.c`, `RematPlanPolicy.h`,
+`RematScheduler.c`,
 `RematWireTable.c` (the row SDK, the one legitimate `->data` writer)
 and `RematRows.h`. A new file is therefore a row until
 someone says otherwise. `RematPlace.h`, ARENA's private placement, is gated
@@ -340,8 +353,20 @@ decisions and those with nothing in force yet are left out.
   buffers.
 - **remat D26** ARENA's arena is resident: reserved at init, held until
   deinit.
-- **remat D28** The validator (`RematCheck`) is always compiled in,
-  firmware included. There is no opt-out macro.
+- **remat D28** The validator (`RematCheck.c`) is ON by default, firmware
+  included; `ODT_REMAT_CHECK=OFF` compiles it out (a build option, not a
+  runtime flag or a per-rule mask; checking on device stays possible by
+  building ON). OFF never compiles out: the operand resolver
+  (`RematResolve.c`, which the drivers execute on) and its not-initialised
+  guard; the dispatch protocol checks in `RematScheduler.c`; the wire-table
+  key and bind checks; `rematBegin`'s BatchNorm1d check (user-reachable: a
+  `trackRunningStats` edit between calls); the drivers' exit on an unknown
+  step kind (a branch never goes silent); every allocation, overflow and
+  external-input check; and `ODT_REMAT_VERIFY`. These guard what a caller or
+  the platform can still get wrong; the validator guards the rows and the
+  plan against the framework's own bugs. One caller error is named only by
+  the validator: an input header without bytes (`operand not resident: in
+  ACT 0`); with OFF it is undefined.
 - **remat D29** A violation mid-call exits (`exit(1)`), naming the row, the
   step and the rule. An allocation failure exits in `reserveMemory`, at init
   too. An unsupported model or a broken size or range limit exits at init
@@ -352,7 +377,8 @@ decisions and those with nothing in force yet are left out.
   torn down inside the call; its values are bit-identical to the pre-remat
   driver's.
 - **remat D31** Three libraries: `RematPlan` (wire table and static plan),
-  `RematScheduler` (dispatch and rows) and `RematCheck` (the validator).
+  `RematScheduler` (dispatch and rows) and `RematCheck` (the operand resolver,
+  and the validator when `ODT_REMAT_CHECK` is ON).
   Rows write `->data` only through bind and release (R1).
 - **remat D32** Offline planners enter as plan inputs. PAGED and EVICT are
   later rows that need no driver or interface change.

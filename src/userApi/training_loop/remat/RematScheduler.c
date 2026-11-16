@@ -5,6 +5,7 @@
 #include <stdlib.h>
 
 #include "Common.h"
+#include "LayerConfigAccess.h"
 #include "RematPlan.h"
 #include "RematRows.h"
 #include "RematScheduler.h"
@@ -29,6 +30,26 @@ static void requireInCall(const rematScheduler_t *s, const char *call) {
     }
 }
 
+/* trackRunningStats is not in the table's key, so a BatchNorm1d switched to
+ * tracking after the build reaches the call with a plan that recomputes it.
+ * Checked once per training call, after the bind has matched the model to the
+ * plan, before any forward moves the statistics. A change during a call stays
+ * unsafe. */
+static void requireNoStatefulReforward(const rematScheduler_t *s, const model_t *m) {
+    const rematProgram_t *p = &s->plan->train;
+    for (size_t k = 0; k < p->numSteps; k++) {
+        const rematStep_t *st = &p->steps[k];
+        if (st->kind == REMAT_STEP_REFORWARD && layerForwardUpdatesState(m->layers[st->layer])) {
+            PRINT_ERROR("rematBegin: remat[%s] plan step #%zu REFORWARD(layer %u) is a 'reforward "
+                        "of a state-updating layer' (layer %u updates its state in every training "
+                        "forward: a tracked, unfrozen BatchNorm1d; keep ACT %u)",
+                        s->fns->name, k, (unsigned)st->layer, (unsigned)st->layer,
+                        (unsigned)st->layer + 1u);
+            exit(1);
+        }
+    }
+}
+
 /* Both begins: the guards name the verb the caller used. The mode is set
  * before the row's begin, which walks that mode's program. */
 static void beginCall(rematScheduler_t *s, const char *verb, const model_t *m, lossFuncType_t lt,
@@ -48,6 +69,9 @@ static void beginCall(rematScheduler_t *s, const char *verb, const model_t *m, l
         exit(1);
     }
     rematWireTableBind(s->wires, m, lt, mode, input);
+    if (mode == REMAT_MODE_TRAIN) {
+        requireNoStatefulReforward(s, m);
+    }
     /* After the table bind, for a training call only: an evaluation program
      * has no backward step, so no chain. */
     s->wires->inPlace = (mode == REMAT_MODE_TRAIN) ? s->plan->inPlace : NULL;

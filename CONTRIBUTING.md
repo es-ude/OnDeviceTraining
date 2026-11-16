@@ -85,6 +85,7 @@ ctest --preset unit_test_debug          # run all unit tests
 | Configure preset | Purpose |
 |---|---|
 | `unit_test` | Plain unit-test build (what CI runs); sets `ODT_REMAT_VERIFY=ON` |
+| `unit_test_nocheck` | `unit_test` with the remat step validator compiled out (`ODT_REMAT_CHECK=OFF`); CI runs it too |
 | `unit_test_error` / `unit_test_info` / `unit_test_debug` | Increasing log verbosity (`DEBUG_MODE_*`); `debug` also enables `ODT_MEM_PROFILE`, `ODT_TRACK_INSTRUCTIONS` and `ODT_REMAT_VERIFY` |
 | `unit_test_asan` | AddressSanitizer + UBSan, plus `ODT_MEM_PROFILE`, `ODT_TRACK_INSTRUCTIONS`, `ODT_REMAT_VERIFY`. On macOS this needs compiler-rt ≥ LLVM 22 — see [`docs/conventions/testing.md`](docs/conventions/testing.md) (the devenv shell handles it) |
 | `unit_test_ubsan` | UBSan with gcc's full `undefined` set plus `float-cast-overflow` (configure with `CC=gcc`, as CI does); inherits `unit_test_debug` (same `ODT_*` options) |

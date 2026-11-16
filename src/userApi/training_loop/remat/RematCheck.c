@@ -8,7 +8,6 @@
 #include "CheckedSize.h"
 #include "Common.h"
 #include "Layer.h"
-#include "LayerConfigAccess.h"
 #include "Model.h"
 #include "OpTable.h"
 #include "RematCheck.h"
@@ -16,14 +15,8 @@
 #include "RematPlanPolicy.h"
 #include "RematScheduler.h"
 
-size_t rematCheckNumWires(const rematScheduler_t *s) {
-    if (s->fns == NULL || s->wires == NULL || s->plan == NULL) {
-        PRINT_ERROR("rematCheckNumWires: scheduler not initialised (never initialised, or "
-                    "deinitialised)");
-        exit(1);
-    }
-    return s->wires->numWires;
-}
+/* Compiled only with ODT_REMAT_CHECK (CMakeLists.txt); the operand resolver
+ * it calls is RematResolve.c. */
 
 /* The highest node below `below` whose BACKWARD runs, -1 when none. Amortised
  * O(1) per BACKWARD over a call: each node is passed at most once. */
@@ -64,7 +57,7 @@ static void countContributions(const rematWireTable_t *t, uint16_t *pending) {
 
 void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, const model_t *m, rematMode_t mode,
                     uint32_t *producedGen, uint16_t *pending) {
-    size_t numWires = rematCheckNumWires(s);
+    rematResolveInit(c, s, m, mode);
     size_t n = m->numLayers;
     /* REFORWARD's step budget, 2n + 2 + n(n+1)/2: the minimum-memory
      * schedule's n(n+1)/2 recomputes on top of a plain stream. Computed here,
@@ -83,16 +76,13 @@ void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, const model_t *m, rema
     /* The keyed table's flags, not the live model's: the bind compares the
      * two before the first step, and a mismatch exits there by name. */
     const rematWireTable_t *t = s->wires;
-    *c = (rematCheck_t){.sched = s,
-                        .mode = mode,
-                        .m = m,
-                        .hasBackward = t->hasBackward,
-                        .nextBackward = highestRunningBelow(t, (ptrdiff_t)t->modelSize),
-                        .maxSteps = maxSteps,
-                        .producedGen = producedGen,
-                        .pending = pending,
-                        .lastBackward = REMAT_NONE};
-    for (size_t w = 0; w < numWires; w++) {
+    c->hasBackward = t->hasBackward;
+    c->nextBackward = highestRunningBelow(t, (ptrdiff_t)t->modelSize);
+    c->maxSteps = maxSteps;
+    c->producedGen = producedGen;
+    c->pending = pending;
+    c->lastBackward = REMAT_NONE;
+    for (size_t w = 0; w < t->numWires; w++) {
         producedGen[w] = 0u;
         pending[w] = 0u;
     }
@@ -163,8 +153,8 @@ static void requireKindAndLayer(const rematCheck_t *c, const rematStep_t *st) {
 /* Rule 2: FORWARD strictly ascending and BACKWARD strictly
  * descending, so "exactly once, in order" is "matches the cursor"; no
  * per-layer bitset. Every cursor comparison is signed. A REFORWARD moves no
- * cursor: it is admitted inside the backward window, within the step budget,
- * and never for a layer whose training forward updates its state. */
+ * cursor: it is admitted inside the backward window and within the step
+ * budget. A state-updating layer's REFORWARD is rematBegin's to reject. */
 static void requireOrder(const rematCheck_t *c, const rematStep_t *st) {
     switch (st->kind) {
     case REMAT_STEP_FORWARD:
@@ -206,16 +196,6 @@ static void requireOrder(const rematCheck_t *c, const rematStep_t *st) {
         }
         if (c->stepIndex >= c->maxSteps) {
             REMAT_CHECK_EXIT(c, st, "'step budget exceeded' (maxSteps = %zu)", c->maxSteps);
-        }
-        /* trackRunningStats is not in the table's key, so a layer reconfigured
-         * after the plan was built gets here. The config must not change during
-         * a call: this check does not make a concurrent change safe. */
-        if (layerForwardUpdatesState(c->m->layers[st->layer])) {
-            REMAT_CHECK_EXIT(
-                c, st,
-                "'reforward of a state-updating layer' (layer %u updates its state in "
-                "every training forward: a tracked, unfrozen BatchNorm1d; keep ACT %u)",
-                (unsigned)st->layer, (unsigned)st->layer + 1u);
         }
         break;
     case REMAT_STEP_BACKWARD:
@@ -292,41 +272,6 @@ static const rematOperand_t *requireOperands(const rematCheck_t *c, const rematS
                          (unsigned)st->numReads, (unsigned)st->numWrites, reads, writes);
     }
     return &p->operands[st->operands];
-}
-
-static tensor_t *hdrOrNull(const rematWireTable_t *t, uint16_t w) {
-    return w == REMAT_NONE ? NULL : rematWireHdr(t, w);
-}
-
-/* The driver's view of the slice: a BACKWARD reads dy first, then its inputs,
- * and writes one dx slot per input; every other kind reads its inputs and
- * writes out, if anything. */
-static void fillOperands(const rematCheck_t *c, const rematStep_t *st, const rematOperand_t *slice,
-                         rematOperands_t *ops) {
-    const rematWireTable_t *t = c->sched->wires;
-    bool backward = st->kind == REMAT_STEP_BACKWARD;
-    *ops = (rematOperands_t){0};
-    if (st->kind == REMAT_STEP_FORWARD || st->kind == REMAT_STEP_REFORWARD || backward) {
-        ops->k = (uint8_t)(backward ? st->numWrites : st->numReads);
-    }
-    size_t first = 0;
-    if (backward) {
-        ops->dy = rematWireHdr(t, slice[0].wire);
-        first = 1u;
-    }
-    for (size_t i = first; i < st->numReads; i++) {
-        ops->in[i - first] = rematWireHdr(t, slice[i].wire);
-        ops->inMeta[i - first] = slice[i].mode == OP_MODE_META;
-    }
-    const rematOperand_t *writes = slice + st->numReads;
-    for (size_t i = 0; i < st->numWrites; i++) {
-        if (backward) {
-            ops->dx[i] = hdrOrNull(t, writes[i].wire);
-            ops->dxMode[i] = writes[i].mode;
-        } else {
-            ops->out = rematWireHdr(t, writes[i].wire);
-        }
-    }
 }
 
 /* One operand the step touches, with the role its messages name it by. */
@@ -544,7 +489,7 @@ void rematCheckStep(rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops
     requireKindAndLayer(c, st);
     requireOrder(c, st);
     const rematOperand_t *slice = requireOperands(c, st);
-    fillOperands(c, st, slice, ops);
+    rematResolveStep(c, st, ops);
     touched_t touched[REMAT_CHECK_MAX_TOUCHED];
     size_t num = touchedOperands(st, slice, touched);
     requireResident(c, st, touched, num);

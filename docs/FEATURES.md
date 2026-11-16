@@ -853,7 +853,11 @@ checkpointing, limitations, literature).
   block; its init places the buffers with five fixed placement orders,
   first-fit-decreasing among them, and keeps the smallest layout, so the block is
   never larger than first-fit-decreasing's) and `REMAT_HEAP` (one block per buffer),
-  and a validating checker (`RematCheck.h`). Training calls take a caller's
+  and a validating checker (`RematCheck.h`; a build option, `ODT_REMAT_CHECK`,
+  default ON, firmware included: OFF compiles the step validator out and keeps
+  operand resolution, the dispatch and key checks, the BatchNorm1d check and
+  the unknown-kind exit; the `unit_test_nocheck` preset runs the suite OFF in
+  CI). Training calls take a caller's
   scheduler through `trainingCall_t.remat` / `trainingRunOptions_t.remat`;
   `trainingRun` evaluates on the same scheduler when the evaluation micro-batch
   equals the training one and divides the evaluation loader's nominal sample
@@ -892,14 +896,15 @@ checkpointing, limitations, literature).
   rows C measured, and `examples/_shared/remat_conformance.py` trains every frontier
   plan against STORE_ALL (a local check). Wire bytes are poisoned at bind/release
   under `ODT_REMAT_VERIFY` (ON in the `unit_test`/`unit_test_debug`/`unit_test_asan`
-  presets and, by inheritance, `unit_test_ubsan`). A plan may recompute a
+  presets and, by inheritance, `unit_test_ubsan` and `unit_test_nocheck`). A plan may recompute a
   layer's forward output during the backward phase (`REMAT_STEP_REFORWARD`,
   in a `REMAT_PLAN_SEQUENCE` step list or a `REMAT_PLAN_RETAIN_LIST` plan): the driver runs it with
   the first forward's key, so the output is the same bytes, and traces it as
   `"refwd"`; the checker admits it only while a pending backward step still
   reads that output and within 2n + 2 + n(n+1)/2 steps, and both the plan
-  grammar and the checker reject recomputing a BatchNorm1d that tracks running
-  statistics and is not frozen (its second forward would move them again).
+  grammar and `rematBegin` (once per training call, with the validator OFF too)
+  reject recomputing a BatchNorm1d that tracks running statistics and is not
+  frozen (its second forward would move them again).
   With `rematPlanSpec_t.inPlaceDx` a ReLU, Dropout or Flatten backward writes
   its dx into the bytes of the gradient it reads when both have one dtype, FLOAT32 or
   SYM_INT32, and equal bytes (a BFP wire never shares); the plan keeps one

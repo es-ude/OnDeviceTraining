@@ -109,7 +109,7 @@ A scheduler binds against the model as it is at each call.
   samples (m > 1), already at the gather check if it is not FLOAT32 or
   differs from the first eval sample.
 
-## Two tiers of checking
+## Three tiers of checking
 
 - **`ODT_REMAT_CHECK`** (a CMake option, default ON, firmware included): the
   validator's step rules (kind, layer range, order, step budget, residency,

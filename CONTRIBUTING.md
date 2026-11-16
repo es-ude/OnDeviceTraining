@@ -92,6 +92,10 @@ ctest --preset unit_test_debug          # run all unit tests
 | `examples` | `BUILD_EXAMPLES=ON`; the default `all` target compiles **every** example binary |
 | `examples_memprofile` | `examples` + `ODT_MEM_PROFILE=ON` |
 | `arm_cross` | Compile-only `arm-none-eabi` cross build (`cmake/arm-none-eabi.cmake`, `-Werror`, no tests); its build preset compiles an explicit list of core library targets |
+| `arm_cross_nocheck` | `arm_cross` with `ODT_REMAT_CHECK=OFF` |
+
+What each option does is documented once, for users, in the README's
+[Build options](README.md#build-options) section.
 
 Each preset builds into its own `build/<preset>/` directory. Test presets
 exist for the six `unit_test*` presets; test binaries in

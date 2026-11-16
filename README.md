@@ -54,3 +54,25 @@ capabilities. Expect this project to evolve quickly.
 - **MCU realism:** optimize for peak RAM, temporary buffers, and predictable memory behavior.
 - **Host equivalence:** run the same model code on PC for debugging/profiling and cross-checking.
 - **Incremental complexity:** start minimal, then add optimizers, quantization, and memory knobs without breaking the baseline.
+
+---
+
+## Build options
+
+Pass options at configure time (`cmake -B build -DODT_REMAT_CHECK=OFF`) or pick a preset from
+[`CMakePresets.json`](CMakePresets.json). `cmake -LH <build-dir>` lists every option with its help
+text. Projects that only `add_subdirectory(OnDeviceTraining/src)` get the same options and defaults.
+
+| Option | Default | What it does / when to change it |
+|---|---|---|
+| `HOST` | `ON` | Host PC build. Set `OFF` for MCU firmware (defines `BUILDING_FOR_REMOTE`). |
+| `BUILD_EXAMPLES` | `OFF` | Build the training programs under `examples/`. |
+| `ODT_BUILD_TESTS` | `ON` | Build the unit tests (top-level builds only). Turn `OFF` when you only need the libraries. |
+| `ODT_BUILD_DIFFERENTIAL` | `OFF` | Build the differential numerics driver in `test/differential`. |
+| `DEBUG_MODE_INFO` | `OFF` | Print info-level log messages. Errors are always printed. |
+| `DEBUG_MODE_DEBUG` | `OFF` | Print debug-level log messages (verbose; host debugging). |
+| `ODT_MEM_PROFILE` | `OFF` | Track heap use of the framework's allocations to measure peak RAM. Adds overhead; leave `OFF` in firmware. |
+| `ODT_TRACK_INSTRUCTIONS` | `OFF` | Count arithmetic operations in the kernels. Adds overhead; profiling only. |
+| `ODT_REMAT_VERIFY` | `OFF` | Overwrite rematerialized buffers with poison bytes to catch stale reads. Test builds only. |
+| `ODT_REMAT_CHECK` | `ON` | Validate every rematerialization step before running it. Set `OFF` on MCUs to save flash (about 5 KB) once your model is known to be valid. |
+| `ODT_SCALE_STRICT` | `OFF` | Exit when a stored SYM/SYM_INT32/ASYM scale is not an exact 15-bit dyadic value. Test builds only. |

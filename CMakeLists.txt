@@ -8,16 +8,11 @@ project(OnDeviceTraining)
 
 odt_is_top_level_project(ODT_TOP_LEVEL_PROJECT)
 
+include(cmake/OdtOptions.cmake)
 include(cmake/compile_guards.cmake)
 
 add_subdirectory(src)
 
-set(DEBUG_LEVEL "0" CACHE STRING "Debug verbosity: 0=off, 1=error, 2=warn, 3=info")
-option(HOST "Build for host machine" ON)
-option(BUILD_EXAMPLES "Build the C-side training programs under examples/" OFF)
-option(ODT_BUILD_TESTS "Build unit tests (Unity + ctest registration)" ON)
-option(ODT_BUILD_DIFFERENTIAL
-        "Build the differential numerics driver under test/differential (not a ctest)" OFF)
 if(NOT HOST)
     add_compile_definitions(BUILDING_FOR_REMOTE)
 endif()

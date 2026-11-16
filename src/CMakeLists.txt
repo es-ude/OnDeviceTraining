@@ -1,3 +1,4 @@
+include(${CMAKE_CURRENT_LIST_DIR}/../cmake/OdtOptions.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/../cmake/compile_guards.cmake)
 
 add_subdirectory(arithmetic)

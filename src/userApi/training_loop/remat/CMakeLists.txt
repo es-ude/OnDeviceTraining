@@ -2,15 +2,6 @@
 # Rounding and ArithmeticType are linked because Tensor.h -> Quantization.h
 # and LayerConfigAccess.h include their headers.
 
-# Test builds poison wire bytes at bind and release. ON in the
-# unit_test, unit_test_debug and unit_test_asan presets (unit_test_ubsan
-# inherits debug, unit_test_nocheck unit_test); OFF in firmware and the examples.
-option(ODT_REMAT_VERIFY "Poison remat wire bytes at bind and release (test builds)" OFF)
-
-# The step validator (RematCheck.c). ON by default, firmware included; OFF
-# compiles it out and keeps only the operand resolver (RematResolve.c).
-option(ODT_REMAT_CHECK "Validate every remat step before the driver runs it" ON)
-
 add_library(RematPlan RematWireTable.c RematDerive.c RematPlan.c RematPlanPolicy.c)
 target_include_directories(RematPlan PUBLIC include)
 # PUBLIC, like ODT_MEM_PROFILE on StorageApi: tests that link RematPlan

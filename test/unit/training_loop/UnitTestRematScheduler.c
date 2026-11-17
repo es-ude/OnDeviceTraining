@@ -2133,10 +2133,12 @@ static uint8_t qMaxBitsOf(const tensor_t *hdr) {
     return ((const symInt32QConfig_t *)hdr->quantization->qConfig)->qMaxBits;
 }
 
-/* The contract: declared widths are the caller's, and the framework trusts
- * them. An in-place pair shares bytes, never a config, so while the pair
- * shares bytes each header keeps the width its own layer declared; the
- * scheduler never widens or narrows one wire to match the other. */
+/* The declared-width contract: declared widths are the caller's
+ * responsibility; setup rejects a narrower destination once; a width changed
+ * after setup is trusted unchecked, a wrong one is the caller's error. An
+ * in-place pair shares bytes, never a config, so while the pair shares bytes
+ * each header keeps the width its own layer declared; the scheduler never
+ * widens or narrows one wire to match the other. */
 void testAnInPlaceSymPairKeepsEachWiresDeclaredWidthOnBothRows(void) {
     const rowInit_t inits[] = {initArena, initHeap};
     for (size_t k = 0; k < 2u; k++) {

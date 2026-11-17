@@ -4,11 +4,6 @@
 #include "Layer.h"
 #include "LayerQuant.h"
 
-/*! Relu copies SYM_INT32 codes verbatim: declare outputQ at least as wide as
- *  the input wire and propLossQ at least as wide as the dx it receives. Setup
- *  (scheduler init, inference()) rejects a narrower one; the framework trusts
- *  the declared widths and does not re-check a width edited after setup. */
-
 /*! Borrowing variant — stores lq->outputQ and lq->propLossQ as the
  *  layer's outputQ / propLossQ pointers. Caller retains ownership of lq.
  *  Use when: the quantizations are shared/long-lived (e.g. reused across

@@ -939,10 +939,11 @@ void testTableInitExitsOnAZeroByteWire(void) {
     freeModel(model, 1);
 }
 
-/* The declared-width contract, forward: declared widths are the caller's and the framework
- * trusts them. Relu copies its input's codes verbatim, so an output declared narrower than its
- * input is a caller error that setup rejects, before any code is copied. No trainable layer: the
- * forward pair is checked even without a GRAD wire. */
+/* The declared-width contract: declared widths are the caller's responsibility; setup rejects a
+ * narrower destination once; a width changed after setup is trusted unchecked, a wrong one is the
+ * caller's error. Forward half of the setup check: Relu copies its input's codes verbatim, so an
+ * output declared narrower than its input exits at table init. No trainable layer: the forward
+ * pair is checked even without a GRAD wire. */
 void testTableInitExitsOnAReluOutputNarrowerThanItsInput(void) {
     symInt32QConfig_t wideQc;
     initSymInt32QConfigWithQMaxBits(HALF_AWAY, &wideQc, 16);
@@ -961,9 +962,9 @@ void testTableInitExitsOnAReluOutputNarrowerThanItsInput(void) {
     freeModel(model, 1);
 }
 
-/* The declared-width contract, backward: a caller error that setup rejects. Flatten's dx
- * inherits ACT 2 (@8) while the loss it copies verbatim is GRAD 3, Quant's propLossQ (@16).
- * Every other pair is equal-width or not SYM_INT32 on both sides. */
+/* The declared-width contract (see the Relu test above), backward half of the setup check:
+ * Flatten's dx inherits ACT 2 (@8) while the loss it copies verbatim is GRAD 3, Quant's
+ * propLossQ (@16). Every other pair is equal-width or not SYM_INT32 on both sides. */
 void testTableInitExitsOnAFlattenDxNarrowerThanTheLossItCopies(void) {
     symInt32QConfig_t wideQc;
     initSymInt32QConfigWithQMaxBits(HALF_AWAY, &wideQc, 16);
@@ -981,6 +982,33 @@ void testTableInitExitsOnAFlattenDxNarrowerThanTheLossItCopies(void) {
                              "SYM_INT32 qMaxBits 8, narrower than its source wire's 16",
                              (void)rematWireTableInit(&t, model, 4, defaultLossConfig(MSE), x));
     freeModel(model, 4);
+}
+
+/* The declared-width contract (see the Relu test above), its "once" half, as wanted behaviour:
+ * setup checks the widths once and a later bind does not. A valid Relu (input and wires @16)
+ * inits; the programmer then narrows the Relu's wires to 8 bits, below its 16-bit input. The
+ * next bind runs without an exit and the wire carries the narrowed width as declared -- the
+ * framework trusts it, and the wrong size is the programmer's own error. */
+void testAWidthNarrowedAfterSetupIsTrustedAsTheCallersResponsibility(void) {
+    symInt32QConfig_t inputQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &inputQc, 16);
+    quantization_t inputQ = {.type = SYM_INT32, .qConfig = &inputQc};
+    symInt32QConfig_t reluQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &reluQc, 16);
+    quantization_t reluQ = {.type = SYM_INT32, .qConfig = &reluQc};
+    layer_t *model[1] = {makeRelu(&reluQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &inputQ);
+    rematWireTable_t *t = initTable(model, 1, MSE, x);
+
+    reluQc.qMaxBits = 8; /* the programmer's edit after setup */
+    ASSERT_EXITS_WITH(0, rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x));
+    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
+    const symInt32QConfig_t *act1Qc = rematActHdr(t, 1)->quantization->qConfig;
+    TEST_ASSERT_EQUAL_UINT8(8, act1Qc->qMaxBits);
+
+    rematWireTableFree(t);
+    freeModel(model, 1);
 }
 
 /* The borrowed ACT 0 may be any dtype, packed ones included;
@@ -4397,6 +4425,7 @@ int main(void) {
     RUN_TEST(testTableInitExitsOnAZeroByteWire);
     RUN_TEST(testTableInitExitsOnAReluOutputNarrowerThanItsInput);
     RUN_TEST(testTableInitExitsOnAFlattenDxNarrowerThanTheLossItCopies);
+    RUN_TEST(testAWidthNarrowedAfterSetupIsTrustedAsTheCallersResponsibility);
     RUN_TEST(testTableInitAcceptsAPackedBorrowedInputAndSizesItExactly);
     RUN_TEST(testTableInitExitsOnAnUnknownInputQtype);
     RUN_TEST(testTableInitExitsOnAByteCountOverflowBeforeReservingTheTable);

@@ -2511,17 +2511,13 @@ static void buildCeReluSoftmax(zooFixture_t *f) {
 }
 
 /* Linear(4->4, the deepest, SYM weight grad over a 12-bit ACT 1) -> ReLU
- * (12-bit wires) -> Linear(4->2) whose dx is stored at 14 bits, under MSE,
- * B = 1. In place, the ReLU's 12-bit GRAD 1 (wire 6) writes into the bytes of
- * the 14-bit GRAD 2 (wire 5): equal bytes make the pair, the widths do not.
- * The widths cross a known gap: the ReLU SYM backward copies codes without
- * narrowing them to its 12-bit propLoss, so GRAD 1 carries codes wider than
- * 12 bits, which the operand guard of the weight-grad GEMM below cannot see
- * (it reads the declared width; with K = B = 1 no int32 sum can overflow).
- * So a config shared across the pair shows: GRAD 1 then declares 14 bits and
- * the guard stops the call. Should the ReLU narrow later, the in-place run
- * and the reference narrow alike, and a shared config still declares 14. */
-static void buildSymReluUnderA14BitDx(zooFixture_t *f) {
+ * (14-bit wires) -> Linear(4->2) whose dx is stored at 12 bits, under MSE,
+ * B = 1. In place, the ReLU's 14-bit GRAD 1 (wire 6) writes into the bytes of
+ * the 12-bit GRAD 2 (wire 5): equal bytes make the pair, the widths do not,
+ * and each wire keeps its own config. The ReLU copies codes verbatim, so its
+ * wires are at least as wide as the wires it copies from (table init rejects
+ * the narrower way round). */
+static void buildSymReluOverA12BitDx(zooFixture_t *f) {
     beginZoo(f);
     quantization_t *sym12 = keepTemplate(f, quantizationInitSymInt32WithBits(HALF_AWAY, 12));
     quantization_t *sym14 = keepTemplate(f, quantizationInitSymInt32WithBits(HALF_AWAY, 14));
@@ -2530,10 +2526,10 @@ static void buildSymReluUnderA14BitDx(zooFixture_t *f) {
     f->model[0]->config->linear->weightGradMath =
         (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = HALF_AWAY};
     layerQuant_t lq;
-    layerQuantInitUniform(&lq, sym12);
+    layerQuantInitUniform(&lq, sym14);
     f->model[1] = reluLayerInit(&lq);
     f->model[2] = makeLinear(4, 2, false, 2);
-    f->model[2]->config->linear->propLossQ = sym14;
+    f->model[2]->config->linear->propLossQ = sym12;
     f->n = 3;
     f->x = makeFloatTensor((size_t[]){1, 4}, 2, 1.0f);
     mseLabel(f, 2);
@@ -2565,7 +2561,7 @@ static const inPlaceEntry_t g_inPlaceFloat[IN_PLACE_FLOAT_ENTRIES] = {
     {"ce-relu-softmax", buildCeReluSoftmax, {[3] = true}, false, WIRE_BIT(5)},
 };
 static const inPlaceEntry_t g_inPlaceSym = {
-    "sym-12-under-14", buildSymReluUnderA14BitDx, {[3] = true}, true, WIRE_BIT(6)};
+    "sym-14-over-12", buildSymReluOverA12BitDx, {[3] = true}, true, WIRE_BIT(6)};
 
 /* Every plan kind with inPlaceDx on one fixture and row: STORE_ALL,
  * LIVENESS, RETAIN_LIST and, where it fits, MLP3's SEQUENCE. Each call

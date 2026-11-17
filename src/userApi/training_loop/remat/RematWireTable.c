@@ -193,6 +193,21 @@ static void deriveFacts(rematWireFact_t *facts, size_t numWires, layer_t **model
     }
 }
 
+/* Once per init, on the templates: a scale-transparent layer copies the codes of the wire it reads
+ * into the wire it writes. Forward, layer l reads ACT l and writes ACT l+1. Backward, the GRAD
+ * wires follow the seed in the order BACKWARD writes them, so GRAD id's layer reads id - 1 (the
+ * seed for the backward top, under CROSS_ENTROPY too). */
+static void requireTransparentCopyWidths(const rematWireFact_t *facts, size_t numWires,
+                                         layer_t **model, size_t n) {
+    for (size_t l = 0; l < n; l++) {
+        requireTransparentCopyWidth(model[l], l, "forward", facts[l].tmpl, facts[l + 1u].tmpl);
+    }
+    for (size_t id = n + 2u; id < numWires; id++) {
+        size_t l = facts[id].index;
+        requireTransparentCopyWidth(model[l], l, "backward", facts[id - 1u].tmpl, facts[id].tmpl);
+    }
+}
+
 static rematWire_t recordOf(const rematWireFact_t *f, tensor_t *hdr) {
     return (rematWire_t){.kind = f->kind,
                          .dtype = f->dtype,
@@ -343,6 +358,7 @@ bool rematWireTableInit(rematWireTable_t **out, layer_t **model, size_t n, lossC
         /* Makes every later sum over wires (liveBytes, peakLiveBytes) provably in range. */
         totalBytes = addSize(totalBytes, f->bytes, f, "total wire bytes");
     }
+    requireTransparentCopyWidths(facts, numWires, model, n);
 
     slabLayout_t sizing = {.base = NULL, .cursor = 0};
     (void)layoutTable(&sizing, facts, numWires, n, inputRank);

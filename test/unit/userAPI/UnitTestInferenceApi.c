@@ -1052,12 +1052,41 @@ void testInferenceOnADrawingForwardExits(void) {
                              inferThroughADropoutLeftInTrainingMode());
 }
 
+/* Relu copies its input's codes verbatim, so an output wire declared narrower than the input
+ * would hold codes above its declared width. */
+void testInferenceExitsOnAReluOutputNarrowerThanItsInput(void) {
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = 1;
+    dims[1] = 3;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    tensor_t *input = initTensor(shape, quantizationInitSymInt32WithBits(HALF_AWAY, 16), NULL);
+    tensorFillFromFloatBuffer(input, (float[]){-1.f, 1.f, 2.f}, 3);
+    quantization_t *narrowQ = quantizationInitSymInt32WithBits(HALF_AWAY, 8);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, narrowQ);
+    layer_t *relu = reluLayerInit(&lq);
+    layer_t *model[] = {relu};
+
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "layer 0 (Relu) forward: its destination wire is declared SYM_INT32 "
+                             "qMaxBits 8, narrower than its source wire's 16",
+                             freeTensor(inference(model, 1, input)));
+
+    freeReluLayer(relu);
+    freeTensor(input);
+    freeQuantization(narrowQ);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testInferenceLinearReluFloat);
     RUN_TEST(testInferenceLinearReluSymInt32);
     RUN_TEST(testInferenceLayerNormSymInt32);
     RUN_TEST(testInferenceOutputWireHonorsDeclaredQMaxBits);
+    RUN_TEST(testInferenceExitsOnAReluOutputNarrowerThanItsInput);
 
     RUN_TEST(testInferenceWithLossLinearReluFloat);
     RUN_TEST(testInferenceWithLossRejectsRank1LabelAgainstBatchedOutput);

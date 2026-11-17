@@ -502,3 +502,34 @@ size_t layerForwardCost(const layer_t *layer, size_t inElements, size_t outEleme
         exit(1);
     }
 }
+
+static const char *scaleTransparentName(layerType_t type) {
+    switch (type) {
+    case RELU:
+        return "Relu";
+    case DROPOUT:
+        return "Dropout";
+    case FLATTEN:
+        return "Flatten";
+    default:
+        return NULL;
+    }
+}
+
+void requireTransparentCopyWidth(const layer_t *layer, size_t index, const char *direction,
+                                 const quantization_t *src, const quantization_t *dst) {
+    const char *name = scaleTransparentName(layer->type);
+    if (name == NULL || src->type != SYM_INT32 || dst->type != SYM_INT32) {
+        return;
+    }
+    uint8_t srcBits = ((const symInt32QConfig_t *)src->qConfig)->qMaxBits;
+    uint8_t dstBits = ((const symInt32QConfig_t *)dst->qConfig)->qMaxBits;
+    if (dstBits < srcBits) {
+        PRINT_ERROR("layer %zu (%s) %s: its destination wire is declared SYM_INT32 qMaxBits %u, "
+                    "narrower than its source wire's %u -- the layer copies codes verbatim, so "
+                    "declare the destination at least %u bits wide",
+                    index, name, direction, (unsigned)dstBits, (unsigned)srcBits,
+                    (unsigned)srcBits);
+        exit(1);
+    }
+}

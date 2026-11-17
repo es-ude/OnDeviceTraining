@@ -315,7 +315,14 @@ only the quantization configs change; the int32 accumulator (no int64) is kept.
   the file-static Conv1d / ConvT grad kernels keep the scratch width, which no
   proof reads), and the requant cells clamp to the target width, so only a
   hand-built tensor whose codes exceed its own declared width can defeat the
-  proof.
+  proof. The scale-transparent Relu/Dropout/Flatten copy codes verbatim into a
+  wire that keeps its own declared width, so for a SYM_INT32 → SYM_INT32 copy
+  the destination must be declared at least as wide as the source
+  (`requireTransparentCopyWidth`). Wire setup enforces it on the declared
+  templates, never a kernel: every forward and backward pair at
+  `rematWireTableInit`, the forward pair in the scheduler-less inference buffer
+  setup (`initBufferOutput`). A width narrowed by a config edit after the table
+  init is not re-checked by the later binds.
   Sites: `matmulIntCore` (`N = aColumns`) and `matmulIntCoreGrouped` (raw group
   partial, bounded by `min(groupSize, N)` terms, **and** the int32 accumulator of
   rescaled partials, bounded by `N` terms plus the seed), `conv1dKernelSymInt32`

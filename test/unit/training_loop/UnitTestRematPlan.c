@@ -939,6 +939,48 @@ void testTableInitExitsOnAZeroByteWire(void) {
     freeModel(model, 1);
 }
 
+/* Relu copies its input's codes verbatim, so an output declared narrower than the input would
+ * hold codes above its declared width. No trainable layer: the forward pair is checked even
+ * without a GRAD wire. */
+void testTableInitExitsOnAReluOutputNarrowerThanItsInput(void) {
+    symInt32QConfig_t wideQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &wideQc, 16);
+    quantization_t wideQ = {.type = SYM_INT32, .qConfig = &wideQc};
+    symInt32QConfig_t narrowQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &narrowQc, 8);
+    quantization_t narrowQ = {.type = SYM_INT32, .qConfig = &narrowQc};
+    layer_t *model[1] = {makeRelu(&narrowQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &wideQ);
+    rematWireTable_t *t = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "layer 0 (Relu) forward: its destination wire is declared SYM_INT32 "
+                             "qMaxBits 8, narrower than its source wire's 16",
+                             (void)rematWireTableInit(&t, model, 1, defaultLossConfig(MSE), x));
+    freeModel(model, 1);
+}
+
+/* Flatten's dx inherits ACT 2 (@8) while the loss it copies is GRAD 3, Quant's propLossQ (@16).
+ * Every other pair is equal-width or not SYM_INT32 on both sides. */
+void testTableInitExitsOnAFlattenDxNarrowerThanTheLossItCopies(void) {
+    symInt32QConfig_t wideQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &wideQc, 16);
+    quantization_t wideQ = {.type = SYM_INT32, .qConfig = &wideQc};
+    symInt32QConfig_t narrowQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &narrowQc, 8);
+    quantization_t narrowQ = {.type = SYM_INT32, .qConfig = &narrowQc};
+    layer_t *model[4] = {makeLinear(2, 4, false, 0), makeQuant(&narrowQ, &g_floatQ),
+                         flattenLayerInit(), makeQuant(&g_floatQ, &wideQ)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
+    rematWireTable_t *t = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "layer 2 (Flatten) backward: its destination wire is declared "
+                             "SYM_INT32 qMaxBits 8, narrower than its source wire's 16",
+                             (void)rematWireTableInit(&t, model, 4, defaultLossConfig(MSE), x));
+    freeModel(model, 4);
+}
+
 /* The borrowed ACT 0 may be any dtype, packed ones included;
  * its bytes are exact for the checker's disjointness test. */
 void testTableInitAcceptsAPackedBorrowedInputAndSizesItExactly(void) {
@@ -4041,8 +4083,9 @@ static uint8_t middleLayerMark(layer_t *middle, quantization_t *dxQ, size_t grad
 }
 
 /* The rows a type-, dtype- or size-blind rule would pair: each keeps four
- * elements on both wires. SYM_INT32 widths are not compared (12 bits under
- * 14 pairs): each wire keeps its own qConfig. Dropout's row is in the
+ * elements on both wires. SYM_INT32 widths are not compared (a 14-bit dx over
+ * a 12-bit loss pairs; table init rejects the narrower dx): each wire keeps
+ * its own qConfig. Dropout's row is in the
  * driver's conformance suite, whose binary links the Dropout layer. */
 void testInPlaceEligibilityTruthTable(void) {
     uint8_t exponent[1];
@@ -4064,8 +4107,8 @@ void testInPlaceEligibilityTruthTable(void) {
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, middleLayerMark(makeSoftmax(), NULL, 0), "Softmax");
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, middleLayerMark(makeQuant(&g_floatQ, &g_floatQ), NULL, 0),
                                     "FLOAT32 Quantization");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, middleLayerMark(makeRelu(&sym12Q), &sym14Q, 0),
-                                    "SYM_INT32 12 under 14 bits");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, middleLayerMark(makeRelu(&sym14Q), &sym12Q, 0),
+                                    "SYM_INT32 14 over 12 bits");
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, middleLayerMark(makeRelu(&bfpQ), &bfpQ, 0), "BFP");
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, middleLayerMark(makeRelu(&sym12Q), NULL, 0),
                                     "SYM_INT32 under FLOAT32");
@@ -4350,6 +4393,8 @@ int main(void) {
     RUN_TEST(testTableInitExitsOnAnInputRankAboveTheRankField);
     RUN_TEST(testTableInitExitsOnAnUnsupportedWireDtype);
     RUN_TEST(testTableInitExitsOnAZeroByteWire);
+    RUN_TEST(testTableInitExitsOnAReluOutputNarrowerThanItsInput);
+    RUN_TEST(testTableInitExitsOnAFlattenDxNarrowerThanTheLossItCopies);
     RUN_TEST(testTableInitAcceptsAPackedBorrowedInputAndSizesItExactly);
     RUN_TEST(testTableInitExitsOnAnUnknownInputQtype);
     RUN_TEST(testTableInitExitsOnAByteCountOverflowBeforeReservingTheTable);

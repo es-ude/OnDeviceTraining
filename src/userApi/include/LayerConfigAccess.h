@@ -79,4 +79,13 @@ size_t layerForwardCost(const layer_t *layer, size_t inElements, size_t outEleme
  * prop-loss wire and grad storage are ignored -- evaluation never runs them. */
 const char *layerForwardNonFloat32Field(layer_t *layer);
 
+/* Setup gate for the scale-transparent layers (Relu, Dropout, Flatten). Their SYM_INT32 paths copy
+ * codes from the wire they read (src) into the wire they write (dst) without restoring them to
+ * dst's declared width, and the accumulator guard trusts every declared qMaxBits. Call once per
+ * wire pair when the wires are set up, never per element. Exits naming the layer when it is
+ * scale-transparent, both configs are SYM_INT32 and dst is declared narrower than src; every other
+ * pair passes. direction ("forward"/"backward") only names the pair in the message. */
+void requireTransparentCopyWidth(const layer_t *layer, size_t index, const char *direction,
+                                 const quantization_t *src, const quantization_t *dst);
+
 #endif // ODT_LAYER_CONFIG_ACCESS_H

@@ -30,15 +30,17 @@
 #include "TensorApi.h"
 #include "TensorConversion.h"
 
-// Initializes buffer to match output
-static void initBufferOutput(tensor_t *buffer, layer_t *currentLayer, shape_t *inputShape,
-                             sparsity_t *inputSparsity, quantization_t *inputQ) {
+// Initializes buffer to match output; layerIndex names the layer in a setup exit
+static void initBufferOutput(tensor_t *buffer, layer_t *currentLayer, size_t layerIndex,
+                             shape_t *inputShape, sparsity_t *inputSparsity,
+                             quantization_t *inputQ) {
     layerType_t currentLayerType = currentLayer->type;
     quantization_t *currentQ = layerOutputQ(currentLayer);
     if (currentQ == NULL) {
         // Flatten has no per-layer quantization; output dtype equals input dtype.
         currentQ = inputQ;
     }
+    requireTransparentCopyWidth(currentLayer, layerIndex, "forward", inputQ, currentQ);
 
     size_t sizeDims = inputShape->numberOfDimensions;
 
@@ -192,7 +194,7 @@ tensor_t *inference(layer_t **model, size_t numberOfLayers, tensor_t *input) {
         forwardFn_t forward = layerFunctions[currentLayerType].forward;
 
         tensor_t outputCurr;
-        initBufferOutput(&outputCurr, currentLayer, outputNext.shape, outputNext.sparsity,
+        initBufferOutput(&outputCurr, currentLayer, i, outputNext.shape, outputNext.sparsity,
                          outputNext.quantization);
         forward(currentLayer, &outputNext, &outputCurr, NULL);
 
@@ -295,7 +297,7 @@ inferenceStats_t *inferenceWithLoss(layer_t **model, size_t numberOfLayers, tens
         forwardFn_t forward = layerFunctions[currentLayerType].forward;
 
         tensor_t outputCurr;
-        initBufferOutput(&outputCurr, currentLayer, outputNext.shape, outputNext.sparsity,
+        initBufferOutput(&outputCurr, currentLayer, i, outputNext.shape, outputNext.sparsity,
                          outputNext.quantization);
         layerExec_t exStorage;
         forward(currentLayer, &outputNext, &outputCurr, layerExecForLayer(callKey, i, &exStorage));

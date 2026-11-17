@@ -939,9 +939,10 @@ void testTableInitExitsOnAZeroByteWire(void) {
     freeModel(model, 1);
 }
 
-/* Relu copies its input's codes verbatim, so an output declared narrower than the input would
- * hold codes above its declared width. No trainable layer: the forward pair is checked even
- * without a GRAD wire. */
+/* The declared-width contract, forward: declared widths are the caller's and the framework
+ * trusts them. Relu copies its input's codes verbatim, so an output declared narrower than its
+ * input is a caller error that setup rejects, before any code is copied. No trainable layer: the
+ * forward pair is checked even without a GRAD wire. */
 void testTableInitExitsOnAReluOutputNarrowerThanItsInput(void) {
     symInt32QConfig_t wideQc;
     initSymInt32QConfigWithQMaxBits(HALF_AWAY, &wideQc, 16);
@@ -960,7 +961,8 @@ void testTableInitExitsOnAReluOutputNarrowerThanItsInput(void) {
     freeModel(model, 1);
 }
 
-/* Flatten's dx inherits ACT 2 (@8) while the loss it copies is GRAD 3, Quant's propLossQ (@16).
+/* The declared-width contract, backward: a caller error that setup rejects. Flatten's dx
+ * inherits ACT 2 (@8) while the loss it copies verbatim is GRAD 3, Quant's propLossQ (@16).
  * Every other pair is equal-width or not SYM_INT32 on both sides. */
 void testTableInitExitsOnAFlattenDxNarrowerThanTheLossItCopies(void) {
     symInt32QConfig_t wideQc;

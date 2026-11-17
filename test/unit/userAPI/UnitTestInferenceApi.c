@@ -1052,8 +1052,9 @@ void testInferenceOnADrawingForwardExits(void) {
                              inferThroughADropoutLeftInTrainingMode());
 }
 
-/* Relu copies its input's codes verbatim, so an output wire declared narrower than the input
- * would hold codes above its declared width. */
+/* The declared-width contract on the scheduler-less path: declared widths are the caller's and
+ * the framework trusts them. Relu copies its input's codes verbatim, so an output wire declared
+ * narrower than its input is a caller error that the buffer setup rejects before the forward. */
 void testInferenceExitsOnAReluOutputNarrowerThanItsInput(void) {
     size_t *dims = reserveMemory(2 * sizeof(size_t));
     dims[0] = 1;

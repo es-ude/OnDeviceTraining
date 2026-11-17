@@ -2113,6 +2113,57 @@ void testAnInPlaceSymPairKeepsTwoHeadersOnBothRows(void) {
     }
 }
 
+/* MLP3 whose ReLU declares 14-bit wires over the last Linear's 12-bit dx: the
+ * in-place pair wire 6 (GRAD 1, 14 bits) over wire 5 (GRAD 2, 12 bits). */
+static symInt32QConfig_t g_sym14Qc;
+static quantization_t g_sym14Q = {.type = SYM_INT32, .qConfig = &g_sym14Qc};
+static void buildMixedWidthSymChainModel(fixture_t *f) {
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &g_sym12Qc, 12);
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &g_sym14Qc, 14);
+    f->model[0] = makeLinear(2, 4, false, 0);
+    f->model[1] = makeRelu(&g_sym14Q);
+    f->model[2] = makeLinear(4, 2, false, 2);
+    f->model[2]->config->linear->propLossQ = &g_sym12Q;
+    f->n = MLP3_N;
+    f->lt = MSE;
+    f->x = makeResidentInput(&f->in, (size_t[]){1, 2}, 2);
+}
+
+static uint8_t qMaxBitsOf(const tensor_t *hdr) {
+    return ((const symInt32QConfig_t *)hdr->quantization->qConfig)->qMaxBits;
+}
+
+/* The contract: declared widths are the caller's, and the framework trusts
+ * them. An in-place pair shares bytes, never a config, so while the pair
+ * shares bytes each header keeps the width its own layer declared; the
+ * scheduler never widens or narrows one wire to match the other. */
+void testAnInPlaceSymPairKeepsEachWiresDeclaredWidthOnBothRows(void) {
+    const rowInit_t inits[] = {initArena, initHeap};
+    for (size_t k = 0; k < 2u; k++) {
+        fixture_t f;
+        buildMixedWidthSymChainModel(&f);
+        rematScheduler_t s = inits[k](&f, &g_livenessInPlace);
+        TEST_ASSERT_EQUAL_UINT8(1, s.plan->inPlace[6]);
+        bindAndBegin(&f, &s);
+        rematStep_t st;
+        size_t sharedSteps = 0;
+        while (rematNext(&s, &st)) {
+            const tensor_t *root = rematWireHdr(s.wires, 5);
+            const tensor_t *member = rematWireHdr(s.wires, 6);
+            if (member->data != NULL) {
+                TEST_ASSERT_EQUAL_PTR(root->data, member->data);
+                TEST_ASSERT_EQUAL_UINT8(12, qMaxBitsOf(root));
+                TEST_ASSERT_EQUAL_UINT8(14, qMaxBitsOf(member));
+                sharedSteps++;
+            }
+            rematDone(&s, &st);
+        }
+        endAndUnbind(&s);
+        TEST_ASSERT_TRUE_MESSAGE(sharedSteps > 0, "the pair never shared bytes");
+        freeFixture(&f, &s);
+    }
+}
+
 /* A member's header is derived when its root binds, through the same path as
  * every inherited wire: GRAD 9, Flatten's dx and a member of GRAD 10's chain,
  * takes ACT 9's dtype and shape at rootStep, although ACT 9's bytes died long
@@ -3253,6 +3304,7 @@ int main(void) {
     RUN_TEST(testRowContractArenaInPlaceUnderEveryPolicy);
     RUN_TEST(testRowContractHeapInPlaceUnderEveryPolicy);
     RUN_TEST(testAnInPlaceSymPairKeepsTwoHeadersOnBothRows);
+    RUN_TEST(testAnInPlaceSymPairKeepsEachWiresDeclaredWidthOnBothRows);
     RUN_TEST(testAnInPlaceFlattenMemberTakesItsHeaderAtItsRootsBind);
     RUN_TEST(testHarLivenessInPlaceObservesItsPlannedPeakOnBothRows);
     RUN_TEST(testBindAndReleaseExitOnAnInPlaceMember);

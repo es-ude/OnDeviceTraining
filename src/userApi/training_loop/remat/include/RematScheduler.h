@@ -152,7 +152,13 @@ struct rematScheduler {
  * memory counter (ODT_MEM_PROFILE) a successful init checks that it reserved
  * exactly its report's arenaBytes + metadataBytes and exits naming both
  * otherwise. The counter is process-wide: no other thread may reserve or free
- * memory while an init runs. */
+ * memory while an init runs.
+ * Declared wire widths are the caller's: the framework trusts every declared
+ * SYM_INT32 qMaxBits and never checks a stored code against it. Init exits
+ * when a Relu, Dropout or Flatten, which copy codes verbatim, writes a wire
+ * declared narrower than the wire it copies from (forward or backward). It
+ * checks once: a width edited after init is used as declared, unchecked, and
+ * a wrong one is the caller's error. */
 bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
                     const tensor_t *inputLike, const rematPlanSpec_t *spec);
 /* The peer row: table and plan only; one exactly-sized block per
@@ -200,7 +206,8 @@ void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out);
 /* THE entry points (the optimizerStep precedent): only drivers call them; raw
  * fns-> calls only in unit tests. rematBegin binds the table (key check,
  * per-bind derivation, ACT 0 = input) before the row's begin; rematEnd
- * unbinds it after the row's end. */
+ * unbinds it after the row's end. The bind adopts the templates' current
+ * declared widths without re-checking them (the width contract at the init). */
 void rematBegin(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss, tensor_t *input);
 /* An evaluation call on the same instance: the same guards and key check, then
  * the plan's EVAL program (FORWARD and LOSS_FORWARD only); no GRAD header is

@@ -18,7 +18,10 @@ void freeInferenceStats(inferenceStats_t *inferenceStats);
  *  nothing. A forward that draws (stochastic rounding, a BFP_SHIFT_SR softmax,
  *  a Dropout layer left in training mode) needs a key: run it through
  *  inferenceWithLoss with call->key (a keyed inference() is #491); here it
- *  stops with a named error at its first draw. */
+ *  stops with a named error at its first draw. Declared wire widths are the
+ *  caller's and are trusted: before each layer runs, a Relu or Dropout whose
+ *  SYM_INT32 output is declared narrower than its input stops with a named
+ *  error. */
 tensor_t *inference(layer_t **model, size_t numberOfLayers, tensor_t *input);
 
 /*! Wraps each sample with batchViewOf before calling inference() -- see

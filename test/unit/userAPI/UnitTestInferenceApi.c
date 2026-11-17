@@ -1052,9 +1052,10 @@ void testInferenceOnADrawingForwardExits(void) {
                              inferThroughADropoutLeftInTrainingMode());
 }
 
-/* The declared-width contract on the scheduler-less path: declared widths are the caller's and
- * the framework trusts them. Relu copies its input's codes verbatim, so an output wire declared
- * narrower than its input is a caller error that the buffer setup rejects before the forward. */
+/* The declared-width contract: declared widths are the caller's responsibility; setup rejects a
+ * narrower destination once; a width changed after setup is trusted unchecked, a wrong one is the
+ * caller's error. Scheduler-less path: Relu copies its input's codes verbatim, so an output wire
+ * declared narrower than its input exits in the buffer setup, before the forward. */
 void testInferenceExitsOnAReluOutputNarrowerThanItsInput(void) {
     size_t *dims = reserveMemory(2 * sizeof(size_t));
     dims[0] = 1;

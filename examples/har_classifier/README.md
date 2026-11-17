@@ -306,8 +306,8 @@ arm). The #206 acceptance criterion braced for a drop citing Deutel et al.
 (arXiv:2407.10734) — but the paper's reported degradation is tied to 8-bit
 **gradient** range, and this configuration deliberately keeps gradients
 FLOAT32, so parity here is consistent with the paper rather than contradicting
-it. Quantizing the gradient path is the open research axis (#218, Jan's
-#137–#142 ladder), not this run.
+it. Quantizing the gradient path is the open research axis (#218), not this
+run.
 
 ### Group-granular quantization (#300)
 

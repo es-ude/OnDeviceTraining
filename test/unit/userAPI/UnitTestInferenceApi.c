@@ -295,8 +295,8 @@ void testInferenceLayerNormSymInt32(void) {
 
     /* [2,4] SYM input — int16-range mantissas by construction (NOT a Linear
      * output; Linear SYM outputs are accumulator-range and would violate the
-     * LayerNorm input contract — open inter-layer requantization question
-     * for the quantized-training epic, #137). */
+     * LayerNorm input contract — inter-layer requantization is an open
+     * question). */
     size_t *inDims = reserveMemory(2 * sizeof(size_t));
     inDims[0] = 2;
     inDims[1] = 4;

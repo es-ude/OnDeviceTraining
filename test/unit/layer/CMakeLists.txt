@@ -595,3 +595,10 @@ add_elastic_ai_unit_test(
         StorageApi
         odt_test_death
 )
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        OpTable
+        MORE_LIBS
+        CommonLayerLibs
+)

@@ -214,6 +214,15 @@ target_link_libraries(Model PRIVATE
         Rounding
 )
 
+add_library(OpTable OpTable.c)
+target_include_directories(OpTable PUBLIC include)
+target_link_libraries(OpTable PRIVATE
+        Layer
+        Common
+        Tensor
+        Rounding
+)
+
 add_library(Linear Linear.c)
 target_include_directories(Linear PUBLIC include)
 target_link_libraries(Linear PRIVATE

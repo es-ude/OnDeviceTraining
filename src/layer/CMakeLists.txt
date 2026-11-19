@@ -214,6 +214,7 @@ target_link_libraries(Model PRIVATE
         Common
         Tensor
         Rounding
+        StorageApi
 )
 
 add_library(OpTable OpTable.c)

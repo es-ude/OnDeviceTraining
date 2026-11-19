@@ -31,5 +31,10 @@ bool modelIsChain(const model_t *m);
  * node j, each derived from the shapes of the buffers node j is wired to. Fine for any validated
  * model; the caller sizes every shape's dims and order to maxRank = max(input rank, 2). */
 void modelShapePass(const model_t *m, const shape_t *input, shape_t *shapes, size_t maxRank);
+/* Exits with an error naming caller unless m is a schedulable model: 1 <= numLayers < 0xFFFF and,
+ * for an explicit CSR, well-formed offsets, exactly each op's arity of inputs per node, inputs
+ * only from earlier buffers, and a consumer for every buffer but the last. Call it once at a public
+ * entry; lower layers trust it and never re-check. The rules on merge inputs join with ADD. */
+void modelRequireValid(const model_t *m, const char *caller);
 
 #endif // ODT_MODEL_H

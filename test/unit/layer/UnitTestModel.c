@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "DeathTest.h"
 #include "Layer.h"
 #include "Model.h"
 #include "unity.h"
@@ -94,6 +95,58 @@ void testShapePassReadsTheWiredInput(void) {
     TEST_ASSERT_EQUAL_size_t(4, shapes[2].dimensions[2]);
 }
 
+static layer_t *g_three[3] = {&g_relu[0], &g_relu[1], &g_relu[2]};
+
+void testValidChainsPass(void) {
+    static const uint16_t start[4] = {0, 1, 2, 3}, in[3] = {0, 1, 2};
+    layer_t *reused[3] = {&g_relu[0], &g_relu[0], &g_relu[0]}; /* chains may reuse a layer */
+    modelRequireValid(&MODEL_CHAIN(g_three, 3), "t");
+    modelRequireValid(&(model_t){g_three, 3, start, in}, "t");
+    modelRequireValid(&MODEL_CHAIN(reused, 3), "t");
+}
+
+void testAnEmptyModelExitsNamingTheCaller(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "someEntry: modelSize == 0: nothing to schedule",
+                             modelRequireValid(&MODEL_CHAIN(g_three, 0), "someEntry"));
+}
+
+/* Rule 1 reads no layer: 0xFFFF nodes over a 3-entry array is safe. */
+void testAModelAtTheBufferIdLimitExits(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "t: modelSize 65535 reaches 0xFFFF: buffer ids are uint16_t",
+                             modelRequireValid(&(model_t){g_three, 0xFFFFu, NULL, NULL}, "t"));
+}
+
+void testTheCsrStartsAtZero(void) {
+    static const uint16_t start[3] = {1, 1, 2}, in[2] = {0, 1};
+    ASSERT_EXITS_WITH_OUTPUT(1, "t: wiring: inputStart[0] is 1, not 0",
+                             modelRequireValid(&(model_t){g_three, 2, start, in}, "t"));
+}
+
+void testTheCsrNeverDecreases(void) {
+    static const uint16_t start[3] = {0, 1, 0}, in[1] = {0};
+    ASSERT_EXITS_WITH_OUTPUT(1, "t: wiring: inputStart[2] = 0 is below inputStart[1] = 1",
+                             modelRequireValid(&(model_t){g_three, 2, start, in}, "t"));
+}
+
+/* The out-of-range second id is never read: the arity rule fires first. */
+void testANodeTakesExactlyItsArity(void) {
+    static const uint16_t start[3] = {0, 1, 3}, in[3] = {0, 1, 0x7777};
+    ASSERT_EXITS_WITH_OUTPUT(1, "t: wiring: node 1 has 2 inputs, layer type 1 takes 1",
+                             modelRequireValid(&(model_t){g_three, 2, start, in}, "t"));
+}
+
+void testAnInputComesFromAnEarlierBuffer(void) {
+    static const uint16_t start[3] = {0, 1, 2}, in[2] = {1, 1};
+    ASSERT_EXITS_WITH_OUTPUT(1, "t: wiring: node 0 reads buffer 1, which is not produced before it",
+                             modelRequireValid(&(model_t){g_three, 2, start, in}, "t"));
+}
+
+void testEveryBufferButTheLastHasAConsumer(void) {
+    static const uint16_t start[3] = {0, 1, 2}, in[2] = {0, 0};
+    ASSERT_EXITS_WITH_OUTPUT(1, "t: wiring: buffer 1 has no consumer",
+                             modelRequireValid(&(model_t){g_three, 2, start, in}, "t"));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testAChainNodeReadsItsPredecessor);
@@ -101,5 +154,13 @@ int main(void) {
     RUN_TEST(testBothChainEncodingsAreAChain);
     RUN_TEST(testShapePassWritesEveryBufferShape);
     RUN_TEST(testShapePassReadsTheWiredInput);
+    RUN_TEST(testValidChainsPass);
+    RUN_TEST(testAnEmptyModelExitsNamingTheCaller);
+    RUN_TEST(testAModelAtTheBufferIdLimitExits);
+    RUN_TEST(testTheCsrStartsAtZero);
+    RUN_TEST(testTheCsrNeverDecreases);
+    RUN_TEST(testANodeTakesExactlyItsArity);
+    RUN_TEST(testAnInputComesFromAnEarlierBuffer);
+    RUN_TEST(testEveryBufferButTheLastHasAConsumer);
     return UNITY_END();
 }

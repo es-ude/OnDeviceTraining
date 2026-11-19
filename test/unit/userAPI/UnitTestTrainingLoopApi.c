@@ -3129,7 +3129,8 @@ static remRun_t runTwoEpochs(bool withScheduler, bool deinitBeforeTheRun) {
     rematScheduler_t s;
     if (withScheduler) {
         batchView_t view;
-        TEST_ASSERT_TRUE(rematHeapInit(&s, model, 1, cfg, batchViewOf(&view, epochItems[0]), NULL));
+        TEST_ASSERT_TRUE(rematHeapInit(&s, &MODEL_CHAIN(model, 1), cfg,
+                                       batchViewOf(&view, epochItems[0]), NULL));
         if (deinitBeforeTheRun) {
             rematSchedulerDeinit(&s);
         }
@@ -3245,7 +3246,7 @@ static remRun_t runMicroBatched(size_t m, size_t mEval, size_t evalCount,
     remRun_t run = {0};
     rematScheduler_t s;
     if (withScheduler) {
-        TEST_ASSERT_TRUE(rematHeapInit(&s, model, 1, cfg, trainBatchLike, NULL));
+        TEST_ASSERT_TRUE(rematHeapInit(&s, &MODEL_CHAIN(model, 1), cfg, trainBatchLike, NULL));
     }
     g_forwardedCalls = 0;
     g_forwardedOnScheduler = 0;

@@ -313,8 +313,9 @@ static bool buildStage2Remat(rematScheduler_t *s, const rematSelection_t *sel, l
                              lossConfig_t lossConfig) {
     sample_t *keySample = getTrainSample(0);
     batchView_t keyView;
-    bool built = rematSelectInit(s, sel, "har_classifier_finetune", model2, MODEL_SIZE, lossConfig,
-                                 batchViewOf(&keyView, keySample->item));
+    bool built =
+        rematSelectInit(s, sel, "har_classifier_finetune", &MODEL_CHAIN(model2, MODEL_SIZE),
+                        lossConfig, batchViewOf(&keyView, keySample->item));
     freeSample(keySample);
     return built;
 }
@@ -323,8 +324,8 @@ static bool buildStage2Remat(rematScheduler_t *s, const rematSelection_t *sel, l
 static bool dumpStage2Problem(layer_t **model2, lossConfig_t lossConfig) {
     sample_t *keySample = getTrainSample(0);
     batchView_t keyView;
-    bool dumped = rematSelectDumpProblem(stdout, stderr, model2, MODEL_SIZE, lossConfig,
-                                         batchViewOf(&keyView, keySample->item));
+    bool dumped = rematSelectDumpProblem(stdout, stderr, &MODEL_CHAIN(model2, MODEL_SIZE),
+                                         lossConfig, batchViewOf(&keyView, keySample->item));
     freeSample(keySample);
     return dumped;
 }

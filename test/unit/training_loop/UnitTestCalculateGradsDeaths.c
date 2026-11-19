@@ -321,8 +321,8 @@ void testARowThatEatsTheLastStepExitsOnBothRows(void) {
 static fixture_t *g_reentered;
 
 static bool reenteringNext(rematScheduler_t *s, rematStep_t *st) {
-    rematBegin(s, g_reentered->model, g_reentered->n, defaultLossConfig(g_reentered->lt),
-               g_reentered->x);
+    rematBegin(s, &MODEL_CHAIN(g_reentered->model, g_reentered->n),
+               defaultLossConfig(g_reentered->lt), g_reentered->x);
     return decoratedNext(s, st);
 }
 

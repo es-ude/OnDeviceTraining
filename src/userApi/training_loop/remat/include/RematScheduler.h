@@ -7,6 +7,7 @@
 
 #include "Layer.h"
 #include "LossFunction.h"
+#include "Model.h"
 #include "Tensor.h"
 
 /* The remat scheduler's public header (#4): the step, policy, spec
@@ -153,11 +154,11 @@ struct rematScheduler {
  * exactly its report's arenaBytes + metadataBytes and exits naming both
  * otherwise. The counter is process-wide: no other thread may reserve or free
  * memory while an init runs. */
-bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
+bool rematArenaInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
                     const tensor_t *inputLike, const rematPlanSpec_t *spec);
 /* The peer row: table and plan only; one exactly-sized block per
  * range, reserved when the range opens and freed when it closes. */
-bool rematHeapInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
+bool rematHeapInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
                    const tensor_t *inputLike, const rematPlanSpec_t *spec);
 /* NULL-safe and idempotent: the row's blocks (fns->deinit), then the plan and
  * the table. Exits inside a call. */
@@ -201,12 +202,12 @@ void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out);
  * fns-> calls only in unit tests. rematBegin binds the table (key check,
  * per-bind derivation, ACT 0 = input) before the row's begin; rematEnd
  * unbinds it after the row's end. */
-void rematBegin(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss, tensor_t *input);
+void rematBegin(rematScheduler_t *s, const model_t *m, lossConfig_t loss, tensor_t *input);
 /* An evaluation call on the same instance: the same guards and key check, then
  * the plan's EVAL program (FORWARD and LOSS_FORWARD only); no GRAD header is
  * written. The eval caller has only the loss type, which is all the bind
  * keys. */
-void rematBeginEval(rematScheduler_t *s, layer_t **model, size_t modelSize, lossFuncType_t lossType,
+void rematBeginEval(rematScheduler_t *s, const model_t *m, lossFuncType_t lossType,
                     tensor_t *input);
 bool rematNext(rematScheduler_t *s, rematStep_t *step);
 void rematDone(rematScheduler_t *s, const rematStep_t *step);

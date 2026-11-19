@@ -591,13 +591,13 @@ void arenaVerifyPlacement(const rematWireTable_t *t, const rematProgram_t *p, co
     }
 }
 
-bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
+bool rematArenaInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
                     const tensor_t *inputLike, const rematPlanSpec_t *spec) {
 #ifdef ODT_MEM_PROFILE
     size_t mark = memProfileCurrentBytes();
 #endif
     *s = (rematScheduler_t){.type = REMAT_ARENA, .fns = &rematSchedulerFunctions[REMAT_ARENA]};
-    if (!rematWireTableInit(&s->wires, &MODEL_CHAIN(model, n), loss, inputLike)) {
+    if (!rematWireTableInit(&s->wires, m, loss, inputLike)) {
         return false;
     }
     /* Early bound, before the plan block exists: every TRAIN plan writes each
@@ -614,7 +614,7 @@ bool rematArenaInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t
     }
     /* The identical model reaches both: rematPlanBuild checks it against the
      * table's key. */
-    if (!rematPlanBuild(&s->plan, s->wires, &MODEL_CHAIN(model, n), spec)) {
+    if (!rematPlanBuild(&s->plan, s->wires, m, spec)) {
         return false;
     }
     const rematProgram_t *p = &s->plan->train;

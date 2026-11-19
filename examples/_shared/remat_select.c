@@ -203,26 +203,25 @@ static bool isGemm(layerType_t type) {
     return type == LINEAR || type == CONV1D || type == CONV1D_TRANSPOSED;
 }
 
-void rematSelectRetainMask(const rematSelection_t *sel, layer_t **model, size_t modelSize,
-                           bool *retain) {
+void rematSelectRetainMask(const rematSelection_t *sel, const model_t *m, bool *retain) {
     size_t k = 1;
-    while (k * k < modelSize) {
+    while (k * k < m->numLayers) {
         k++;
     }
-    for (size_t j = 0; j <= modelSize; j++) {
+    for (size_t j = 0; j <= m->numLayers; j++) {
         switch (sel->retainForm) {
         case REMAT_RETAIN_LIST:
             retain[j] = sel->retain[j];
             break;
         case REMAT_RETAIN_SQRT:
-            retain[j] = j >= 1u && j < modelSize && j % k == 0u;
+            retain[j] = j >= 1u && j < m->numLayers && j % k == 0u;
             break;
         case REMAT_RETAIN_SPEED:
-            retain[j] = j >= 1u && isGemm(model[j - 1u]->type);
+            retain[j] = j >= 1u && isGemm(m->layers[j - 1u]->type);
             break;
         }
     }
-    retain[modelSize] = true;
+    retain[m->numLayers] = true;
 }
 
 static const char *storageName(rematSchedulerType_t t) {
@@ -288,24 +287,22 @@ static void printFields(FILE *f, const char *lead, const char *example, const re
 }
 
 bool rematSelectInit(rematScheduler_t *s, const rematSelection_t *sel, const char *example,
-                     layer_t **model, size_t modelSize, lossConfig_t loss,
-                     const tensor_t *inputLike) {
+                     const model_t *m, lossConfig_t loss, const tensor_t *inputLike) {
     rematPlanSpec_t spec = sel->plan;
     bool retain[REMAT_SELECT_MAX_LAYERS + 1u];
     if (spec.policy == REMAT_PLAN_RETAIN_LIST) {
-        if (modelSize != sel->modelSize) {
+        if (m->numLayers != sel->modelSize) {
             fprintf(stderr,
                     "ERROR: rematSelectInit: REMAT_PLAN was read for %zu layers, the model "
                     "has %zu\n",
-                    sel->modelSize, modelSize);
+                    sel->modelSize, m->numLayers);
             return false;
         }
-        rematSelectRetainMask(sel, model, modelSize, retain);
+        rematSelectRetainMask(sel, m, retain);
         spec.retain = retain;
     }
-    bool built = (sel->storage == REMAT_ARENA)
-                     ? rematArenaInit(s, model, modelSize, loss, inputLike, &spec)
-                     : rematHeapInit(s, model, modelSize, loss, inputLike, &spec);
+    bool built = (sel->storage == REMAT_ARENA) ? rematArenaInit(s, m, loss, inputLike, &spec)
+                                               : rematHeapInit(s, m, loss, inputLike, &spec);
     if (!built) {
         rematReport_t r;
         rematSchedulerReport(s, &r);
@@ -382,8 +379,7 @@ static const char *dumpTypeName(layerType_t type) {
 
 /* Everything the problem cannot hold is refused before a byte is written, so
  * a refused dump leaves json empty. A Flatten's dtypes are its input's. */
-static bool dumpCanWrite(layer_t **model, size_t modelSize, lossConfig_t loss,
-                         const tensor_t *inputLike) {
+static bool dumpCanWrite(const model_t *m, lossConfig_t loss, const tensor_t *inputLike) {
     const shape_t *in = inputLike->shape;
     if (in->numberOfDimensions == 0u || in->numberOfDimensions > REMAT_DUMP_MAX_RANK) {
         fprintf(stderr,
@@ -410,8 +406,8 @@ static bool dumpCanWrite(layer_t **model, size_t modelSize, lossConfig_t loss,
         fprintf(stderr, "ERROR: DUMP_PROBLEM: unknown lossFuncType_t %d\n", (int)loss.funcType);
         return false;
     }
-    for (size_t l = 0; l < modelSize; l++) {
-        layer_t *layer = model[l];
+    for (size_t l = 0; l < m->numLayers; l++) {
+        layer_t *layer = m->layers[l];
         if (dumpTypeName(layer->type) == NULL) {
             fprintf(stderr,
                     "ERROR: DUMP_PROBLEM: layer %zu has layerType_t %d, which the problem dump "
@@ -504,9 +500,9 @@ static void emitLayer(problemWriter_t *w, const layer_t *layer, const shape_t *o
     emit(w, "}");
 }
 
-bool rematSelectDumpProblem(FILE *json, FILE *hashLine, layer_t **model, size_t modelSize,
-                            lossConfig_t loss, const tensor_t *inputLike) {
-    if (!dumpCanWrite(model, modelSize, loss, inputLike)) {
+bool rematSelectDumpProblem(FILE *json, FILE *hashLine, const model_t *m, lossConfig_t loss,
+                            const tensor_t *inputLike) {
+    if (!dumpCanWrite(m, loss, inputLike)) {
         return false;
     }
     problemWriter_t w = {.f = json, .hash = REMAT_PROBLEM_HASH_BASIS};
@@ -520,8 +516,8 @@ bool rematSelectDumpProblem(FILE *json, FILE *hashLine, layer_t **model, size_t 
     shape_t scratch[2] = {{.dimensions = dims[0], .orderOfDimensions = order[0]},
                           {.dimensions = dims[1], .orderOfDimensions = order[1]}};
     shape_t *prev = inputLike->shape;
-    for (size_t l = 0; l < modelSize; l++) {
-        layer_t *layer = model[l];
+    for (size_t l = 0; l < m->numLayers; l++) {
+        layer_t *layer = m->layers[l];
         shape_t *out = &scratch[l % 2u];
         /* As the remat wire table: a Flatten writes [batch, features]. */
         out->numberOfDimensions = (layer->type == FLATTEN) ? 2u : prev->numberOfDimensions;

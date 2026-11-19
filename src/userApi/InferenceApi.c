@@ -245,10 +245,11 @@ static inferenceStats_t *inferenceOnScheduler(layer_t **model, size_t numberOfLa
                                               tensor_t *input, tensor_t *label,
                                               lossFuncType_t funcType, reduction_t forwardReduction,
                                               rematScheduler_t *s, const rngKey_t *callKey) {
+    const model_t chain = MODEL_CHAIN(model, numberOfLayers);
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t chk;
-    rematCheckInit(&chk, s, model, numberOfLayers, funcType, REMAT_MODE_EVAL, producedGen);
-    rematBeginEval(s, model, numberOfLayers, funcType, input);
+    rematCheckInit(&chk, s, &chain, funcType, REMAT_MODE_EVAL, producedGen);
+    rematBeginEval(s, &chain, funcType, input);
     inferenceStats_t *inferenceStats = NULL;
     for (;;) {
         rematStep_t st;

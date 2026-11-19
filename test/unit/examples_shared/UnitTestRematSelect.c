@@ -105,7 +105,7 @@ void testARetainListKeepsItsActsAndTheLastOne(void) {
     TEST_ASSERT_EQUAL_INT(REMAT_PLAN_RETAIN_LIST, sel.plan.policy);
     TEST_ASSERT_NULL(sel.plan.retain);
     bool mask[HAR_N + 1];
-    rematSelectRetainMask(&sel, NULL, HAR_N, mask);
+    rematSelectRetainMask(&sel, &MODEL_CHAIN(NULL, HAR_N), mask);
     assertKeeps(mask, HAR_N, (const size_t[]){3, 7, 12}, 3, "retain:3,7");
     TEST_ASSERT_EQUAL_STRING(", \"remat_storage\": \"heap\", \"remat_plan\": \"retain:3,7,12\"",
                              configKeysOf(&sel));
@@ -125,20 +125,20 @@ void testTheRetainPresetsResolveAgainstTheModel(void) {
     }
     bool mask[17];
     rematSelection_t sqrt12 = selectFor("retain:sqrt", HAR_N);
-    rematSelectRetainMask(&sqrt12, model, HAR_N, mask);
+    rematSelectRetainMask(&sqrt12, &MODEL_CHAIN(model, HAR_N), mask);
     assertKeeps(mask, HAR_N, (const size_t[]){4, 8, 12}, 3, "retain:sqrt, n = 12");
     rematSelection_t sqrt16 = selectFor("retain:sqrt", 16);
-    rematSelectRetainMask(&sqrt16, NULL, 16, mask);
+    rematSelectRetainMask(&sqrt16, &MODEL_CHAIN(NULL, 16), mask);
     assertKeeps(mask, 16, (const size_t[]){4, 8, 12, 16}, 4, "retain:sqrt, n = 16");
     rematSelection_t speed = selectFor("retain:speed", HAR_N);
-    rematSelectRetainMask(&speed, model, HAR_N, mask);
+    rematSelectRetainMask(&speed, &MODEL_CHAIN(model, HAR_N), mask);
     assertKeeps(mask, HAR_N, (const size_t[]){1, 4, 7, 11, 12}, 5, "retain:speed");
     static const layerType_t convTTypes[4] = {CONV1D, RELU, CONV1D_TRANSPOSED, RELU};
     for (size_t l = 0; l < COUNT_OF(convTTypes); l++) {
         layers[l] = (layer_t){.type = convTTypes[l], .config = NULL};
     }
     rematSelection_t speedConvT = selectFor("retain:speed", COUNT_OF(convTTypes));
-    rematSelectRetainMask(&speedConvT, model, COUNT_OF(convTTypes), mask);
+    rematSelectRetainMask(&speedConvT, &MODEL_CHAIN(model, COUNT_OF(convTTypes)), mask);
     assertKeeps(mask, COUNT_OF(convTTypes), (const size_t[]){1, 3, 4}, 3,
                 "retain:speed, Conv1dTransposed");
     TEST_ASSERT_EQUAL_STRING(", \"remat_storage\": \"heap\", \"remat_plan\": \"retain:sqrt\"",
@@ -434,7 +434,7 @@ static bool dumpOf(layer_t **model, size_t n, lossConfig_t loss, const tensor_t 
     FILE *hashLine = tmpfile();
     TEST_ASSERT_NOT_NULL(json);
     TEST_ASSERT_NOT_NULL(hashLine);
-    bool dumped = rematSelectDumpProblem(json, hashLine, model, n, loss, input);
+    bool dumped = rematSelectDumpProblem(json, hashLine, &MODEL_CHAIN(model, n), loss, input);
     (void)readInto(json, g_printed, sizeof g_printed);
     (void)readInto(hashLine, g_hashLine, sizeof g_hashLine);
     return dumped;
@@ -537,7 +537,7 @@ void testTheProblemOfTheFinetuneModelMarksItsFrozenConvs(void) {
 static void exitWithTheDumpVerdict(FILE *json, layer_t **model, size_t n, lossConfig_t loss,
                                    const tensor_t *input) {
     (void)dup2(STDOUT_FILENO, fileno(stderr));
-    bool dumped = rematSelectDumpProblem(json, stdout, model, n, loss, input);
+    bool dumped = rematSelectDumpProblem(json, stdout, &MODEL_CHAIN(model, n), loss, input);
     exit(dumped ? 0 : (ftell(json) == 0 ? 1 : 2));
 }
 
@@ -625,7 +625,8 @@ void testAFailedHashLineFailsTheDump(void) {
     FILE *hashLine = fopen("/dev/null", "r");
     TEST_ASSERT_NOT_NULL(json);
     TEST_ASSERT_NOT_NULL(hashLine);
-    TEST_ASSERT_FALSE(rematSelectDumpProblem(json, hashLine, relu, 1u, g_crossEntropy, x));
+    TEST_ASSERT_FALSE(
+        rematSelectDumpProblem(json, hashLine, &MODEL_CHAIN(relu, 1u), g_crossEntropy, x));
     (void)fclose(hashLine);
     (void)fclose(json);
     freeReluLayer(relu[0]);
@@ -636,7 +637,8 @@ void testAFailedHashLineFailsTheDump(void) {
 static void exitWithTheWriteVerdict(layer_t **model, const tensor_t *input) {
     (void)dup2(STDOUT_FILENO, fileno(stderr));
     FILE *json = fopen("/dev/null", "r");
-    exit(rematSelectDumpProblem(json, stdout, model, 1u, g_crossEntropy, input) ? 0 : 1);
+    exit(rematSelectDumpProblem(json, stdout, &MODEL_CHAIN(model, 1u), g_crossEntropy, input) ? 0
+                                                                                              : 1);
 }
 
 void testAFailedProblemWriteIsNamed(void) {
@@ -663,7 +665,7 @@ static bool initFlattenWithBudget(rematScheduler_t *s, const char *budget) {
     initFloat32Quantization(&floatQ);
     static inputHeader_t in;
     const tensor_t *x = makeInputHeader(&in, (const size_t[]){1, 4}, 2u, &floatQ);
-    return rematSelectInit(s, &sel, "unit", model, 1u, defaultLossConfig(MSE), x);
+    return rematSelectInit(s, &sel, "unit", &MODEL_CHAIN(model, 1u), defaultLossConfig(MSE), x);
 }
 
 static void exitWithTheBudgetVerdict(const char *budget) {
@@ -711,7 +713,10 @@ static void exitWithTheInitVerdictForElevenLayers(void) {
     (void)dup2(STDOUT_FILENO, fileno(stderr));
     rematSelection_t sel = selectFor("retain:3", HAR_N);
     rematScheduler_t s = {0};
-    exit(rematSelectInit(&s, &sel, "har_classifier", NULL, 11u, (lossConfig_t){0}, NULL) ? 0 : 1);
+    exit(rematSelectInit(&s, &sel, "har_classifier", &MODEL_CHAIN(NULL, 11u), (lossConfig_t){0},
+                         NULL)
+             ? 0
+             : 1);
 }
 
 /* A list checked against 12 layers must not build a plan for 11. */
@@ -740,7 +745,8 @@ static void assertInitMarksExactlyWithTheSuffix(const char *plan, bool withSuffi
     setTensorValues(&input, (uint8_t *)x, &shape, &floatQ, NULL);
     rematScheduler_t s;
     TEST_ASSERT_TRUE_MESSAGE(
-        rematSelectInit(&s, &sel, "unit", model, 1u, defaultLossConfig(MSE), &input), plan);
+        rematSelectInit(&s, &sel, "unit", &MODEL_CHAIN(model, 1u), defaultLossConfig(MSE), &input),
+        plan);
     TEST_ASSERT_EQUAL_MESSAGE(withSuffix, s.plan->inPlace != NULL, plan);
     rematSchedulerDeinit(&s);
 }

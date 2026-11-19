@@ -32,8 +32,8 @@ static void requireInCall(const rematScheduler_t *s, const char *call) {
 
 /* Both begins: the guards name the verb the caller used. The mode is set
  * before the row's begin, which walks that mode's program. */
-static void beginCall(rematScheduler_t *s, const char *verb, layer_t **model, size_t n,
-                      lossFuncType_t lt, rematMode_t mode, tensor_t *input) {
+static void beginCall(rematScheduler_t *s, const char *verb, const model_t *m, lossFuncType_t lt,
+                      rematMode_t mode, tensor_t *input) {
     if (s->fns == NULL || s->wires == NULL || s->plan == NULL) {
         PRINT_ERROR("%s: scheduler not initialised (never initialised, or its init "
                     "returned false and was ignored)",
@@ -44,7 +44,7 @@ static void beginCall(rematScheduler_t *s, const char *verb, layer_t **model, si
         PRINT_ERROR("%s: scheduler '%s' re-entered", verb, s->fns->name);
         exit(1);
     }
-    rematWireTableBind(s->wires, &MODEL_CHAIN(model, n), lt, mode, input);
+    rematWireTableBind(s->wires, m, lt, mode, input);
     /* After the table bind, for a training call only: an evaluation program
      * has no backward step, so no chain. */
     s->wires->inPlace = (mode == REMAT_MODE_TRAIN) ? s->plan->inPlace : NULL;
@@ -53,14 +53,13 @@ static void beginCall(rematScheduler_t *s, const char *verb, layer_t **model, si
     s->fns->begin(s);
 }
 
-void rematBegin(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
-                tensor_t *input) {
-    beginCall(s, "rematBegin", model, n, loss.funcType, REMAT_MODE_TRAIN, input);
+void rematBegin(rematScheduler_t *s, const model_t *m, lossConfig_t loss, tensor_t *input) {
+    beginCall(s, "rematBegin", m, loss.funcType, REMAT_MODE_TRAIN, input);
 }
 
-void rematBeginEval(rematScheduler_t *s, layer_t **model, size_t modelSize, lossFuncType_t lossType,
+void rematBeginEval(rematScheduler_t *s, const model_t *m, lossFuncType_t lossType,
                     tensor_t *input) {
-    beginCall(s, "rematBeginEval", model, modelSize, lossType, REMAT_MODE_EVAL, input);
+    beginCall(s, "rematBeginEval", m, lossType, REMAT_MODE_EVAL, input);
 }
 
 /* next() and done() alternate, and done() answers exactly the step next()

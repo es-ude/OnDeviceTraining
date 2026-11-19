@@ -1183,7 +1183,7 @@ static void initMixedChainsAndExitWithTheAlignmentVerdict(void) {
         buildMixedChain(&c, &state);
         for (size_t policy = 0; policy < 2u; policy++) {
             rematScheduler_t s;
-            if (!rematArenaInit(&s, c.model, c.n, defaultLossConfig(MSE), c.x,
+            if (!rematArenaInit(&s, &MODEL_CHAIN(c.model, c.n), defaultLossConfig(MSE), c.x,
                                 policy == 0u ? NULL : &g_liveness)) {
                 _exit(3);
             }
@@ -1229,7 +1229,7 @@ void testArenaInitFailureKeepsAnalyticReport(void) {
     tensor_t *x = makeInput(&in, (size_t[]){1, (size_t)1 << 60}, 2, &g_floatQ);
     size_t before = memProfileCurrentBytes();
     rematScheduler_t s;
-    TEST_ASSERT_FALSE(rematArenaInit(&s, model, 1, defaultLossConfig(MSE), x, NULL));
+    TEST_ASSERT_FALSE(rematArenaInit(&s, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), x, NULL));
     rematReport_t r;
     rematSchedulerReport(&s, &r);
     TEST_ASSERT_TRUE(r.planned);
@@ -1268,7 +1268,7 @@ static void arenaInitExpectingAnExit(layer_t **model, size_t n, lossFuncType_t l
     rematScheduler_t s;
     g_memBeforeExit = memProfileCurrentBytes();
     (void)atexit(printReservedBeforeExit);
-    (void)rematArenaInit(&s, model, n, defaultLossConfig(lt), x, NULL);
+    (void)rematArenaInit(&s, &MODEL_CHAIN(model, n), defaultLossConfig(lt), x, NULL);
 }
 
 static size_t sharedBlockBytes(layer_t **model, size_t n, lossFuncType_t lt, const tensor_t *x) {
@@ -1348,7 +1348,7 @@ void testArenaInitExitsAboveMaxRangesBeforeThePlanIsBuilt(void) {
 
 static void initAndExitWithTheVerdict(layer_t **model, size_t n, const tensor_t *x) {
     rematScheduler_t s;
-    bool ok = rematArenaInit(&s, model, n, defaultLossConfig(MSE), x, NULL) &&
+    bool ok = rematArenaInit(&s, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x, NULL) &&
               s.plan->train.numRanges == n;
     rematSchedulerDeinit(&s);
     _exit(ok ? 0 : 2);
@@ -1381,7 +1381,7 @@ static size_t fillChainSequence(rematStep_t *steps, size_t n) {
 static void heapInitAndExitWithTheVerdict(layer_t **model, size_t n, const tensor_t *x,
                                           const rematPlanSpec_t *spec, size_t numRanges) {
     rematScheduler_t s;
-    bool ok = rematHeapInit(&s, model, n, defaultLossConfig(MSE), x, spec) &&
+    bool ok = rematHeapInit(&s, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x, spec) &&
               s.plan->train.numRanges == numRanges;
     rematSchedulerDeinit(&s);
     _exit(ok ? 0 : 2);
@@ -1392,13 +1392,13 @@ static void heapInitWithSpecExpectingAnExit(layer_t **model, size_t n, const ten
     rematScheduler_t s;
     g_memBeforeExit = memProfileCurrentBytes();
     (void)atexit(printReservedBeforeExit);
-    (void)rematHeapInit(&s, model, n, defaultLossConfig(MSE), x, spec);
+    (void)rematHeapInit(&s, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x, spec);
 }
 
 static void arenaInitWithSpecExpectingAnExit(layer_t **model, size_t n, const tensor_t *x,
                                              const rematPlanSpec_t *spec) {
     rematScheduler_t s;
-    (void)rematArenaInit(&s, model, n, defaultLossConfig(MSE), x, spec);
+    (void)rematArenaInit(&s, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x, spec);
 }
 
 /* HEAP admits a STORE_ALL or LIVENESS plan of any size: the cap covers only
@@ -1522,7 +1522,7 @@ void testArenaInitExitsOnAnArenaSumOverflowBeforeAnyRowReservation(void) {
 
 /* One call through the dispatch, on either row. */
 static void bindAndBegin(fixture_t *f, rematScheduler_t *s) {
-    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    rematBegin(s, &MODEL_CHAIN(f->model, f->n), defaultLossConfig(f->lt), f->x);
 }
 
 static void endAndUnbind(rematScheduler_t *s) {
@@ -1532,7 +1532,7 @@ static void endAndUnbind(rematScheduler_t *s) {
 /* One call in `mode`: rematBegin for TRAIN, rematBeginEval for EVAL. */
 static void bindAndBeginIn(fixture_t *f, rematScheduler_t *s, rematMode_t mode) {
     if (mode == REMAT_MODE_EVAL) {
-        rematBeginEval(s, f->model, f->n, f->lt, f->x);
+        rematBeginEval(s, &MODEL_CHAIN(f->model, f->n), f->lt, f->x);
     } else {
         bindAndBegin(f, s);
     }
@@ -1954,7 +1954,7 @@ static void assertEvalOffsetsAreTwoEnded(void (*build)(fixture_t *)) {
     fixture_t f;
     build(&f);
     rematScheduler_t s = initArena(&f, NULL);
-    rematBeginEval(&s, f.model, f.n, f.lt, f.x);
+    rematBeginEval(&s, &MODEL_CHAIN(f.model, f.n), f.lt, f.x);
     rematStep_t st;
     while (rematNext(&s, &st)) {
         for (uint16_t j = 1; j <= f.n; j++) {
@@ -2427,7 +2427,7 @@ void testArenaPadStaysPoisonedWhileBound(void) {
  * 3-byte pad is the arena's last bytes. */
 static void readThePadOfATopPlacedEvalWire(fixture_t *f, rematScheduler_t *s) {
     odtInstallAsanDeathExit();
-    rematBeginEval(s, f->model, f->n, f->lt, f->x);
+    rematBeginEval(s, &MODEL_CHAIN(f->model, f->n), f->lt, f->x);
     rematStep_t st;
     (void)rematNext(s, &st); /* FORWARD 0 binds ACT 1 */
     volatile uint8_t *act1 = rematWireHdr(s->wires, 1)->data;
@@ -2553,11 +2553,13 @@ void testHeapPlanBlockHoldsTheSequenceSteps(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
     rematScheduler_t all;
-    TEST_ASSERT_TRUE(rematHeapInit(&all, model, MLP3_N, defaultLossConfig(MSE), x, NULL));
+    TEST_ASSERT_TRUE(
+        rematHeapInit(&all, &MODEL_CHAIN(model, MLP3_N), defaultLossConfig(MSE), x, NULL));
     const rematPlanSpec_t spec = {
         .policy = REMAT_PLAN_SEQUENCE, .sequence = steps, .sequenceLen = COUNT_OF(steps)};
     rematScheduler_t seq;
-    TEST_ASSERT_TRUE(rematHeapInit(&seq, model, MLP3_N, defaultLossConfig(MSE), x, &spec));
+    TEST_ASSERT_TRUE(
+        rematHeapInit(&seq, &MODEL_CHAIN(model, MLP3_N), defaultLossConfig(MSE), x, &spec));
     TEST_ASSERT_EQUAL_size_t(all.plan->blockBytes + 36u, seq.plan->blockBytes);
     rematReport_t r;
     rematSchedulerReport(&seq, &r);
@@ -2570,7 +2572,7 @@ void testHeapPlanBlockHoldsTheSequenceSteps(void) {
 
 static void heapInitExpectingAnExit(layer_t **model, const tensor_t *x) {
     rematScheduler_t s;
-    (void)rematHeapInit(&s, model, 1, defaultLossConfig(MSE), x, NULL);
+    (void)rematHeapInit(&s, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), x, NULL);
 }
 
 /* A borrowed [1, SIZE_MAX/4 + 2] FLOAT32 input (4 * N wraps to 4)
@@ -2701,7 +2703,7 @@ void testHeapEndInEvalChecksTheEvalWalk(void) {
 
 static void beginEvalOnAZeroedScheduler(fixture_t *f) {
     rematScheduler_t s = {0};
-    rematBeginEval(&s, f->model, f->n, f->lt, f->x);
+    rematBeginEval(&s, &MODEL_CHAIN(f->model, f->n), f->lt, f->x);
 }
 
 /* rematBeginEval shares rematBegin's guards, under its own name. */
@@ -2717,7 +2719,7 @@ void testBeginEvalExitsOnASchedulerThatIsNotInitialised(void) {
 
 static void beginEvalInsideATrainingCall(fixture_t *f, rematScheduler_t *s) {
     bindAndBegin(f, s);
-    rematBeginEval(s, f->model, f->n, f->lt, f->x);
+    rematBeginEval(s, &MODEL_CHAIN(f->model, f->n), f->lt, f->x);
 }
 
 void testBeginEvalExitsWhenReEntered(void) {
@@ -2790,7 +2792,7 @@ static void assertTheDispatchWalks(rowInit_t init) {
     buildHarModel(&f);
     rematScheduler_t s = init(&f, NULL);
     const rematProgram_t *p = &s.plan->train;
-    rematBegin(&s, f.model, f.n, defaultLossConfig(f.lt), f.x);
+    rematBegin(&s, &MODEL_CHAIN(f.model, f.n), defaultLossConfig(f.lt), f.x);
     TEST_ASSERT_TRUE(s.inCall);
     TEST_ASSERT_EQUAL_PTR(f.x, rematActHdr(s.wires, 0));
     rematStep_t st;
@@ -2848,7 +2850,7 @@ void testTheDispatchCallsThroughTheInstancesFunctionTable(void) {
     buildF1Model(&f);
     rematScheduler_t s = initArena(&f, NULL);
     s.fns = &g_countingArena;
-    rematBegin(&s, f.model, f.n, defaultLossConfig(f.lt), f.x);
+    rematBegin(&s, &MODEL_CHAIN(f.model, f.n), defaultLossConfig(f.lt), f.x);
     rematStep_t st;
     while (rematNext(&s, &st)) {
         rematDone(&s, &st);
@@ -2865,7 +2867,7 @@ void testTheDispatchCallsThroughTheInstancesFunctionTable(void) {
 
 static void beginOnAZeroedScheduler(fixture_t *f) {
     rematScheduler_t s = {0};
-    rematBegin(&s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    rematBegin(&s, &MODEL_CHAIN(f->model, f->n), defaultLossConfig(f->lt), f->x);
 }
 
 void testBeginExitsOnASchedulerThatWasNeverInitialised(void) {
@@ -2879,7 +2881,7 @@ void testBeginExitsOnASchedulerThatWasNeverInitialised(void) {
 /* The state rematHeapInit leaves when its plan block fails (fns and
  * table set, plan NULL); a caller that ignored the false must not enter a call. */
 static void beginOnAHeapWhosePlanFailed(fixture_t *f, rematScheduler_t *s) {
-    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    rematBegin(s, &MODEL_CHAIN(f->model, f->n), defaultLossConfig(f->lt), f->x);
 }
 
 void testBeginExitsOnAHeapWhoseInitReturnedFalse(void) {
@@ -2898,8 +2900,8 @@ void testBeginExitsOnAHeapWhoseInitReturnedFalse(void) {
 }
 
 static void beginTwice(fixture_t *f, rematScheduler_t *s) {
-    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
-    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    rematBegin(s, &MODEL_CHAIN(f->model, f->n), defaultLossConfig(f->lt), f->x);
+    rematBegin(s, &MODEL_CHAIN(f->model, f->n), defaultLossConfig(f->lt), f->x);
 }
 
 /* The table bind resets liveBytes and bindGen but leaves ->data alone, so
@@ -2950,7 +2952,7 @@ void testDoneExitsOutsideACall(void) {
 }
 
 static void endTwice(fixture_t *f, rematScheduler_t *s) {
-    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    rematBegin(s, &MODEL_CHAIN(f->model, f->n), defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     while (rematNext(s, &st)) {
         rematDone(s, &st);
@@ -2969,7 +2971,7 @@ void testEndExitsOutsideACall(void) {
 }
 
 static void deinitInsideACall(fixture_t *f, rematScheduler_t *s) {
-    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    rematBegin(s, &MODEL_CHAIN(f->model, f->n), defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     (void)rematNext(s, &st);
     rematSchedulerDeinit(s);
@@ -3174,9 +3176,10 @@ static void initWithAnUnaccountedReservation(rematSchedulerType_t row) {
     g_realOutputShape = layerFunctions[first].calcOutputShape;
     layerFunctions[first].calcOutputShape = outputShapeReservingEightBytesOnce;
     rematScheduler_t s;
-    bool built = (row == REMAT_ARENA)
-                     ? rematArenaInit(&s, f.model, f.n, defaultLossConfig(f.lt), f.x, NULL)
-                     : rematHeapInit(&s, f.model, f.n, defaultLossConfig(f.lt), f.x, NULL);
+    bool built =
+        (row == REMAT_ARENA)
+            ? rematArenaInit(&s, &MODEL_CHAIN(f.model, f.n), defaultLossConfig(f.lt), f.x, NULL)
+            : rematHeapInit(&s, &MODEL_CHAIN(f.model, f.n), defaultLossConfig(f.lt), f.x, NULL);
     if (!built) {
         exit(2);
     }

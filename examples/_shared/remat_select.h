@@ -8,6 +8,7 @@
 
 #include "Layer.h"
 #include "LossFunction.h"
+#include "Model.h"
 #include "RematScheduler.h"
 #include "Tensor.h"
 
@@ -66,11 +67,11 @@ typedef struct rematSelection {
  * call it before any data is loaded, with the model's layer count. */
 bool rematSelectFromEnv(rematSelection_t *sel, size_t modelSize);
 
-/* The mask a recompute plan gets, modelSize + 1 entries: retain:<j>... as
+/* The mask a recompute plan gets, m->numLayers + 1 entries: retain:<j>... as
  * listed, retain:sqrt and retain:speed resolved against the model (speed
- * reads each layer's type only); retain[modelSize] is always true. */
-void rematSelectRetainMask(const rematSelection_t *sel, layer_t **model, size_t modelSize,
-                           bool *retain);
+ * reads each layer's type only, so the others accept a NULL m->layers);
+ * retain[m->numLayers] is always true. */
+void rematSelectRetainMask(const rematSelection_t *sel, const model_t *m, bool *retain);
 
 /* Builds the chosen scheduler into s, keyed to inputLike (the [1, ...sample
  * shape] view of one training sample). A failed reservation prints the
@@ -80,8 +81,7 @@ void rematSelectRetainMask(const rematSelection_t *sel, layer_t **model, size_t 
  * arena only, not the metadata) prints both numbers to stderr, deinits s and
  * returns false; an arena equal to it fits. */
 bool rematSelectInit(rematScheduler_t *s, const rematSelection_t *sel, const char *example,
-                     layer_t **model, size_t modelSize, lossConfig_t loss,
-                     const tensor_t *inputLike);
+                     const model_t *m, lossConfig_t loss, const tensor_t *inputLike);
 
 /* The one-line plan report of DRY_PLAN=1: the plan as selected, then the
  * scheduler's numbers. */
@@ -116,7 +116,7 @@ uint64_t rematSelectProblemHash(uint64_t state, const char *bytes, size_t n);
  * and returns false without the hash line; a failed write of the hash line
  * returns false with no message (the trainers write it to stderr, so no
  * stream is left to name it on). */
-bool rematSelectDumpProblem(FILE *json, FILE *hashLine, layer_t **model, size_t modelSize,
-                            lossConfig_t loss, const tensor_t *inputLike);
+bool rematSelectDumpProblem(FILE *json, FILE *hashLine, const model_t *m, lossConfig_t loss,
+                            const tensor_t *inputLike);
 
 #endif // EXAMPLES_SHARED_REMAT_SELECT_H

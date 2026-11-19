@@ -858,8 +858,10 @@ void testInferenceWithLossRunsOnACallersScheduler(void) {
         inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN, NULL);
     rematScheduler_t heap;
     rematScheduler_t arena;
-    TEST_ASSERT_TRUE(rematHeapInit(&heap, f.model, 2, defaultLossConfig(MSE), f.input, NULL));
-    TEST_ASSERT_TRUE(rematArenaInit(&arena, f.model, 2, defaultLossConfig(MSE), f.input, NULL));
+    TEST_ASSERT_TRUE(
+        rematHeapInit(&heap, &MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE), f.input, NULL));
+    TEST_ASSERT_TRUE(
+        rematArenaInit(&arena, &MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE), f.input, NULL));
     rematScheduler_t *rows[2] = {&heap, &arena};
     for (size_t k = 0; k < 2u; k++) {
         const trainingCall_t call = {.remat = rows[k]};
@@ -991,7 +993,8 @@ void testInferenceWithLossHandsEachLayerItsLayerKey(void) {
     buildEvalFixture(&f);
     const rngKey_t callKey = rngKeyFromSeed(EVAL_CALL_KEY_SEED);
     rematScheduler_t heap;
-    TEST_ASSERT_TRUE(rematHeapInit(&heap, f.model, 2, defaultLossConfig(MSE), f.input, NULL));
+    TEST_ASSERT_TRUE(
+        rematHeapInit(&heap, &MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE), f.input, NULL));
 
     installExecSpies();
     freeInferenceStats(inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN,

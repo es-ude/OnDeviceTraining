@@ -14,14 +14,14 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 
-bool rematHeapInit(rematScheduler_t *s, layer_t **model, size_t n, lossConfig_t loss,
+bool rematHeapInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
                    const tensor_t *inputLike, const rematPlanSpec_t *spec) {
 #ifdef ODT_MEM_PROFILE
     size_t mark = memProfileCurrentBytes();
 #endif
     *s = (rematScheduler_t){.type = REMAT_HEAP, .fns = &rematSchedulerFunctions[REMAT_HEAP]};
-    if (!rematWireTableInit(&s->wires, &MODEL_CHAIN(model, n), loss, inputLike) ||
-        !rematPlanBuild(&s->plan, s->wires, &MODEL_CHAIN(model, n), spec)) {
+    if (!rematWireTableInit(&s->wires, m, loss, inputLike) ||
+        !rematPlanBuild(&s->plan, s->wires, m, spec)) {
         return false;
     }
 #ifdef ODT_MEM_PROFILE

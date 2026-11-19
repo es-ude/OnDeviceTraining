@@ -71,11 +71,12 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
     odtHookFire(ODT_EVENT_FORWARD_BEGIN);
     setLayersTrainingMode(model, modelSize, true);
 
+    const model_t chain = MODEL_CHAIN(model, modelSize);
     rematScheduler_t ephemeral;
     rematScheduler_t *s = (call != NULL) ? call->remat : NULL;
     const rngKey_t *callKey = (call != NULL) ? call->key : NULL;
     if (s == NULL) {
-        if (!rematHeapInit(&ephemeral, model, modelSize, lossConfig, input, &defaultPlanSpec)) {
+        if (!rematHeapInit(&ephemeral, &chain, lossConfig, input, &defaultPlanSpec)) {
             PRINT_ERROR("calculateGrads: ephemeral HEAP scheduler: reserveMemory failed");
             exit(1);
         }
@@ -83,9 +84,9 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
     }
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t chk;
-    rematCheckInit(&chk, s, model, modelSize, lossConfig.funcType, REMAT_MODE_TRAIN, producedGen);
+    rematCheckInit(&chk, s, &chain, lossConfig.funcType, REMAT_MODE_TRAIN, producedGen);
 
-    rematBegin(s, model, modelSize, lossConfig, input);
+    rematBegin(s, &chain, lossConfig, input);
     lossFunctions_t lossFns = lossFunctions[lossConfig.funcType];
     trainingStats_t *trainingStats = NULL;
     rematStep_t st;

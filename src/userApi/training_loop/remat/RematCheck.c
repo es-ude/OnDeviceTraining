@@ -23,9 +23,10 @@ size_t rematCheckNumWires(const rematScheduler_t *s) {
     return s->wires->numWires;
 }
 
-void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, layer_t **model, size_t n,
-                    lossFuncType_t lt, rematMode_t mode, uint32_t *producedGen) {
+void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, const model_t *m, lossFuncType_t lt,
+                    rematMode_t mode, uint32_t *producedGen) {
     size_t numWires = rematCheckNumWires(s);
+    size_t n = m->numLayers;
     /* REFORWARD's step budget, 2n + 2 + n(n+1)/2: the minimum-memory
      * schedule's n(n+1)/2 recomputes on top of a plain stream. Computed here,
      * apart from the plan grammar's bound, so a mistake in one shows in the
@@ -42,11 +43,10 @@ void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, layer_t **model, size_
     }
     size_t deepest;
     ptrdiff_t top;
-    rematBackwardRange(model, n, lt, &deepest, &top);
+    rematBackwardRange(m->layers, m->numLayers, lt, &deepest, &top);
     *c = (rematCheck_t){.sched = s,
                         .mode = mode,
-                        .model = model,
-                        .n = n,
+                        .m = m,
                         .deepest = deepest,
                         .backwardTop = top,
                         .hasBackward = deepest < n,
@@ -99,14 +99,14 @@ static void requireKindAndLayer(const rematCheck_t *c, const rematStep_t *st) {
     case REMAT_STEP_FORWARD:
     case REMAT_STEP_REFORWARD:
     case REMAT_STEP_BACKWARD:
-        if (st->layer >= c->n) {
-            REMAT_CHECK_EXIT(c, st, "'layer out of range' (n = %zu)", c->n);
+        if (st->layer >= c->m->numLayers) {
+            REMAT_CHECK_EXIT(c, st, "'layer out of range' (n = %zu)", c->m->numLayers);
         }
         break;
     case REMAT_STEP_LOSS_FORWARD:
     case REMAT_STEP_LOSS_BACKWARD:
-        if (st->layer != c->n) {
-            REMAT_CHECK_EXIT(c, st, "'layer out of range' (n = %zu)", c->n);
+        if (st->layer != c->m->numLayers) {
+            REMAT_CHECK_EXIT(c, st, "'layer out of range' (n = %zu)", c->m->numLayers);
         }
         break;
     default:
@@ -133,7 +133,7 @@ static void requireOrder(const rematCheck_t *c, const rematStep_t *st) {
         if (c->lossForwardSeen) {
             REMAT_CHECK_EXIT(c, st, "'duplicate loss-forward'");
         }
-        if (c->nextForward != c->n) {
+        if (c->nextForward != c->m->numLayers) {
             REMAT_CHECK_EXIT(c, st, "'loss-forward early' (FORWARD(%zu) has not run)",
                              c->nextForward);
         }
@@ -154,7 +154,8 @@ static void requireOrder(const rematCheck_t *c, const rematStep_t *st) {
          * deepest clause (without it deepest == n > top >= nextBackward); it
          * stays as the rule reads. */
         if (!c->lossForwardSeen || !c->hasBackward || c->nextBackward < (ptrdiff_t)c->deepest ||
-            (ptrdiff_t)st->layer >= (c->lossBackwardSeen ? c->nextBackward : (ptrdiff_t)c->n)) {
+            (ptrdiff_t)st->layer >=
+                (c->lossBackwardSeen ? c->nextBackward : (ptrdiff_t)c->m->numLayers)) {
             REMAT_CHECK_EXIT(c, st, "'reforward outside window'");
         }
         if (c->stepIndex >= c->maxSteps) {
@@ -163,7 +164,7 @@ static void requireOrder(const rematCheck_t *c, const rematStep_t *st) {
         /* trackRunningStats is not in the table's key, so a layer reconfigured
          * after the plan was built gets here. The config must not change during
          * a call: this check does not make a concurrent change safe. */
-        if (layerForwardUpdatesState(c->model[st->layer])) {
+        if (layerForwardUpdatesState(c->m->layers[st->layer])) {
             REMAT_CHECK_EXIT(
                 c, st,
                 "'reforward of a state-updating layer' (layer %u updates its state in "
@@ -210,16 +211,16 @@ static stepWires_t resolve(const rematCheck_t *c, const rematStep_t *st) {
         w.out = rematActId(t, l + 1u);
         break;
     case REMAT_STEP_LOSS_FORWARD:
-        w.in = rematActId(t, c->n);
+        w.in = rematActId(t, c->m->numLayers);
         break;
     case REMAT_STEP_LOSS_BACKWARD:
-        w.in = rematActId(t, c->n);
-        w.out = rematGradId(t, c->n);
+        w.in = rematActId(t, c->m->numLayers);
+        w.out = rematGradId(t, c->m->numLayers);
         break;
     case REMAT_STEP_BACKWARD:
         w.in = rematActId(t, l);
-        w.readsIn = layerBackwardReadsInput(c->model[l]);
-        w.gradIn = rematGradId(t, (ptrdiff_t)l == c->backwardTop ? c->n : l + 1u);
+        w.readsIn = layerBackwardReadsInput(c->m->layers[l]);
+        w.gradIn = rematGradId(t, (ptrdiff_t)l == c->backwardTop ? c->m->numLayers : l + 1u);
         /* REMAT_NONE at deepest (the grads-only call): the table has no GRAD
          * deepest, and the bind keeps its deepest equal to the live one. */
         w.out = rematGradId(t, l);
@@ -397,7 +398,7 @@ void rematCheckStep(rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops
  * complete iff every cursor reached its end. Under CE with n = 1, top = -1 is
  * already below deepest = 0: LOSS_BACKWARD with no BACKWARD is complete. */
 void rematCheckFinish(const rematCheck_t *c) {
-    if (c->nextForward != c->n) {
+    if (c->nextForward != c->m->numLayers) {
         REMAT_FINISH_EXIT(c, "'incomplete stream: missing FORWARD(%zu)'", c->nextForward);
     }
     if (!c->lossForwardSeen) {

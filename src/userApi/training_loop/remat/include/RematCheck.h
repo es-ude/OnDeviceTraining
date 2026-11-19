@@ -7,6 +7,7 @@
 
 #include "Layer.h"
 #include "LossFunction.h"
+#include "Model.h"
 #include "RematScheduler.h"
 #include "Tensor.h"
 
@@ -29,9 +30,8 @@ typedef struct rematOperands {
 typedef struct rematCheck {
     rematScheduler_t *sched; /* borrowed: the table, and the row name for messages */
     rematMode_t mode;        /* EVAL admits FORWARD and LOSS_FORWARD only */
-    layer_t **model;
-    size_t n;
-    size_t deepest; /* rematBackwardRange on the LIVE model */
+    const model_t *m;        /* borrowed: the live model; a named model_t that outlives the call */
+    size_t deepest;          /* rematBackwardRange on the LIVE model */
     ptrdiff_t backwardTop;
     bool hasBackward;
     size_t nextForward;
@@ -50,8 +50,8 @@ typedef struct rematCheck {
 size_t rematCheckNumWires(const rematScheduler_t *s);
 /* Before rematBegin / rematBeginEval, in the same mode. Zeroes
  * producedGen[0..numWires) (a VLA has no initialiser). */
-void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, layer_t **model, size_t n,
-                    lossFuncType_t lt, rematMode_t mode, uint32_t *producedGen);
+void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, const model_t *m, lossFuncType_t lt,
+                    rematMode_t mode, uint32_t *producedGen);
 /* Checks one step and resolves its operands into *ops; exits on a violation,
  * before the driver runs anything. */
 void rematCheckStep(rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops);

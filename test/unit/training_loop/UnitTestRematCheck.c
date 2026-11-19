@@ -84,10 +84,12 @@ void testInitSetsTheCursorsFromTheLiveModelAndZeroesProducedGen(void) {
     uint32_t producedGen[numWires];
     memset(producedGen, 0xA5, sizeof producedGen);
     rematCheck_t c;
-    rematCheckInit(&c, &s, live.model, live.n, live.lt, REMAT_MODE_TRAIN, producedGen);
+    const model_t liveModel = MODEL_CHAIN(live.model, live.n);
+    rematCheckInit(&c, &s, &liveModel, live.lt, REMAT_MODE_TRAIN, producedGen);
     TEST_ASSERT_EQUAL_PTR(&s, c.sched);
-    TEST_ASSERT_EQUAL_PTR(live.model, c.model);
-    TEST_ASSERT_EQUAL_size_t(HAR_N, c.n);
+    TEST_ASSERT_EQUAL_PTR(&liveModel, c.m);
+    TEST_ASSERT_EQUAL_PTR(live.model, c.m->layers);
+    TEST_ASSERT_EQUAL_size_t(HAR_N, c.m->numLayers);
     TEST_ASSERT_EQUAL_size_t(10, c.deepest);
     TEST_ASSERT_EQUAL_INT(10, (int)c.backwardTop); /* n - 2 under CE */
     TEST_ASSERT_TRUE(c.hasBackward);
@@ -112,7 +114,7 @@ void testInitSetsTheCursorsFromTheLiveModelAndZeroesProducedGen(void) {
 static void assertResolved(const rematCheck_t *c, const rematStep_t *st,
                            const rematOperands_t *op) {
     const rematWireTable_t *t = c->sched->wires;
-    size_t n = c->n;
+    size_t n = c->m->numLayers;
     size_t l = st->layer;
     switch (st->kind) {
     case REMAT_STEP_FORWARD:
@@ -157,8 +159,9 @@ static void checkedCall(fixture_t *f, rematScheduler_t *s) {
     const rematWireTable_t *t = s->wires;
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_TRAIN, producedGen);
-    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    const model_t chain = MODEL_CHAIN(f->model, f->n);
+    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_TRAIN, producedGen);
+    rematBegin(s, &chain, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     while (rematNext(s, &st)) {
         rematOperands_t op;
@@ -218,8 +221,9 @@ static void checkedEvalCall(fixture_t *f, rematScheduler_t *s) {
     const rematWireTable_t *t = s->wires;
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_EVAL, producedGen);
-    rematBeginEval(s, f->model, f->n, f->lt, f->x);
+    const model_t chain = MODEL_CHAIN(f->model, f->n);
+    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_EVAL, producedGen);
+    rematBeginEval(s, &chain, f->lt, f->x);
     rematStep_t st;
     while (rematNext(s, &st)) {
         rematOperands_t op;
@@ -256,7 +260,8 @@ void testCheckAcceptsAnEvalCallOnEitherRow(void) {
 static void evalCheckerGets(fixture_t *f, rematScheduler_t *s, rematStep_t st) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_EVAL, producedGen);
+    const model_t chain = MODEL_CHAIN(f->model, f->n);
+    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_EVAL, producedGen);
     rematOperands_t op;
     rematCheckStep(&c, &st, &op);
 }
@@ -297,8 +302,9 @@ void testEvalStillNamesAnUnknownStepKind(void) {
 static void evalStreamWithoutLossForward(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_EVAL, producedGen);
-    rematBeginEval(s, f->model, f->n, f->lt, f->x);
+    const model_t chain = MODEL_CHAIN(f->model, f->n);
+    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_EVAL, producedGen);
+    rematBeginEval(s, &chain, f->lt, f->x);
     rematStep_t st;
     for (size_t k = 0; k < f->n; k++) {
         TEST_ASSERT_TRUE(rematNext(s, &st));
@@ -331,8 +337,9 @@ void testOperandsAreResolvedPositionallyOnHar(void) {
     const rematWireTable_t *t = s.wires;
     uint32_t producedGen[rematCheckNumWires(&s)];
     rematCheck_t c;
-    rematCheckInit(&c, &s, f.model, f.n, f.lt, REMAT_MODE_TRAIN, producedGen);
-    rematBegin(&s, f.model, f.n, defaultLossConfig(f.lt), f.x);
+    const model_t chain = MODEL_CHAIN(f.model, f.n);
+    rematCheckInit(&c, &s, &chain, f.lt, REMAT_MODE_TRAIN, producedGen);
+    rematBegin(&s, &chain, defaultLossConfig(f.lt), f.x);
     rematOperands_t at[25];
     rematStep_t st;
     size_t i = 0;
@@ -374,8 +381,9 @@ static void offerStep(fixture_t *f, rematScheduler_t *s, size_t k, const rematSt
                       tamperFn_t tamper) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_TRAIN, producedGen);
-    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    const model_t chain = MODEL_CHAIN(f->model, f->n);
+    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_TRAIN, producedGen);
+    rematBegin(s, &chain, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     rematOperands_t op;
     for (size_t i = 0; i < k; i++) {
@@ -443,8 +451,9 @@ void testStepExitsOnALossStepWhoseLayerIsNotN(void) {
 static void driveCall(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_TRAIN, producedGen);
-    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    const model_t chain = MODEL_CHAIN(f->model, f->n);
+    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_TRAIN, producedGen);
+    rematBegin(s, &chain, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     rematOperands_t op;
     while (rematNext(s, &st)) {
@@ -643,13 +652,15 @@ void testInitSetsTheStepBudgetFromTheModelSize(void) {
     rematScheduler_t s = initHeap(&f, NULL);
     uint32_t producedGen[rematCheckNumWires(&s)];
     rematCheck_t c;
-    rematCheckInit(&c, &s, f.model, f.n, f.lt, REMAT_MODE_TRAIN, producedGen);
+    const model_t har = MODEL_CHAIN(f.model, f.n);
+    rematCheckInit(&c, &s, &har, f.lt, REMAT_MODE_TRAIN, producedGen);
     TEST_ASSERT_EQUAL_size_t(104, c.maxSteps);
     freeFixture(&f, &s);
     buildMlp3Model(&f);
     s = initHeap(&f, NULL);
     uint32_t producedGenMlp3[rematCheckNumWires(&s)];
-    rematCheckInit(&c, &s, f.model, f.n, f.lt, REMAT_MODE_TRAIN, producedGenMlp3);
+    const model_t mlp3 = MODEL_CHAIN(f.model, f.n);
+    rematCheckInit(&c, &s, &mlp3, f.lt, REMAT_MODE_TRAIN, producedGenMlp3);
     TEST_ASSERT_EQUAL_size_t(14, c.maxSteps);
     freeFixture(&f, &s);
 }
@@ -659,7 +670,8 @@ void testInitSetsTheStepBudgetFromTheModelSize(void) {
 static void initWithAnOverflowingBudget(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, SIZE_MAX / 2u, f->lt, REMAT_MODE_TRAIN, producedGen);
+    const model_t chain = MODEL_CHAIN(f->model, SIZE_MAX / 2u);
+    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_TRAIN, producedGen);
 }
 
 void testInitExitsOnAStepBudgetThatOverflows(void) {
@@ -753,8 +765,9 @@ void testStepExitsOnAReforwardPastTheModel(void) {
 static void reforwardUntilTheBudgetStops(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_TRAIN, producedGen);
-    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    const model_t chain = MODEL_CHAIN(f->model, f->n);
+    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_TRAIN, producedGen);
+    rematBegin(s, &chain, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     rematOperands_t op;
     for (size_t i = 0; i < 14u && rematNext(s, &st); i++) {
@@ -782,8 +795,9 @@ void testStepExitsOnAReforwardBeyondTheStepBudget(void) {
 static void evalOfferStep(fixture_t *f, rematScheduler_t *s, size_t k, const rematStep_t *forged) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_EVAL, producedGen);
-    rematBeginEval(s, f->model, f->n, f->lt, f->x);
+    const model_t chain = MODEL_CHAIN(f->model, f->n);
+    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_EVAL, producedGen);
+    rematBeginEval(s, &chain, f->lt, f->x);
     rematStep_t st;
     rematOperands_t op;
     for (size_t i = 0; i < k && rematNext(s, &st); i++) {
@@ -811,9 +825,10 @@ void testEvalRejectsAReforwardAfterTheLossForward(void) {
 static void twoCallsOnOneChecker(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_TRAIN, producedGen);
+    const model_t chain = MODEL_CHAIN(f->model, f->n);
+    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_TRAIN, producedGen);
     for (int call = 0; call < 2; call++) {
-        rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+        rematBegin(s, &chain, defaultLossConfig(f->lt), f->x);
         rematStep_t st;
         rematOperands_t op;
         while (rematNext(s, &st)) {
@@ -1162,8 +1177,9 @@ void testStepReadsTheMarksFromThePlan(void) {
 static void finishAfter(fixture_t *f, rematScheduler_t *s, size_t k) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_TRAIN, producedGen);
-    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    const model_t chain = MODEL_CHAIN(f->model, f->n);
+    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_TRAIN, producedGen);
+    rematBegin(s, &chain, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     rematOperands_t op;
     for (size_t i = 0; i < k; i++) {
@@ -1320,8 +1336,9 @@ void testReleasedExitsWhenARowLeavesAWireResident(void) {
 static void releasedBeforeEnd(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
-    rematCheckInit(&c, s, f->model, f->n, f->lt, REMAT_MODE_TRAIN, producedGen);
-    rematBegin(s, f->model, f->n, defaultLossConfig(f->lt), f->x);
+    const model_t chain = MODEL_CHAIN(f->model, f->n);
+    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_TRAIN, producedGen);
+    rematBegin(s, &chain, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     rematOperands_t op;
     while (rematNext(s, &st)) {
@@ -1353,9 +1370,10 @@ void testCheckReservesNothing(void) {
     size_t before = memProfileCurrentBytes();
     uint32_t producedGen[rematCheckNumWires(&s)];
     rematCheck_t c;
-    rematCheckInit(&c, &s, f.model, f.n, f.lt, REMAT_MODE_TRAIN, producedGen);
+    const model_t chain = MODEL_CHAIN(f.model, f.n);
+    rematCheckInit(&c, &s, &chain, f.lt, REMAT_MODE_TRAIN, producedGen);
     TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
-    rematBegin(&s, f.model, f.n, defaultLossConfig(f.lt), f.x);
+    rematBegin(&s, &chain, defaultLossConfig(f.lt), f.x);
     rematStep_t st;
     while (rematNext(&s, &st)) {
         size_t held = memProfileCurrentBytes();

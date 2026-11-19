@@ -517,13 +517,13 @@ int main(void) {
             batchView_t keyView;
             const tensor_t *inputLike = batchViewOf(&keyView, keySample->item);
             if (rematSel.dumpProblem) {
-                bool dumped = rematSelectDumpProblem(stdout, stderr, model, MODEL_SIZE, lossConfig,
-                                                     inputLike);
+                bool dumped = rematSelectDumpProblem(
+                    stdout, stderr, &MODEL_CHAIN(model, MODEL_SIZE), lossConfig, inputLike);
                 freeSample(keySample);
                 return dumped ? 0 : 1;
             }
-            bool built = rematSelectInit(&remat, &rematSel, "har_classifier", model, MODEL_SIZE,
-                                         lossConfig, inputLike);
+            bool built = rematSelectInit(&remat, &rematSel, "har_classifier",
+                                         &MODEL_CHAIN(model, MODEL_SIZE), lossConfig, inputLike);
             freeSample(keySample);
             if (!built) {
                 return 1;

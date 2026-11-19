@@ -129,7 +129,8 @@ void testStateDictSkipsNoAffineBatchNorm(void) {
     layer_t *model[] = {a, b};
     float g[2] = {2.f, 3.f};
     float be[2] = {4.f, 5.f};
-    modelLoadStateDict(model, 2, (stateDictEntry_t[]){{.weightData = g, .biasData = be}}, 1);
+    modelLoadStateDict(&MODEL_CHAIN(model, 2),
+                       (stateDictEntry_t[]){{.weightData = g, .biasData = be}}, 1);
     float g0 = ((float *)b->config->batchNorm1d->gamma->param->data)[0];
     freeBatchNorm1dLayer(b);
     freeBatchNorm1dLayer(a);
@@ -144,7 +145,7 @@ void testLoadBuffersInModelOrderSkippingUntrackedBatchNorm(void) {
     const float rmA[2] = {0.5f, -0.5f}, rvA[2] = {2.f, 3.f};
     const float rmB[2] = {1.5f, 2.5f}, rvB[2] = {0.25f, 0.75f};
     modelLoadStateDictBuffers(
-        model, 3,
+        &MODEL_CHAIN(model, 3),
         (stateDictBuffers_t[]){
             {.name = "bn1", .runningMean = rmA, .runningVar = rvA, .numBatchesTracked = 7},
             {.name = "bn2", .runningMean = rmB, .runningVar = rvB, .numBatchesTracked = 9},
@@ -167,7 +168,7 @@ static void loadBuffersOrDie(size_t numEntries, const float *rm, const float *rv
     layer_t *model[] = {bnLayer(2, false, false, TRAINABLE_DEFAULT)};
     stateDictBuffers_t e[2] = {{.runningMean = rm, .runningVar = rv},
                                {.runningMean = rm, .runningVar = rv}};
-    modelLoadStateDictBuffers(model, 1, e, numEntries);
+    modelLoadStateDictBuffers(&MODEL_CHAIN(model, 1), e, numEntries);
 }
 
 void testLoadBuffersRejectsBadInput(void) {
@@ -285,7 +286,7 @@ void testFrozenBatchNormKeepsLoadedBuffersDuringTraining(void) {
     layer_t *model[2];
     buildBnLinear(model, TRAINABLE_FALSE);
     const float rm[2] = {0.2f, -0.3f}, rv[2] = {1.5f, 0.5f};
-    modelLoadStateDictBuffers(model, 2,
+    modelLoadStateDictBuffers(&MODEL_CHAIN(model, 2),
                               (stateDictBuffers_t[]){{.runningMean = rm, .runningVar = rv}}, 1);
     tensor_t *x = buildFloatTensor((size_t[]){1, 2}, 2, kX);
     tensor_t *y = buildFloatTensor((size_t[]){1, 2}, 2, kY);

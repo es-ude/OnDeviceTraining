@@ -174,7 +174,7 @@ void testStateDictLoad_DropoutNoParams(void) {
     layer_t *drop = dropoutLayerInit(0.5f, mask, fq, bq);
     layer_t *model[1] = {drop};
 
-    modelLoadStateDict(model, 1, NULL, 0); // must return without exiting
+    modelLoadStateDict(&MODEL_CHAIN(model, 1), NULL, 0); // must return without exiting
 
     freeDropoutLayer(drop);
     freeTensor(mask);

@@ -324,7 +324,7 @@ void testGroupNormClassifierTrainsAndRoundTrips(void) {
         {.name = "groupNorm", .weightData = savedGamma, .biasData = savedBeta},
         {.name = "linear", .weightData = savedLinW, .biasData = savedLinB},
     };
-    modelLoadStateDict(model, MODEL_SIZE, entries, 3);
+    modelLoadStateDict(&MODEL_CHAIN(model, MODEL_SIZE), entries, 3);
 
     tensor_t *predA1 = inference(model, MODEL_SIZE, probeA);
     tensor_t *predB1 = inference(model, MODEL_SIZE, probeB);

@@ -1,7 +1,7 @@
 #ifndef STATE_DICT_API_H
 #define STATE_DICT_API_H
 
-#include "Layer.h"
+#include "Model.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -21,8 +21,7 @@ typedef struct stateDictEntry {
  *
  *  Error messages include entries[i].name if non-NULL, otherwise the
  *  param-layer index (0-based). */
-void modelLoadStateDict(layer_t **model, size_t numLayers, stateDictEntry_t *entries,
-                        size_t numEntries);
+void modelLoadStateDict(const model_t *m, stateDictEntry_t *entries, size_t numEntries);
 
 typedef struct stateDictBuffers {
     const char *name;         /* OPTIONAL -- error messages only */
@@ -41,7 +40,7 @@ typedef struct stateDictBuffers {
  *  layers; a NULL runningMean/runningVar; a non-finite running mean; a
  *  negative or non-finite running variance. Messages name entries[i].name
  *  if non-NULL, else the buffer-layer index (0-based). */
-void modelLoadStateDictBuffers(layer_t **model, size_t numLayers, const stateDictBuffers_t *entries,
+void modelLoadStateDictBuffers(const model_t *m, const stateDictBuffers_t *entries,
                                size_t numEntries);
 
 #endif /* STATE_DICT_API_H */

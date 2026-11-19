@@ -127,7 +127,7 @@ void testStateDictLoad_NoParamLayerZeroEntries(void) {
     layer_t *pool = buildPool(q, 2);
     layer_t *model[1] = {pool};
 
-    modelLoadStateDict(model, 1, NULL, 0); // must return without exiting
+    modelLoadStateDict(&MODEL_CHAIN(model, 1), NULL, 0); // must return without exiting
 
     freeAdaptiveAvgPool1dLayer(pool);
     freeQuantization(q);

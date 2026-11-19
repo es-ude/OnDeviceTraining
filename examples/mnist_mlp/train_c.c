@@ -154,7 +154,7 @@ static int loadStateDictFromDir(layer_t **model, const char *weightsDir) {
     }
 
     modelLoadStateDict(
-        model, MODEL_SIZE,
+        &MODEL_CHAIN(model, MODEL_SIZE),
         (stateDictEntry_t[]){
             {.name = names[0], .weightData = (float *)w[0]->data, .biasData = (float *)b[0]->data},
             {.name = names[1], .weightData = (float *)w[1]->data, .biasData = (float *)b[1]->data},

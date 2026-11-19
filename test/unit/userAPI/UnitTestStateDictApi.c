@@ -39,7 +39,7 @@ void testModelLoadStateDictLoadsTwoLinearLayersSkippingRelu(void) {
     float w1[2] = {7, 8};
     float b1[1] = {99};
 
-    modelLoadStateDict(model, 3,
+    modelLoadStateDict(&MODEL_CHAIN(model, 3),
                        (stateDictEntry_t[]){
                            {.name = "fc1", .weightData = w0, .biasData = b0},
                            {.name = "fc2", .weightData = w1, .biasData = b1},
@@ -84,7 +84,7 @@ void testModelLoadStateDictTreatsLayerNormAsParameterLayer(void) {
     stateDictEntry_t entries[] = {{.name = "ln", .weightData = gammaData, .biasData = betaData}};
 
     /* If LAYERNORM were param-less, numEntries(1) != paramLayers(0) -> exit(1). */
-    modelLoadStateDict(model, 1, entries, 1);
+    modelLoadStateDict(&MODEL_CHAIN(model, 1), entries, 1);
 
     layerNormConfig_t *cfg = ln->config->layerNorm;
     float *loadedGamma = (float *)cfg->gamma->param->data;

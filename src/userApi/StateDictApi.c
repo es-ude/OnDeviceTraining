@@ -34,12 +34,11 @@ static bool layerHasParameters(layer_t *layer) {
     }
 }
 
-void modelLoadStateDict(layer_t **model, size_t numLayers, stateDictEntry_t *entries,
-                        size_t numEntries) {
+void modelLoadStateDict(const model_t *m, stateDictEntry_t *entries, size_t numEntries) {
     /* First pass: count param layers and verify entry count matches. */
     size_t numParamLayers = 0;
-    for (size_t i = 0; i < numLayers; i++) {
-        if (layerHasParameters(model[i])) {
+    for (size_t i = 0; i < m->numLayers; i++) {
+        if (layerHasParameters(m->layers[i])) {
             numParamLayers++;
         }
     }
@@ -51,8 +50,8 @@ void modelLoadStateDict(layer_t **model, size_t numLayers, stateDictEntry_t *ent
 
     /* Second pass: load each param layer in order. */
     size_t entryIdx = 0;
-    for (size_t i = 0; i < numLayers; i++) {
-        if (!layerHasParameters(model[i])) {
+    for (size_t i = 0; i < m->numLayers; i++) {
+        if (!layerHasParameters(m->layers[i])) {
             continue;
         }
         stateDictEntry_t *e = &entries[entryIdx];
@@ -65,7 +64,7 @@ void modelLoadStateDict(layer_t **model, size_t numLayers, stateDictEntry_t *ent
             }
             exit(1);
         }
-        layerLoadWeights(model[i], e->weightData, e->biasData);
+        layerLoadWeights(m->layers[i], e->weightData, e->biasData);
         entryIdx++;
     }
 }
@@ -83,12 +82,12 @@ static void failBufferEntry(const stateDictBuffers_t *e, size_t idx, const char 
     exit(1);
 }
 
-void modelLoadStateDictBuffers(layer_t **model, size_t numLayers, const stateDictBuffers_t *entries,
+void modelLoadStateDictBuffers(const model_t *m, const stateDictBuffers_t *entries,
                                size_t numEntries) {
     /* First pass: count buffer-bearing layers and verify entry count matches. */
     size_t numBufferLayers = 0;
-    for (size_t i = 0; i < numLayers; i++) {
-        if (layerHasRunningBuffers(model[i])) {
+    for (size_t i = 0; i < m->numLayers; i++) {
+        if (layerHasRunningBuffers(m->layers[i])) {
             numBufferLayers++;
         }
     }
@@ -101,12 +100,12 @@ void modelLoadStateDictBuffers(layer_t **model, size_t numLayers, const stateDic
 
     /* Second pass: load each buffer-bearing layer in order. */
     size_t entryIdx = 0;
-    for (size_t i = 0; i < numLayers; i++) {
-        if (!layerHasRunningBuffers(model[i])) {
+    for (size_t i = 0; i < m->numLayers; i++) {
+        if (!layerHasRunningBuffers(m->layers[i])) {
             continue;
         }
         const stateDictBuffers_t *e = &entries[entryIdx];
-        batchNorm1dConfig_t *cfg = model[i]->config->batchNorm1d;
+        batchNorm1dConfig_t *cfg = m->layers[i]->config->batchNorm1d;
         if (e->runningMean == NULL || e->runningVar == NULL) {
             failBufferEntry(e, entryIdx, "runningMean and runningVar are required");
         }

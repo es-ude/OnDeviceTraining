@@ -72,15 +72,15 @@ static void freeLayerNormStub(layer_t *layer) {
 }
 
 void testValidatorAcceptsEmptyModel(void) {
-    /* modelSize == 0: loop never runs, valid stays true. */
+    /* numLayers == 0: loop never runs, valid stays true. */
     layer_t *model[1] = {NULL}; /* pointer needed; element never read */
-    bool valid = validateModelQuantization(model, 0);
+    bool valid = validateModelQuantization(&MODEL_CHAIN(model, 0));
     TEST_ASSERT_TRUE_MESSAGE(valid, "empty model (size 0) should be accepted");
 }
 
 void testValidatorRejectsNullModel(void) {
-    /* model == NULL: guarded at entry, returns false. */
-    bool valid = validateModelQuantization(NULL, 0);
+    /* m->layers == NULL: guarded at entry, returns false. */
+    bool valid = validateModelQuantization(&MODEL_CHAIN(NULL, 0));
     TEST_ASSERT_FALSE_MESSAGE(valid, "NULL model pointer should be rejected");
 }
 
@@ -91,7 +91,7 @@ void testValidatorRejectsNullElementMidArray(void) {
     layer_t *linear = buildLinearStub(symQ);
     layer_t *model[2] = {linear, NULL};
 
-    bool valid = validateModelQuantization(model, 2);
+    bool valid = validateModelQuantization(&MODEL_CHAIN(model, 2));
 
     freeLinearStub(linear);
     freeQuantization(symQ);
@@ -112,7 +112,7 @@ void testValidatorAcceptsSymProducerFollowedByNonQuantLayer(void) {
     layer_t *norm = buildLayerNormStub(symQ);
     layer_t *model[2] = {linear, norm};
 
-    bool valid = validateModelQuantization(model, 2);
+    bool valid = validateModelQuantization(&MODEL_CHAIN(model, 2));
 
     freeLayerNormStub(norm);
     freeLinearStub(linear);
@@ -129,7 +129,7 @@ void testValidatorAcceptsFloatOnlyModel(void) {
     layer_t *norm = buildLayerNormStub(fQ);
     layer_t *model[2] = {linear, norm};
 
-    bool valid = validateModelQuantization(model, 2);
+    bool valid = validateModelQuantization(&MODEL_CHAIN(model, 2));
 
     freeLayerNormStub(norm);
     freeLinearStub(linear);

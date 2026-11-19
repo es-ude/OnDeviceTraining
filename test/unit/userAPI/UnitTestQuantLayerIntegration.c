@@ -322,7 +322,7 @@ void testFullSymChainTrainingStepMatchesFloatTwin(void) {
     layer_t *modelSym[5] = {lin0S, quant1, lnS, quant2, lin1S};
 
     /* Setup assert: the chain satisfies the int16 inter-layer contract. */
-    TEST_ASSERT_TRUE_MESSAGE(validateModelQuantization(modelSym, 5),
+    TEST_ASSERT_TRUE_MESSAGE(validateModelQuantization(&MODEL_CHAIN(modelSym, 5)),
                              "chain with Quant layers must pass the validator");
 
     tensor_t *inS = build2DSym(2, 4, INPUT_VALS, 8);
@@ -359,7 +359,7 @@ void testFullSymChainTrainingStepMatchesFloatTwin(void) {
     layer_t *lin1F = buildTrainableLinear(3, 2, W1_VALS, B1_VALS, fQ, false);
     layer_t *modelF[3] = {lin0F, lnF, lin1F};
 
-    TEST_ASSERT_TRUE_MESSAGE(validateModelQuantization(modelF, 3),
+    TEST_ASSERT_TRUE_MESSAGE(validateModelQuantization(&MODEL_CHAIN(modelF, 3)),
                              "FLOAT-only twin must pass the validator");
 
     tensor_t *inF = build2DFloat(2, 4, INPUT_VALS, 8);
@@ -460,7 +460,7 @@ void testConv1dTransposedSymChainTrains(void) {
     layer_t *quant = buildQuantLayer(symQ, symQ);
     layer_t *model[2] = {&convLayer, quant};
 
-    TEST_ASSERT_TRUE_MESSAGE(validateModelQuantization(model, 2),
+    TEST_ASSERT_TRUE_MESSAGE(validateModelQuantization(&MODEL_CHAIN(model, 2)),
                              "ConvT-SYM -> Quant must pass the validator");
 
     /* Fixed learnable sample: input [1,1,3] -> ConvT output [1,1,4]; label [1,1,4]. */
@@ -523,7 +523,7 @@ void testValidatorAcceptsChainWithoutQuantLayers(void) {
 
     /* Linear-SYM's forward already restores width before feeding LayerNorm-SYM
      * directly — no Quant layer needed between them. */
-    bool valid = validateModelQuantization(model, 3);
+    bool valid = validateModelQuantization(&MODEL_CHAIN(model, 3));
 
     freeParameter(lin1->config->linear->weights);
     freeParameter(lin1->config->linear->bias);

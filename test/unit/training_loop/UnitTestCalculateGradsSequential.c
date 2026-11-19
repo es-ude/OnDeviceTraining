@@ -82,7 +82,7 @@ void testCalculateGradsSequentialClosedForm() {
     /* Set known weights/bias: W = {{0.1,0.2},{0.3,0.4}}, b = {0,0}. */
     float W[4] = {0.1f, 0.2f, 0.3f, 0.4f};
     float B[2] = {0.0f, 0.0f};
-    modelLoadStateDict(model, 2,
+    modelLoadStateDict(&MODEL_CHAIN(model, 2),
                        (stateDictEntry_t[]){{.name = "fc", .weightData = W, .biasData = B}}, 1);
 
     tensor_t *x = makeRowVec2(1.0f, 1.0f);
@@ -135,7 +135,7 @@ void testCrossEntropyFloatHeadIgnoresAnUnusedSymPropLossQ(void) {
     const float p[3] = {0.5f, 0.49999f, 0.00001f};
     float W[6] = {0};
     float B[3] = {logf(p[0]), logf(p[1]), logf(p[2])};
-    modelLoadStateDict(model, 2,
+    modelLoadStateDict(&MODEL_CHAIN(model, 2),
                        (stateDictEntry_t[]){{.name = "fc", .weightData = W, .biasData = B}}, 1);
     tensor_t *x = makeRowVec2(1.0f, 1.0f);
     tensor_t *label = makeRowVecN((const float[]){1.0f, 0.0f, 0.0f}, 3);
@@ -192,7 +192,7 @@ void testTracedGradsFiresInOrder() {
         &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey0}, &lq);
     model[1] = softmaxLayerInit(&lq);
     float W[4] = {0.1f, 0.2f, 0.3f, 0.4f}, B[2] = {0};
-    modelLoadStateDict(model, 2,
+    modelLoadStateDict(&MODEL_CHAIN(model, 2),
                        (stateDictEntry_t[]){{.name = "fc", .weightData = W, .biasData = B}}, 1);
     tensor_t *x = makeRowVec2(1.0f, 1.0f);
     tensor_t *label = makeRowVec2(1.0f, 0.0f);
@@ -235,7 +235,7 @@ void testTraceModelParamsFiresPerTrainableParam() {
         &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey0}, &lq);
     model[1] = softmaxLayerInit(&lq);
     float W[4] = {0.1f, 0.2f, 0.3f, 0.4f}, B[2] = {0};
-    modelLoadStateDict(model, 2,
+    modelLoadStateDict(&MODEL_CHAIN(model, 2),
                        (stateDictEntry_t[]){{.name = "fc", .weightData = W, .biasData = B}}, 1);
     tensor_t *x = makeRowVec2(1.0f, 1.0f), *label = makeRowVec2(1.0f, 0.0f);
     trainingStats_t *stats = calculateGradsSequential(
@@ -726,7 +726,7 @@ void testFrozenLayerSurvivesTrainingUntouched(void) {
     float trainW[8] = {0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f};
     float trainB[2] = {0.0f, 0.0f};
     modelLoadStateDict(
-        model, 3,
+        &MODEL_CHAIN(model, 3),
         (stateDictEntry_t[]){{.name = "frozen", .weightData = frozenW, .biasData = frozenB},
                              {.name = "trainable", .weightData = trainW, .biasData = trainB}},
         2);
@@ -850,7 +850,7 @@ void testBackwardStopsAtDeepestTrainableLayer(void) {
     float trainW[8] = {0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f};
     float trainB[2] = {0.0f, 0.0f};
     modelLoadStateDict(
-        model, 3,
+        &MODEL_CHAIN(model, 3),
         (stateDictEntry_t[]){{.name = "frozen", .weightData = frozenW, .biasData = frozenB},
                              {.name = "trainable", .weightData = trainW, .biasData = trainB}},
         2);
@@ -954,12 +954,12 @@ void testTruncationPreservesUpperLayerGrads(void) {
     layer_t *m2[3] = {m2Bottom, m2Relu, m2Top};
 
     modelLoadStateDict(
-        m1, 3,
+        &MODEL_CHAIN(m1, 3),
         (stateDictEntry_t[]){{.name = "bottom", .weightData = seedS, .biasData = seedSBias},
                              {.name = "top", .weightData = seedT, .biasData = seedTBias}},
         2);
     modelLoadStateDict(
-        m2, 3,
+        &MODEL_CHAIN(m2, 3),
         (stateDictEntry_t[]){{.name = "bottom", .weightData = seedS, .biasData = seedSBias},
                              {.name = "top", .weightData = seedT, .biasData = seedTBias}},
         2);
@@ -1029,7 +1029,7 @@ void testAllFrozenModelSkipsBackwardEntirely(void) {
 
     float W[8] = {0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f};
     float B[2] = {0.0f, 0.0f};
-    modelLoadStateDict(model, 1,
+    modelLoadStateDict(&MODEL_CHAIN(model, 1),
                        (stateDictEntry_t[]){{.name = "frozen", .weightData = W, .biasData = B}}, 1);
 
     tensor_t *x = makeRowVecN((float[]){1.0f, 1.0f, 1.0f, 1.0f}, 4);
@@ -1220,7 +1220,7 @@ static void runSpiedGradsCall(const trainingCall_t *call) {
         &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey0}, &lq);
     model[1] = softmaxLayerInit(&lq);
     float W[4] = {0.1f, 0.2f, 0.3f, 0.4f}, B[2] = {0};
-    modelLoadStateDict(model, 2,
+    modelLoadStateDict(&MODEL_CHAIN(model, 2),
                        (stateDictEntry_t[]){{.name = "fc", .weightData = W, .biasData = B}}, 1);
     tensor_t *x = makeRowVec2(1.0f, 1.0f);
     tensor_t *label = makeRowVec2(1.0f, 0.0f);

@@ -146,7 +146,7 @@ static void buildLinearSoftmaxModel(layer_t *model[2], quantization_t *q, traina
     model[1] = softmaxLayerInit(&lq);
     float W[4] = {0.1f, 0.2f, 0.3f, 0.4f};
     float B[2] = {0.0f, 0.0f};
-    modelLoadStateDict(model, 2,
+    modelLoadStateDict(&MODEL_CHAIN(model, 2),
                        (stateDictEntry_t[]){{.name = "fc", .weightData = W, .biasData = B}}, 1);
 }
 

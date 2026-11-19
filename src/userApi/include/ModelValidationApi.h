@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "Layer.h"
+#include "Model.h"
 
 /*! Opt-in model-quantization validator (NOT wired into the training loop).
  *
@@ -18,6 +18,6 @@
  *  Diagnostics: logs every violation (PRINT_ERROR-style, visible with
  *  DLEVEL >= 1) and returns false if at least one violation was found.
  *  NEVER exits — callers decide how to react. */
-bool validateModelQuantization(layer_t **model, size_t modelSize);
+bool validateModelQuantization(const model_t *m);
 
 #endif // ODT_MODEL_VALIDATION_API_H

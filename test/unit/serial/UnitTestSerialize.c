@@ -3005,6 +3005,26 @@ static void testDeserializeSkipsSymGradIntoFrozenSkeleton(void) {
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(capturedSerialBias, capturedSkeletonBias, numBiases);
 }
 
+/* Two FLOAT32 ReLUs wired so buffer 1 has no consumer: a wiring the chain loop would misread. */
+static const uint16_t g_skipStart[3] = {0, 1, 2}, g_skipIds[2] = {0, 0};
+
+void testSerializeModelValidatesTheWiring(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *layers[2] = {reluLayerInit(&lq), reluLayerInit(&lq)};
+    FILE *f = tmpfile();
+    TEST_ASSERT_NOT_NULL(f);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "serializeModel: wiring: buffer 1 has no consumer",
+                             serializeModel(&(model_t){layers, 2, g_skipStart, g_skipIds}, f));
+
+    fclose(f);
+    freeReluLayer(layers[1]);
+    freeReluLayer(layers[0]);
+    freeQuantization(floatQ);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testRoundTripLinear);
@@ -3046,5 +3066,6 @@ int main(void) {
     RUN_TEST(testDeserializeRejectsConv1dBiasPresenceMismatch);
     RUN_TEST(testDeserializeRejectsConv1dTransposedBiasPresenceMismatch);
     RUN_TEST(testDeserializeRejectsLinearHasBiasByteOutOfRange);
+    RUN_TEST(testSerializeModelValidatesTheWiring);
     return UNITY_END();
 }

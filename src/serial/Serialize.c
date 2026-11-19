@@ -16,6 +16,7 @@
 #include "LayerNorm.h"
 #include "Linear.h"
 #include "MaxPool1d.h"
+#include "Model.h"
 #include "QuantizationLayer.h"
 #include "Relu.h"
 #include "Rounding.h"
@@ -115,6 +116,7 @@ void serializeParameter(parameter_t *parameter, FILE *f) {
 }
 
 void serializeModel(const model_t *m, FILE *f) {
+    modelRequireValid(m, "serializeModel");
     serialWriteBytes(SERIALIZE_MAGIC, 4, f);
     serialWriteU32LE(SERIALIZE_FORMAT_VERSION, f);
     serialWriteSizeAsU32LE(m->numLayers, f);

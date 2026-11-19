@@ -2811,6 +2811,30 @@ static void testReadTensorRecordHeaderRejectsRankAboveCap(void) {
     fclose(f);
 }
 
+/* Two FLOAT32 ReLUs wired so buffer 1 has no consumer: a wiring the chain loop would misread. */
+static const uint16_t g_skipStart[3] = {0, 1, 2}, g_skipIds[2] = {0, 0};
+
+/* The stream is a valid chain serialization of the same layers, so only the wiring can refuse it.
+ */
+static void testDeserializeModelValidatesTheWiring(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *layers[2] = {reluLayerInit(&lq), reluLayerInit(&lq)};
+    FILE *f = tmpfile();
+    TEST_ASSERT_NOT_NULL(f);
+    serializeModel(&MODEL_CHAIN(layers, 2), f);
+    rewind(f);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: wiring: buffer 1 has no consumer",
+                             deserializeModel(&(model_t){layers, 2, g_skipStart, g_skipIds}, f));
+
+    fclose(f);
+    freeReluLayer(layers[1]);
+    freeReluLayer(layers[0]);
+    freeQuantization(floatQ);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -2895,5 +2919,6 @@ int main(void) {
     RUN_TEST(testReadTensorRecordHeaderGroupedAsym);
     RUN_TEST(testReadTensorRecordHeaderGroupedBfp);
     RUN_TEST(testReadTensorRecordHeaderRejectsRankAboveCap);
+    RUN_TEST(testDeserializeModelValidatesTheWiring);
     return UNITY_END();
 }

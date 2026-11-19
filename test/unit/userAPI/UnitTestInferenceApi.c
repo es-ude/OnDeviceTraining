@@ -1089,6 +1089,62 @@ void testInferenceExitsOnAReluOutputNarrowerThanItsInput(void) {
     freeQuantization(narrowQ);
 }
 
+/* Two FLOAT32 ReLUs wired so buffer 1 has no consumer: a wiring the chain loop would misread. */
+static const uint16_t g_skipStart[3] = {0, 1, 2}, g_skipIds[2] = {0, 0};
+
+typedef struct {
+    quantization_t *q;
+    layer_t *layers[2];
+    model_t model;
+    tensor_t *x;
+} skipFixture_t;
+
+static void buildSkipFixture(skipFixture_t *f) {
+    f->q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, f->q);
+    f->layers[0] = reluLayerInit(&lq);
+    f->layers[1] = reluLayerInit(&lq);
+    f->model = (model_t){f->layers, 2, g_skipStart, g_skipIds};
+    f->x = buildFloatTensor2DInf(1, 2, (float[]){-1.f, 2.f});
+}
+
+static void freeSkipFixture(skipFixture_t *f) {
+    freeTensor(f->x);
+    freeReluLayer(f->layers[1]);
+    freeReluLayer(f->layers[0]);
+    freeQuantization(f->q);
+}
+
+void testInferenceValidatesTheWiring(void) {
+    skipFixture_t f;
+    buildSkipFixture(&f);
+    ASSERT_EXITS_WITH_OUTPUT(1, "inference: wiring: buffer 1 has no consumer",
+                             (void)inference(&f.model, f.x));
+    freeSkipFixture(&f);
+}
+
+/* An empty batch runs no sample, so the exit proves the check precedes the sample loop. */
+void testInferenceBatchedValidatesOncePerCall(void) {
+    skipFixture_t f;
+    buildSkipFixture(&f);
+    batch_t empty = {.size = 0};
+    ASSERT_EXITS_WITH_OUTPUT(1, "inferenceBatched: wiring: buffer 1 has no consumer",
+                             (void)inferenceBatched(&f.model, &empty));
+    freeSkipFixture(&f);
+}
+
+void testInferenceWithLossValidatesTheWiring(void) {
+    skipFixture_t f;
+    buildSkipFixture(&f);
+    tensor_t *label = buildFloatTensor2DInf(1, 2, (float[]){0.f, 1.f});
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "inferenceWithLoss: wiring: buffer 1 has no consumer",
+        (void)inferenceWithLoss(&f.model, f.x, label, MSE, REDUCTION_MEAN, NULL));
+    freeTensor(label);
+    freeSkipFixture(&f);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testInferenceLinearReluFloat);
@@ -1096,6 +1152,9 @@ int main(void) {
     RUN_TEST(testInferenceLayerNormSymInt32);
     RUN_TEST(testInferenceOutputWireHonorsDeclaredQMaxBits);
     RUN_TEST(testInferenceExitsOnAReluOutputNarrowerThanItsInput);
+    RUN_TEST(testInferenceValidatesTheWiring);
+    RUN_TEST(testInferenceBatchedValidatesOncePerCall);
+    RUN_TEST(testInferenceWithLossValidatesTheWiring);
 
     RUN_TEST(testInferenceWithLossLinearReluFloat);
     RUN_TEST(testInferenceWithLossRejectsRank1LabelAgainstBatchedOutput);

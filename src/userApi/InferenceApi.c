@@ -20,6 +20,7 @@
 #include "LayerNorm.h"
 #include "Linear.h"
 #include "MaxPool1d.h"
+#include "Model.h"
 #include "QuantizationLayer.h"
 #include "Relu.h"
 #include "RematCheck.h"
@@ -183,7 +184,8 @@ static void deInitBuffer(tensor_t *buffer) {
     freeQuantization(buffer->quantization);
 }
 
-tensor_t *inference(const model_t *m, tensor_t *input) {
+/* The chain forward behind inference and inferenceBatched; the caller has validated m. */
+static tensor_t *inferChain(const model_t *m, tensor_t *input) {
     tensor_t outputNext;
 
     initBufferInput(input, &outputNext);
@@ -208,13 +210,19 @@ tensor_t *inference(const model_t *m, tensor_t *input) {
     return output;
 }
 
+tensor_t *inference(const model_t *m, tensor_t *input) {
+    modelRequireValid(m, "inference");
+    return inferChain(m, input);
+}
+
 tensor_t **inferenceBatched(const model_t *m, batch_t *batch) {
+    modelRequireValid(m, "inferenceBatched");
     tensor_t **tensorArr = reserveMemory(batch->size * sizeof(*tensorArr));
 
     for (size_t i = 0; i < batch->size; i++) {
-        /* batch_t consumer: the sample is natural-shape, inference() takes [B, ...]. */
+        /* batch_t consumer: the sample is natural-shape, inferChain takes [B, ...]. */
         batchView_t itemView;
-        tensorArr[i] = inference(m, batchViewOf(&itemView, batch->samples[i]->item));
+        tensorArr[i] = inferChain(m, batchViewOf(&itemView, batch->samples[i]->item));
     }
 
     return tensorArr;
@@ -286,6 +294,7 @@ inferenceStats_t *inferenceWithLoss(const model_t *m, tensor_t *input, tensor_t 
         return inferenceOnScheduler(m, input, label, funcType, forwardReduction, call->remat,
                                     callKey);
     }
+    modelRequireValid(m, "inferenceWithLoss");
     tensor_t outputNext;
     initBufferInput(input, &outputNext);
 

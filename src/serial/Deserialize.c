@@ -20,6 +20,7 @@
 #include "LayerNorm.h"
 #include "Linear.h"
 #include "MaxPool1d.h"
+#include "Model.h"
 #include "QuantizationLayer.h"
 #include "Relu.h"
 #include "Rounding.h"
@@ -139,6 +140,7 @@ void deserializeParameter(parameter_t *parameter, FILE *f) {
 }
 
 void deserializeModel(const model_t *m, FILE *f) {
+    modelRequireValid(m, "deserializeModel");
     char magic[4];
     serialReadBytes(magic, 4, f);
     if (memcmp(magic, SERIALIZE_MAGIC, 4) != 0) {

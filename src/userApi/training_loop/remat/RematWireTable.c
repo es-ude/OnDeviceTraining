@@ -11,6 +11,7 @@
 #include "Layer.h"
 #include "LayerConfigAccess.h"
 #include "LossFunction.h"
+#include "Model.h"
 #include "Quantization.h"
 #include "RematPlan.h"
 #include "StorageApi.h"
@@ -305,11 +306,8 @@ static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t
 bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t loss,
                         const tensor_t *inputLike) {
     *out = NULL;
+    modelRequireValid(m, "rematWireTableInit");
     size_t n = m->numLayers;
-    if (n == 0) {
-        PRINT_ERROR("rematWireTableInit: modelSize == 0: nothing to schedule");
-        exit(1);
-    }
     size_t deepest;
     ptrdiff_t top;
     rematBackwardRange(m->layers, n, loss.funcType, &deepest, &top);

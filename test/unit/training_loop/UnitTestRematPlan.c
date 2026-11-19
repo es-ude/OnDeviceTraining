@@ -881,6 +881,19 @@ void testTableInitExitsOnAnEmptyModel(void) {
     freeModel(model, 1);
 }
 
+/* A wiring the chain drivers would misread is refused before anything is reserved. */
+void testTableInitValidatesTheWiring(void) {
+    layer_t *model[2] = {makeRelu(&g_floatQ), makeRelu(&g_floatQ)};
+    static const uint16_t start[3] = {0, 1, 2}, ids[2] = {0, 0};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
+    rematWireTable_t *t = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "rematWireTableInit: wiring: buffer 1 has no consumer",
+        (void)rematWireTableInit(&t, &(model_t){model, 2, start, ids}, defaultLossConfig(MSE), x));
+    freeModel(model, 2);
+}
+
 /* 65534 parameter-free layers under MSE: no GRAD, so n + 1 = 65535 wires, the
  * first count whose ids would include the REMAT_NONE sentinel. One ReLU is
  * reused for every slot; the model array itself is test-owned. */
@@ -4444,6 +4457,7 @@ int main(void) {
     RUN_TEST(testSlabObjectsAlignedAndExponentsAtTheTail);
     RUN_TEST(testAccessorsReadTheTableAndHeadersAreLinked);
     RUN_TEST(testTableInitExitsOnAnEmptyModel);
+    RUN_TEST(testTableInitValidatesTheWiring);
     RUN_TEST(testTableInitExitsWhenWireIdsWouldReachRematNone);
     RUN_TEST(testTableInitExitsOnAnInputRankAboveTheRankField);
     RUN_TEST(testTableInitExitsOnAnUnsupportedWireDtype);

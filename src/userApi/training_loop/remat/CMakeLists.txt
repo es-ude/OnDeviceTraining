@@ -13,6 +13,7 @@ target_include_directories(RematPlan PUBLIC include)
 # directly can #ifdef their poison assertions.
 target_compile_definitions(RematPlan PUBLIC $<$<BOOL:${ODT_REMAT_VERIFY}>:ODT_REMAT_VERIFY>)
 target_link_libraries(RematPlan PRIVATE
+        Model
         Tensor
         Quantization
         TensorApi

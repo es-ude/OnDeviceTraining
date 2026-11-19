@@ -44,6 +44,16 @@ target_link_libraries(InferenceApi PRIVATE
         RematCheck
 )
 
+add_library(ModelGraphApi ModelGraphApi.c)
+target_include_directories(ModelGraphApi PUBLIC include)
+target_link_libraries(ModelGraphApi PRIVATE
+        Model
+        Layer
+        Tensor
+        Rounding
+        Common
+)
+
 add_library(StorageApi StorageApi.c)
 target_include_directories(StorageApi PUBLIC include)
 target_compile_definitions(StorageApi PUBLIC $<$<BOOL:${ODT_MEM_PROFILE}>:ODT_MEM_PROFILE>)

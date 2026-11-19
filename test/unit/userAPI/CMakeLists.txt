@@ -735,3 +735,14 @@ target_link_libraries(UnitTestStackedEvaluation PRIVATE
         odt_test_death
 )
 __register_target_as_unit_test(UnitTestStackedEvaluation)
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        ModelGraphApi
+        MORE_LIBS
+        Model
+        OpTable
+        CommonLayerLibs
+        StorageApi
+        odt_test_death
+)

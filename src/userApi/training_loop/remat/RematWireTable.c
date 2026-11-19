@@ -316,9 +316,6 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
     *out = NULL;
     modelRequireValid(m, "rematWireTableInit");
     size_t n = m->numLayers;
-    size_t deepest;
-    ptrdiff_t top;
-    rematBackwardRange(m->layers, n, loss.funcType, &deepest, &top);
 
     /* The gradient flags and the dx slots, derived once here and copied into the table: dxWire
      * first, so it is 2-aligned without padding. Freed with the facts. */
@@ -336,6 +333,12 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
     uint8_t *runsBackward = needsGrad + n + 1u;
     uint8_t *dxMode = runsBackward + n;
     modelGradFlags(m, loss.funcType, needsGrad, runsBackward);
+    /* CrossEntropy's backward IS the combined Softmax + CE gradient p - y, so the sink's own
+     * backward never runs: it must be the Softmax, or a layer would silently go untrained, and
+     * its config must declare one of the two heads. With nothing to train nothing is skipped. */
+    if (loss.funcType == CROSS_ENTROPY && needsGrad[n]) {
+        requireCrossEntropyHead(m->layers[n - 1u], "rematWireTableInit");
+    }
     bool hasBackward = needsGrad[loss.funcType == CROSS_ENTROPY ? n - 1u : n] != 0;
     size_t numWires =
         addSize(addSize(n, 1u, NULL, "numWires"),
@@ -413,8 +416,6 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
 
     t->modelSize = n;
     t->lossType = loss.funcType;
-    t->deepest = deepest;
-    t->backwardTop = top;
     t->hasBackward = hasBackward;
     t->numWires = numWires;
     for (size_t j = 0; j <= n; j++) {
@@ -579,14 +580,15 @@ static void requireModelKey(const rematWireTable_t *t, const model_t *m, lossFun
             exitModelKeyAt("layerType", i, t->layerType[i], (size_t)m->layers[i]->type);
         }
     }
-    size_t deepest; /* unused: called for its CrossEntropy head check on the live model */
-    ptrdiff_t top;
-    rematBackwardRange(m->layers, n, lt, &deepest, &top);
     /* The live flags go into the bind scratch, unused until phase 1 derives into it; it holds
      * numWires facts, far more than the 2n + 1 bytes. */
     uint8_t *liveNeedsGrad = (uint8_t *)t->bindScratch;
     uint8_t *liveRunsBackward = liveNeedsGrad + n + 1u;
     modelGradFlags(m, lt, liveNeedsGrad, liveRunsBackward);
+    /* The head config is no key field, so the init's head check runs again on the live model. */
+    if (lt == CROSS_ENTROPY && liveNeedsGrad[n]) {
+        requireCrossEntropyHead(m->layers[n - 1u], "rematWireTableBind");
+    }
     for (size_t i = 0; i < n; i++) {
         if (liveRunsBackward[i] != t->runsBackward[i]) {
             exitModelKeyAt("runsBackward", i, t->runsBackward[i], liveRunsBackward[i]);

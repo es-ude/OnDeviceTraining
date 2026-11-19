@@ -456,7 +456,7 @@ static rematStep_t harStep(const rematScheduler_t *s, size_t i) {
     return s->plan->train.steps[i];
 }
 
-/* HAR's BACKWARD(10) (#14) pointed at BACKWARD(9)'s slice: in the pool, of
+/* HAR's BACKWARD(10) (step 14) pointed at BACKWARD(9)'s slice: in the pool, of
  * the right counts, but not its node's. */
 void testStepExitsOnAStepOffItsNodesSlice(void) {
     fixture_t f;
@@ -758,7 +758,7 @@ void testStepExitsOnAReforwardWhenNothingTrains(void) {
     freeFixture(&f, &s);
 }
 
-/* After HAR's LOSS_BACKWARD (#13) BACKWARD(10) is pending: REFORWARD(10)
+/* After HAR's LOSS_BACKWARD (step 13) BACKWARD(10) is pending: REFORWARD(10)
  * would regenerate ACT 11, which no pending step reads. */
 void testStepExitsOnAReforwardAtThePendingBackward(void) {
     fixture_t f;
@@ -814,7 +814,7 @@ void testStepExitsOnAReforwardPastTheModel(void) {
         "remat[arena]: step #4 REFORWARD(layer 2) violates 'layer out of range' (n = 2)");
 }
 
-/* HAR's stream up to its LOSS_BACKWARD (#0..#13), then REFORWARD(0) again and
+/* HAR's stream up to its LOSS_BACKWARD (steps 0..13), then REFORWARD(0) again and
  * again: ACT 0 is borrowed and STORE_ALL keeps ACT 1 bound to the stream's
  * end, so only the step budget stops it. */
 static void reforwardUntilTheBudgetStops(fixture_t *f, rematScheduler_t *s) {

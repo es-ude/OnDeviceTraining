@@ -2384,8 +2384,8 @@ gates both (the whole step with the optimizer: §15.8).
   label and grad wire are ALL FLOAT32; any other mix (a FLOAT32 output into a
   BFP grad wire, a quantized label) takes the converting arm. A BFP `p` is
   the integer head. The training loop skips the model's last layer exactly
-  once under CrossEntropy (`rematBackwardRange`), and that layer must be the
-  Softmax: any other last layer (or an empty model) fails fast, so no
+  once under CrossEntropy (`modelGradFlags`), and that layer must be the
+  Softmax: any other last layer fails fast at the remat table init, so no
   layer's backward is dropped silently -- checked when a backward runs (an
   all-frozen, eval-only model skips nothing and is not checked).
 
@@ -2402,7 +2402,7 @@ the Softmax's dx, so the remat wire table gives it the Softmax's
 SYM head, and under MSE, the seed still inherits the model output's config
 and `propLossQ` stays unused, exactly as before the heads existed).
 `requireCrossEntropyHead` (`LayerConfigAccess.c`, called by
-`rematBackwardRange`) accepts a head without any BFP unchanged (FLOAT32 and
+`rematWireTableInit` and every `rematWireTableBind`) accepts a head without any BFP unchanged (FLOAT32 and
 SYM models), and with any BFP exactly two tuples:
 
 | head | forwardMath | propLossMath | outputQ (`p`) | propLossQ (loss grad) |

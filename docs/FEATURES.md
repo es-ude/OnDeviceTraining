@@ -175,7 +175,7 @@ Notes on the qualified cells:
   (#380 PR2) is shipped: backward truncates at the deepest trainable layer — dx
   wires below it, and the deepest trainable layer's own dx, are neither computed
   nor allocated; trace emits backward events only for the executed range.
-  The cut is at the deepest **non-frozen parameter** layer (`deepestTrainableIndex`;
+  The cut is at the deepest **non-frozen parameter** layer (`modelGradFlags`;
   a `noAffine` BatchNorm1d has no parameters and never counts): leading non-param layers
   (Flatten/Pool/Dropout/Quant — the repo's standard model heads) no longer run
   backward at all, and their previously-fired `agrad` events (e.g. kws_raw's
@@ -548,8 +548,9 @@ checkpointing, limitations, literature).
   (`epochStats_t` / `classificationReport_t`). Three epoch-level eval entry points
   (`evaluationEpoch` / `evaluationEpochWithMetrics` / `evaluationEpochWithReport`)
   plus the per-sample, never-stacking `evaluationBatch` primitive.
-  `calculateGradsSequential`'s backward pass truncates at `deepestTrainableIndex`
-  — the closest-to-input layer whose params still train (#380 PR2); when no
+  `calculateGradsSequential`'s backward pass truncates at the deepest trainable
+  layer (`modelGradFlags`) — the closest-to-input layer whose params still
+  train (#380 PR2); when no
   layer trains, the whole backward pass (loss-grad seed + layer loop) is
   skipped, though the forward loss value is always computed.
 - **Data loading** — `.npy` (`<f4`/`<i4`) datasets, with a strictly validated header

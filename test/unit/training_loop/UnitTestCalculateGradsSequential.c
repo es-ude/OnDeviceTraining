@@ -1010,7 +1010,7 @@ void testTruncationPreservesUpperLayerGrads(void) {
 
 /* ── #380 PR2 Task 2: all-frozen model skips backward entirely ──
  * model: [frozen Linear(4->2)], MSE loss. No layer trains, so
- * deepestTrainableIndex returns the sentinel (modelSize) and the entire
+ * modelGradFlags sets no runsBackward flag and the entire
  * backward block -- including the loss-gradient seed -- must be skipped: no
  * "lossgrad", no "agrad". The forward pass and loss must still run (finite
  * loss value), and nothing may crash. */

@@ -1706,6 +1706,9 @@ static void assertOperandsResident(const rematWireTable_t *t, layer_t **model,
                                    const rematStep_t *st) {
     size_t n = t->modelSize;
     size_t l = st->layer;
+    size_t deepest;
+    ptrdiff_t top;
+    positionalRange(model, n, t->lossType, &deepest, &top);
     switch (st->kind) {
     case REMAT_STEP_FORWARD:
     case REMAT_STEP_REFORWARD:
@@ -1720,13 +1723,12 @@ static void assertOperandsResident(const rematWireTable_t *t, layer_t **model,
         assertResident(t, rematGradId(t, n), "LOSS_BACKWARD writes the seed");
         break;
     case REMAT_STEP_BACKWARD: {
-        uint16_t gradIn =
-            ((ptrdiff_t)l == t->backwardTop) ? rematGradId(t, n) : rematGradId(t, l + 1u);
+        uint16_t gradIn = ((ptrdiff_t)l == top) ? rematGradId(t, n) : rematGradId(t, l + 1u);
         assertResident(t, gradIn, "BACKWARD reads gradIn");
         if (layerBackwardReadsInput(model[l])) {
             assertResident(t, rematActId(t, l), "BACKWARD reads its input");
         }
-        if (l > t->deepest) {
+        if (l > deepest) {
             assertResident(t, rematGradId(t, l), "BACKWARD writes its dx");
         }
         break;
@@ -3142,15 +3144,15 @@ static void selfCheckWithOneExtraByte(rowInit_t init) {
 
 void testInitSelfCheckExitsOnAnUnaccountedByteOnHeap(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[heap]: init reserved 7217 B, but its report accounts for "
-                             "7216 B (arenaBytes 0 + metadataBytes 7216)",
+                             "remat[heap]: init reserved 7193 B, but its report accounts for "
+                             "7192 B (arenaBytes 0 + metadataBytes 7192)",
                              selfCheckWithOneExtraByte(initHeap));
 }
 
 void testInitSelfCheckExitsOnAnUnaccountedByteOnArena(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[arena]: init reserved 81689 B, but its report accounts for "
-                             "81688 B (arenaBytes 74288 + metadataBytes 7400)",
+                             "remat[arena]: init reserved 81665 B, but its report accounts for "
+                             "81664 B (arenaBytes 74288 + metadataBytes 7376)",
                              selfCheckWithOneExtraByte(initArena));
 }
 
@@ -3187,15 +3189,15 @@ static void initWithAnUnaccountedReservation(rematSchedulerType_t row) {
 
 void testHeapInitExitsOnAnUnaccountedReservation(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[heap]: init reserved 7224 B, but its report accounts for "
-                             "7216 B (arenaBytes 0 + metadataBytes 7216)",
+                             "remat[heap]: init reserved 7200 B, but its report accounts for "
+                             "7192 B (arenaBytes 0 + metadataBytes 7192)",
                              initWithAnUnaccountedReservation(REMAT_HEAP));
 }
 
 void testArenaInitExitsOnAnUnaccountedReservation(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[arena]: init reserved 81696 B, but its report accounts for "
-                             "81688 B (arenaBytes 74288 + metadataBytes 7400)",
+                             "remat[arena]: init reserved 81672 B, but its report accounts for "
+                             "81664 B (arenaBytes 74288 + metadataBytes 7376)",
                              initWithAnUnaccountedReservation(REMAT_ARENA));
 }
 #endif

@@ -573,7 +573,7 @@ add_elastic_ai_unit_test(
         odt_test_death
 )
 
-# #4 PR0: Layer.c's model-walk helpers (layerParameters, deepestTrainableIndex).
+# Layer.c's model-walk helper layerParameters.
 # Stack-built fixtures only -- no factory or *Api library is needed.
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST

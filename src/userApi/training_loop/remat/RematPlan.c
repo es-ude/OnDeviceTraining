@@ -18,20 +18,6 @@
 #include "RematScheduler.h"
 #include "StorageApi.h"
 
-void rematBackwardRange(layer_t **model, size_t n, lossFuncType_t lt, size_t *deepest,
-                        ptrdiff_t *top) {
-    /* CrossEntropy's backward IS the combined Softmax + CE gradient p - y, so
-     * the loop starts one layer below the top: that skipped layer must be the
-     * Softmax, or its backward would silently never run, and its config must
-     * declare one of the two heads. Checked only when a backward runs: with
-     * nothing to train nothing is skipped (an empty model still fails). */
-    *deepest = deepestTrainableIndex(model, n);
-    if (lt == CROSS_ENTROPY && (n == 0 || *deepest < n)) {
-        requireCrossEntropyHead(n == 0 ? NULL : model[n - 1], "rematBackwardRange");
-    }
-    *top = (ptrdiff_t)n - 1 - (lt == CROSS_ENTROPY ? 1 : 0);
-}
-
 size_t rematWalkOpening(const rematProgram_t *p, rematWalk_t *w) {
     if (w->open < p->numRanges && p->ranges[w->open].begin == w->step) {
         return w->open++;
@@ -520,10 +506,11 @@ static void requireRangesWellFormed(const rematProgram_t *p, const rematWireTabl
  * gradient BACKWARD(l) reads is wire - 1; and the two wires share one dtype,
  * FLOAT32 or SYM_INT32, and their bytes. BFP wires never alias. It runs
  * before the steps, so rematChainRoot only ever walks down a valid chain.
- * The gradient BACKWARD(l) reads is the table's gradIdOf[l + 1]; rule 8
- * then holds that lookup, and BACKWARD(l)'s slice, to the wire records. */
-static void requireMarksOnAliasPairs(const rematWireTable_t *t, const model_t *m,
-                                     const uint8_t *inPlace) {
+ * The gradient BACKWARD(l) reads is the wire whose record holds GRAD l + 1
+ * (gradWireOf), not the table's raw gradIdOf lookup. */
+static void requireMarksOnAliasPairs(const grammarModel_t *g, const uint8_t *inPlace) {
+    const rematWireTable_t *t = g->t;
+    const model_t *m = g->m;
     size_t n = t->modelSize;
     for (size_t w = 0; w < t->numWires; w++) {
         if (inPlace[w] == 0u) {
@@ -544,7 +531,7 @@ static void requireMarksOnAliasPairs(const rematWireTable_t *t, const model_t *m
                         w, l);
             exit(1);
         }
-        uint16_t gradIn = t->gradIdOf[l + 1u];
+        uint16_t gradIn = gradWireOf(g, l + 1u);
         if (gradIn != w - 1u) {
             PRINT_ERROR("rematPlanBuild: wire %zu carries an in-place mark, but BACKWARD(%zu) "
                         "reads wire %u, not wire %zu",
@@ -570,10 +557,10 @@ static void requireMarksOnAliasPairs(const rematWireTable_t *t, const model_t *m
 
 void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, const model_t *m,
                               rematMode_t mode, const uint8_t *inPlace) {
-    if (inPlace != NULL) {
-        requireMarksOnAliasPairs(t, m, inPlace);
-    }
     grammarModel_t g = grammarModelOf(t, m);
+    if (inPlace != NULL) {
+        requireMarksOnAliasPairs(&g, inPlace);
+    }
     bool hasBackward = grammarHasBackward(&g);
     size_t n = t->modelSize;
     size_t nextForward = 0;
@@ -712,18 +699,26 @@ static void requireTheFieldsOfThePolicy(const rematPlanSpec_t *spec) {
 /* RETAIN_LIST's checks before the counting pass reads the mask. A model whose
  * loss backward runs but no BACKWARD step does has no REFORWARD window: a
  * dropped ACT n could never be recomputed before LOSS_BACKWARD reads it.
- * DEFENSIVE since rematBackwardRange validates the CrossEntropy head: that
- * state needs top < deepest < n, i.e. CE with the last layer (the skipped
- * Softmax, which has no parameters) as the deepest trainable one -- no
- * longer reachable (under MSE top = n - 1 >= deepest always). Kept so a
- * future loss that skips a layer cannot silently drop ACT n. */
+ * DEFENSIVE: unreachable today, since the loss gradient lands in a buffer
+ * whose producer runs its BACKWARD whenever that buffer needs a gradient (ACT
+ * n's under MSE, the Softmax input's under CrossEntropy). Kept so a future
+ * loss that skips more than its sink cannot silently drop ACT n. */
+static bool anyNodeRunsBackward(const rematWireTable_t *t) {
+    for (size_t j = 0; j < t->modelSize; j++) {
+        if (t->runsBackward[j]) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void requireARetainMaskWithAWindow(const rematPlanSpec_t *spec, const rematWireTable_t *t) {
     if (spec->retain == NULL) {
         PRINT_ERROR("rematPlanBuild: REMAT_PLAN_RETAIN_LIST needs a retain mask, got NULL");
         exit(1);
     }
     size_t n = t->modelSize;
-    if (t->hasBackward && t->backwardTop < (ptrdiff_t)t->deepest && !spec->retain[n]) {
+    if (t->hasBackward && !anyNodeRunsBackward(t) && !spec->retain[n]) {
         PRINT_ERROR("rematPlanBuild: RETAIN_LIST drops ACT %zu but no REFORWARD window exists "
                     "(LOSS_BACKWARD reads it and no BACKWARD step runs); keep ACT %zu",
                     n, n);

@@ -442,7 +442,8 @@ static void crossEntropySoftmaxBackwardBfp(tensor_t *softmaxOutput, tensor_t *di
 }
 
 /* The combined Softmax + CrossEntropy gradient p - y: the training loop skips
- * the model's last layer (which must be the Softmax, rematBackwardRange) and
+ * the model's last layer (which must be the Softmax: the CE combined-gradient
+ * skip in modelGradFlags, checked at the remat table init) and
  * seeds the backward with this -- on the Softmax's dx wire (its propLossQ)
  * for a head with any BFP, else on the model output's own wire (the remat
  * wire table, crossEntropyHeadDeclaresBfp).

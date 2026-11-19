@@ -37,6 +37,7 @@
 #include "RematPlanPolicy.h"
 #include "RematTestFixtures.h"
 #include "Serialize.h"
+#include "Softmax.h"
 #include "SoftmaxApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -136,6 +137,9 @@ static void assertLiveAt(const rematProgram_t *p, const uint8_t *inPlace, uint16
 static void assertEveryStepsOperandsAreCoLive(const rematProgram_t *p, const uint8_t *inPlace,
                                               const rematWireTable_t *t, layer_t **model) {
     size_t n = t->modelSize;
+    size_t deepest;
+    ptrdiff_t top;
+    positionalRange(model, n, t->lossType, &deepest, &top);
     for (size_t s = 0; s < p->numSteps; s++) {
         size_t l = p->steps[s].layer;
         switch (p->steps[s].kind) {
@@ -152,13 +156,12 @@ static void assertEveryStepsOperandsAreCoLive(const rematProgram_t *p, const uin
             assertLiveAt(p, inPlace, rematGradId(t, n), s, "LOSS_BACKWARD writes the seed");
             break;
         case REMAT_STEP_BACKWARD: {
-            uint16_t gradIn =
-                ((ptrdiff_t)l == t->backwardTop) ? rematGradId(t, n) : rematGradId(t, l + 1);
+            uint16_t gradIn = ((ptrdiff_t)l == top) ? rematGradId(t, n) : rematGradId(t, l + 1);
             assertLiveAt(p, inPlace, gradIn, s, "BACKWARD reads gradIn");
             if (layerBackwardReadsInput(model[l])) {
                 assertLiveAt(p, inPlace, rematActId(t, l), s, "BACKWARD reads its input");
             }
-            if (l > t->deepest) {
+            if (l > deepest) {
                 assertLiveAt(p, inPlace, rematGradId(t, l), s, "BACKWARD writes its dx");
             }
             break;
@@ -318,96 +321,43 @@ static void endGrad10BeforeBackwardReadsIt(rematProgram_t *p) {
     p->ranges[13].end--;
 }
 
-/* ---- rematBackwardRange ---- */
-
-void testBackwardRangeMseRunsFromLastLayerToDeepest(void) {
-    layer_t *model[3] = {makeLinear(2, 4, false, 0), makeRelu(&g_floatQ),
-                         makeLinear(4, 2, false, 2)};
-    size_t deepest = 99;
-    ptrdiff_t top = 99;
-    rematBackwardRange(model, 3, MSE, &deepest, &top);
-    TEST_ASSERT_EQUAL_size_t(0, deepest);
-    TEST_ASSERT_EQUAL_INT(2, (int)top);
-    freeModel(model, 3);
-}
-
-void testBackwardRangeCrossEntropySkipsTheLastLayerPositionally(void) {
-    layer_t *model[2] = {makeLinear(2, 3, false, 0), makeSoftmax()};
-    size_t deepest = 99;
-    ptrdiff_t top = 99;
-    rematBackwardRange(model, 2, CROSS_ENTROPY, &deepest, &top);
-    TEST_ASSERT_EQUAL_size_t(0, deepest);
-    TEST_ASSERT_EQUAL_INT(0, (int)top);
-    freeModel(model, 2);
-}
-
-void testBackwardRangeTruncatesAtDeepestTrainable(void) {
-    layer_t *model[3] = {makeLinear(2, 4, true, 0), makeRelu(&g_floatQ),
-                         makeLinear(4, 2, false, 2)};
-    size_t deepest = 99;
-    ptrdiff_t top = 99;
-    rematBackwardRange(model, 3, MSE, &deepest, &top);
-    TEST_ASSERT_EQUAL_size_t(2, deepest);
-    TEST_ASSERT_EQUAL_INT(2, (int)top);
-    freeModel(model, 3);
-}
-
-void testBackwardRangeAllFrozenReturnsModelSize(void) {
-    layer_t *model[2] = {makeLinear(2, 4, true, 0), makeRelu(&g_floatQ)};
-    size_t deepest = 99;
-    ptrdiff_t top = 99;
-    rematBackwardRange(model, 2, MSE, &deepest, &top);
-    TEST_ASSERT_EQUAL_size_t(2, deepest);
-    TEST_ASSERT_EQUAL_INT(1, (int)top);
-    freeModel(model, 2);
-}
-
-/* n = 1 under CE (the model is the Softmax alone) keeps the signed top = -1. */
-void testBackwardRangeSingleLayerUnderCrossEntropyIsMinusOne(void) {
-    layer_t *model[1] = {makeSoftmax()};
-    size_t deepest = 99;
-    ptrdiff_t top = 99;
-    rematBackwardRange(model, 1, CROSS_ENTROPY, &deepest, &top);
-    TEST_ASSERT_EQUAL_size_t(1, deepest);
-    TEST_ASSERT_EQUAL_INT(-1, (int)top);
-    freeModel(model, 1);
-}
+/* ---- the CrossEntropy head at table init ---- */
 
 /* CrossEntropy's backward is the COMBINED Softmax + CE gradient p - y, so the
  * backward skips the model's last layer exactly once: that layer must be the
  * Softmax. Any other last layer would be skipped silently (its backward never
- * runs) -- the topology dies instead, naming the layer type. */
-static void ceRangeOn(layer_t **model, size_t n) {
-    size_t deepest;
-    ptrdiff_t top;
-    rematBackwardRange(model, n, CROSS_ENTROPY, &deepest, &top);
+ * runs) -- the table init dies instead, naming the layer type. */
+static void ceTableOn(layer_t **model, size_t n) {
+    inputLike_t in;
+    rematWireTable_t *t =
+        initTable(model, n, CROSS_ENTROPY, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
+    rematWireTableFree(t);
+    freeModel(model, n);
 }
 static void ceWithoutSoftmaxLinear(void) {
     layer_t *model[1] = {makeLinear(2, 3, false, 0)};
-    ceRangeOn(model, 1);
+    ceTableOn(model, 1);
 }
 static void ceWithoutSoftmaxRelu(void) {
     layer_t *model[2] = {makeLinear(2, 3, false, 0), makeRelu(&g_floatQ)};
-    ceRangeOn(model, 2);
-}
-static void ceEmptyModel(void) {
-    ceRangeOn(NULL, 0);
+    ceTableOn(model, 2);
 }
 static void ceWithSoftmax(void) {
     layer_t *model[2] = {makeLinear(2, 3, false, 0), makeSoftmax()};
-    ceRangeOn(model, 2);
+    ceTableOn(model, 2);
 }
 
-void testBackwardRangeCrossEntropyRequiresALastSoftmax(void) {
+void testTableInitCrossEntropyRequiresALastSoftmax(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "CrossEntropy skips the last layer's backward",
                              ceWithoutSoftmaxLinear());
     ASSERT_EXITS_WITH_OUTPUT(1, "CrossEntropy skips the last layer's backward",
                              ceWithoutSoftmaxRelu());
-    ASSERT_EXITS_WITH_FAILURE(ceEmptyModel());
     ASSERT_EXITS_WITH(0, ceWithSoftmax());
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireTableInit: CrossEntropy skips the last layer's backward",
+                             ceWithoutSoftmaxLinear());
 }
 
-/* ---- the model head under CrossEntropy (ruling R2) ----
+/* ---- the model head under CrossEntropy ----
  * The head is the Softmax forward plus CE's combined gradient p - y, declared
  * by the Softmax's config: (forwardMath, propLossMath, outputQ, propLossQ).
  * With any BFP in it, exactly two tuples are heads:
@@ -436,44 +386,41 @@ static layer_t *makeHead(arithmeticType_t fwd, arithmeticType_t bwd, bool bfpOut
     return softmaxLayerInit(&lq);
 }
 
-static void headRangeOn(arithmeticType_t fwd, arithmeticType_t bwd, bool bfpOut, bool bfpDx,
+static void headTableOn(arithmeticType_t fwd, arithmeticType_t bwd, bool bfpOut, bool bfpDx,
                         bool frozen) {
     layer_t *model[2] = {makeLinear(2, 3, frozen, 0), makeHead(fwd, bwd, bfpOut, bfpDx)};
-    size_t deepest;
-    ptrdiff_t top;
-    rematBackwardRange(model, 2, CROSS_ENTROPY, &deepest, &top);
-    freeModel(model, 2);
+    ceTableOn(model, 2);
 }
 
 static void headBfp(void) {
-    headRangeOn(ARITH_BFP, ARITH_BFP, true, true, false);
+    headTableOn(ARITH_BFP, ARITH_BFP, true, true, false);
 }
 static void headFloatIntoBfp(void) {
-    headRangeOn(ARITH_FLOAT32, ARITH_FLOAT32, false, true, false);
+    headTableOn(ARITH_FLOAT32, ARITH_FLOAT32, false, true, false);
 }
 static void headFloat(void) {
-    headRangeOn(ARITH_FLOAT32, ARITH_FLOAT32, false, false, false);
+    headTableOn(ARITH_FLOAT32, ARITH_FLOAT32, false, false, false);
 }
-static void headBfpSoftmaxFloatCe(void) { /* the numerics before the ruling */
-    headRangeOn(ARITH_BFP, ARITH_FLOAT32, true, true, false);
+static void headBfpSoftmaxFloatCe(void) { /* the numerics before the two heads were fixed */
+    headTableOn(ARITH_BFP, ARITH_FLOAT32, true, true, false);
 }
 static void headFloatSoftmaxPackedP(void) { /* float compute, p packed to BFP */
-    headRangeOn(ARITH_FLOAT32, ARITH_FLOAT32, true, true, false);
+    headTableOn(ARITH_FLOAT32, ARITH_FLOAT32, true, true, false);
 }
 static void headIntegerCeFloatP(void) {
-    headRangeOn(ARITH_BFP, ARITH_BFP, false, true, false);
+    headTableOn(ARITH_BFP, ARITH_BFP, false, true, false);
 }
 static void headIntegerCeFloatDx(void) {
-    headRangeOn(ARITH_BFP, ARITH_BFP, true, false, false);
+    headTableOn(ARITH_BFP, ARITH_BFP, true, false, false);
 }
 static void headFloatSoftmaxIntegerCe(void) {
-    headRangeOn(ARITH_FLOAT32, ARITH_BFP, true, true, false);
+    headTableOn(ARITH_FLOAT32, ARITH_BFP, true, true, false);
 }
 static void headMismatchButFrozen(void) {
-    headRangeOn(ARITH_BFP, ARITH_FLOAT32, true, true, true);
+    headTableOn(ARITH_BFP, ARITH_FLOAT32, true, true, true);
 }
 
-void testBackwardRangeCrossEntropyHeadIsOneOfTwoDeclaredArms(void) {
+void testTableInitCrossEntropyHeadIsOneOfTwoDeclaredArms(void) {
     ASSERT_EXITS_WITH(0, headBfp());
     ASSERT_EXITS_WITH(0, headFloatIntoBfp());
     ASSERT_EXITS_WITH(0, headFloat());
@@ -486,16 +433,35 @@ void testBackwardRangeCrossEntropyHeadIsOneOfTwoDeclaredArms(void) {
     ASSERT_EXITS_WITH(0, headMismatchButFrozen());
 }
 
-/* M4: with nothing to train no backward runs, so nothing is skipped: a CE
- * model without a last Softmax (eval only) is not rejected. */
+/* With nothing to train no backward runs, so nothing is skipped: a CE model
+ * without a last Softmax (eval only) is not rejected. */
 static void ceWithoutSoftmaxAllFrozen(void) {
     layer_t *model[2] = {makeLinear(2, 3, true, 0), makeRelu(&g_floatQ)};
-    ceRangeOn(model, 2);
+    ceTableOn(model, 2);
+}
+
+void testTableInitCrossEntropyChecksTheHeadOnlyWhenABackwardRuns(void) {
+    ASSERT_EXITS_WITH(0, ceWithoutSoftmaxAllFrozen());
+}
+
+/* The bind checks the head of the live model as well: a head config edited
+ * after the table init (here a BFP Softmax under a float CE) dies at the next
+ * bind, before it can reach a training step. */
+static void headEditedBeforeBind(void) {
+    layer_t *model[2] = {makeLinear(2, 3, false, 0),
+                         makeHead(ARITH_FLOAT32, ARITH_FLOAT32, false, false)};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
+    rematWireTable_t *t = initTable(model, 2, CROSS_ENTROPY, x);
+    model[1]->config->softmax->forwardMath.type = ARITH_BFP;
+    rematWireTableBind(t, &MODEL_CHAIN(model, 2), CROSS_ENTROPY, REMAT_MODE_TRAIN, x);
+    rematWireTableFree(t);
     freeModel(model, 2);
 }
 
-void testBackwardRangeCrossEntropyChecksTheHeadOnlyWhenABackwardRuns(void) {
-    ASSERT_EXITS_WITH(0, ceWithoutSoftmaxAllFrozen());
+void testTableBindChecksTheCrossEntropyHeadOfTheLiveModel(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireTableBind: the CrossEntropy head",
+                             headEditedBeforeBind());
 }
 
 /* Under CrossEntropy with a BFP-declaring head the seed GRAD n IS the
@@ -723,8 +689,6 @@ void testHarTableRecordsBytesRanksAndKey(void) {
 
     TEST_ASSERT_EQUAL_size_t(HAR_N, t->modelSize);
     TEST_ASSERT_EQUAL_INT(CROSS_ENTROPY, t->lossType);
-    TEST_ASSERT_EQUAL_size_t(0, t->deepest);
-    TEST_ASSERT_EQUAL_INT(10, (int)t->backwardTop);
     TEST_ASSERT_TRUE(t->hasBackward);
     for (size_t i = 0; i < HAR_N; i++) {
         TEST_ASSERT_EQUAL_UINT8(model[i]->type, t->layerType[i]);
@@ -1548,20 +1512,18 @@ void testBindRunsSampleBOnATableBuiltOnSampleA(void) {
 
 /* The bind's per-wire derivation scratch and the n + 1 ACT shapes live inside
  * the table block. LP64 layout arithmetic (not a scan-model pin): table struct
- * 200 (160 + the 5 gradient-flag pointers 40) + 24 records x 40 = 1160;
+ * 176 (hasBackward packs beside the 4-byte lossType) + 24 records x 40 = 1136;
  * gradIdOf 26, layerType/frozen 24, runsBackward 12, needsGrad 13, readsInput
- * 12 = 1247, rounded to 2 for dxWire 24 x 2 = 1296, dxMode 24 = 1320 (already
- * a multiple of 8), + the input key 48 = 1368; the 13 ACT shapes 13 x (24 +
- * 2 x 3 x 8) = 936; the bind scratch 960; the headers 2680. Total 5944 =
- * 1368 + 936 + 960 + 2680 = 5800 + 144: the 5 pointers 40, the 5 arrays
- * 12 + 13 + 12 + 48 + 24 = 109, 1 pad byte before dxWire, less the 6 pad bytes
- * the key had before inputDims when frozen ended it. Every host preset is LP64. */
+ * 12 = 1223, rounded to 2 for dxWire 24 x 2 = 1272, dxMode 24 = 1296 (already
+ * a multiple of 8), + the input key 48 = 1344; the 13 ACT shapes 13 x (24 +
+ * 2 x 3 x 8) = 936; the bind scratch 960; the headers 2680. Total 5920 =
+ * 1344 + 936 + 960 + 2680. Every host preset is LP64. */
 void testHarSlabHoldsTheBindScratch(void) {
     layer_t *model[HAR_N];
     buildHar(model, false);
     inputLike_t in;
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
-    TEST_ASSERT_EQUAL_size_t(5944, t->slabBytes);
+    TEST_ASSERT_EQUAL_size_t(5920, t->slabBytes);
     const uint8_t *scratch = (const uint8_t *)t->bindScratch;
     TEST_ASSERT_TRUE(scratch >= (const uint8_t *)(t->inputOrder + t->inputRank));
     TEST_ASSERT_TRUE(scratch + t->numWires * sizeof(rematWireFact_t) <=
@@ -4196,7 +4158,7 @@ static void randomRetainMask(uint32_t *state, layer_t **model, size_t n, lossFun
     }
     size_t deepest;
     ptrdiff_t top;
-    rematBackwardRange(model, n, lt, &deepest, &top);
+    positionalRange(model, n, lt, &deepest, &top);
     if (deepest < n && top < (ptrdiff_t)deepest) {
         retain[n] = true;
     }
@@ -4983,11 +4945,14 @@ static void buildSquareLinearHand(handProgram_t *h) {
 }
 
 /* Each of these edits a table record after MLP3's table is built: the
- * numbering puts GRAD 3 where BACKWARD(1) reads, or GRAD 1's record changes
- * its size or dtype. */
+ * records swap GRAD 3 and GRAD 2, so BACKWARD(1) reads wire 4 and the marked
+ * GRAD 1 (wire 6) no longer follows its gradient -- while the raw gradIdOf
+ * lookup still says wire 5, so only a check that reads the records catches
+ * it -- or GRAD 1's record changes its size or dtype. */
 static void buildMlp3HandReadingTheSeedAtBackward1(handProgram_t *h) {
     buildMlp3Hand(h);
-    h->t->gradIdOf[2] = 4;
+    h->t->wires[4].index = 2;
+    h->t->wires[5].index = 3;
 }
 
 static void buildMlp3HandWithBfpDxWires(handProgram_t *h) {
@@ -5108,14 +5073,10 @@ void testGrammarRejectsAMemberReadOutsideItsRootsRange(void) {
 
 int main(void) {
     UNITY_BEGIN();
-    RUN_TEST(testBackwardRangeMseRunsFromLastLayerToDeepest);
-    RUN_TEST(testBackwardRangeCrossEntropySkipsTheLastLayerPositionally);
-    RUN_TEST(testBackwardRangeTruncatesAtDeepestTrainable);
-    RUN_TEST(testBackwardRangeAllFrozenReturnsModelSize);
-    RUN_TEST(testBackwardRangeSingleLayerUnderCrossEntropyIsMinusOne);
-    RUN_TEST(testBackwardRangeCrossEntropyRequiresALastSoftmax);
-    RUN_TEST(testBackwardRangeCrossEntropyHeadIsOneOfTwoDeclaredArms);
-    RUN_TEST(testBackwardRangeCrossEntropyChecksTheHeadOnlyWhenABackwardRuns);
+    RUN_TEST(testTableInitCrossEntropyRequiresALastSoftmax);
+    RUN_TEST(testTableInitCrossEntropyHeadIsOneOfTwoDeclaredArms);
+    RUN_TEST(testTableInitCrossEntropyChecksTheHeadOnlyWhenABackwardRuns);
+    RUN_TEST(testTableBindChecksTheCrossEntropyHeadOfTheLiveModel);
     RUN_TEST(testCrossEntropySeedTakesTheSoftmaxDxWire);
     RUN_TEST(testCrossEntropySeedOfTheBfpHeadTakesItsPropLossQ);
     RUN_TEST(testCrossEntropySeedOfANonBfpHeadInheritsActN);

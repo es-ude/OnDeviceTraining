@@ -291,10 +291,10 @@ static size_t modelResidentParamBytes(layer_t **model, size_t modelSize) {
 }
 
 /* #380 PR3: stage 2 freezes conv1/conv2/conv3; the head Linear (model[10])
- * is the ONLY trainable layer, and it is ALSO the top of the driver's
- * backward range (rematBackwardRange: MODEL_SIZE-1, less 1 for the
- * CE+Softmax combined-gradient shortcut). deepestTrainableIndex() therefore
- * equals that top: the one backward step is BACKWARD(deepest), which
+ * is the ONLY trainable layer, and it is ALSO the only node with runsBackward
+ * set (modelGradFlags: the Softmax above it is the CE combined-gradient skip,
+ * the frozen convs below need no gradient): the one backward step is
+ * BACKWARD(10), the first trainable layer, which
  * produces no dx -- no GRAD wire below the seed is EVER live under the remat
  * wire table's lifetimes. There is no dx pair in stage 2 at all; the sole
  * live gradient buffer is the combined CE+Softmax lossGrad seed, shape

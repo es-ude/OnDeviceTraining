@@ -344,7 +344,14 @@ static void buildMnistCnnModel(fixture_t *f) {
  * top = n - 1, or n - 2 under CROSS_ENTROPY, whose backward skips the Softmax. */
 static void positionalRange(layer_t **model, size_t n, lossFuncType_t lt, size_t *deepest,
                             ptrdiff_t *top) {
-    *deepest = deepestTrainableIndex(model, n);
+    *deepest = n;
+    for (size_t j = 0; j < n && *deepest == n; j++) {
+        parameter_t *w = NULL;
+        parameter_t *b = NULL;
+        if (layerParameters(model[j], &w, &b) && !layerIsFrozen(model[j])) {
+            *deepest = j;
+        }
+    }
     *top = (ptrdiff_t)n - 1 - (lt == CROSS_ENTROPY ? 1 : 0);
 }
 

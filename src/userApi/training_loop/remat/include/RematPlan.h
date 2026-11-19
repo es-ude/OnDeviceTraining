@@ -85,11 +85,9 @@ typedef struct rematWireFact {
 typedef struct rematWireTable {
     size_t modelSize;
     lossFuncType_t lossType;
-    size_t deepest; /* positional facts the plan generators still read; not part of the key */
-    ptrdiff_t backwardTop;
     bool hasBackward;
     size_t numWires;
-    rematWire_t *wires;    /* ACT j at id j (0..n), then GRAD n, top, top-1, ..., deepest+1 */
+    rematWire_t *wires;    /* ACT j at id j (0..n), then the GRAD wires in production order */
     uint16_t *gradIdOf;    /* [n+1]: the GRAD holding buffer b's gradient, else REMAT_NONE; under
                               CROSS_ENTROPY the seed is the Softmax input's gradient too */
     uint8_t *layerType;    /* [n], key */
@@ -129,21 +127,13 @@ typedef struct rematBfpGroups {
 rematBfpGroups_t rematBfpWireGrouping(const bfpQConfig_t *tmpl, size_t elements, uint8_t kind,
                                       size_t index);
 
-/* deepest = deepestTrainableIndex (n = nothing trains); top = n-1, or n-2
- * under CROSS_ENTROPY in SIGNED arithmetic (n == 1 under CE gives -1). Under
- * CROSS_ENTROPY, when a backward runs (deepest < n), the skipped last layer
- * must be the Softmax (CE's backward is the combined p - y) and declare one
- * of the two model heads (requireCrossEntropyHead): anything else fails
- * fast; an empty model fails fast too.
- * One shared function: the table init uses it on the built model, the bind on
- * the live one. */
-void rematBackwardRange(layer_t **model, size_t n, lossFuncType_t lt, size_t *deepest,
-                        ptrdiff_t *top);
-
 /* Sizes and places the whole table in ONE reserveMemory block: records, key,
  * and one header per slab wire. The headers are linked, but their content
  * (dims, config) is written by every rematWireTableBind. Returns false only
- * when reserveMemory fails. */
+ * when reserveMemory fails. Under CROSS_ENTROPY, when a backward runs, the
+ * skipped last layer must be the Softmax and declare one of the two model heads
+ * (requireCrossEntropyHead), else it exits; every bind checks the live model
+ * the same way. */
 bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t loss,
                         const tensor_t *inputLike);
 /* NULL-safe. One freeReservedMemory; never freeTensor on a slab header. */

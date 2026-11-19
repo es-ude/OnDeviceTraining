@@ -2220,7 +2220,7 @@ static void buildMlpWithATrackedBatchNorm(zooFixture_t *f) {
  * BatchNorm1d keeps its own output: the run then recomputes only the Linear
  * below it. Left out: the zoo's BatchNorm1d at layer 0 (any run would
  * recompute it: the death tests). A cross-entropy model without a last
- * Softmax, or a single-layer one, no longer trains (rematBackwardRange
+ * Softmax, or a single-layer one, no longer trains (the remat table init
  * rejects it), so it has no entry. */
 #define RECOMPUTE_ENTRIES 24
 static const recomputeEntry_t g_recompute[RECOMPUTE_ENTRIES] = {

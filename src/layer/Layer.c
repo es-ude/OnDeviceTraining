@@ -82,7 +82,7 @@ bool layerParameters(const layer_t *layer, parameter_t **weightOut, parameter_t 
         return true;
     case BATCHNORM1D:
         if (!layer->config->batchNorm1d->affine) {
-            return false; /* no gamma/beta: never trainable, never the deepest */
+            return false; /* no gamma/beta: never trainable */
         }
         *weightOut = layer->config->batchNorm1d->gamma;
         *biasOut = layer->config->batchNorm1d->beta;
@@ -90,15 +90,4 @@ bool layerParameters(const layer_t *layer, parameter_t **weightOut, parameter_t 
     default:
         return false;
     }
-}
-
-size_t deepestTrainableIndex(layer_t **model, size_t modelSize) {
-    for (size_t i = 0; i < modelSize; i++) {
-        parameter_t *w = NULL;
-        parameter_t *b = NULL;
-        if (layerParameters(model[i], &w, &b) && !layerIsFrozen(model[i])) {
-            return i;
-        }
-    }
-    return modelSize;
 }

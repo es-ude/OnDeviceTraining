@@ -97,59 +97,10 @@ void testLayerParametersIgnoresFrozen(void) {
                  "frozen LAYERNORM");
 }
 
-void testDeepestTrainableIndexSkipsFrozenAndParamFreeLayers(void) {
-    parameter_t p[6];
-    linearConfig_t frozenLinear = {.weights = &p[0], .bias = &p[1], .frozen = true};
-    layerNormConfig_t layerNorm = {.gamma = &p[2], .beta = &p[3]};
-    linearConfig_t linear = {.weights = &p[4], .bias = &p[5]};
-    layer_t relu = {.type = RELU, .config = NULL};
-    layer_t frozen = {.type = LINEAR, .config = &(layerConfig_t){.linear = &frozenLinear}};
-    layer_t norm = {.type = LAYERNORM, .config = &(layerConfig_t){.layerNorm = &layerNorm}};
-    layer_t top = {.type = LINEAR, .config = &(layerConfig_t){.linear = &linear}};
-
-    layer_t *model[] = {&relu, &frozen, &norm, &top};
-    TEST_ASSERT_EQUAL_size_t(2, deepestTrainableIndex(model, 4));
-
-    layer_t *bottomTrains[] = {&top, &relu};
-    TEST_ASSERT_EQUAL_size_t(0, deepestTrainableIndex(bottomTrains, 2));
-}
-
-void testDeepestTrainableIndexReturnsModelSizeWhenNothingTrains(void) {
-    parameter_t p[4];
-    linearConfig_t frozenLinear = {.weights = &p[0], .bias = &p[1], .frozen = true};
-    groupNormConfig_t frozenGroupNorm = {.gamma = &p[2], .beta = &p[3], .frozen = true};
-    layer_t linear = {.type = LINEAR, .config = &(layerConfig_t){.linear = &frozenLinear}};
-    layer_t relu = {.type = RELU, .config = NULL};
-    layer_t norm = {.type = GROUPNORM, .config = &(layerConfig_t){.groupNorm = &frozenGroupNorm}};
-    layer_t flatten = {.type = FLATTEN, .config = NULL};
-
-    layer_t *allFrozen[] = {&linear, &relu, &norm};
-    TEST_ASSERT_EQUAL_size_t(3, deepestTrainableIndex(allFrozen, 3));
-
-    layer_t *paramFree[] = {&relu, &flatten};
-    TEST_ASSERT_EQUAL_size_t(2, deepestTrainableIndex(paramFree, 2));
-}
-
-/* A non-affine BatchNorm1d is never the deepest trainable layer: it must be
- * skipped like any other param-free layer, even though it is config-bearing. */
-void testDeepestTrainableIndexSkipsNonAffineBatchNorm(void) {
-    parameter_t p[2];
-    batchNorm1dConfig_t nonAffineBn = {.gamma = NULL, .beta = NULL, .affine = false};
-    linearConfig_t linear = {.weights = &p[0], .bias = &p[1]};
-    layer_t bn = {.type = BATCHNORM1D, .config = &(layerConfig_t){.batchNorm1d = &nonAffineBn}};
-    layer_t top = {.type = LINEAR, .config = &(layerConfig_t){.linear = &linear}};
-
-    layer_t *model[] = {&bn, &top};
-    TEST_ASSERT_EQUAL_size_t(1, deepestTrainableIndex(model, 2));
-}
-
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLayerParametersReturnsEachParamLayersOwnPair);
     RUN_TEST(testLayerParametersFalseForParamFreeLayers);
     RUN_TEST(testLayerParametersIgnoresFrozen);
-    RUN_TEST(testDeepestTrainableIndexSkipsFrozenAndParamFreeLayers);
-    RUN_TEST(testDeepestTrainableIndexReturnsModelSizeWhenNothingTrains);
-    RUN_TEST(testDeepestTrainableIndexSkipsNonAffineBatchNorm);
     return UNITY_END();
 }

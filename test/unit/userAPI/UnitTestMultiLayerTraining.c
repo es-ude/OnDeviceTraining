@@ -2346,8 +2346,8 @@ static void capturePr4FlattenCarry(void *ctx, size_t layerIdx, layerType_t layer
  *     ARITH_BFP forwardMath from the shared BFP wire and Softmax's forward
  *     dispatches on it (Task 4's i-exp kernel). Its propLossMath derives
  *     ARITH_BFP too (Task 5's funnel arm), but CrossEntropy's FUSED backward
- *     still skips the softmax layer entirely (rematBackwardRange starts the
- *     backward one layer lower for CROSS_ENTROPY), so that native backward is not
+ *     still skips the softmax layer entirely (the CE combined-gradient skip in
+ *     modelGradFlags: runsBackward[n - 1] is 0), so that native backward is not
  *     reached HERE -- see unitTestUniformBfpSoftmaxMseTrains (MSE, non-CE)
  *     for that coverage;
  *   - the loss reaches its BFP fake-quant arm (Task 10) because the model
@@ -3159,8 +3159,8 @@ void unitTestSoftmaxCeTwoRowsThroughLoop(void) {
 }
 
 /*! #152 PR2: Linear -> Softmax -> MSE at TWO rows through the loop. MSE does
- *  not skip the Softmax layer (only CROSS_ENTROPY does: rematBackwardRange's
- *  top is n - 2 there), so this is the one loop path that reaches the per-row
+ *  not skip the Softmax layer (only CROSS_ENTROPY does: modelGradFlags clears
+ *  runsBackward[n - 1] there), so this is the one loop path that reaches the per-row
  *  softmax BACKWARD: each row's dx must use its own s and its own dot before
  *  the Linear weight/bias grads sum over the rows. softmaxMseTwoRowsE2e* are
  *  goldgen'd (generate_expected_softmax.py section 7): the loss is the
@@ -3223,8 +3223,8 @@ void unitTestSoftmaxMseTwoRowsBackwardThroughLoop(void) {
  * ======================================================================== */
 
 /*! The non-CE twin of the two capstones above: MSE does not special-case
- *  softmax the way the CROSS_ENTROPY backward range does (rematBackwardRange
- *  starts one layer lower), so this IS the model that drives
+ *  softmax the way CROSS_ENTROPY does (the CE combined-gradient skip in
+ *  modelGradFlags), so this IS the model that drives
  *  softmaxBackwardKernelBfp (Task 5's native funnel arm) through the
  *  training loop -- linear(4->3) -> softmax, ONE uniform BFP wire profile
  *  (m=8/e=8) through layerQuantInitUniform, SGD+momentum.

@@ -51,6 +51,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         StateDictApi
         MORE_LIBS
+        LossFunction
         Common
         RNG
         LinearApi
@@ -466,6 +467,7 @@ __register_target_as_unit_test(UnitTestFlattenIntegration)
 
 add_executable(UnitTestBiaslessConvOptim UnitTestBiaslessConvOptim.c)
 target_link_libraries(UnitTestBiaslessConvOptim PRIVATE
+        LossFunction
         unity
         Conv1dApi
         Conv1d
@@ -498,6 +500,7 @@ __register_target_as_unit_test(UnitTestBiaslessConvOptim)
 
 add_executable(UnitTestOptimizerScaling UnitTestOptimizerScaling.c)
 target_link_libraries(UnitTestOptimizerScaling PRIVATE
+        LossFunction
         unity
         OptimizerApi
         SgdApi
@@ -562,6 +565,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         ModelValidationApi
         MORE_LIBS
+        LossFunction
         ArithmeticType
         CommonLayerLibs
         LinearApi
@@ -680,6 +684,7 @@ __register_target_as_unit_test(UnitTestMicroBatchStacking)
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST StackGather
         MORE_LIBS
+        LossFunction
         RNG
         TensorApi
         Tensor
@@ -740,6 +745,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         ModelGraphApi
         MORE_LIBS
+        LossFunction
         Model
         OpTable
         CommonLayerLibs

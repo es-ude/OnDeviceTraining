@@ -48,6 +48,7 @@ target_link_libraries(InferenceApi PRIVATE
 add_library(ModelGraphApi ModelGraphApi.c)
 target_include_directories(ModelGraphApi PUBLIC include)
 target_link_libraries(ModelGraphApi PRIVATE
+        LossFunction
         Model
         Layer
         Tensor
@@ -94,6 +95,7 @@ target_link_libraries(LayerWeightsApi PRIVATE
 add_library(StateDictApi StateDictApi.c)
 target_include_directories(StateDictApi PUBLIC include)
 target_link_libraries(StateDictApi PRIVATE
+        LossFunction
         Common
         Layer
         LayerWeightsApi
@@ -115,6 +117,7 @@ target_link_libraries(LayerConfigAccess PRIVATE
 add_library(ModelValidationApi ModelValidationApi.c)
 target_include_directories(ModelValidationApi PUBLIC include)
 target_link_libraries(ModelValidationApi PRIVATE
+        LossFunction
         Common
         Layer
         Quantization

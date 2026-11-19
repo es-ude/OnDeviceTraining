@@ -2,6 +2,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Deserialize
         MORE_LIBS
+        LossFunction
         Common
         TensorApi
         Tensor
@@ -36,6 +37,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Serialize
         MORE_LIBS
+        LossFunction
         Common
         RNG
         Deserialize

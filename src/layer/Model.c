@@ -56,6 +56,28 @@ void modelShapePass(const model_t *m, const shape_t *input, shape_t *shapes, siz
     }
 }
 
+void modelGradFlags(const model_t *m, lossFuncType_t lt, uint8_t *needsGrad,
+                    uint8_t *runsBackward) {
+    size_t n = m->numLayers;
+    needsGrad[0] = 0;
+    for (size_t j = 0; j < n; j++) {
+        parameter_t *w = NULL;
+        parameter_t *b = NULL;
+        layer_t *layer = m->layers[j];
+        bool needs = layerParameters(layer, &w, &b) && !layerIsFrozen(layer);
+        uint16_t ids[MODEL_MAX_ARITY];
+        uint8_t k = modelNodeInputs(m, j, ids);
+        for (uint8_t i = 0; i < k; i++) {
+            needs = needs || needsGrad[ids[i]];
+        }
+        needsGrad[j + 1] = needs;
+        runsBackward[j] = needs;
+    }
+    if (lt == CROSS_ENTROPY) {
+        runsBackward[n - 1] = 0;
+    }
+}
+
 void modelRequireValid(const model_t *m, const char *caller) {
     size_t n = m->numLayers;
     if (n == 0) {

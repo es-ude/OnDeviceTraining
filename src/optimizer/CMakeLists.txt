@@ -1,6 +1,7 @@
 add_library(Optimizer Optimizer.c)
 target_include_directories(Optimizer PUBLIC include)
 target_link_libraries(Optimizer PRIVATE
+        LossFunction
         Quantization
         Rounding
         Layer
@@ -28,6 +29,7 @@ target_link_libraries(OptimizerKeys PRIVATE
 add_library(Sgd Sgd.c)
 target_include_directories(Sgd PUBLIC include)
 target_link_libraries(Sgd PRIVATE
+        LossFunction
         OptimizerKeys
         RNG
         DTypes
@@ -46,6 +48,7 @@ target_link_libraries(Sgd PRIVATE
 add_library(AdamW AdamW.c)
 target_include_directories(AdamW PUBLIC include)
 target_link_libraries(AdamW PRIVATE
+        LossFunction
         OptimizerKeys
         RNG
         DTypes
@@ -67,6 +70,7 @@ target_compile_options(AdamW PRIVATE -ffp-contract=off)
 add_library(LrScheduler LrScheduler.c)
 target_include_directories(LrScheduler PUBLIC include)
 target_link_libraries(LrScheduler PRIVATE
+        LossFunction
         Optimizer
         # #327: PRIVATE-everywhere convention (docs/conventions) - Optimizer.h
         # transitively includes Layer.h/Tensor.h/Quantization.h/Rounding.h;
@@ -82,6 +86,7 @@ target_link_libraries(LrScheduler PRIVATE
 add_library(BsScheduler BsScheduler.c)
 target_include_directories(BsScheduler PUBLIC include)
 target_link_libraries(BsScheduler PRIVATE
+        LossFunction
         Optimizer
         DataLoader
         # #327 PRIVATE-everywhere convention (docs/conventions): Optimizer.h and

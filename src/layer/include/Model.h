@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "Layer.h"
+#include "LossFunction.h"
 
 /* Widest op today is ADD; bump deliberately with the first wider op. */
 #define MODEL_MAX_ARITY 2u
@@ -31,6 +32,13 @@ bool modelIsChain(const model_t *m);
  * node j, each derived from the shapes of the buffers node j is wired to. Fine for any validated
  * model; the caller sizes every shape's dims and order to maxRank = max(input rank, 2). */
 void modelShapePass(const model_t *m, const shape_t *input, shape_t *shapes, size_t maxRank);
+/* The one producer of the needs-grad flags; anything else that needs them reads its output.
+ * needsGrad[b] for b in 0..n: buffer b needs a gradient iff its producer is trainable
+ * (layerParameters && !layerIsFrozen) or reads a buffer that needs one; needsGrad[0] = 0.
+ * runsBackward[j] for j in 0..n-1: the same rule for node j, except that under CROSS_ENTROPY the
+ * sink node never runs (the combined p - y gradient covers the Softmax). The caller sizes
+ * needsGrad to n + 1 and runsBackward to n entries. */
+void modelGradFlags(const model_t *m, lossFuncType_t lt, uint8_t *needsGrad, uint8_t *runsBackward);
 /* Exits with an error naming caller unless m is a schedulable model: 1 <= numLayers < 0xFFFF and,
  * for an explicit CSR, well-formed offsets, exactly each op's arity of inputs per node, inputs
  * only from earlier buffers, and a consumer for every buffer but the last. Call it once at a public

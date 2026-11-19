@@ -3,9 +3,15 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
+#include "BatchNorm1d.h"
 #include "DeathTest.h"
+#include "GroupNorm.h"
 #include "Layer.h"
+#include "LayerNorm.h"
+#include "Linear.h"
+#include "LossFunction.h"
 #include "Model.h"
 #include "unity.h"
 
@@ -147,6 +153,112 @@ void testEveryBufferButTheLastHasAConsumer(void) {
                              modelRequireValid(&(model_t){g_three, 2, start, in}, "t"));
 }
 
+static void assertFlags(layer_t **layers, size_t n, lossFuncType_t lt, const uint8_t *needs,
+                        const uint8_t *runs) {
+    uint8_t g[8], r[8];
+    memset(g, 0xA5, sizeof g);
+    memset(r, 0xA5, sizeof r);
+    modelGradFlags(&MODEL_CHAIN(layers, n), lt, g, r);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(needs, g, n + 1);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(runs, r, n);
+}
+
+static parameter_t g_p[8];
+static linearConfig_t g_linear = {.weights = &g_p[0], .bias = &g_p[1]};
+static linearConfig_t g_frozenLinear = {.weights = &g_p[2], .bias = &g_p[3], .frozen = true};
+static layerNormConfig_t g_norm = {.gamma = &g_p[4], .beta = &g_p[5]};
+static layerNormConfig_t g_frozenNorm = {.gamma = &g_p[4], .beta = &g_p[5], .frozen = true};
+static groupNormConfig_t g_frozenGroupNorm = {.gamma = &g_p[6], .beta = &g_p[7], .frozen = true};
+static batchNorm1dConfig_t g_nonAffineBn = {.gamma = NULL, .beta = NULL, .affine = false};
+
+static layer_t g_top = {.type = LINEAR, .config = &(layerConfig_t){.linear = &g_linear}};
+static layer_t g_frozen = {.type = LINEAR, .config = &(layerConfig_t){.linear = &g_frozenLinear}};
+static layer_t g_trainNorm = {.type = LAYERNORM, .config = &(layerConfig_t){.layerNorm = &g_norm}};
+static layer_t g_frozenNormLayer = {.type = LAYERNORM,
+                                    .config = &(layerConfig_t){.layerNorm = &g_frozenNorm}};
+static layer_t g_frozenGn = {.type = GROUPNORM,
+                             .config = &(layerConfig_t){.groupNorm = &g_frozenGroupNorm}};
+static layer_t g_bn = {.type = BATCHNORM1D,
+                       .config = &(layerConfig_t){.batchNorm1d = &g_nonAffineBn}};
+static layer_t g_reluLayer = {.type = RELU, .config = NULL};
+static layer_t g_flatten = {.type = FLATTEN, .config = NULL};
+static layer_t g_softmax = {.type = SOFTMAX, .config = NULL};
+
+void testGradFlagsSkipFrozenAndParamFreeLayersBelowTheFirstTrainable(void) {
+    assertFlags((layer_t *[]){&g_reluLayer, &g_frozen, &g_trainNorm, &g_top}, 4, MSE,
+                (uint8_t[]){0, 0, 0, 1, 1}, (uint8_t[]){0, 0, 1, 1});
+    assertFlags((layer_t *[]){&g_top, &g_reluLayer}, 2, MSE, (uint8_t[]){0, 1, 1},
+                (uint8_t[]){1, 1});
+}
+
+void testGradFlagsAreAllZeroWhenNothingTrains(void) {
+    assertFlags((layer_t *[]){&g_frozen, &g_reluLayer, &g_frozenGn}, 3, MSE,
+                (uint8_t[]){0, 0, 0, 0}, (uint8_t[]){0, 0, 0});
+    assertFlags((layer_t *[]){&g_reluLayer, &g_flatten}, 2, MSE, (uint8_t[]){0, 0, 0},
+                (uint8_t[]){0, 0});
+}
+
+/* A non-affine BatchNorm1d carries a config but no parameters: it trains nothing. */
+void testGradFlagsSkipANonAffineBatchNorm(void) {
+    assertFlags((layer_t *[]){&g_bn, &g_top}, 2, MSE, (uint8_t[]){0, 0, 1}, (uint8_t[]){0, 1});
+}
+
+/* Under CROSS_ENTROPY the sink Softmax never runs backward: the combined p - y gradient covers
+ * it, while its input buffer still needs a gradient. */
+void testGradFlagsNeverRunTheSinkSoftmaxUnderCrossEntropy(void) {
+    assertFlags((layer_t *[]){&g_top, &g_reluLayer, &g_softmax}, 3, CROSS_ENTROPY,
+                (uint8_t[]){0, 1, 1, 1}, (uint8_t[]){1, 1, 0});
+    assertFlags((layer_t *[]){&g_top, &g_reluLayer, &g_softmax}, 3, MSE, (uint8_t[]){0, 1, 1, 1},
+                (uint8_t[]){1, 1, 1});
+}
+
+static uint32_t nextRandom(uint32_t *state) { /* xorshift32, test-local */
+    uint32_t v = *state;
+    v ^= v << 13;
+    v ^= v >> 17;
+    v ^= v << 5;
+    *state = v;
+    return v;
+}
+
+/* On a chain, needs-grad is the positional range from the deepest trainable node to the top:
+ * node j runs backward iff deepest <= j, and buffer j needs a gradient iff j > deepest. The
+ * oracle computes deepest independently of the graph walk under test. */
+void testGradFlagsOfAChainAreTheDeepestToTopRange(void) {
+    layer_t *pool[] = {&g_top, &g_frozen, &g_reluLayer, &g_trainNorm, &g_frozenNormLayer};
+    uint32_t state = 0x9E3779B9u;
+    bool sawTraining = false, sawFrozenOnly = false;
+    for (int trial = 0; trial < 200; trial++) {
+        size_t n = 1 + nextRandom(&state) % 7u;
+        layer_t *layers[7];
+        for (size_t j = 0; j < n; j++) {
+            layers[j] = pool[nextRandom(&state) % 5u];
+        }
+        size_t deepest = n;
+        for (size_t j = 0; j < n && deepest == n; j++) {
+            parameter_t *w = NULL, *b = NULL;
+            if (layerParameters(layers[j], &w, &b) && !layerIsFrozen(layers[j])) {
+                deepest = j;
+            }
+        }
+        sawTraining |= deepest < n;
+        sawFrozenOnly |= deepest == n;
+
+        uint8_t needs[8], runs[8];
+        memset(needs, 0xA5, sizeof needs);
+        memset(runs, 0xA5, sizeof runs);
+        modelGradFlags(&MODEL_CHAIN(layers, n), MSE, needs, runs);
+        TEST_ASSERT_EQUAL_UINT8(0, needs[0]);
+        for (size_t j = 0; j < n; j++) {
+            TEST_ASSERT_EQUAL_UINT8(deepest <= j, runs[j]);
+        }
+        for (size_t j = 1; j <= n; j++) {
+            TEST_ASSERT_EQUAL_UINT8(j > deepest, needs[j]);
+        }
+    }
+    TEST_ASSERT_TRUE(sawTraining && sawFrozenOnly);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testAChainNodeReadsItsPredecessor);
@@ -162,5 +274,10 @@ int main(void) {
     RUN_TEST(testANodeTakesExactlyItsArity);
     RUN_TEST(testAnInputComesFromAnEarlierBuffer);
     RUN_TEST(testEveryBufferButTheLastHasAConsumer);
+    RUN_TEST(testGradFlagsSkipFrozenAndParamFreeLayersBelowTheFirstTrainable);
+    RUN_TEST(testGradFlagsAreAllZeroWhenNothingTrains);
+    RUN_TEST(testGradFlagsSkipANonAffineBatchNorm);
+    RUN_TEST(testGradFlagsNeverRunTheSinkSoftmaxUnderCrossEntropy);
+    RUN_TEST(testGradFlagsOfAChainAreTheDeepestToTopRange);
     return UNITY_END();
 }

@@ -26,6 +26,7 @@ target_link_libraries(PpcaReplay PRIVATE
 add_library(PpcaReplaySerialize PpcaReplaySerialize.c)
 target_include_directories(PpcaReplaySerialize PUBLIC include)
 target_link_libraries(PpcaReplaySerialize PRIVATE
+        LossFunction
         Common
         PpcaReplay
         SerialWire

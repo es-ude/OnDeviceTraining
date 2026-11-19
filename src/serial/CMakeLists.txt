@@ -7,6 +7,7 @@ target_link_libraries(SerialWire PRIVATE
 add_library(Serialize Serialize.c)
 target_include_directories(Serialize PUBLIC include)
 target_link_libraries(Serialize PRIVATE
+        LossFunction
         Model
         Common
         SerialWire
@@ -33,6 +34,7 @@ target_link_libraries(Serialize PRIVATE
 add_library(Deserialize Deserialize.c)
 target_include_directories(Deserialize PUBLIC include)
 target_link_libraries(Deserialize PRIVATE
+        LossFunction
         Model
         Common
         SerialWire

@@ -3070,10 +3070,15 @@ void testGrammarRejectsAForwardBeyondTheLastLayer(void) {
         "step #12 (kind 0, layer 12) violates grammar rule 1: one FORWARD per layer");
 }
 
-/* A table that says no backward runs, validating HAR's program, which has one:
- * the LOSS_BACKWARD at step 13 is the first step rule 2 rejects. */
-static void clearHasBackwardAndValidate(grammarFixture_t *f) {
-    f->t->hasBackward = false;
+/* HAR's program, which has a backward, validated against the same model with
+ * every trainable layer frozen afterwards: the grammar reads needs-grad off
+ * the model, so the LOSS_BACKWARD at step 13 is the first step rule 2
+ * rejects. */
+static void freezeEveryLayerAndValidate(grammarFixture_t *f) {
+    f->model[0]->config->conv1d->frozen = true;
+    f->model[3]->config->conv1d->frozen = true;
+    f->model[6]->config->conv1d->frozen = true;
+    f->model[10]->config->linear->frozen = true;
     rematPlanValidateGrammar(&f->p->train, f->t, &MODEL_CHAIN(f->model, f->t->modelSize),
                              REMAT_MODE_TRAIN, NULL);
 }
@@ -3082,7 +3087,7 @@ void testGrammarRejectsALossBackwardWithoutABackwardPhase(void) {
     grammarFixture_t f;
     buildHarLivenessFixture(&f);
     ASSERT_EXITS_WITH_OUTPUT(1, "step #13 (kind 2, layer 12) violates grammar rule 2",
-                             clearHasBackwardAndValidate(&f));
+                             freezeEveryLayerAndValidate(&f));
     freeGrammarFixture(&f);
 }
 
@@ -3186,16 +3191,129 @@ void testGrammarRejectsALayerBackwardInAnEvalProgram(void) {
     freeGrammarFixture(&f);
 }
 
+/* HAR TRAIN pool: FORWARD(j) at 2j (its input, then ACT j+1), LOSS_FORWARD at
+ * 24, LOSS_BACKWARD at 25..26, then BACKWARD(10 - i) at 27 + 3i: dy, input, dx.
+ * 60 operands. */
+static void wrongGradientIntoB10(rematProgram_t *p) {
+    p->operands[27].wire = 14;
+}
+static void metaInputOfALinear(rematProgram_t *p) {
+    p->operands[28].mode = OP_MODE_META;
+}
+static void readInputOfAFlatten(rematProgram_t *p) {
+    p->operands[31].mode = OP_MODE_READ;
+}
+static void dxIntoTheInputOfB0(rematProgram_t *p) {
+    p->operands[59].wire = 23;
+}
+static void forward3OffItsNodeSlice(rematProgram_t *p) {
+    p->nodeOps[3].forward = 8;
+}
+static void sliceOfB0PastThePool(rematProgram_t *p) {
+    p->steps[24].operands = 58;
+}
+static void b10ReadsOneOperand(rematProgram_t *p) {
+    p->steps[14].numReads = 1;
+}
+
+void testGrammarRejectsABackwardReadingTheWrongGradient(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarStoreAllFixture, wrongGradientIntoB10,
+                        "step #14 (kind 3, layer 10) violates grammar rule 8: operand 0 is wire 14 "
+                        "(READ), expected wire 13 (READ)");
+}
+
+void testGrammarRejectsAMetaReadOfAnInputTheBackwardReads(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarStoreAllFixture, metaInputOfALinear,
+                        "step #14 (kind 3, layer 10) violates grammar rule 8: operand 1 is wire 10 "
+                        "(META), expected wire 10 (READ)");
+}
+
+/* A READ the read-set denies would keep a dead input alive. */
+void testGrammarRejectsAReadOfAnInputTheBackwardNeverReads(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarStoreAllFixture, readInputOfAFlatten,
+                        "step #15 (kind 3, layer 9) violates grammar rule 8: operand 1 is wire 9 "
+                        "(READ), expected wire 9 (META)");
+}
+
+void testGrammarRejectsADxForAnInputThatNeedsNoGradient(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarStoreAllFixture, dxIntoTheInputOfB0,
+                        "step #24 (kind 3, layer 0) violates grammar rule 8: operand 2 is wire 23 "
+                        "(WRITE), expected wire 65535 (WRITE)");
+}
+
+void testGrammarRejectsAStepOffItsNodesSlice(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarStoreAllFixture, forward3OffItsNodeSlice,
+                        "step #3 (kind 0, layer 3) violates grammar rule 8: its operand slice is "
+                        "not its node's (nodeOps)");
+}
+
+void testGrammarRejectsASliceOutsideThePool(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarStoreAllFixture, sliceOfB0PastThePool,
+                        "step #24 (kind 3, layer 0) violates grammar rule 8: its operand slice "
+                        "lies outside the pool");
+}
+
+void testGrammarRejectsAStepWithTheWrongOperandCounts(void) {
+    ASSERT_GRAMMAR_EXIT(buildHarStoreAllFixture, b10ReadsOneOperand,
+                        "step #14 (kind 3, layer 10) violates grammar rule 8: 1 reads and 1 "
+                        "writes, expected 2 and 1");
+}
+
+/* The grammar re-derives from the model, so flags tampered in the table do
+ * not move it: the table is the deriver's input, and trusting it would share
+ * the deriver's errors. */
+static void tamperTheTablesFlagsAndValidate(grammarFixture_t *f) {
+    f->t->needsGrad[1] = 0u;
+    f->t->runsBackward[0] = 0u;
+    f->t->readsInput[9] = 1u;
+    f->t->dxWire[2] = REMAT_NONE;
+    f->t->hasBackward = false;
+    rematPlanValidateGrammar(&f->p->train, f->t, &MODEL_CHAIN(f->model, f->n), REMAT_MODE_TRAIN,
+                             NULL);
+}
+
+void testGrammarDerivesFromTheModelNotFromTheTablesFlags(void) {
+    grammarFixture_t f;
+    buildHarStoreAllFixture(&f);
+    ASSERT_EXITS_WITH(0, tamperTheTablesFlagsAndValidate(&f));
+    freeGrammarFixture(&f);
+}
+
+/* gradIdOf is a lookup the grammar confirms against the wire records: a table
+ * that maps buffer 11 to GRAD 10 (wire 14), and a slice that follows it, still
+ * meet the seed (wire 13), the record CrossEntropy's dy at BACKWARD(10) is. */
+static void mapBuffer11ToGrad10AndValidate(grammarFixture_t *f) {
+    f->t->gradIdOf[11] = 14;
+    f->p->train.operands[27].wire = 14;
+    rematPlanValidateGrammar(&f->p->train, f->t, &MODEL_CHAIN(f->model, f->n), REMAT_MODE_TRAIN,
+                             NULL);
+}
+
+void testGrammarConfirmsTheTablesGradientLookupAgainstTheRecords(void) {
+    grammarFixture_t f;
+    buildHarStoreAllFixture(&f);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "step #14 (kind 3, layer 10) violates grammar rule 8: operand 0 is "
+                             "wire 14 (READ), expected wire 13 (READ)",
+                             mapBuffer11ToGrad10AndValidate(&f));
+    freeGrammarFixture(&f);
+}
+
 /* ---- REFORWARD and the rule-6 range checks (hand-written programs) ---- */
 
-/* A program in test-owned arrays: the grammar reads only steps and ranges. */
+/* A program in test-owned arrays: hand-written steps and ranges, with the
+ * operands the deriver gives those steps, so the tests reach the step and
+ * range rules past rule 8. */
 #define HAND_MAX 16
+#define HAND_OPS 64
 typedef struct handProgram {
     layer_t *model[MLP3_N];
     size_t n;
     inputLike_t in;
     rematWireTable_t *t;
     rematStep_t steps[HAND_MAX];
+    rematOperand_t operands[HAND_OPS];
+    rematNodeOps_t nodeOps[MLP3_N + 1];
     rematRange_t ranges[HAND_MAX];
     rematProgram_t p;
 } handProgram_t;
@@ -3224,10 +3342,19 @@ static void buildSingleLinearHand(handProgram_t *h) {
 static void setHandProgram(handProgram_t *h, const rematStep_t *steps, size_t numSteps,
                            const rematRange_t *ranges, size_t numRanges) {
     TEST_ASSERT_TRUE(numSteps <= HAND_MAX && numRanges <= HAND_MAX);
-    memcpy(h->steps, steps, numSteps * sizeof *steps);
+    const rematPlanSpec_t spec = {
+        .policy = REMAT_PLAN_SEQUENCE, .sequence = steps, .sequenceLen = numSteps};
+    rematDeriveSize_t size = rematDeriveTrainSize(h->t, &spec);
+    TEST_ASSERT_TRUE(size.numOperands <= HAND_OPS);
+    h->p = (rematProgram_t){.numSteps = numSteps,
+                            .steps = h->steps,
+                            .numOperands = size.numOperands,
+                            .operands = h->operands,
+                            .nodeOps = h->nodeOps,
+                            .numRanges = numRanges,
+                            .ranges = h->ranges};
+    rematDeriveTrain(h->t, &spec, &h->p);
     memcpy(h->ranges, ranges, numRanges * sizeof *ranges);
-    h->p = (rematProgram_t){
-        .numSteps = numSteps, .steps = h->steps, .numRanges = numRanges, .ranges = h->ranges};
 }
 
 static void freeHandProgram(handProgram_t *h) {
@@ -4423,9 +4550,9 @@ void testPlanBuildExitsOnARecomputeCostAboveSizeMax(void) {
 }
 
 /* rematPlanBuild runs the grammar on what it generates: a table that claims
- * conv 3's BACKWARD does not read its input derives a META operand, so the
- * scan ends ACT 3's range at FORWARD(3), while the grammar's own reading of
- * the model has BACKWARD(3) (step 21) read it. */
+ * conv 3's BACKWARD does not read its input derives a META operand there,
+ * while the grammar's own reading of the model has BACKWARD(3) (step 21) read
+ * it. */
 static void clearConv3ReadsInputAndBuild(grammarFixture_t *f) {
     f->t->readsInput[3] = 0;
     rematPlan_t *p = NULL;
@@ -4436,7 +4563,8 @@ void testPlanBuildRunsTheGrammarOnWhatItGenerates(void) {
     grammarFixture_t f;
     buildHarLivenessFixture(&f);
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "step #21 (kind 3, layer 3) violates grammar rule 4: it reads wire 3",
+                             "step #21 (kind 3, layer 3) violates grammar rule 8: operand 1 is "
+                             "wire 3 (META), expected wire 3 (READ)",
                              clearConv3ReadsInputAndBuild(&f));
     freeGrammarFixture(&f);
 }
@@ -5140,6 +5268,15 @@ int main(void) {
     RUN_TEST(testGrammarRejectsABackwardReadingGradInOutsideItsRange);
     RUN_TEST(testGrammarRejectsABackwardStepInAnEvalProgram);
     RUN_TEST(testGrammarRejectsALayerBackwardInAnEvalProgram);
+    RUN_TEST(testGrammarRejectsABackwardReadingTheWrongGradient);
+    RUN_TEST(testGrammarRejectsAMetaReadOfAnInputTheBackwardReads);
+    RUN_TEST(testGrammarRejectsAReadOfAnInputTheBackwardNeverReads);
+    RUN_TEST(testGrammarRejectsADxForAnInputThatNeedsNoGradient);
+    RUN_TEST(testGrammarRejectsAStepOffItsNodesSlice);
+    RUN_TEST(testGrammarRejectsASliceOutsideThePool);
+    RUN_TEST(testGrammarRejectsAStepWithTheWrongOperandCounts);
+    RUN_TEST(testGrammarDerivesFromTheModelNotFromTheTablesFlags);
+    RUN_TEST(testGrammarConfirmsTheTablesGradientLookupAgainstTheRecords);
     RUN_TEST(testGrammarAcceptsAReforwardRunInsideTheWindow);
     RUN_TEST(testGrammarAcceptsAProgramAtTheStepBound);
     RUN_TEST(testGrammarRejectsMoreStepsThanTheBound);

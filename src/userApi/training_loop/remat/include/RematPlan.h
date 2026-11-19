@@ -248,9 +248,9 @@ typedef struct rematPlan {
 } rematPlan_t;
 
 /* Generates the TRAIN and the EVAL program for the table's built model in ONE
- * reserveMemory block. `m` must be the model the table was built on: it
- * feeds the read-set rule only (the backward range comes from the table), and
- * a layerType/frozen mismatch exits by name. Returns false only when
+ * reserveMemory block. `m` must be the model the table was built on: the
+ * deriver reads only the table, `m` feeds the grammar and the costs, and a
+ * layerType/frozen mismatch exits by name. Returns false only when
  * reserveMemory fails. */
 bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t *m,
                     const rematPlanSpec_t *spec);
@@ -270,16 +270,24 @@ size_t rematProgramActPeakBytes(const rematProgram_t *p, const rematWireTable_t 
 size_t rematWalkOpening(const rematProgram_t *p, rematWalk_t *w);
 size_t rematWalkClosing(const rematProgram_t *p, rematWalk_t *w);
 
-/* Grammar validation (rules 1-4 and 6). Deliberately independent of
- * RematCheck, so a mutation in one is caught by the other. rematPlanBuild runs
- * it on every program it generates; tests run it on tampered programs. Exits
- * naming the step index (or the range index) and the rule. An EVAL program has
- * no backward step: rule 2 rejects LOSS_BACKWARD and BACKWARD there, rule 6
- * rejects REFORWARD, and rule 3 does not apply. Rule 6 also bounds the step
- * count, admits a REFORWARD only inside the backward window and never for a
- * layer whose training forward updates its state (layerForwardUpdatesState),
- * makes every write open a range of its own, and keeps the ranges on wires
- * of the table, begin-sorted and inside the stream. inPlace is the plan's
+/* Grammar validation (rules 1-4, 6 and 8). Deliberately independent of
+ * RematCheck and of the deriver, so a mutation in one is caught by the other:
+ * it reads wiring, read-set and needs-grad off `m` with its own code, never
+ * the table's flags or dx slots, and takes the table's gradIdOf only where
+ * the wire records confirm it. rematPlanBuild runs it on every program it
+ * generates; tests run it on tampered programs. Exits naming the step index
+ * (or the range index) and the rule. An EVAL program has no backward step:
+ * rule 2 rejects LOSS_BACKWARD and BACKWARD there, rule 6 rejects REFORWARD,
+ * and rule 3 does not apply. Rule 3 runs BACKWARD over the grammar's own set
+ * of nodes that run backward, descending. Rule 8 holds every step's operand
+ * slice inside the pool, at its node's nodeOps entry, and equal to the
+ * operands the model gives that step; rules 4 and 6 then read the slice. Rule
+ * 6 also bounds the step count, admits a REFORWARD only inside the backward
+ * window and never for a layer whose training forward updates its state
+ * (layerForwardUpdatesState), makes every write open a range of its own,
+ * opens each range at a step whose write set holds its wire with WRITE, and
+ * keeps the ranges on wires of the table, begin-sorted and inside the
+ * stream. inPlace is the plan's
  * marks (NULL: none), checked first on their own: each sits on a ReLU,
  * Dropout or Flatten dx wire whose BACKWARD reads wire - 1, both of one
  * dtype, FLOAT32 or SYM_INT32, and equal bytes. A member's reads and its

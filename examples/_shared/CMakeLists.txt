@@ -5,7 +5,7 @@ target_include_directories(examples_shared PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # source here includes (Layer.h, Tensor.h, TensorConversion.h, TensorApi.h,
 # Quantization.h, QuantizationApi.h, Rounding.h, Common.h, BfpKernelSupport.h;
 # remat_select.c: RematScheduler.h, LayerConfigAccess.h,
-# CalculateGradsSequential.h and what it pulls in: TrainingLoopApi.h,
+# Model.h, CalculateGradsSequential.h and what it pulls in: TrainingLoopApi.h,
 # InferenceApi.h, DataLoader.h, LossFunction.h, Optimizer.h, RNG.h;
 # bfp_dataset.c: Dataset.h, Serialize.h, SerialWire.h, TensorRecord.h).
 target_link_libraries(examples_shared PRIVATE
@@ -15,6 +15,7 @@ target_link_libraries(examples_shared PRIVATE
         DataLoader
         RematScheduler
         LayerConfigAccess
+        Model
         CalculateGradsSequential
         TrainingLoopApi
         RNG

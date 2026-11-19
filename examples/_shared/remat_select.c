@@ -9,6 +9,7 @@
 
 #include "CalculateGradsSequential.h"
 #include "LayerConfigAccess.h"
+#include "Model.h"
 #include "RematScheduler.h"
 #include "remat_select.h"
 
@@ -511,22 +512,19 @@ bool rematSelectDumpProblem(FILE *json, FILE *hashLine, const model_t *m, lossCo
     emit(&w, ",\"dtype\":{\"kind\":\"FLOAT32\"}},\"loss\":\"");
     emit(&w, loss.funcType == CROSS_ENTROPY ? "CROSS_ENTROPY" : "MSE");
     emit(&w, "\",\"layers\":[");
-    size_t dims[2][REMAT_DUMP_MAX_RANK];
-    size_t order[2][REMAT_DUMP_MAX_RANK];
-    shape_t scratch[2] = {{.dimensions = dims[0], .orderOfDimensions = order[0]},
-                          {.dimensions = dims[1], .orderOfDimensions = order[1]}};
-    shape_t *prev = inputLike->shape;
-    for (size_t l = 0; l < m->numLayers; l++) {
-        layer_t *layer = m->layers[l];
-        shape_t *out = &scratch[l % 2u];
-        /* As the remat wire table: a Flatten writes [batch, features]. */
-        out->numberOfDimensions = (layer->type == FLATTEN) ? 2u : prev->numberOfDimensions;
-        layerFunctions[layer->type].calcOutputShape(layer, prev, out);
+    size_t n = m->numLayers;
+    shape_t shapes[n + 1];
+    size_t dims[n + 1][REMAT_DUMP_MAX_RANK];
+    size_t order[n + 1][REMAT_DUMP_MAX_RANK];
+    for (size_t b = 0; b <= n; b++) {
+        shapes[b] = (shape_t){.dimensions = dims[b], .orderOfDimensions = order[b]};
+    }
+    modelShapePass(m, inputLike->shape, &shapes[0], REMAT_DUMP_MAX_RANK);
+    for (size_t l = 0; l < n; l++) {
         if (l > 0u) {
             emit(&w, ",");
         }
-        emitLayer(&w, layer, out);
-        prev = out;
+        emitLayer(&w, m->layers[l], &shapes[l + 1]);
     }
     emit(&w, "]}\n");
     if (fflush(json) != 0 || ferror(json)) {

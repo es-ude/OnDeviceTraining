@@ -3756,26 +3756,30 @@ void testSequencePlanExitsAboveUint16MaxStepsBeforeReserving(void) {
     freeReluLayer(relu);
 }
 
-/* Linear(2->2) + 13106 ReLUs under MSE: every node runs its BACKWARD, so the
- * pool holds 2n + 1 + 2 + 3n = 5n + 3 = 65538 operands > 65536, and the build
- * exits before it reserves the plan block. */
-#define LONG_RELU_CHAIN_N 13107u
+/* 4 ReLUs, Linear(2->2), 13104 ReLUs under MSE: the ReLUs below the Linear
+ * need no gradient and skip their BACKWARD, so the pool holds 2n + 1 + 2 + 3b
+ * = 26218 + 3 + 39315 = 65536 operands (n = 13109, b = 13105): one past
+ * UINT16_MAX, which is REMAT_NONE and must never start a slice. The build exits
+ * before it reserves the plan block. */
+#define LONG_RELU_CHAIN_N 13109u
+#define LONG_RELU_CHAIN_LINEAR 4u
 static layer_t *g_longReluChain[LONG_RELU_CHAIN_N];
 
 void testPlanBuildExitsOnAnOperandPoolAboveUint16Offsets(void) {
     layer_t *relu = makeRelu(&g_floatQ);
-    g_longReluChain[0] = makeLinear(2, 2, false, 0);
-    for (size_t i = 1; i < LONG_RELU_CHAIN_N; i++) {
+    for (size_t i = 0; i < LONG_RELU_CHAIN_N; i++) {
         g_longReluChain[i] = relu;
     }
+    g_longReluChain[LONG_RELU_CHAIN_LINEAR] = makeLinear(2, 2, false, LONG_RELU_CHAIN_LINEAR);
     inputLike_t in;
     rematWireTable_t *t = initTable(g_longReluChain, LONG_RELU_CHAIN_N, MSE,
                                     makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
     assertExitsBeforeThePlanBlock(t, g_longReluChain, NULL,
-                                  "rematPlanBuild: the TRAIN program needs 65538 operands, above "
-                                  "UINT16_MAX + 1 (operand offsets are uint16_t)");
+                                  "rematPlanBuild: the TRAIN program needs 65536 operands, above "
+                                  "UINT16_MAX (operand offsets are uint16_t, and UINT16_MAX is "
+                                  "REMAT_NONE)");
     rematWireTableFree(t);
-    freeModel(g_longReluChain, 1);
+    freeModel(&g_longReluChain[LONG_RELU_CHAIN_LINEAR], 1);
     freeReluLayer(relu);
 }
 
@@ -4418,11 +4422,12 @@ void testPlanBuildExitsOnARecomputeCostAboveSizeMax(void) {
                              buildMlp3PlanWithLayer0Width(&spec, SIZE_MAX / 6u));
 }
 
-/* rematPlanBuild runs the grammar on what it generates: a table record that
- * claims GRAD 8 is GRAD 7 (wire 16) yields a range that opens one step after
- * BACKWARD(8) writes it. */
-static void mislabelGrad8AndBuild(grammarFixture_t *f) {
-    f->t->wires[16].index = 7;
+/* rematPlanBuild runs the grammar on what it generates: a table that claims
+ * conv 3's BACKWARD does not read its input derives a META operand, so the
+ * scan ends ACT 3's range at FORWARD(3), while the grammar's own reading of
+ * the model has BACKWARD(3) (step 21) read it. */
+static void clearConv3ReadsInputAndBuild(grammarFixture_t *f) {
+    f->t->readsInput[3] = 0;
     rematPlan_t *p = NULL;
     (void)rematPlanBuild(&p, f->t, &MODEL_CHAIN(f->model, f->t->modelSize), &g_liveness);
 }
@@ -4430,9 +4435,9 @@ static void mislabelGrad8AndBuild(grammarFixture_t *f) {
 void testPlanBuildRunsTheGrammarOnWhatItGenerates(void) {
     grammarFixture_t f;
     buildHarLivenessFixture(&f);
-    ASSERT_EXITS_WITH_OUTPUT(
-        1, "step #16 (kind 3, layer 8) violates grammar rule 4: it writes wire 16",
-        mislabelGrad8AndBuild(&f));
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "step #21 (kind 3, layer 3) violates grammar rule 4: it reads wire 3",
+                             clearConv3ReadsInputAndBuild(&f));
     freeGrammarFixture(&f);
 }
 
@@ -4644,6 +4649,34 @@ void testInPlaceChainOfTwoMembersHasOneRange(void) {
     rematPlanFree(p);
     rematWireTableFree(t);
     freeModel(model, 4);
+}
+
+/* HAR LIVENESS with in-place dx: GRAD 9, 7, 4, 1 (wires 15, 17, 20, 23) are
+ * members. The scan reads only the stored operands: a member's WRITE lands in
+ * its root's range, which then ends at the member's reader. */
+void testScanRangesLandsAnInPlaceMembersWriteInItsRootsRange(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlan_t *p = buildPlan(t, model, &g_livenessInPlace);
+    rematRange_t again[32];
+    rematScanRanges(t, &p->train, REMAT_PLAN_LIVENESS, p->inPlace, again);
+    TEST_ASSERT_EQUAL_size_t(19, p->train.numRanges);
+    TEST_ASSERT_EQUAL_MEMORY(p->train.ranges, again, 19 * sizeof(rematRange_t));
+    const uint16_t members[4] = {15, 17, 20, 23};
+    for (size_t r = 0; r < 19; r++) {
+        for (size_t m = 0; m < 4; m++) {
+            TEST_ASSERT_NOT_EQUAL(members[m], p->train.ranges[r].wire);
+        }
+    }
+    assertOnlyRangeOf(&p->train, 14, 14, 16); /* GRAD 10, root of GRAD 9: B10 writes, B8 reads */
+    assertOnlyRangeOf(&p->train, 16, 16, 18); /* GRAD 8, root of GRAD 7 */
+    assertOnlyRangeOf(&p->train, 19, 19, 21); /* GRAD 5, root of GRAD 4 */
+    assertOnlyRangeOf(&p->train, 22, 22, 24); /* GRAD 2, root of GRAD 1 */
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
 }
 
 /* Linear(2->4) -> middle -> Linear(4->2) under MSE, layer 2's dx stored as
@@ -5168,6 +5201,7 @@ int main(void) {
     RUN_TEST(testInPlaceStoreAllHarPeakLiveBytesIs70192);
     RUN_TEST(testInPlaceReluAtTheCrossEntropyTopSharesTheSeed);
     RUN_TEST(testInPlaceChainOfTwoMembersHasOneRange);
+    RUN_TEST(testScanRangesLandsAnInPlaceMembersWriteInItsRootsRange);
     RUN_TEST(testInPlaceEligibilityTruthTable);
     RUN_TEST(testInPlaceDxWithoutAPairKeepsThePlan);
     RUN_TEST(testInPlaceRetainListHarRunsARootOverAReforwardRun);

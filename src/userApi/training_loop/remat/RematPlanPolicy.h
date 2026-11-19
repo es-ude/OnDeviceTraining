@@ -23,14 +23,18 @@ size_t rematDeriveGradWires(const model_t *m, lossFuncType_t lt, const uint8_t *
 typedef struct rematDeriveSize {
     size_t numSteps;
     size_t numOperands;
+    size_t numRanges;
 } rematDeriveSize_t;
 
 /* The TRAIN program's sizes for this spec. The operand pool does not depend on the policy:
  * every node's FORWARD slice, the LOSS_FORWARD slice, then, when a backward runs, the
- * LOSS_BACKWARD slice and the BACKWARD slice of every runsBackward node, descending. Reads the
- * caller's sequence or retain mask, so the spec's own checks must have run first. */
+ * LOSS_BACKWARD slice and the BACKWARD slice of every runsBackward node, descending. numRanges
+ * counts the writes rematScanRanges opens a range for, with spec->inPlaceDx deciding the
+ * members. Reads the caller's sequence or retain mask, so the spec's own checks must have run
+ * first. */
 rematDeriveSize_t rematDeriveTrainSize(const rematWireTable_t *t, const rematPlanSpec_t *spec);
-/* The EVAL program's sizes: n + 1 steps and the pool's FORWARD and LOSS_FORWARD slices. */
+/* The EVAL program's sizes: n + 1 steps, the pool's FORWARD and LOSS_FORWARD slices, and the n
+ * ranges of ACT 1..n. */
 rematDeriveSize_t rematDeriveEvalSize(const rematWireTable_t *t);
 /* The one operand writer. Fills the steps (kind and layer from the policy generator, or the
  * caller's sequence), the pool and nodeOps, and points each step at its node's slice by kind;
@@ -43,47 +47,38 @@ void rematDeriveTrain(const rematWireTable_t *t, const rematPlanSpec_t *spec, re
  * The caller places p's arrays and counts from rematDeriveEvalSize. */
 void rematDeriveEval(const rematWireTable_t *t, rematProgram_t *p);
 
-/* BACKWARD(l) = n + 2 + (top - l), for deepest <= l <= top. */
-size_t rematBackwardStep(const rematWireTable_t *t, size_t l);
+/* One range per opening write, in step order, read from the stored operands only; the same rule
+ * for every step kind. A READ operand extends the newest range of its chain root (META extends
+ * nothing; ACT 0 has no range); a write operand's wire, unless REMAT_NONE, opens {wire, s, s} if it
+ * is its own root and its mode is WRITE, and otherwise extends its root's newest range. STORE_ALL
+ * then ends every ACT range at numSteps - 1. A read before any write of its wire extends nothing
+ * (the grammar rejects it). Ranges come out begin-sorted, ties by wire id: a chain step opens at
+ * most one range. The marks must be filled first (NULL: no members); ranges holds the sizing
+ * pass's numRanges. O(S * R), no scratch. */
+void rematScanRanges(const rematWireTable_t *t, const rematProgram_t *p, rematPlanPolicy_t policy,
+                     const uint8_t *inPlace, rematRange_t *ranges);
+
 /* FORWARD 0..n-1, LOSS_FORWARD; then, when a backward runs, LOSS_BACKWARD and a BACKWARD for
  * every runsBackward node, descending. */
 void rematFillTrainSteps(const rematWireTable_t *t, rematStep_t *steps);
+/* Is wire w an in-place member: the dx GRAD l of a ReLU, Dropout or Flatten whose wire and wire
+ * w - 1, the gradient its BACKWARD reads, have one dtype, FLOAT32 or SYM_INT32, and equal bytes?
+ * The one membership predicate: the marks and the sizing pass's range count both use it. */
+bool rematInPlaceMember(const rematWireTable_t *t, size_t w);
 /* inPlace[w] = 1 for every in-place member w, 0 for every other wire; returns
- * the number of members. With inPlace == NULL it only counts (the plan sizes
- * its block first). A member is the dx GRAD l of a ReLU, Dropout or Flatten
- * whose wire and wire w - 1, the gradient its BACKWARD reads, have one dtype,
- * FLOAT32 or SYM_INT32, and equal bytes. */
+ * the number of members. With inPlace == NULL it only counts. */
 size_t rematFillInPlaceMarks(const rematWireTable_t *t, uint8_t *inPlace);
-/* One range per slab wire in wire-id order (= begin order); with inPlaceDx an
- * in-place member gets none and its chain root's range ends at the member's
- * last reader. LIVENESS reads the model for layerBackwardReadsInput. */
-void rematFillTrainRanges(rematPlanPolicy_t policy, const rematWireTable_t *t, layer_t **model,
-                          size_t numSteps, bool inPlaceDx, rematRange_t *ranges);
-/* The scan generator (SEQUENCE; RETAIN_LIST on its own step list): one range
- * per write, so the count is the number of writes; each range opens at its
- * write and ends at the last read of its wire before the wire's next write
- * (at the write itself if nothing reads it). Ranges come out begin-sorted.
- * Safe on any step list: a step the grammar will reject (an unknown kind, a
- * layer outside its kind's range) opens and extends nothing. numSteps must be
- * at most UINT16_MAX (step indexes are stored as uint16_t). With inPlaceDx an
- * in-place member's write opens nothing and a read of it extends its chain
- * root's newest range. */
-size_t rematScanRangeCount(const rematWireTable_t *t, const rematStep_t *steps, size_t numSteps,
-                           bool inPlaceDx);
-void rematScanRanges(const rematWireTable_t *t, layer_t **model, const rematStep_t *steps,
-                     size_t numSteps, bool inPlaceDx, rematRange_t *ranges);
+/* The wire whose range holds this one's bytes: an in-place member walks down to its chain's root;
+ * every other wire, and every wire under NULL marks, is its own. */
+uint16_t rematChainRoot(const uint8_t *inPlace, uint16_t wire);
 /* The RETAIN_LIST generator: FORWARD 0..n-1 and LOSS_FORWARD; then, before
  * LOSS_BACKWARD and before every BACKWARD(l) that reads its input, the
  * REFORWARD run k..j-1 that recomputes a dropped ACT j (j = n, or l) from the
  * nearest present ACT k < j: ACT 0, a kept one, or one an earlier run
  * recomputed. The needs only descend, so each ACT is recomputed at most once
- * and a program holds at most 3n + 2 steps. With steps == NULL it only counts
- * (the plan sizes its block first). Returns the step count; *numWrites (if
- * not NULL) gets the number of steps that open a range, which is
- * rematScanRangeCount of the same list and the same inPlaceDx. */
-size_t rematFillRetainSteps(const rematWireTable_t *t, const bool *retain, bool inPlaceDx,
-                            rematStep_t *steps, size_t *numWrites);
-/* The EVAL ranges: n of them (ACT 1..n, in wire-id order), whatever the policy. */
-void rematFillEvalProgram(const rematWireTable_t *t, rematRange_t *ranges);
+ * and a program holds at most 3n + 2 steps. So the program is the default
+ * TRAIN program plus REFORWARD steps. With steps == NULL it only counts (the
+ * plan sizes its block first). Returns the step count. */
+size_t rematFillRetainSteps(const rematWireTable_t *t, const bool *retain, rematStep_t *steps);
 
 #endif // ODT_REMAT_PLAN_POLICY_H

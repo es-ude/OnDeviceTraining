@@ -73,11 +73,10 @@ static void sortEndOrder(rematProgram_t *p) {
  * peaks, peakLiveBytes and the activation-only peak (accumulated with planAdd
  * in peakBytesUpTo, each under its own label), the activations' element
  * counts, and the two costs, forwardCost and recomputeCost.
- * The deriver's step and operand counts, rematBackwardStep and numRanges
- * (numWires - 1 less the in-place members) are plain size_t arithmetic on
- * modelSize, backwardTop, deepest and numWires -- all bounded well under
- * SIZE_MAX by the table's numWires < REMAT_NONE guard, so they cannot
- * overflow. Only the two costs' exits are reachable (a layer's cost has no
+ * The deriver's step, operand and range counts are plain size_t sums over
+ * the table's nodes and the caller's steps -- all bounded well under SIZE_MAX
+ * by the table's numWires < REMAT_NONE guard and the step bound, so they
+ * cannot overflow. Only the two costs' exits are reachable (a layer's cost has no
  * bound the table checked) and have death tests. The others have none: a
  * program holds at most UINT16_MAX steps and no more ranges than steps, and
  * grammar rule 6 keeps the ranges of one wire apart, so a peak never exceeds
@@ -147,8 +146,7 @@ typedef struct programLayout {
     size_t stepsAt, operandsAt, nodeOpsAt, rangesAt, endOrderAt, end;
 } programLayout_t;
 
-static programLayout_t layoutProgram(size_t at, rematDeriveSize_t size, size_t numNodeOps,
-                                     size_t numRanges) {
+static programLayout_t layoutProgram(size_t at, rematDeriveSize_t size, size_t numNodeOps) {
     programLayout_t l;
     l.stepsAt = roundUpTo(at, _Alignof(rematStep_t));
     l.operandsAt = roundUpTo(
@@ -162,21 +160,23 @@ static programLayout_t layoutProgram(size_t at, rematDeriveSize_t size, size_t n
         roundUpTo(planAdd(l.nodeOpsAt, planMul(numNodeOps, sizeof(rematNodeOps_t), "blockBytes"),
                           "blockBytes"),
                   _Alignof(rematRange_t));
-    l.endOrderAt = roundUpTo(
-        planAdd(l.rangesAt, planMul(numRanges, sizeof(rematRange_t), "blockBytes"), "blockBytes"),
-        _Alignof(uint16_t));
-    l.end = planAdd(l.endOrderAt, planMul(numRanges, sizeof(uint16_t), "blockBytes"), "blockBytes");
+    l.endOrderAt =
+        roundUpTo(planAdd(l.rangesAt, planMul(size.numRanges, sizeof(rematRange_t), "blockBytes"),
+                          "blockBytes"),
+                  _Alignof(uint16_t));
+    l.end = planAdd(l.endOrderAt, planMul(size.numRanges, sizeof(uint16_t), "blockBytes"),
+                    "blockBytes");
     return l;
 }
 
 static void placeProgram(rematProgram_t *p, uint8_t *block, const programLayout_t *l,
-                         rematDeriveSize_t size, size_t numRanges) {
+                         rematDeriveSize_t size) {
     p->numSteps = size.numSteps;
     p->steps = (rematStep_t *)(block + l->stepsAt);
     p->numOperands = size.numOperands;
     p->operands = (rematOperand_t *)(block + l->operandsAt);
     p->nodeOps = (rematNodeOps_t *)(block + l->nodeOpsAt);
-    p->numRanges = numRanges;
+    p->numRanges = size.numRanges;
     p->ranges = (rematRange_t *)(block + l->rangesAt);
     p->endOrder = (uint16_t *)(block + l->endOrderAt);
 }
@@ -190,15 +190,6 @@ static void grammarExit(size_t s, const rematStep_t *st, const char *rule) {
 static void grammarEndExit(size_t numSteps, const char *rule) {
     PRINT_ERROR("rematPlanBuild: the stream of %zu steps violates grammar %s", numSteps, rule);
     exit(1);
-}
-
-/* The wire whose range holds this one's bytes: an in-place member walks down
- * to its chain's root; every other wire is its own. */
-static uint16_t chainRoot(const uint8_t *inPlace, uint16_t wire) {
-    while (inPlace != NULL && inPlace[wire] != 0u) {
-        wire--;
-    }
-    return wire;
 }
 
 /* Linear in the ranges on purpose (O(S * R) over a program): independent of
@@ -292,10 +283,10 @@ static void requireOperandsCovered(const rematProgram_t *p, const rematWireTable
                                    const model_t *m, const uint8_t *inPlace, size_t s) {
     stepOperands_t o = operandsOf(t, m->layers, &p->steps[s]);
     for (size_t i = 0; i < o.numReads; i++) {
-        requireCovered(p, s, o.reads[i], chainRoot(inPlace, o.reads[i]), "reads");
+        requireCovered(p, s, o.reads[i], rematChainRoot(inPlace, o.reads[i]), "reads");
     }
     if (o.write != REMAT_NONE) {
-        uint16_t root = chainRoot(inPlace, o.write);
+        uint16_t root = rematChainRoot(inPlace, o.write);
         requireCovered(p, s, o.write, root, "writes");
         if (root == o.write) {
             requireNoEarlierRangeOpen(p, s, o.write);
@@ -366,7 +357,7 @@ static void requireRangesWellFormed(const rematProgram_t *p, const rematWireTabl
  * ReLU, Dropout or Flatten, so wire - 1 is a GRAD too, never ACT n; the
  * gradient BACKWARD(l) reads is wire - 1; and the two wires share one dtype,
  * FLOAT32 or SYM_INT32, and their bytes. BFP wires never alias. It runs
- * before the steps, so chainRoot only ever walks down a valid chain. */
+ * before the steps, so rematChainRoot only ever walks down a valid chain. */
 static void requireMarksOnAliasPairs(const rematWireTable_t *t, const model_t *m,
                                      const uint8_t *inPlace) {
     size_t n = t->modelSize;
@@ -623,14 +614,15 @@ static void requireASequenceWithinTheBound(const rematPlanSpec_t *spec, size_t n
     }
 }
 
-/* A step's slice starts at a uint16_t offset, so a pool above UINT16_MAX + 1
- * operands cannot be addressed. The pool does not depend on the policy: five
- * operands per node that runs its BACKWARD on a chain, so this stops long
- * chains of about 13107 nodes. */
+/* A step's slice starts at a uint16_t offset, and UINT16_MAX itself is
+ * REMAT_NONE, the empty-slice mark in nodeOps: a pool of more than UINT16_MAX
+ * operands could start a real slice there. The pool does not depend on the
+ * policy: five operands per node that runs its BACKWARD on a chain, so this
+ * stops long chains of about 13107 nodes. */
 static void requireAnOperandPoolWithinTheOffsets(size_t numOperands) {
-    if (numOperands > (size_t)UINT16_MAX + 1u) {
-        PRINT_ERROR("rematPlanBuild: the TRAIN program needs %zu operands, above UINT16_MAX + 1 "
-                    "(operand offsets are uint16_t)",
+    if (numOperands > (size_t)UINT16_MAX) {
+        PRINT_ERROR("rematPlanBuild: the TRAIN program needs %zu operands, above UINT16_MAX "
+                    "(operand offsets are uint16_t, and UINT16_MAX is REMAT_NONE)",
                     numOperands);
         exit(1);
     }
@@ -638,8 +630,8 @@ static void requireAnOperandPoolWithinTheOffsets(size_t numOperands) {
 
 /* A SEQUENCE or RETAIN_LIST plan opens a range per write, up to one per step:
  * the cap bounds its quadratic plan work before anything is reserved.
- * STORE_ALL and LIVENESS keep at most numWires - 1 ranges and are not capped
- * here. */
+ * STORE_ALL and LIVENESS open each wire's range once, at most numWires - 1,
+ * and are not capped here. */
 static void requireRangesWithinTheCap(size_t numRanges) {
     if (numRanges > ODT_REMAT_MAX_RANGES) {
         PRINT_ERROR("rematPlanBuild: plan has %zu ranges, above ODT_REMAT_MAX_RANGES (%u)",
@@ -705,25 +697,23 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t 
     }
     requireTheFieldsOfThePolicy(spec);
     requireTheTablesModel(t, m);
-    size_t numMembers = spec->inPlaceDx ? rematFillInPlaceMarks(t, NULL) : 0u;
-    size_t numRanges = t->numWires - 1u - numMembers;
     if (policy == REMAT_PLAN_SEQUENCE) {
         requireASequenceWithinTheBound(spec, t->modelSize);
-        numRanges = rematScanRangeCount(t, spec->sequence, spec->sequenceLen, spec->inPlaceDx);
-        requireRangesWithinTheCap(numRanges);
     } else if (policy == REMAT_PLAN_RETAIN_LIST) {
         requireARetainMaskWithAWindow(spec, t);
-        size_t numSteps = rematFillRetainSteps(t, spec->retain, spec->inPlaceDx, NULL, &numRanges);
-        requireAProgramWithinTheBound(numSteps, t->modelSize);
-        requireRangesWithinTheCap(numRanges);
     }
     rematDeriveSize_t trainSize = rematDeriveTrainSize(t, spec);
+    if (policy == REMAT_PLAN_RETAIN_LIST) {
+        requireAProgramWithinTheBound(trainSize.numSteps, t->modelSize);
+    }
+    if (policy == REMAT_PLAN_SEQUENCE || policy == REMAT_PLAN_RETAIN_LIST) {
+        requireRangesWithinTheCap(trainSize.numRanges);
+    }
     requireAnOperandPoolWithinTheOffsets(trainSize.numOperands);
     rematDeriveSize_t evalSize = rematDeriveEvalSize(t);
-    size_t evalRanges = t->modelSize;
     size_t numNodeOps = t->modelSize + 1u;
-    programLayout_t trainAt = layoutProgram(sizeof(rematPlan_t), trainSize, numNodeOps, numRanges);
-    programLayout_t evalAt = layoutProgram(trainAt.end, evalSize, numNodeOps, evalRanges);
+    programLayout_t trainAt = layoutProgram(sizeof(rematPlan_t), trainSize, numNodeOps);
+    programLayout_t evalAt = layoutProgram(trainAt.end, evalSize, numNodeOps);
     /* The marks close the block: one byte per wire, no alignment. */
     size_t blockBytes =
         spec->inPlaceDx ? planAdd(evalAt.end, t->numWires, "blockBytes") : evalAt.end;
@@ -739,22 +729,17 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t 
         (void)rematFillInPlaceMarks(t, p->inPlace);
     }
     rematProgram_t *train = &p->train;
-    placeProgram(train, block, &trainAt, trainSize, numRanges);
+    placeProgram(train, block, &trainAt, trainSize);
     rematDeriveTrain(t, spec, train);
-    if (policy == REMAT_PLAN_SEQUENCE || policy == REMAT_PLAN_RETAIN_LIST) {
-        rematScanRanges(t, m->layers, train->steps, train->numSteps, spec->inPlaceDx,
-                        train->ranges);
-    } else {
-        rematFillTrainRanges(policy, t, m->layers, train->numSteps, spec->inPlaceDx, train->ranges);
-    }
+    rematScanRanges(t, train, policy, p->inPlace, train->ranges);
     sortEndOrder(train);
     rematPlanValidateGrammar(train, t, m, REMAT_MODE_TRAIN, p->inPlace);
     train->peakLiveBytes = peakLiveBytesOf(train, t);
     recordRecomputeNumbers(p, t, m);
     rematProgram_t *eval = &p->eval;
-    placeProgram(eval, block, &evalAt, evalSize, evalRanges);
+    placeProgram(eval, block, &evalAt, evalSize);
     rematDeriveEval(t, eval);
-    rematFillEvalProgram(t, eval->ranges);
+    rematScanRanges(t, eval, REMAT_PLAN_LIVENESS, NULL, eval->ranges);
     sortEndOrder(eval);
     rematPlanValidateGrammar(eval, t, m, REMAT_MODE_EVAL, NULL);
     eval->peakLiveBytes = peakLiveBytesOf(eval, t);

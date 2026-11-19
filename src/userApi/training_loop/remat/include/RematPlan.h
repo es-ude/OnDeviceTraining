@@ -215,7 +215,7 @@ typedef struct rematNodeOps {
 typedef struct rematProgram {
     size_t numSteps;
     rematStep_t *steps;
-    size_t numOperands;       /* at most UINT16_MAX + 1: step offsets are uint16_t */
+    size_t numOperands;       /* <= UINT16_MAX: offsets; UINT16_MAX is REMAT_NONE */
     rematOperand_t *operands; /* each step's slice: its reads, then its writes */
     rematNodeOps_t *nodeOps;  /* [n + 1] */
     size_t numRanges;

@@ -680,6 +680,46 @@ void testHarTableRecordsBytesRanksAndKey(void) {
     freeModel(model, HAR_N);
 }
 
+void testHarTableKeepsEveryActShape(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    const size_t dims0[3] = {1, 9, 128};
+    for (size_t d = 0; d < 3; d++) {
+        TEST_ASSERT_EQUAL_size_t(dims0[d], t->actShapes[0].dimensions[d]);
+    }
+    for (size_t j = 0; j <= HAR_N; j++) {
+        const shape_t *s = &t->actShapes[j];
+        TEST_ASSERT_EQUAL_size_t(t->wires[j].rank, s->numberOfDimensions);
+        size_t elements = 1;
+        for (size_t d = 0; d < s->numberOfDimensions; d++) {
+            elements *= s->dimensions[d];
+            TEST_ASSERT_EQUAL_size_t(d, s->orderOfDimensions[d]);
+        }
+        TEST_ASSERT_EQUAL_size_t(t->wires[j].bytes, elements * sizeof(float));
+    }
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* Every bind re-derives the shapes (phase 1); a scribble does not survive it. */
+void testBindRewritesTheActShapes(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    tensor_t *x = makeHarInput(&in);
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, x);
+    size_t kept = t->actShapes[10].dimensions[1];
+    t->actShapes[10].dimensions[1] = 7u;
+    rematWireTableBind(t, &MODEL_CHAIN(model, HAR_N), CROSS_ENTROPY, REMAT_MODE_TRAIN, x);
+    TEST_ASSERT_EQUAL_size_t(kept, t->actShapes[10].dimensions[1]);
+    TEST_ASSERT_EQUAL_size_t(kept, rematActHdr(t, 10)->shape->dimensions[1]);
+    rematWireTableUnbind(t);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
 /* One grouped template shared by wires of different sizes groups each
  * wire by its own element count, as the pre-remat driver did. */
 void testSharedGroupedBfpTemplateGroupsPerWire(void) {
@@ -1099,10 +1139,12 @@ void testTableInitExitsOnAByteCountOverflowBeforeReservingTheTable(void) {
     tensor_t *x = makeInput(&in, (size_t[]){1, SIZE_MAX / 4u + 2u}, 2, &g_floatQ);
     ASSERT_EXITS_WITH_OUTPUT(1, "size overflow computing bytes of wire ACT 0",
                              initExpectingAnExit(model, 1, x));
-    /* Only the transient derivation scratch (2 wires) is live at the exit: the
-     * table block is never reserved. */
+    /* Only the transient derivation scratch (2 wire facts, and 2 shapes with
+     * dims and order of maxRank 2) is live at the exit: the table block is
+     * never reserved. */
 #ifdef ODT_MEM_PROFILE
-    size_t expectedReserved = 2u * sizeof(rematWireFact_t);
+    size_t expectedReserved =
+        2u * sizeof(rematWireFact_t) + 2u * (sizeof(shape_t) + 2u * 2u * sizeof(size_t));
 #else
     size_t expectedReserved = 0u; /* the counters are no-ops without ODT_MEM_PROFILE */
 #endif
@@ -1439,17 +1481,19 @@ void testBindRunsSampleBOnATableBuiltOnSampleA(void) {
     freeModel(model, 1);
 }
 
-/* The bind's per-wire derivation scratch lives inside the
- * table block. LP64 layout arithmetic (not a scan-model pin): table struct 152
- * + 24 records x 40 + gradIdOf 26 + layerType/frozen 24, rounded to 8, + the
- * input key 48 = 1216; the bind scratch 960; the headers 2680. Total 4856.
+/* The bind's per-wire derivation scratch and the n + 1 ACT shapes live inside
+ * the table block. LP64 layout arithmetic (not a scan-model pin): table struct
+ * 160 + 24 records x 40 + gradIdOf 26 + layerType/frozen 24, rounded to 8, +
+ * the input key 48 = 1224; the 13 ACT shapes 13 x (24 + 2 x 3 x 8) = 936; the
+ * bind scratch 960; the headers 2680. Total 5800 = 4856 + sizeof(shape_t *) 8
+ * + 936: every added object is a multiple of 8 bytes, so no padding moves.
  * Every host preset is LP64. */
 void testHarSlabHoldsTheBindScratch(void) {
     layer_t *model[HAR_N];
     buildHar(model, false);
     inputLike_t in;
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
-    TEST_ASSERT_EQUAL_size_t(4856, t->slabBytes);
+    TEST_ASSERT_EQUAL_size_t(5800, t->slabBytes);
     const uint8_t *scratch = (const uint8_t *)t->bindScratch;
     TEST_ASSERT_TRUE(scratch >= (const uint8_t *)(t->inputOrder + t->inputRank));
     TEST_ASSERT_TRUE(scratch + t->numWires * sizeof(rematWireFact_t) <=
@@ -4448,6 +4492,8 @@ int main(void) {
     RUN_TEST(testBfpWireGroupingExitsNamingTheWireOnAnIndivisibleGroupSize);
     RUN_TEST(testHarTableNumbersWiresInProductionOrder);
     RUN_TEST(testHarTableRecordsBytesRanksAndKey);
+    RUN_TEST(testHarTableKeepsEveryActShape);
+    RUN_TEST(testBindRewritesTheActShapes);
     RUN_TEST(testSharedGroupedBfpTemplateGroupsPerWire);
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testTableInitReservesOneBlockOfSlabBytesAndFreeReturnsIt);

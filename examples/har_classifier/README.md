@@ -649,11 +649,11 @@ choice.
 ```bash
 B=./build/examples/examples/har_classifier/train_c_har_classifier
 REMAT_STORAGE=arena DRY_PLAN=1 $B
-# DRY_PLAN example=har_classifier storage=arena plan=liveness planned=1 placed=1 data_reserved=1 steps=25 wires_peak_b=49152 activations_peak_b=41216 arena_b=49152 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=5616 refwd_steps=0 forward_cost=502150 recompute_cost=0
+# DRY_PLAN example=har_classifier storage=arena plan=liveness planned=1 placed=1 data_reserved=1 steps=25 wires_peak_b=49152 activations_peak_b=41216 arena_b=49152 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=6560 refwd_steps=0 forward_cost=502150 recompute_cost=0
 REMAT_STORAGE=arena REMAT_PLAN=retain:3,7 DRY_PLAN=1 $B
-# DRY_PLAN example=har_classifier storage=arena plan=retain:3,7,12 planned=1 placed=1 data_reserved=1 steps=32 wires_peak_b=32768 activations_peak_b=24576 arena_b=32768 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=5756 refwd_steps=7 forward_cost=502150 recompute_cost=301056
+# DRY_PLAN example=har_classifier storage=arena plan=retain:3,7,12 planned=1 placed=1 data_reserved=1 steps=32 wires_peak_b=32768 activations_peak_b=24576 arena_b=32768 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=6700 refwd_steps=7 forward_cost=502150 recompute_cost=301056
 REMAT_STORAGE=arena REMAT_PLAN=liveness+inplace DRY_PLAN=1 $B
-# DRY_PLAN example=har_classifier storage=arena plan=liveness+inplace planned=1 placed=1 data_reserved=1 steps=25 wires_peak_b=41216 activations_peak_b=41216 arena_b=41216 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=5576 refwd_steps=0 forward_cost=502150 recompute_cost=0
+# DRY_PLAN example=har_classifier storage=arena plan=liveness+inplace planned=1 placed=1 data_reserved=1 steps=25 wires_peak_b=41216 activations_peak_b=41216 arena_b=41216 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=6520 refwd_steps=0 forward_cost=502150 recompute_cost=0
 REMAT_STORAGE=arena REMAT_PLAN=liveness EPOCHS=1 $B
 ```
 
@@ -730,7 +730,7 @@ uv run -m odt.planner solve har.problem.json --m 1 --budget 32768
 # # problem fnv1a64=26b4a7babc5f10bf
 # REMAT_PLAN=retain:4,6,7,10,12+inplace REMAT_BUDGET_B=32768
 REMAT_STORAGE=arena REMAT_PLAN=retain:4,6,7,10,12+inplace REMAT_BUDGET_B=32768 DRY_PLAN=1 $B
-# DRY_PLAN example=har_classifier storage=arena plan=retain:4,6,7,10,12+inplace planned=1 placed=1 data_reserved=1 steps=28 wires_peak_b=28928 activations_peak_b=28928 arena_b=28928 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=5636 refwd_steps=3 forward_cost=502150 recompute_cost=133120
+# DRY_PLAN example=har_classifier storage=arena plan=retain:4,6,7,10,12+inplace planned=1 placed=1 data_reserved=1 steps=28 wires_peak_b=28928 activations_peak_b=28928 arena_b=28928 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=6580 refwd_steps=3 forward_cost=502150 recompute_cost=133120
 REMAT_STORAGE=arena REMAT_PLAN=retain:3,7 REMAT_BUDGET_B=32767 $B
 # (stderr, exit 1, before any training) ERROR: remat arena 32768 B exceeds REMAT_BUDGET_B=32767 B
 ```

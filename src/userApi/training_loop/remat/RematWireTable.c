@@ -163,26 +163,19 @@ static void setWireFacts(rematWireFact_t *f, const quantization_t *tmpl, uint8_t
 /* ACT j takes layerOutputQ(model[j-1]), or for Flatten the template of ACT j-1
  * (for Flatten-at-0 the caller's live input config): config fields only, never
  * a scale or exponents. A GRAD takes backwardWireQ(model[l]) and ACT l's
- * shape, or inherits its ACT's template. Shapes ping-pong between two scratch
- * shapes of maxRank entries. */
+ * shape, or inherits its ACT's template. shapes[0..n] is modelShapePass's
+ * output for this input; ACT j's rank and elements come from shapes[j]. */
 static void deriveFacts(rematWireFact_t *facts, size_t numWires, const model_t *m,
-                        const tensor_t *input, size_t maxRank) {
+                        const shape_t *shapes, const tensor_t *input) {
     size_t n = m->numLayers;
-    size_t dimsA[maxRank], orderA[maxRank], dimsB[maxRank], orderB[maxRank];
-    shape_t scratch[2] = {{.dimensions = dimsA, .orderOfDimensions = orderA},
-                          {.dimensions = dimsB, .orderOfDimensions = orderB}};
-    shape_t *prev = input->shape;
-    setWireFacts(&facts[0], input->quantization, (uint8_t)prev->numberOfDimensions,
-                 elementsOf(prev, &facts[0]));
+    setWireFacts(&facts[0], input->quantization, (uint8_t)shapes[0].numberOfDimensions,
+                 elementsOf(&shapes[0], &facts[0]));
     for (size_t j = 1; j <= n; j++) {
         layer_t *layer = m->layers[j - 1];
-        shape_t *out = &scratch[j % 2u];
-        out->numberOfDimensions = (layer->type == FLATTEN) ? 2u : prev->numberOfDimensions;
-        layerFunctions[layer->type].calcOutputShape(layer, prev, out);
         const quantization_t *tmpl =
             (layer->type == FLATTEN) ? facts[j - 1].tmpl : layerOutputQ(layer);
-        setWireFacts(&facts[j], tmpl, (uint8_t)out->numberOfDimensions, elementsOf(out, &facts[j]));
-        prev = out;
+        setWireFacts(&facts[j], tmpl, (uint8_t)shapes[j].numberOfDimensions,
+                     elementsOf(&shapes[j], &facts[j]));
     }
     for (size_t id = n + 1u; id < numWires; id++) {
         rematWireFact_t *f = &facts[id];
@@ -243,8 +236,25 @@ static void *slabPlace(slabLayout_t *layout, size_t align, size_t count, size_t 
 #define SLAB_PLACE(layout, T, count, f)                                                            \
     ((T *)slabPlace((layout), _Alignof(T), (count), sizeof(T), (f)))
 
+/* count shapes, then their dims and their orders, maxRank entries each: the
+ * storage modelShapePass writes into. Init sizes and places its transient
+ * derivation shapes and the table's actShapes with this one rule. */
+static shape_t *placeShapes(slabLayout_t *layout, size_t count, size_t maxRank) {
+    shape_t *shapes = SLAB_PLACE(layout, shape_t, count, NULL);
+    size_t entries = mulSize(count, maxRank, NULL, "shape storage");
+    size_t *dims = SLAB_PLACE(layout, size_t, entries, NULL);
+    size_t *order = SLAB_PLACE(layout, size_t, entries, NULL);
+    if (shapes != NULL) {
+        for (size_t j = 0; j < count; j++) {
+            shapes[j] = (shape_t){.dimensions = dims + j * maxRank,
+                                  .orderOfDimensions = order + j * maxRank};
+        }
+    }
+    return shapes;
+}
+
 static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t *facts,
-                                     size_t numWires, size_t n, size_t inputRank) {
+                                     size_t numWires, size_t n, size_t inputRank, size_t maxRank) {
     rematWireTable_t *t = SLAB_PLACE(layout, rematWireTable_t, 1u, NULL);
     rematWire_t *wires = SLAB_PLACE(layout, rematWire_t, numWires, NULL);
     uint16_t *gradIdOf = SLAB_PLACE(layout, uint16_t, n + 1u, NULL);
@@ -252,9 +262,10 @@ static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t
     uint8_t *frozen = SLAB_PLACE(layout, uint8_t, n, NULL);
     size_t *inputDims = SLAB_PLACE(layout, size_t, inputRank, NULL);
     size_t *inputOrder = SLAB_PLACE(layout, size_t, inputRank, NULL);
-    /* The bind's derivation scratch: after the fixed-size
-     * key, before the headers, so the exponent arrays stay the block's tail. The
-     * cursor rule aligns it for rematWireFact_t like every other object. */
+    /* The ACT shapes and the bind's derivation scratch: after the fixed-size key,
+     * before the headers, so the exponent arrays stay the block's tail. The
+     * cursor rule aligns them like every other object. */
+    shape_t *actShapes = placeShapes(layout, n + 1u, maxRank);
     rematWireFact_t *bindScratch = SLAB_PLACE(layout, rematWireFact_t, numWires, NULL);
     if (t != NULL) {
         t->wires = wires;
@@ -263,6 +274,7 @@ static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t
         t->frozen = frozen;
         t->inputDims = inputDims;
         t->inputOrder = inputOrder;
+        t->actShapes = actShapes;
         t->bindScratch = bindScratch;
         wires[0] = recordOf(&facts[0], NULL);
     }
@@ -333,16 +345,26 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
     size_t maxRank = inputRank > 2u ? inputRank : 2u;
 
     /* The table's size depends on the derived facts (ranks, dtypes, exponent
-     * counts), so init derives into a transient scratch of numWires facts --
-     * sized from numWires alone -- and frees it before returning. Every bind
-     * derives into the table's own copy. */
+     * counts), so init derives into a transient scratch of numWires facts and
+     * n + 1 shapes -- sized from numWires and maxRank alone -- and frees it
+     * before returning. Every bind derives into the table's own copies. */
     rematWireFact_t *facts =
         reserveMemory(mulSize(numWires, sizeof(rematWireFact_t), NULL, "derivation scratch"));
     if (facts == NULL) {
         return false;
     }
+    slabLayout_t shapeSizing = {.base = NULL, .cursor = 0};
+    (void)placeShapes(&shapeSizing, n + 1u, maxRank);
+    uint8_t *shapeBlock = reserveMemory(shapeSizing.cursor);
+    if (shapeBlock == NULL) {
+        freeReservedMemory(facts);
+        return false;
+    }
+    slabLayout_t shapePlacing = {.base = shapeBlock, .cursor = 0};
+    shape_t *shapes = placeShapes(&shapePlacing, n + 1u, maxRank);
+    modelShapePass(m, inputLike->shape, shapes, maxRank);
     numberWires(facts, m, deepest, top, hasBackward, loss.funcType);
-    deriveFacts(facts, numWires, m, inputLike, maxRank);
+    deriveFacts(facts, numWires, m, shapes, inputLike);
 
     size_t totalBytes = 0;
     for (size_t id = 1; id < numWires; id++) {
@@ -364,14 +386,16 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
     requireTransparentCopyWidths(facts, numWires, m);
 
     slabLayout_t sizing = {.base = NULL, .cursor = 0};
-    (void)layoutTable(&sizing, facts, numWires, n, inputRank);
+    (void)layoutTable(&sizing, facts, numWires, n, inputRank, maxRank);
     uint8_t *block = reserveMemory(sizing.cursor);
     if (block == NULL) {
+        freeReservedMemory(shapeBlock);
         freeReservedMemory(facts);
         return false;
     }
     slabLayout_t placing = {.base = block, .cursor = 0};
-    rematWireTable_t *t = layoutTable(&placing, facts, numWires, n, inputRank);
+    rematWireTable_t *t = layoutTable(&placing, facts, numWires, n, inputRank, maxRank);
+    modelShapePass(m, inputLike->shape, t->actShapes, maxRank);
 
     t->modelSize = n;
     t->lossType = loss.funcType;
@@ -396,6 +420,7 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
     t->inputType = (uint8_t)inputLike->quantization->type;
     t->maxRank = (uint8_t)maxRank;
     t->slabBytes = sizing.cursor;
+    freeReservedMemory(shapeBlock);
     freeReservedMemory(facts);
     *out = t;
     return true;
@@ -459,18 +484,18 @@ static void writeGradHeaders(rematWireTable_t *t, const rematWireFact_t *facts) 
     }
 }
 
-/* Phase 3 of the table bind: write the headers. calcOutputShape is a pure function of the config
- * and the input shape, so recomputing into the slab reproduces phase 1's shapes without keeping
- * them in scratch. */
-static void writeHeaders(rematWireTable_t *t, const model_t *m, rematMode_t mode, tensor_t *input,
+/* Phase 3 of the table bind: write the headers. ACT j's shape is phase 1's actShapes[j]. */
+static void writeHeaders(rematWireTable_t *t, rematMode_t mode, tensor_t *input,
                          const rematWireFact_t *facts) {
     t->wires[0].hdr = input;
     t->wires[0].bytes = facts[0].bytes; /* a width edit on a packed input is adopted */
     for (size_t j = 1; j <= t->modelSize; j++) {
-        layer_t *layer = m->layers[j - 1];
-        tensor_t *hdr = t->wires[j].hdr;
-        hdr->shape->numberOfDimensions = t->wires[j].rank;
-        layerFunctions[layer->type].calcOutputShape(layer, t->wires[j - 1].hdr->shape, hdr->shape);
+        shape_t *dst = t->wires[j].hdr->shape;
+        const shape_t *src = &t->actShapes[j];
+        size_t rankBytes = src->numberOfDimensions * sizeof(size_t);
+        dst->numberOfDimensions = src->numberOfDimensions;
+        memcpy(dst->dimensions, src->dimensions, rankBytes);
+        memcpy(dst->orderOfDimensions, src->orderOfDimensions, rankBytes);
         writeWireConfig(t, (uint16_t)j, facts[j].tmpl, facts[j].elements);
     }
     if (mode == REMAT_MODE_TRAIN) { /* eval binds no GRAD wire */
@@ -585,13 +610,13 @@ static void requireWireKey(const rematWireTable_t *t, const rematWireFact_t *fac
 void rematWireTableBind(rematWireTable_t *t, const model_t *m, lossFuncType_t lt, rematMode_t mode,
                         tensor_t *input) {
     requireModelKey(t, m, lt, input);
-    /* O(maxRank) stack (four size_t[maxRank] shape arrays); the per-wire
-     * facts live in the table block. */
+    /* Phase 1 writes only into the table block: the shapes, then the per-wire facts. */
+    modelShapePass(m, input->shape, t->actShapes, t->maxRank);
     rematWireFact_t *facts = t->bindScratch;
     numberWires(facts, m, t->deepest, t->backwardTop, t->hasBackward, t->lossType);
-    deriveFacts(facts, t->numWires, m, input, t->maxRank);
+    deriveFacts(facts, t->numWires, m, t->actShapes, input);
     requireWireKey(t, facts);
-    writeHeaders(t, m, mode, input, facts);
+    writeHeaders(t, mode, input, facts);
 }
 
 void rematWireTableUnbind(rematWireTable_t *t) {

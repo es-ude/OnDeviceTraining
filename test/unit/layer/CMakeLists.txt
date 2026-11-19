@@ -586,3 +586,12 @@ add_elastic_ai_unit_test(
         ExecuteOp
         Kernel
 )
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        Model
+        MORE_LIBS
+        CommonLayerLibs
+        StorageApi
+        odt_test_death
+)

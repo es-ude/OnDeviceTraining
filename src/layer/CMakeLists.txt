@@ -206,6 +206,14 @@ target_link_libraries(Layer PRIVATE
         BatchNorm1d
 )
 
+add_library(Model Model.c)
+target_include_directories(Model PUBLIC include)
+target_link_libraries(Model PRIVATE
+        Common
+        Tensor
+        Rounding
+)
+
 add_library(Linear Linear.c)
 target_include_directories(Linear PUBLIC include)
 target_link_libraries(Linear PRIVATE

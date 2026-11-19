@@ -25,6 +25,7 @@
 #include "Linear.h"
 #include "LinearApi.h"
 #include "LossFunction.h"
+#include "Model.h"
 #include "Pool1dApi.h"
 #include "QuantLayerApi.h"
 #include "Quantization.h"
@@ -46,7 +47,7 @@ void tearDown(void) {}
 static rematWireTable_t *initTable(layer_t **model, size_t n, lossFuncType_t lt,
                                    const tensor_t *input) {
     rematWireTable_t *t = NULL;
-    TEST_ASSERT_TRUE(rematWireTableInit(&t, model, n, defaultLossConfig(lt), input));
+    TEST_ASSERT_TRUE(rematWireTableInit(&t, &MODEL_CHAIN(model, n), defaultLossConfig(lt), input));
     TEST_ASSERT_NOT_NULL(t);
     return t;
 }
@@ -78,7 +79,7 @@ static void buildBfpSeedFixture(seedFixture_t *f) {
     f->model[1] = makeQuant(&f->tmplQ, &g_floatQ);
     f->x = makeInput(&f->in, (size_t[]){1, 2}, 2, &g_floatQ);
     f->t = initTable(f->model, 2, MSE, f->x);
-    rematWireTableBind(f->t, f->model, 2, MSE, REMAT_MODE_TRAIN, f->x);
+    rematWireTableBind(f->t, &MODEL_CHAIN(f->model, 2), MSE, REMAT_MODE_TRAIN, f->x);
 }
 
 static void freeSeedFixture(seedFixture_t *f) {
@@ -93,7 +94,7 @@ static void freeSeedFixture(seedFixture_t *f) {
 static rematPlan_t *buildPlan(const rematWireTable_t *t, layer_t **model,
                               const rematPlanSpec_t *spec) {
     rematPlan_t *p = NULL;
-    TEST_ASSERT_TRUE(rematPlanBuild(&p, t, model, spec));
+    TEST_ASSERT_TRUE(rematPlanBuild(&p, t, &MODEL_CHAIN(model, t->modelSize), spec));
     TEST_ASSERT_NOT_NULL(p);
     return p;
 }
@@ -235,7 +236,8 @@ static void freeGrammarFixture(grammarFixture_t *f) {
 
 static void tamperAndValidate(grammarFixture_t *f, void (*tamper)(rematProgram_t *)) {
     tamper(&f->p->train);
-    rematPlanValidateGrammar(&f->p->train, f->t, f->model, REMAT_MODE_TRAIN, NULL);
+    rematPlanValidateGrammar(&f->p->train, f->t, &MODEL_CHAIN(f->model, f->t->modelSize),
+                             REMAT_MODE_TRAIN, NULL);
 }
 
 #define ASSERT_GRAMMAR_EXIT(buildFixture, tamper, rule)                                            \
@@ -873,8 +875,9 @@ void testTableInitExitsOnAnEmptyModel(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     rematWireTable_t *t = NULL;
-    ASSERT_EXITS_WITH_OUTPUT(1, "modelSize == 0: nothing to schedule",
-                             (void)rematWireTableInit(&t, model, 0, defaultLossConfig(MSE), x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "modelSize == 0: nothing to schedule",
+        (void)rematWireTableInit(&t, &MODEL_CHAIN(model, 0), defaultLossConfig(MSE), x));
     freeModel(model, 1);
 }
 
@@ -892,8 +895,9 @@ void testTableInitExitsWhenWireIdsWouldReachRematNone(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     rematWireTable_t *t = NULL;
-    ASSERT_EXITS_WITH_OUTPUT(1, "65535 wires reach REMAT_NONE (0xFFFF)",
-                             (void)rematWireTableInit(&t, model, n, defaultLossConfig(MSE), x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "65535 wires reach REMAT_NONE (0xFFFF)",
+        (void)rematWireTableInit(&t, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x));
     freeReservedMemory(model);
     freeReluLayer(relu);
 }
@@ -909,8 +913,9 @@ void testTableInitExitsOnAnInputRankAboveTheRankField(void) {
     tensor_t x = {.data = NULL, .shape = &shape, .quantization = &g_floatQ, .sparsity = NULL};
     layer_t *model[1] = {makeRelu(&g_floatQ)};
     rematWireTable_t *t = NULL;
-    ASSERT_EXITS_WITH_OUTPUT(1, "wire ACT 0 has rank 256, above the uint8_t rank field",
-                             (void)rematWireTableInit(&t, model, 1, defaultLossConfig(MSE), &x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "wire ACT 0 has rank 256, above the uint8_t rank field",
+        (void)rematWireTableInit(&t, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), &x));
     freeModel(model, 1);
 }
 
@@ -923,8 +928,9 @@ void testTableInitExitsOnAnUnsupportedWireDtype(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     rematWireTable_t *t = NULL;
-    ASSERT_EXITS_WITH_OUTPUT(1, "wire ACT 1 has dtype 3; remat wires are FLOAT32, SYM_INT32 or BFP",
-                             (void)rematWireTableInit(&t, model, 1, defaultLossConfig(MSE), x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "wire ACT 1 has dtype 3; remat wires are FLOAT32, SYM_INT32 or BFP",
+        (void)rematWireTableInit(&t, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), x));
     freeModel(model, 1);
 }
 
@@ -934,8 +940,9 @@ void testTableInitExitsOnAZeroByteWire(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 0}, 2, &g_floatQ);
     rematWireTable_t *t = NULL;
-    ASSERT_EXITS_WITH_OUTPUT(1, "wire ACT 1 has zero bytes (#160)",
-                             (void)rematWireTableInit(&t, model, 1, defaultLossConfig(MSE), x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "wire ACT 1 has zero bytes (#160)",
+        (void)rematWireTableInit(&t, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), x));
     freeModel(model, 1);
 }
 
@@ -955,10 +962,11 @@ void testTableInitExitsOnAReluOutputNarrowerThanItsInput(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &wideQ);
     rematWireTable_t *t = NULL;
-    ASSERT_EXITS_WITH_OUTPUT(1,
-                             "layer 0 (Relu) forward: its destination wire is declared SYM_INT32 "
-                             "qMaxBits 8, narrower than its source wire's 16",
-                             (void)rematWireTableInit(&t, model, 1, defaultLossConfig(MSE), x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1,
+        "layer 0 (Relu) forward: its destination wire is declared SYM_INT32 "
+        "qMaxBits 8, narrower than its source wire's 16",
+        (void)rematWireTableInit(&t, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), x));
     freeModel(model, 1);
 }
 
@@ -977,10 +985,11 @@ void testTableInitExitsOnAFlattenDxNarrowerThanTheLossItCopies(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
     rematWireTable_t *t = NULL;
-    ASSERT_EXITS_WITH_OUTPUT(1,
-                             "layer 2 (Flatten) backward: its destination wire is declared "
-                             "SYM_INT32 qMaxBits 8, narrower than its source wire's 16",
-                             (void)rematWireTableInit(&t, model, 4, defaultLossConfig(MSE), x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1,
+        "layer 2 (Flatten) backward: its destination wire is declared "
+        "SYM_INT32 qMaxBits 8, narrower than its source wire's 16",
+        (void)rematWireTableInit(&t, &MODEL_CHAIN(model, 4), defaultLossConfig(MSE), x));
     freeModel(model, 4);
 }
 
@@ -1002,8 +1011,8 @@ void testAWidthNarrowedAfterSetupIsTrustedAsTheCallersResponsibility(void) {
     rematWireTable_t *t = initTable(model, 1, MSE, x);
 
     reluQc.qMaxBits = 8; /* the programmer's edit after setup */
-    ASSERT_EXITS_WITH(0, rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x));
-    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
+    ASSERT_EXITS_WITH(0, rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x));
+    rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x);
     const symInt32QConfig_t *act1Qc = rematActHdr(t, 1)->quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8(8, act1Qc->qMaxBits);
 
@@ -1046,8 +1055,9 @@ void testTableInitExitsOnAnUnknownInputQtype(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &unknownQ);
     rematWireTable_t *t = NULL;
-    ASSERT_EXITS_WITH_OUTPUT(1, "wire ACT 0 has unknown qtype 99",
-                             (void)rematWireTableInit(&t, model, 1, defaultLossConfig(MSE), x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "wire ACT 0 has unknown qtype 99",
+        (void)rematWireTableInit(&t, &MODEL_CHAIN(model, 1), defaultLossConfig(MSE), x));
     freeModel(model, 1);
 }
 
@@ -1066,7 +1076,7 @@ static void initExpectingAnExit(layer_t **model, size_t n, const tensor_t *x) {
     rematWireTable_t *t = NULL;
     g_memBeforeExit = memProfileCurrentBytes();
     (void)atexit(printReservedBeforeExit);
-    (void)rematWireTableInit(&t, model, n, defaultLossConfig(MSE), x);
+    (void)rematWireTableInit(&t, &MODEL_CHAIN(model, n), defaultLossConfig(MSE), x);
 }
 
 /* A borrowed [1, SIZE_MAX/4 + 2] FLOAT32 input: 4 * N wraps to 4. */
@@ -1130,7 +1140,7 @@ void testBindWritesHarHeadersAndPointsAct0AtTheInput(void) {
     inputLike_t in;
     tensor_t *x = makeHarInput(&in);
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, x);
-    rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, HAR_N), CROSS_ENTROPY, REMAT_MODE_TRAIN, x);
 
     TEST_ASSERT_EQUAL_PTR(x, rematActHdr(t, 0));
     assertDims(rematActHdr(t, 1)->shape, (size_t[]){1, 16, 128}, 3);
@@ -1161,13 +1171,13 @@ void testEvalBindLeavesTheGradHeadersAsTheyAre(void) {
     inputLike_t in;
     tensor_t *x = makeHarInput(&in);
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, x);
-    rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, HAR_N), CROSS_ENTROPY, REMAT_MODE_TRAIN, x);
     rematGradHdr(t, 10)->shape->dimensions[1] = 7u;
     rematActHdr(t, 10)->shape->dimensions[1] = 7u;
-    rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_EVAL, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, HAR_N), CROSS_ENTROPY, REMAT_MODE_EVAL, x);
     TEST_ASSERT_EQUAL_size_t(7, rematGradHdr(t, 10)->shape->dimensions[1]);
     assertDims(rematActHdr(t, 10)->shape, (size_t[]){1, 64}, 2);
-    rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, HAR_N), CROSS_ENTROPY, REMAT_MODE_TRAIN, x);
     assertDims(rematGradHdr(t, 10)->shape, (size_t[]){1, 64}, 2);
     rematWireTableFree(t);
     freeModel(model, HAR_N);
@@ -1181,10 +1191,10 @@ void testEvalBindResetsTheBindGenerationsAndTheObservedPeak(void) {
     inputLike_t in;
     tensor_t *x = makeHarInput(&in);
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, x);
-    rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, HAR_N), CROSS_ENTROPY, REMAT_MODE_TRAIN, x);
     t->wires[1].bindGen = 5u;
     t->observedPeakLiveBytes = 99u;
-    rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_EVAL, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, HAR_N), CROSS_ENTROPY, REMAT_MODE_EVAL, x);
     TEST_ASSERT_EQUAL_UINT32(0, t->wires[1].bindGen);
     TEST_ASSERT_EQUAL_size_t(0, t->observedPeakLiveBytes);
     rematWireTableFree(t);
@@ -1202,7 +1212,7 @@ void testEvalBindRunsTheFullKeyCheck(void) {
     tensor_t *x2 = makeInput(&in2, (size_t[]){2, 9, 128}, 3, &g_floatQ);
     ASSERT_EXITS_WITH_OUTPUT(
         1, "key mismatch on wire ACT 0, field 'dims[0]': built 1, live 2",
-        rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_EVAL, x2));
+        rematWireTableBind(t, &MODEL_CHAIN(model, HAR_N), CROSS_ENTROPY, REMAT_MODE_EVAL, x2));
     rematWireTableFree(t);
     freeModel(model, HAR_N);
 }
@@ -1216,7 +1226,7 @@ void testBindCopiesForwardOrderAndGivesGradsIdentityOrder(void) {
     in.order[0] = 1;
     in.order[1] = 0;
     rematWireTable_t *t = initTable(model, 2, MSE, x);
-    rematWireTableBind(t, model, 2, MSE, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, 2), MSE, REMAT_MODE_TRAIN, x);
 
     TEST_ASSERT_EQUAL_size_t(1, rematActHdr(t, 1)->shape->orderOfDimensions[0]);
     TEST_ASSERT_EQUAL_size_t(0, rematActHdr(t, 1)->shape->orderOfDimensions[1]);
@@ -1240,7 +1250,7 @@ void testBindAllocatesNothing(void) {
     tensor_t *x = makeInput(&in, (size_t[]){1, 8}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 1, MSE, x);
     size_t before = memProfileCurrentBytes();
-    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x);
     TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
     rematWireTableFree(t);
     freeModel(model, 1);
@@ -1257,13 +1267,13 @@ void testBindRederivesSymQMaxBitsAndResetsScale(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 1, MSE, x);
-    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x);
     symInt32QConfig_t *slabQc = rematActHdr(t, 1)->quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8(8, slabQc->qMaxBits);
 
     slabQc->scale = 0.25f; /* a producer's OUT_WRITE epilogue */
     symQc.qMaxBits = 16;   /* key-preserving template edit between calls */
-    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x);
     TEST_ASSERT_EQUAL_UINT8(16, slabQc->qMaxBits);
     TEST_ASSERT_EQUAL_FLOAT(1.0f, slabQc->scale);
 
@@ -1291,13 +1301,13 @@ void testBindAfterDeserializeModel(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(skeleton, 1, MSE, x);
-    rematWireTableBind(t, skeleton, 1, MSE, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(skeleton, 1), MSE, REMAT_MODE_TRAIN, x);
     symInt32QConfig_t *slabQc = rematActHdr(t, 1)->quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8(16, slabQc->qMaxBits);
 
     deserializeModel(&MODEL_CHAIN(skeleton, 1), file);
     (void)fclose(file);
-    rematWireTableBind(t, skeleton, 1, MSE, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(skeleton, 1), MSE, REMAT_MODE_TRAIN, x);
     TEST_ASSERT_EQUAL_UINT8(8, slabQc->qMaxBits);
 
     rematWireTableFree(t);
@@ -1315,9 +1325,9 @@ void testBindRederivesRoundingMode(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 1, MSE, x);
-    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x);
     symQc.roundingMode = SR_HALF_AWAY;
-    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x);
     symInt32QConfig_t *slabQc = rematActHdr(t, 1)->quantization->qConfig;
     TEST_ASSERT_EQUAL_INT(SR_HALF_AWAY, slabQc->roundingMode);
     rematWireTableFree(t);
@@ -1337,14 +1347,14 @@ void testBindRederivesFlattenBfpGroupingFromTheLiveInput(void) {
     tensor_t *x = makeInput(&in, (size_t[]){1, 4, 4}, 3, &inputQ);
     rematWireTable_t *t = initTable(model, 1, MSE, x);
     TEST_ASSERT_EQUAL_size_t(4, t->wires[1].expCapacity);
-    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x);
     bfpQConfig_t *slabQc = rematActHdr(t, 1)->quantization->qConfig;
     TEST_ASSERT_EQUAL_size_t(4, slabQc->numGroups);
     TEST_ASSERT_EQUAL_size_t(4, slabQc->groupSize);
 
     slabQc->exponents[0] = 3; /* a producer's exponent write */
     initBfpQConfigGroupedInto(8, 8, HALF_AWAY, 2, 8, inputExponents, &inputQc);
-    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x);
     TEST_ASSERT_EQUAL_size_t(2, slabQc->numGroups);
     TEST_ASSERT_EQUAL_size_t(8, slabQc->groupSize);
     TEST_ASSERT_EQUAL_UINT8(127, slabQc->exponents[0]); /* zero state: bias 2^(8-1)-1 */
@@ -1364,11 +1374,11 @@ void testBindCarriesSymQMaxBitsOntoTheFlattenWire(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 2, 3}, 3, &inputQ);
     rematWireTable_t *t = initTable(model, 1, MSE, x);
-    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x);
     symInt32QConfig_t *slabQc = rematActHdr(t, 1)->quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8(12, slabQc->qMaxBits);
     inputQc.qMaxBits = 8;
-    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x);
     TEST_ASSERT_EQUAL_UINT8(8, slabQc->qMaxBits);
     rematWireTableFree(t);
     freeModel(model, 1);
@@ -1387,7 +1397,7 @@ void testBindFollowsTheLivePackedInputBytes(void) {
     rematWireTable_t *t = initTable(model, 1, MSE, x);
     TEST_ASSERT_EQUAL_size_t(8, rematWireBytes(t, 0));
     inputQc.qBits = 4;
-    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x);
     TEST_ASSERT_EQUAL_size_t(4, rematWireBytes(t, 0));
     rematWireTableFree(t);
     freeModel(model, 1);
@@ -1405,8 +1415,8 @@ void testBindRunsSampleBOnATableBuiltOnSampleA(void) {
     b->data = (uint8_t *)bytesB;
     inputLike_t snapshot = inB;
     rematWireTable_t *t = initTable(model, 1, MSE, a);
-    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, a);
-    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, b);
+    rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, a);
+    rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, b);
     TEST_ASSERT_EQUAL_PTR(b, rematActHdr(t, 0));
     TEST_ASSERT_EQUAL_PTR((uint8_t *)bytesB, b->data);
     TEST_ASSERT_EQUAL_MEMORY(snapshot.dims, inB.dims, sizeof inB.dims);
@@ -1441,7 +1451,7 @@ void testUnbindClearsTheBorrowedInputOnly(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 1, MSE, x);
-    rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x);
     tensor_t *act1 = rematActHdr(t, 1);
     rematWireTableUnbind(t);
     TEST_ASSERT_NULL(rematActHdr(t, 0));
@@ -1474,8 +1484,9 @@ void testBindExitsOnAChangedModelSize(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 2, MSE, x);
-    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on 'modelSize': built 2, live 1",
-                             rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "key mismatch on 'modelSize': built 2, live 1",
+        rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x));
     rematWireTableFree(t);
     freeModel(model, 2);
 }
@@ -1485,8 +1496,9 @@ void testBindExitsOnAChangedLossType(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 2, CROSS_ENTROPY, x);
-    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on 'lossType': built 1, live 0",
-                             rematWireTableBind(t, model, 2, MSE, REMAT_MODE_TRAIN, x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "key mismatch on 'lossType': built 1, live 0",
+        rematWireTableBind(t, &MODEL_CHAIN(model, 2), MSE, REMAT_MODE_TRAIN, x));
     rematWireTableFree(t);
     freeModel(model, 2);
 }
@@ -1499,8 +1511,9 @@ void testBindExitsOnALayerTypeSwap(void) {
     tensor_t *x = makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 2, MSE, x);
     model[1] = softmax; /* same shape, same dtype: only the type changes */
-    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on 'layerType[1]': built 1, live 6",
-                             rematWireTableBind(t, model, 2, MSE, REMAT_MODE_TRAIN, x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "key mismatch on 'layerType[1]': built 1, live 6",
+        rematWireTableBind(t, &MODEL_CHAIN(model, 2), MSE, REMAT_MODE_TRAIN, x));
     rematWireTableFree(t);
     model[1] = relu;
     freeModel(model, 2);
@@ -1517,7 +1530,7 @@ void testBindExitsWhenFreezingMovesDeepest(void) {
     model[0]->config->conv1d->frozen = true;
     ASSERT_EXITS_WITH_OUTPUT(
         1, "key mismatch on 'deepest': built 0, live 3",
-        rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_TRAIN, x));
+        rematWireTableBind(t, &MODEL_CHAIN(model, HAR_N), CROSS_ENTROPY, REMAT_MODE_TRAIN, x));
     model[0]->config->conv1d->frozen = false;
     rematWireTableFree(t);
     freeModel(model, HAR_N);
@@ -1533,7 +1546,7 @@ void testBindExitsWhenFreezingALayerAboveDeepest(void) {
     model[3]->config->conv1d->frozen = true;
     ASSERT_EXITS_WITH_OUTPUT(
         1, "key mismatch on 'frozen[3]': built 0, live 1",
-        rematWireTableBind(t, model, HAR_N, CROSS_ENTROPY, REMAT_MODE_TRAIN, x));
+        rematWireTableBind(t, &MODEL_CHAIN(model, HAR_N), CROSS_ENTROPY, REMAT_MODE_TRAIN, x));
     model[3]->config->conv1d->frozen = false;
     rematWireTableFree(t);
     freeModel(model, HAR_N);
@@ -1545,8 +1558,9 @@ void testBindExitsOnAChangedInputRank(void) {
     inputLike_t in3;
     rematWireTable_t *t = initTable(model, 1, MSE, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
     tensor_t *x3 = makeInput(&in3, (size_t[]){1, 1, 4}, 3, &g_floatQ);
-    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on wire ACT 0, field 'rank': built 2, live 3",
-                             rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x3));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "key mismatch on wire ACT 0, field 'rank': built 2, live 3",
+        rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x3));
     rematWireTableFree(t);
     freeModel(model, 1);
 }
@@ -1559,8 +1573,9 @@ void testBindExitsOnAChangedBatch(void) {
     inputLike_t in2;
     rematWireTable_t *t = initTable(model, 1, MSE, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
     tensor_t *x2 = makeInput(&in2, (size_t[]){2, 4}, 2, &g_floatQ);
-    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on wire ACT 0, field 'dims[0]': built 1, live 2",
-                             rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x2));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "key mismatch on wire ACT 0, field 'dims[0]': built 1, live 2",
+        rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x2));
     rematWireTableFree(t);
     freeModel(model, 1);
 }
@@ -1573,8 +1588,9 @@ void testBindExitsOnAChangedInputOrder(void) {
     tensor_t *xT = makeInput(&inT, (size_t[]){1, 4}, 2, &g_floatQ);
     inT.order[0] = 1;
     inT.order[1] = 0;
-    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on wire ACT 0, field 'order[0]': built 0, live 1",
-                             rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, xT));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "key mismatch on wire ACT 0, field 'order[0]': built 0, live 1",
+        rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, xT));
     rematWireTableFree(t);
     freeModel(model, 1);
 }
@@ -1588,8 +1604,9 @@ void testBindExitsOnAChangedInputDtype(void) {
     inputLike_t inS;
     rematWireTable_t *t = initTable(model, 1, MSE, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
     tensor_t *xS = makeInput(&inS, (size_t[]){1, 4}, 2, &symQ);
-    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on wire ACT 0, field 'dtype': built 1, live 2",
-                             rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, xS));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "key mismatch on wire ACT 0, field 'dtype': built 1, live 2",
+        rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, xS));
     rematWireTableFree(t);
     freeModel(model, 1);
 }
@@ -1605,8 +1622,9 @@ void testBindExitsOnAChangedWireByteCount(void) {
     tensor_t *x = makeInput(&in, (size_t[]){1, 8}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 1, MSE, x);
     tmplQc.mantissaBits = 4;
-    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on wire ACT 1, field 'bytes': built 8, live 4",
-                             rematWireTableBind(t, model, 1, MSE, REMAT_MODE_TRAIN, x));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "key mismatch on wire ACT 1, field 'bytes': built 8, live 4",
+        rematWireTableBind(t, &MODEL_CHAIN(model, 1), MSE, REMAT_MODE_TRAIN, x));
     rematWireTableFree(t);
     freeModel(model, 1);
 }
@@ -1617,7 +1635,7 @@ void testBindExitsOnAChangedWireByteCount(void) {
 static void bindUnderTheAsanCallback(rematWireTable_t *t, layer_t **model, size_t n,
                                      lossFuncType_t lt, tensor_t *x) {
     odtInstallAsanDeathExit();
-    rematWireTableBind(t, model, n, lt, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, n), lt, REMAT_MODE_TRAIN, x);
 }
 
 void testBindFloatToSymTemplateEditExitsBeforeSlabWrite(void) {
@@ -1703,7 +1721,7 @@ void testTableBindResetsBindGenLiveBytesAndThePeak(void) {
     rematWireBind(f.t, SEED_ACT2, (uint8_t *)act2);
     rematWireRelease(f.t, SEED_ACT1);
     rematWireRelease(f.t, SEED_ACT2);
-    rematWireTableBind(f.t, f.model, 2, MSE, REMAT_MODE_TRAIN, f.x);
+    rematWireTableBind(f.t, &MODEL_CHAIN(f.model, 2), MSE, REMAT_MODE_TRAIN, f.x);
     for (uint16_t id = 0; id < f.t->numWires; id++) {
         TEST_ASSERT_EQUAL_UINT32(0, f.t->wires[id].bindGen);
     }
@@ -1746,7 +1764,7 @@ void testWireBindInheritedSymTakesConfigNotScale(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 2, MSE, x);
-    rematWireTableBind(t, model, 2, MSE, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, 2), MSE, REMAT_MODE_TRAIN, x);
     uint32_t act2[4];
     uint32_t seed[4];
     rematWireBind(t, 2, (uint8_t *)act2);
@@ -1773,7 +1791,7 @@ void testWireBindInheritedGradChecksTheLiveDtypeWhenByteNeutral(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
     rematWireTable_t *t = initTable(model, 2, MSE, x);
-    rematWireTableBind(t, model, 2, MSE, REMAT_MODE_TRAIN, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, 2), MSE, REMAT_MODE_TRAIN, x);
     uint32_t act2[4];
     uint32_t seed[4];
     rematWireBind(t, 2, (uint8_t *)act2);
@@ -1954,7 +1972,7 @@ void testWireReleaseExitsWhenLiveBytesWouldUnderflow(void) {
     buildBfpSeedFixture(&f);
     uint32_t act1[8];
     rematWireBind(f.t, SEED_ACT1, (uint8_t *)act1);
-    rematWireTableBind(f.t, f.model, 2, MSE, REMAT_MODE_TRAIN, f.x);
+    rematWireTableBind(f.t, &MODEL_CHAIN(f.model, 2), MSE, REMAT_MODE_TRAIN, f.x);
     ASSERT_EXITS_WITH_OUTPUT(1, "rematWireRelease: wire ACT 1 live bytes would underflow",
                              rematWireRelease(f.t, SEED_ACT1));
     freeSeedFixture(&f);
@@ -1993,7 +2011,7 @@ static void buildDtypeFixture(dtypeFixture_t *f) {
     f->model[2] = makeQuant(&f->bfpQ, &g_floatQ);
     f->x = makeInput(&f->in, (size_t[]){1, 4}, 2, &g_floatQ);
     f->t = initTable(f->model, 3, MSE, f->x);
-    rematWireTableBind(f->t, f->model, 3, MSE, REMAT_MODE_TRAIN, f->x);
+    rematWireTableBind(f->t, &MODEL_CHAIN(f->model, 3), MSE, REMAT_MODE_TRAIN, f->x);
 }
 
 static void assertPoisoned(const uint32_t *f32, const uint32_t *sym, const uint8_t *bfp) {
@@ -2335,7 +2353,8 @@ void testPlanBuildExitsOnAnUnknownPolicy(void) {
     rematPlan_t *p = NULL;
     ASSERT_EXITS_WITH_OUTPUT(
         1, "rematPlanBuild: unknown policy 7",
-        (void)rematPlanBuild(&p, t, model, &(rematPlanSpec_t){.policy = (rematPlanPolicy_t)7}));
+        (void)rematPlanBuild(&p, t, &MODEL_CHAIN(model, t->modelSize),
+                             &(rematPlanSpec_t){.policy = (rematPlanPolicy_t)7}));
     rematWireTableFree(t);
     freeModel(model, 1);
 }
@@ -2614,7 +2633,8 @@ void testGrammarRejectsAForwardBeyondTheLastLayer(void) {
  * the LOSS_BACKWARD at step 13 is the first step rule 2 rejects. */
 static void clearHasBackwardAndValidate(grammarFixture_t *f) {
     f->t->hasBackward = false;
-    rematPlanValidateGrammar(&f->p->train, f->t, f->model, REMAT_MODE_TRAIN, NULL);
+    rematPlanValidateGrammar(&f->p->train, f->t, &MODEL_CHAIN(f->model, f->t->modelSize),
+                             REMAT_MODE_TRAIN, NULL);
 }
 
 void testGrammarRejectsALossBackwardWithoutABackwardPhase(void) {
@@ -2692,7 +2712,8 @@ void testGrammarRejectsABackwardReadingGradInOutsideItsRange(void) {
 static void lossBackwardInEvalAndValidate(grammarFixture_t *f) {
     rematProgram_t *eval = &f->p->eval;
     eval->steps[12] = (rematStep_t){.kind = REMAT_STEP_LOSS_BACKWARD, .layer = 12};
-    rematPlanValidateGrammar(eval, f->t, f->model, REMAT_MODE_EVAL, NULL);
+    rematPlanValidateGrammar(eval, f->t, &MODEL_CHAIN(f->model, f->t->modelSize), REMAT_MODE_EVAL,
+                             NULL);
 }
 
 void testGrammarRejectsABackwardStepInAnEvalProgram(void) {
@@ -2710,7 +2731,8 @@ void testGrammarRejectsABackwardStepInAnEvalProgram(void) {
 static void layerBackwardInEvalAndValidate(grammarFixture_t *f) {
     rematProgram_t *eval = &f->p->eval;
     eval->steps[12] = (rematStep_t){.kind = REMAT_STEP_BACKWARD, .layer = 11};
-    rematPlanValidateGrammar(eval, f->t, f->model, REMAT_MODE_EVAL, NULL);
+    rematPlanValidateGrammar(eval, f->t, &MODEL_CHAIN(f->model, f->t->modelSize), REMAT_MODE_EVAL,
+                             NULL);
 }
 
 void testGrammarRejectsALayerBackwardInAnEvalProgram(void) {
@@ -2773,11 +2795,13 @@ static void freeHandProgram(handProgram_t *h) {
 }
 
 static void validateHandTrain(handProgram_t *h) {
-    rematPlanValidateGrammar(&h->p, h->t, h->model, REMAT_MODE_TRAIN, NULL);
+    rematPlanValidateGrammar(&h->p, h->t, &MODEL_CHAIN(h->model, h->t->modelSize), REMAT_MODE_TRAIN,
+                             NULL);
 }
 
 static void validateHandEval(handProgram_t *h) {
-    rematPlanValidateGrammar(&h->p, h->t, h->model, REMAT_MODE_EVAL, NULL);
+    rematPlanValidateGrammar(&h->p, h->t, &MODEL_CHAIN(h->model, h->t->modelSize), REMAT_MODE_EVAL,
+                             NULL);
 }
 
 /* code 0: the grammar accepts the program; code 1 + message: it exits. */
@@ -3118,7 +3142,7 @@ static void planBuildExpectingAnExit(const rematWireTable_t *t, layer_t **model,
     rematPlan_t *p = NULL;
     g_memBeforeExit = memProfileCurrentBytes();
     (void)atexit(printReservedBeforeExit);
-    (void)rematPlanBuild(&p, t, model, spec);
+    (void)rematPlanBuild(&p, t, &MODEL_CHAIN(model, t->modelSize), spec);
 }
 
 /* A step list written for the full HAR model, used after its convolutions
@@ -3841,7 +3865,7 @@ static void buildMlp3PlanWithLayer0Width(const rematPlanSpec_t *spec, size_t inF
     rematWireTable_t *t = initMlp3Table(model, &in);
     model[0]->config->linear->weights->param->shape->dimensions[1] = inFeatures;
     rematPlan_t *p = NULL;
-    (void)rematPlanBuild(&p, t, model, spec);
+    (void)rematPlanBuild(&p, t, &MODEL_CHAIN(model, t->modelSize), spec);
 }
 
 void testPlanBuildExitsOnAForwardCostAboveSizeMax(void) {
@@ -3864,7 +3888,7 @@ void testPlanBuildExitsOnARecomputeCostAboveSizeMax(void) {
 static void mislabelGrad8AndBuild(grammarFixture_t *f) {
     f->t->wires[16].index = 7;
     rematPlan_t *p = NULL;
-    (void)rematPlanBuild(&p, f->t, f->model, &g_liveness);
+    (void)rematPlanBuild(&p, f->t, &MODEL_CHAIN(f->model, f->t->modelSize), &g_liveness);
 }
 
 void testPlanBuildRunsTheGrammarOnWhatItGenerates(void) {
@@ -3880,7 +3904,7 @@ void testPlanBuildRunsTheGrammarOnWhatItGenerates(void) {
 
 static void buildLivenessPlanOn(grammarFixture_t *f, layer_t **model) {
     rematPlan_t *p = NULL;
-    (void)rematPlanBuild(&p, f->t, model, &g_liveness);
+    (void)rematPlanBuild(&p, f->t, &MODEL_CHAIN(model, f->t->modelSize), &g_liveness);
 }
 
 /* A frozen Linear reads no input in its backward, so under LIVENESS the
@@ -4246,7 +4270,8 @@ static void validateHandMarking(handProgram_t *h, uint16_t marked) {
     uint8_t marks[7] = {0};
     TEST_ASSERT_EQUAL_size_t(7, h->t->numWires);
     marks[marked] = 1u;
-    rematPlanValidateGrammar(&h->p, h->t, h->model, REMAT_MODE_TRAIN, marks);
+    rematPlanValidateGrammar(&h->p, h->t, &MODEL_CHAIN(h->model, h->t->modelSize), REMAT_MODE_TRAIN,
+                             marks);
 }
 
 static void validateHandMarkingGrad1(handProgram_t *h) {

@@ -7,6 +7,7 @@
 
 #include "Layer.h"
 #include "LossFunction.h"
+#include "Model.h"
 #include "Quantization.h"
 #include "RematScheduler.h"
 #include "Tensor.h"
@@ -135,7 +136,7 @@ void rematBackwardRange(layer_t **model, size_t n, lossFuncType_t lt, size_t *de
  * and one header per slab wire. The headers are linked, but their content
  * (dims, config) is written by every rematWireTableBind. Returns false only
  * when reserveMemory fails. */
-bool rematWireTableInit(rematWireTable_t **out, layer_t **model, size_t n, lossConfig_t loss,
+bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t loss,
                         const tensor_t *inputLike);
 /* NULL-safe. One freeReservedMemory; never freeTensor on a slab header. */
 void rematWireTableFree(rematWireTable_t *t);
@@ -146,8 +147,8 @@ void rematWireTableFree(rematWireTable_t *t);
  * Inherited GRAD headers are derived later, by rematWireBind. Reserves
  * nothing. An EVAL bind runs the same key check and ACT derivation but writes
  * no GRAD header: eval binds no GRAD wire. */
-void rematWireTableBind(rematWireTable_t *t, layer_t **model, size_t n, lossFuncType_t lt,
-                        rematMode_t mode, tensor_t *input);
+void rematWireTableBind(rematWireTable_t *t, const model_t *m, lossFuncType_t lt, rematMode_t mode,
+                        tensor_t *input);
 void rematWireTableUnbind(rematWireTable_t *t); /* ACT 0 hdr = NULL, inPlace = NULL */
 
 /* The row SDK: the ONLY writers of a header's ->data. A bind
@@ -220,11 +221,11 @@ typedef struct rematPlan {
 } rematPlan_t;
 
 /* Generates the TRAIN and the EVAL program for the table's built model in ONE
- * reserveMemory block. `model` must be the model the table was built on: it
+ * reserveMemory block. `m` must be the model the table was built on: it
  * feeds the read-set rule only (the backward range comes from the table), and
  * a layerType/frozen mismatch exits by name. Returns false only when
  * reserveMemory fails. */
-bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **model,
+bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t *m,
                     const rematPlanSpec_t *spec);
 void rematPlanFree(rematPlan_t *p); /* NULL-safe */
 
@@ -257,7 +258,7 @@ size_t rematWalkClosing(const rematProgram_t *p, rematWalk_t *w);
  * dtype, FLOAT32 or SYM_INT32, and equal bytes. A member's reads and its
  * write then count against its chain root's range, its write lands in that
  * range although the root opened it, and no range names a member. */
-void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, layer_t **model,
+void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, const model_t *m,
                               rematMode_t mode, const uint8_t *inPlace);
 
 #endif // ODT_REMAT_PLAN_H

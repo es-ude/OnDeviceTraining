@@ -162,8 +162,8 @@ typedef struct builtPlan {
 static builtPlan_t buildTableAndPlan(layer_t **model, size_t n, lossFuncType_t lt,
                                      const tensor_t *x, const rematPlanSpec_t *spec) {
     builtPlan_t b = {NULL, NULL};
-    TEST_ASSERT_TRUE(rematWireTableInit(&b.t, model, n, defaultLossConfig(lt), x));
-    TEST_ASSERT_TRUE(rematPlanBuild(&b.p, b.t, model, spec));
+    TEST_ASSERT_TRUE(rematWireTableInit(&b.t, &MODEL_CHAIN(model, n), defaultLossConfig(lt), x));
+    TEST_ASSERT_TRUE(rematPlanBuild(&b.p, b.t, &MODEL_CHAIN(model, b.t->modelSize), spec));
     return b;
 }
 
@@ -1310,7 +1310,7 @@ _Static_assert(ODT_REMAT_MAX_RANGES <= 4096u, "the ReLU-chain arrays live on the
 static size_t tableBlockBytes(layer_t **model, size_t n, lossFuncType_t lt, const tensor_t *x) {
 #ifdef ODT_MEM_PROFILE
     rematWireTable_t *t = NULL;
-    TEST_ASSERT_TRUE(rematWireTableInit(&t, model, n, defaultLossConfig(lt), x));
+    TEST_ASSERT_TRUE(rematWireTableInit(&t, &MODEL_CHAIN(model, n), defaultLossConfig(lt), x));
     size_t bytes = t->slabBytes;
     rematWireTableFree(t);
     return bytes;

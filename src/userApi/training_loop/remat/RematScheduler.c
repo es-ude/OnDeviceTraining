@@ -44,7 +44,7 @@ static void beginCall(rematScheduler_t *s, const char *verb, layer_t **model, si
         PRINT_ERROR("%s: scheduler '%s' re-entered", verb, s->fns->name);
         exit(1);
     }
-    rematWireTableBind(s->wires, model, n, lt, mode, input);
+    rematWireTableBind(s->wires, &MODEL_CHAIN(model, n), lt, mode, input);
     /* After the table bind, for a training call only: an evaluation program
      * has no backward step, so no chain. */
     s->wires->inPlace = (mode == REMAT_MODE_TRAIN) ? s->plan->inPlace : NULL;

@@ -276,8 +276,8 @@ static stepOperands_t operandsOf(const rematWireTable_t *t, layer_t **model,
  * first: the same step reads wire - 1 of the same chain, which resolves to
  * the same root and is checked before it. */
 static void requireOperandsCovered(const rematProgram_t *p, const rematWireTable_t *t,
-                                   layer_t **model, const uint8_t *inPlace, size_t s) {
-    stepOperands_t o = operandsOf(t, model, &p->steps[s]);
+                                   const model_t *m, const uint8_t *inPlace, size_t s) {
+    stepOperands_t o = operandsOf(t, m->layers, &p->steps[s]);
     for (size_t i = 0; i < o.numReads; i++) {
         requireCovered(p, s, o.reads[i], chainRoot(inPlace, o.reads[i]), "reads");
     }
@@ -315,7 +315,7 @@ static void rangeExit(size_t r, const rematRange_t *range, const char *rule) {
  * a read of that wire, so no recompute is dead. O(R) plus the lengths of the
  * REFORWARD ranges. */
 static void requireRangesWellFormed(const rematProgram_t *p, const rematWireTable_t *t,
-                                    layer_t **model, const uint8_t *inPlace) {
+                                    const model_t *m, const uint8_t *inPlace) {
     for (size_t r = 0; r < p->numRanges; r++) {
         const rematRange_t *range = &p->ranges[r];
         if (range->wire >= t->numWires) {
@@ -333,13 +333,13 @@ static void requireRangesWellFormed(const rematProgram_t *p, const rematWireTabl
             rangeExit(r, range, "ranges sorted by begin, ties by wire id");
         }
         const rematStep_t *opener = &p->steps[range->begin];
-        if (operandsOf(t, model, opener).write != range->wire) {
+        if (operandsOf(t, m->layers, opener).write != range->wire) {
             rangeExit(r, range, "a range opens where its wire is written");
         }
         if (opener->kind == REMAT_STEP_REFORWARD) {
             bool read = false;
             for (size_t s = range->begin + 1u; s <= range->end && !read; s++) {
-                read = stepReads(t, model, &p->steps[s], range->wire);
+                read = stepReads(t, m->layers, &p->steps[s], range->wire);
             }
             if (!read) {
                 rangeExit(r, range, "a REFORWARD's output is read inside its range");
@@ -354,7 +354,7 @@ static void requireRangesWellFormed(const rematProgram_t *p, const rematWireTabl
  * gradient BACKWARD(l) reads is wire - 1; and the two wires share one dtype,
  * FLOAT32 or SYM_INT32, and their bytes. BFP wires never alias. It runs
  * before the steps, so chainRoot only ever walks down a valid chain. */
-static void requireMarksOnAliasPairs(const rematWireTable_t *t, layer_t **model,
+static void requireMarksOnAliasPairs(const rematWireTable_t *t, const model_t *m,
                                      const uint8_t *inPlace) {
     size_t n = t->modelSize;
     for (size_t w = 0; w < t->numWires; w++) {
@@ -369,7 +369,7 @@ static void requireMarksOnAliasPairs(const rematWireTable_t *t, layer_t **model,
             exit(1);
         }
         size_t l = out->index;
-        layerType_t type = model[l]->type;
+        layerType_t type = m->layers[l]->type;
         if (type != RELU && type != DROPOUT && type != FLATTEN) {
             PRINT_ERROR("rematPlanBuild: wire %zu carries an in-place mark, but layer %zu is not a "
                         "ReLU, Dropout or Flatten",
@@ -401,10 +401,10 @@ static void requireMarksOnAliasPairs(const rematWireTable_t *t, layer_t **model,
     }
 }
 
-void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, layer_t **model,
+void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, const model_t *m,
                               rematMode_t mode, const uint8_t *inPlace) {
     if (inPlace != NULL) {
-        requireMarksOnAliasPairs(t, model, inPlace);
+        requireMarksOnAliasPairs(t, m, inPlace);
     }
     size_t n = t->modelSize;
     size_t nextForward = 0;
@@ -462,7 +462,7 @@ void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t
                             "rule 6: a REFORWARD comes after LOSS_FORWARD, below a pending "
                             "backward step");
             }
-            if (layerForwardUpdatesState(model[st->layer])) {
+            if (layerForwardUpdatesState(m->layers[st->layer])) {
                 PRINT_ERROR("rematPlanBuild: step #%zu (kind %u, layer %u) violates grammar rule "
                             "6: layer %u updates its state in every training forward (a tracked, "
                             "unfrozen BatchNorm1d), so it is never recomputed; keep ACT %u",
@@ -477,7 +477,7 @@ void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t
                         s, (unsigned)st->kind, (unsigned)st->layer);
             exit(1);
         }
-        requireOperandsCovered(p, t, model, inPlace, s);
+        requireOperandsCovered(p, t, m, inPlace, s);
     }
     if (!lossForward) {
         grammarEndExit(p->numSteps, "rule 1: no LOSS_FORWARD");
@@ -488,21 +488,21 @@ void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t
     if (mode == REMAT_MODE_TRAIN && t->hasBackward && nextBackward >= (ptrdiff_t)t->deepest) {
         grammarEndExit(p->numSteps, "rule 3: BACKWARD set incomplete");
     }
-    requireRangesWellFormed(p, t, model, inPlace);
+    requireRangesWellFormed(p, t, m, inPlace);
 }
 
-/* The generator and grammar rule 4 both read the read-set off `model`, so a
+/* The generator and grammar rule 4 both read the read-set off the model, so a
  * model other than the table's yields the same wrong ranges in both and the
- * plan validates. Only the key facts are comparable: the signature has no n. */
-static void requireTheTablesModel(const rematWireTable_t *t, layer_t **model) {
+ * plan validates. Only the key facts are compared, over the table's layer count. */
+static void requireTheTablesModel(const rematWireTable_t *t, const model_t *m) {
     for (size_t i = 0; i < t->modelSize; i++) {
-        if ((uint8_t)model[i]->type != t->layerType[i]) {
+        if ((uint8_t)m->layers[i]->type != t->layerType[i]) {
             PRINT_ERROR("rematPlanBuild: the model differs from the table's key at "
                         "'layerType[%zu]': table %u, model %u",
-                        i, (unsigned)t->layerType[i], (unsigned)model[i]->type);
+                        i, (unsigned)t->layerType[i], (unsigned)m->layers[i]->type);
             exit(1);
         }
-        uint8_t frozen = layerIsFrozen(model[i]) ? 1u : 0u;
+        uint8_t frozen = layerIsFrozen(m->layers[i]) ? 1u : 0u;
         if (frozen != t->frozen[i]) {
             PRINT_ERROR("rematPlanBuild: the model differs from the table's key at "
                         "'frozen[%zu]': table %u, model %u",
@@ -626,7 +626,7 @@ static size_t activationElements(const shape_t *shape) {
  * SEQUENCE or RETAIN_LIST plan, whose range cap keeps n at most
  * ODT_REMAT_MAX_RANGES (ACT 1..n each have a range; only GRAD wires share
  * one), so the scans read at most n * numSteps steps. */
-static void recordRecomputeNumbers(rematPlan_t *p, const rematWireTable_t *t, layer_t **model) {
+static void recordRecomputeNumbers(rematPlan_t *p, const rematWireTable_t *t, const model_t *m) {
     const rematProgram_t *train = &p->train;
     size_t refwdSteps = 0;
     for (size_t s = 0; s < train->numSteps; s++) {
@@ -643,7 +643,7 @@ static void recordRecomputeNumbers(rematPlan_t *p, const rematWireTable_t *t, la
     size_t forwardCost = 0;
     size_t recomputeCost = 0;
     for (size_t l = 0; l < t->modelSize; l++) {
-        layer_t *layer = model[l];
+        layer_t *layer = m->layers[l];
         shape_t *out = &scratch[l % 2u];
         out->numberOfDimensions = (layer->type == FLATTEN) ? 2u : prev->numberOfDimensions;
         layerFunctions[layer->type].calcOutputShape(layer, prev, out);
@@ -666,7 +666,7 @@ static void recordRecomputeNumbers(rematPlan_t *p, const rematWireTable_t *t, la
     p->recomputeCost = recomputeCost;
 }
 
-bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **model,
+bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t *m,
                     const rematPlanSpec_t *spec) {
     *out = NULL;
     const rematPlanSpec_t storeAll = {.policy = REMAT_PLAN_STORE_ALL};
@@ -680,7 +680,7 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **mode
         exit(1);
     }
     requireTheFieldsOfThePolicy(spec);
-    requireTheTablesModel(t, model);
+    requireTheTablesModel(t, m);
     size_t numSteps = rematTrainStepCount(t);
     size_t numMembers = spec->inPlaceDx ? rematFillInPlaceMarks(t, NULL) : 0u;
     size_t numRanges = t->numWires - 1u - numMembers;
@@ -691,7 +691,8 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **mode
         requireRangesWithinTheCap(numRanges);
     } else if (policy == REMAT_PLAN_RETAIN_LIST) {
         requireARetainMaskWithAWindow(spec, t);
-        numSteps = rematFillRetainSteps(t, model, spec->retain, spec->inPlaceDx, NULL, &numRanges);
+        numSteps =
+            rematFillRetainSteps(t, m->layers, spec->retain, spec->inPlaceDx, NULL, &numRanges);
         requireAProgramWithinTheBound(numSteps, t->modelSize);
         requireRangesWithinTheCap(numRanges);
     }
@@ -717,23 +718,23 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, layer_t **mode
     placeProgram(train, block, &trainAt, numSteps, numRanges);
     if (policy == REMAT_PLAN_SEQUENCE) {
         memcpy(train->steps, spec->sequence, numSteps * sizeof(rematStep_t));
-        rematScanRanges(t, model, train->steps, numSteps, spec->inPlaceDx, train->ranges);
+        rematScanRanges(t, m->layers, train->steps, numSteps, spec->inPlaceDx, train->ranges);
     } else if (policy == REMAT_PLAN_RETAIN_LIST) {
-        (void)rematFillRetainSteps(t, model, spec->retain, spec->inPlaceDx, train->steps, NULL);
-        rematScanRanges(t, model, train->steps, numSteps, spec->inPlaceDx, train->ranges);
+        (void)rematFillRetainSteps(t, m->layers, spec->retain, spec->inPlaceDx, train->steps, NULL);
+        rematScanRanges(t, m->layers, train->steps, numSteps, spec->inPlaceDx, train->ranges);
     } else {
         rematFillTrainSteps(t, train->steps);
-        rematFillTrainRanges(policy, t, model, numSteps, spec->inPlaceDx, train->ranges);
+        rematFillTrainRanges(policy, t, m->layers, numSteps, spec->inPlaceDx, train->ranges);
     }
     sortEndOrder(train);
-    rematPlanValidateGrammar(train, t, model, REMAT_MODE_TRAIN, p->inPlace);
+    rematPlanValidateGrammar(train, t, m, REMAT_MODE_TRAIN, p->inPlace);
     train->peakLiveBytes = peakLiveBytesOf(train, t);
-    recordRecomputeNumbers(p, t, model);
+    recordRecomputeNumbers(p, t, m);
     rematProgram_t *eval = &p->eval;
     placeProgram(eval, block, &evalAt, evalSteps, evalRanges);
     rematFillEvalProgram(t, eval->steps, eval->ranges);
     sortEndOrder(eval);
-    rematPlanValidateGrammar(eval, t, model, REMAT_MODE_EVAL, NULL);
+    rematPlanValidateGrammar(eval, t, m, REMAT_MODE_EVAL, NULL);
     eval->peakLiveBytes = peakLiveBytesOf(eval, t);
     *out = p;
     return true;

@@ -137,16 +137,16 @@ size_t memInstrumentHarInputWireMetadataBytes(harWireProfile_t in) {
     return wireMetadata(in);
 }
 
-size_t memInstrumentPoolBackwardBytes(layer_t **model, size_t modelSize) {
+size_t memInstrumentPoolBackwardBytes(const model_t *m) {
     /* #321: each MaxPool layer pre-allocates an INT32 argmax-index tensor (shape ==
      * output shape) at build time; it lives the whole run and is required for the
      * backward pass, but lands in no params/grads/optstate/activations category —
      * it was hidden inside the measured params_grads_b delta. Walk the model and
      * sum it, dtype-aware via calcBytesPerTensor. */
     size_t total = 0;
-    for (size_t i = 0; i < modelSize; i++) {
-        if (model[i]->type == MAXPOOL1D) {
-            total += calcBytesPerTensor(model[i]->config->maxPool1d->argmaxIndices);
+    for (size_t i = 0; i < m->numLayers; i++) {
+        if (m->layers[i]->type == MAXPOOL1D) {
+            total += calcBytesPerTensor(m->layers[i]->config->maxPool1d->argmaxIndices);
         }
     }
     return total;
@@ -218,9 +218,9 @@ static void memOneStepThunk(void *p) {
      * trainingRun's step (the sample itself is natural-shape, #152 PR3a). */
     batchView_t itemView;
     batchView_t labelView;
-    trainingStats_t *stats = calculateGradsSequential(
-        c->model, c->modelSize, c->lossConfig, REDUCTION_MEAN, batchViewOf(&itemView, c->input),
-        batchViewOf(&labelView, c->label), &next);
+    trainingStats_t *stats = calculateGradsSequential(&c->model, c->lossConfig, REDUCTION_MEAN,
+                                                      batchViewOf(&itemView, c->input),
+                                                      batchViewOf(&labelView, c->label), &next);
     freeTrainingStats(stats);
     /* No scaleOptimizerGradients: the macro-batch mean scale is a scalar grad
      * multiply that does not deepen the call stack; the step itself does.

@@ -22,7 +22,7 @@ _Static_assert(_Generic(&stackGatherRequireStackable,
                    default: 0),
                "stackGatherRequireStackable signature (#468)");
 _Static_assert(_Generic(&stackGatherRequireFloat32Model,
-                   void (*)(const char *, const char *, layer_t **, size_t, size_t,
+                   void (*)(const char *, const char *, const model_t *, size_t,
                             nonFloat32FieldFn_t): 1,
                    default: 0),
                "stackGatherRequireFloat32Model signature (#468)");
@@ -75,9 +75,9 @@ void testRequireFloat32ModelUsesTheGivenAccessor(void) {
     quantization_t *saved = lin->config->linear->propLossQ;
     lin->config->linear->propLossQ = symQ; /* backward-only field */
     ASSERT_EXITS_WITH_FAILURE(
-        stackGatherRequireFloat32Model("t", "k", model, 1, 2, layerNonFloat32Field));
-    ASSERT_EXITS_WITH(
-        0, stackGatherRequireFloat32Model("t", "k", model, 1, 2, layerForwardNonFloat32Field));
+        stackGatherRequireFloat32Model("t", "k", &MODEL_CHAIN(model, 1), 2, layerNonFloat32Field));
+    ASSERT_EXITS_WITH(0, stackGatherRequireFloat32Model("t", "k", &MODEL_CHAIN(model, 1), 2,
+                                                        layerForwardNonFloat32Field));
     lin->config->linear->propLossQ = saved;
     freeLinearLayer(lin);
     freeQuantization(symQ);

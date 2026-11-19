@@ -164,8 +164,8 @@ void testCalculateGradsFiresForwardPairThenBackwardPair(void) {
     tensor_t *label = makeRowVec2(1.0f, 0.0f);
 
     odtHookSet(recordingHook, &g_ctxToken);
-    trainingStats_t *stats =
-        calculateGradsSequential(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label, NULL);
+    trainingStats_t *stats = calculateGradsSequential(&MODEL_CHAIN(model, 2), ceMeanLoss(),
+                                                      REDUCTION_MEAN, x, label, NULL);
     odtHookSet(NULL, NULL);
 
     size_t count = g_logCount;
@@ -197,8 +197,8 @@ void testTracedGradsInterleavesProbesInsidePhases(void) {
     tensor_t *label = makeRowVec2(1.0f, 0.0f);
 
     odtHookSet(recordingHook, &g_ctxToken);
-    trainingStats_t *stats =
-        tracedGrads(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label, recordingSink, NULL, NULL);
+    trainingStats_t *stats = tracedGrads(&MODEL_CHAIN(model, 2), ceMeanLoss(), REDUCTION_MEAN, x,
+                                         label, recordingSink, NULL, NULL);
     odtHookSet(NULL, NULL);
 
     size_t count = g_logCount;
@@ -232,8 +232,8 @@ void testAllFrozenModelStillFiresBothPairs(void) {
     tensor_t *label = makeRowVec2(1.0f, 0.0f);
 
     odtHookSet(recordingHook, &g_ctxToken);
-    trainingStats_t *stats =
-        tracedGrads(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label, recordingSink, NULL, NULL);
+    trainingStats_t *stats = tracedGrads(&MODEL_CHAIN(model, 2), ceMeanLoss(), REDUCTION_MEAN, x,
+                                         label, recordingSink, NULL, NULL);
     odtHookSet(NULL, NULL);
 
     size_t count = g_logCount;
@@ -269,8 +269,8 @@ void testSixEventsFireInOrderForOneGradsCallPlusOneStep(void) {
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     odtHookSet(recordingHook, &g_ctxToken);
-    trainingStats_t *stats =
-        calculateGradsSequential(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label, NULL);
+    trainingStats_t *stats = calculateGradsSequential(&MODEL_CHAIN(model, 2), ceMeanLoss(),
+                                                      REDUCTION_MEAN, x, label, NULL);
     optimizerStep(optim, NULL);
     odtHookSet(NULL, NULL);
 
@@ -306,8 +306,8 @@ void testNothingFiresWhenHookUnset(void) {
 
     odtHookSet(recordingHook, &g_ctxToken);
     odtHookSet(NULL, NULL);
-    trainingStats_t *stats =
-        calculateGradsSequential(model, 2, ceMeanLoss(), REDUCTION_MEAN, x, label, NULL);
+    trainingStats_t *stats = calculateGradsSequential(&MODEL_CHAIN(model, 2), ceMeanLoss(),
+                                                      REDUCTION_MEAN, x, label, NULL);
     optimizerStep(optim, NULL);
 
     size_t count = g_logCount;
@@ -367,7 +367,7 @@ void testTrainingEpochDefaultStepsThroughOptimizerStep(void) {
                                       NULL, /*shuffle*/ false, /*dropLast*/ true);
 
     odtHookSet(recordingHook, &g_ctxToken);
-    float epochLoss = trainingEpochDefault(model, 2, ceMeanLoss(), dl, optim,
+    float epochLoss = trainingEpochDefault(&MODEL_CHAIN(model, 2), ceMeanLoss(), dl, optim,
                                            calculateGradsSequential, REDUCTION_MEAN, 1, NULL);
     odtHookSet(NULL, NULL);
 
@@ -428,7 +428,7 @@ void testTrainingEpochDefaultFiresOneQuadPerMicroBatchChunk(void) {
                                       NULL, /*shuffle*/ false, /*dropLast*/ true);
 
     odtHookSet(recordingHook, &g_ctxToken);
-    float epochLoss = trainingEpochDefault(model, 2, ceMeanLoss(), dl, optim,
+    float epochLoss = trainingEpochDefault(&MODEL_CHAIN(model, 2), ceMeanLoss(), dl, optim,
                                            calculateGradsSequential, REDUCTION_MEAN, 2, NULL);
     odtHookSet(NULL, NULL);
 

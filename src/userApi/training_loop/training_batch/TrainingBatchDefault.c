@@ -14,8 +14,8 @@
 
 /* m == 1: PR3a's per-sample walk, unchanged -- each sample is wrapped by
  * batchViewOf (no copy, no heap), so default runs stay bit-identical. */
-static float trainingBatchPerSample(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
-                                    batch_t *batch, calculateGradsFn_t calculateGradsFn,
+static float trainingBatchPerSample(const model_t *model, lossConfig_t lossConfig, batch_t *batch,
+                                    calculateGradsFn_t calculateGradsFn,
                                     reduction_t forwardReduction, const trainingCall_t *call) {
     float totalLoss = 0.0f;
 
@@ -26,7 +26,7 @@ static float trainingBatchPerSample(layer_t **model, size_t modelSize, lossConfi
         batchView_t labelView;
         trainingCall_t next;
         rngKey_t callKey;
-        trainingStats_t *stats = calculateGradsFn(model, modelSize, lossConfig, forwardReduction,
+        trainingStats_t *stats = calculateGradsFn(model, lossConfig, forwardReduction,
                                                   batchViewOf(&itemView, batch->samples[i]->item),
                                                   batchViewOf(&labelView, batch->samples[i]->label),
                                                   trainingCallForIndex(call, i, &next, &callKey));
@@ -47,7 +47,7 @@ static float trainingBatchPerSample(layer_t **model, size_t modelSize, lossConfi
  * weighted by rows for MEAN (Σ chunkLoss * m), plain for SUM. Out of line, so
  * the bfp-census's `trainingBatchDefault self` row holds only the per-sample
  * path's own call sites (the m == 1 loss-value sum). */
-static __attribute__((noinline)) float trainingBatchStacked(layer_t **model, size_t modelSize,
+static __attribute__((noinline)) float trainingBatchStacked(const model_t *model,
                                                             lossConfig_t lossConfig, batch_t *batch,
                                                             calculateGradsFn_t calculateGradsFn,
                                                             reduction_t forwardReduction, size_t m,
@@ -91,8 +91,8 @@ static __attribute__((noinline)) float trainingBatchStacked(layer_t **model, siz
         trainingCall_t next;
         rngKey_t callKey;
         trainingStats_t *stats =
-            calculateGradsFn(model, modelSize, lossConfig, forwardReduction, stackedItem,
-                             stackedLabel, trainingCallForIndex(call, first / m, &next, &callKey));
+            calculateGradsFn(model, lossConfig, forwardReduction, stackedItem, stackedLabel,
+                             trainingCallForIndex(call, first / m, &next, &callKey));
         totalLoss += stats->loss * rowWeight;
         freeTrainingStats(stats);
         for (size_t r = 0; r < m; r++) {
@@ -105,10 +105,9 @@ static __attribute__((noinline)) float trainingBatchStacked(layer_t **model, siz
     return totalLoss;
 }
 
-float trainingBatchDefault(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
-                           batch_t *batch, calculateGradsFn_t calculateGradsFn,
-                           reduction_t forwardReduction, size_t microBatchSize,
-                           const trainingCall_t *call) {
+float trainingBatchDefault(const model_t *model, lossConfig_t lossConfig, batch_t *batch,
+                           calculateGradsFn_t calculateGradsFn, reduction_t forwardReduction,
+                           size_t microBatchSize, const trainingCall_t *call) {
     size_t m = (microBatchSize == 0) ? 1 : microBatchSize;
     if (batch->size % m != 0) {
         PRINT_ERROR("trainingBatchDefault: batch size %zu is not divisible by microBatchSize %zu "
@@ -129,12 +128,12 @@ float trainingBatchDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
 
     float totalLoss;
     if (m == 1) {
-        totalLoss = trainingBatchPerSample(model, modelSize, lossConfig, batch, calculateGradsFn,
+        totalLoss = trainingBatchPerSample(model, lossConfig, batch, calculateGradsFn,
                                            forwardReduction, call);
     } else {
-        stackGatherRequireFloat32Model("trainingBatchDefault", "microBatchSize", model, modelSize,
-                                       m, layerNonFloat32Field);
-        totalLoss = trainingBatchStacked(model, modelSize, lossConfig, batch, calculateGradsFn,
+        stackGatherRequireFloat32Model("trainingBatchDefault", "microBatchSize", model, m,
+                                       layerNonFloat32Field);
+        totalLoss = trainingBatchStacked(model, lossConfig, batch, calculateGradsFn,
                                          forwardReduction, m, call);
     }
 

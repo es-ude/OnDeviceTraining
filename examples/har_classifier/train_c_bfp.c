@@ -1180,17 +1180,15 @@ static void wireGateSink(void *ctx, size_t layerIdx, layerType_t layerType, cons
 /* The calculateGradsFn handed to trainingRun: input/label arrive already wrapped
  * as [1, ...] views by trainingBatchDefault (the loop owns the batch axis, #152
  * PR3a), so they go to calculateGradsSequential/tracedGrads unchanged. */
-static trainingStats_t *firstStepGatedGrads(layer_t **model, size_t modelSize,
-                                            lossConfig_t lossConfig, reduction_t forwardReduction,
-                                            tensor_t *input, tensor_t *label,
-                                            const trainingCall_t *call) {
+static trainingStats_t *firstStepGatedGrads(const model_t *model, lossConfig_t lossConfig,
+                                            reduction_t forwardReduction, tensor_t *input,
+                                            tensor_t *label, const trainingCall_t *call) {
     if (g_wireGateDone) {
-        return calculateGradsSequential(model, modelSize, lossConfig, forwardReduction, input,
-                                        label, call);
+        return calculateGradsSequential(model, lossConfig, forwardReduction, input, label, call);
     }
     g_wireGateDone = true;
-    trainingStats_t *stats = tracedGrads(model, modelSize, lossConfig, forwardReduction, input,
-                                         label, wireGateSink, &g_wireGate, call);
+    trainingStats_t *stats = tracedGrads(model, lossConfig, forwardReduction, input, label,
+                                         wireGateSink, &g_wireGate, call);
     size_t expected = WIRE_EVENTS_BODY + g_inLayer;
     int missing = 0;
     for (size_t s = 0; s < expected; s++) {
@@ -1312,9 +1310,9 @@ int main(int argc, char **argv) {
 
     /* ---- Gate: param + grad storage dtypes -------------------------------- */
     paramGateCtx_t wCtx = {.isGrad = false, .count = 0, .fails = 0};
-    traceModelWeights(model, g_modelSize, "gate", paramGateSink, &wCtx);
+    traceModelWeights(&MODEL_CHAIN(model, g_modelSize), "gate", paramGateSink, &wCtx);
     paramGateCtx_t gCtx = {.isGrad = true, .count = 0, .fails = 0};
-    traceModelGrads(model, g_modelSize, "gate", paramGateSink, &gCtx);
+    traceModelGrads(&MODEL_CHAIN(model, g_modelSize), "gate", paramGateSink, &gCtx);
     /* 4 trainable layers x (weight + bias) = 8 each. */
     if (wCtx.fails != 0 || gCtx.fails != 0 || wCtx.count != 8 || gCtx.count != 8) {
         fprintf(stderr, "GATES FAILED (weight ok=%d fails=%d; grad ok=%d fails=%d)\n", wCtx.count,
@@ -1456,7 +1454,7 @@ int main(int argc, char **argv) {
     report.grads_b = memInstrumentGradBytes(sgd);
     report.optstate_analytic_b = memInstrumentOptStateBytes(sgd);
     report.io_b = memInstrumentHarIoBytes(MICRO_BATCH);
-    report.pool_backward_b = memInstrumentPoolBackwardBytes(model, g_modelSize);
+    report.pool_backward_b = memInstrumentPoolBackwardBytes(&MODEL_CHAIN(model, g_modelSize));
     harWireProfile_t outProf[HAR_NUM_LAYERS], dxProf[HAR_NUM_LAYERS];
     fillWireProfiles(outProf, dxProf);
     report.activations_b = memInstrumentHarActivationBytes(MICRO_BATCH, outProf);
@@ -1473,8 +1471,7 @@ int main(int argc, char **argv) {
 
     sample_t *stepSample = getTrainSample(0);
     memStepCtx_t stepCtx = {
-        .model = model,
-        .modelSize = g_modelSize,
+        .model = MODEL_CHAIN(model, g_modelSize),
         .lossConfig = (lossConfig_t){.funcType = CROSS_ENTROPY,
                                      .backwardReduction = REDUCTION_MEAN,
                                      .classWeights = NULL},

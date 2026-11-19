@@ -89,7 +89,7 @@ void testCalculateGradsSequentialClosedForm() {
     tensor_t *label = makeRowVec2(1.0f, 0.0f); /* one-hot class 0 */
 
     trainingStats_t *stats = calculateGradsSequential(
-        model, 2,
+        &MODEL_CHAIN(model, 2),
         (lossConfig_t){
             .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
         REDUCTION_MEAN, x, label, NULL);
@@ -141,7 +141,7 @@ void testCrossEntropyFloatHeadIgnoresAnUnusedSymPropLossQ(void) {
     tensor_t *label = makeRowVecN((const float[]){1.0f, 0.0f, 0.0f}, 3);
 
     trainingStats_t *stats = calculateGradsSequential(
-        model, 2,
+        &MODEL_CHAIN(model, 2),
         (lossConfig_t){
             .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
         REDUCTION_MEAN, x, label, NULL);
@@ -197,7 +197,7 @@ void testTracedGradsFiresInOrder() {
     tensor_t *x = makeRowVec2(1.0f, 1.0f);
     tensor_t *label = makeRowVec2(1.0f, 0.0f);
 
-    trainingStats_t *stats = tracedGrads(model, 2,
+    trainingStats_t *stats = tracedGrads(&MODEL_CHAIN(model, 2),
                                          (lossConfig_t){.funcType = CROSS_ENTROPY,
                                                         .backwardReduction = REDUCTION_MEAN,
                                                         .classWeights = NULL},
@@ -239,13 +239,13 @@ void testTraceModelParamsFiresPerTrainableParam() {
                        (stateDictEntry_t[]){{.name = "fc", .weightData = W, .biasData = B}}, 1);
     tensor_t *x = makeRowVec2(1.0f, 1.0f), *label = makeRowVec2(1.0f, 0.0f);
     trainingStats_t *stats = calculateGradsSequential(
-        model, 2,
+        &MODEL_CHAIN(model, 2),
         (lossConfig_t){
             .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
         REDUCTION_MEAN, x, label, NULL);
 
-    traceModelWeights(model, 2, "w_before", recordingSink, NULL);
-    traceModelGrads(model, 2, "grad_raw", recordingSink, NULL);
+    traceModelWeights(&MODEL_CHAIN(model, 2), "w_before", recordingSink, NULL);
+    traceModelGrads(&MODEL_CHAIN(model, 2), "grad_raw", recordingSink, NULL);
 
     /* weight+bias for the one Linear, then wgrad+bgrad */
     TEST_ASSERT_EQUAL_size_t(4, g_eventCount);
@@ -304,7 +304,7 @@ void testTraceModelGradsSkipsFrozenLayerNeverPassesNull(void) {
         &(linearInit_t){.inFeatures = 2, .outFeatures = 2, .weightInit.key = &initKey1}, &lq);
 
     gradTraceCounts_t counts = {.callCount = 0, .sawNoNull = true};
-    traceModelGrads(model, 2, "grad", countingSink, &counts);
+    traceModelGrads(&MODEL_CHAIN(model, 2), "grad", countingSink, &counts);
 
     /* CAPTURE (before any free touches the layers). */
     size_t callCount = counts.callCount;
@@ -464,7 +464,7 @@ void testDxWireHonorsProducerPropLossQ(void) {
     const rngKey_t callKey = rngKeyFromSeed(0x221u);
     agradCapCtx_t ctx = {.capturedAgrad = false};
     trainingStats_t *stats = tracedGrads(
-        model, 4,
+        &MODEL_CHAIN(model, 4),
         (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM, .classWeights = NULL},
         REDUCTION_SUM, x, label, agradCaptureSink, &ctx, &(trainingCall_t){.key = &callKey});
 
@@ -578,7 +578,7 @@ void testDxWireHonorsProducerPropLossQMaxBits(void) {
 
     agradBitsCapCtx_t ctx = {.capturedAgrad = false};
     trainingStats_t *stats = tracedGrads(
-        model, 4,
+        &MODEL_CHAIN(model, 4),
         (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM, .classWeights = NULL},
         REDUCTION_SUM, x, label, agradBitsCaptureSink, &ctx, NULL);
 
@@ -668,7 +668,7 @@ void testForwardWireHonorsDeclaredOutputQMaxBits(void) {
 
     fwdBitsCapCtx_t ctx = {.capturedFwd = false};
     trainingStats_t *stats = tracedGrads(
-        model, 1,
+        &MODEL_CHAIN(model, 1),
         (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM, .classWeights = NULL},
         REDUCTION_SUM, x, label, fwdBitsCaptureSink, &ctx, NULL);
 
@@ -776,8 +776,8 @@ void testFrozenLayerSurvivesTrainingUntouched(void) {
     float firstLoss = 0.0f, lastLoss = 0.0f;
     for (size_t step = 0; step < 5; step++) {
         optimFns.zero(optim);
-        trainingStats_t *stats =
-            calculateGradsSequential(model, 3, lossConfig, REDUCTION_SUM, input, label, NULL);
+        trainingStats_t *stats = calculateGradsSequential(&MODEL_CHAIN(model, 3), lossConfig,
+                                                          REDUCTION_SUM, input, label, NULL);
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -859,7 +859,7 @@ void testBackwardStopsAtDeepestTrainableLayer(void) {
     tensor_t *label = makeRowVecN((float[]){1.0f, 0.0f}, 2);
 
     trainingStats_t *stats = tracedGrads(
-        model, 3,
+        &MODEL_CHAIN(model, 3),
         (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM, .classWeights = NULL},
         REDUCTION_SUM, x, label, recordingSink, NULL, NULL);
 
@@ -972,9 +972,9 @@ void testTruncationPreservesUpperLayerGrads(void) {
     lossConfig_t lossConfig = {
         .funcType = MSE, .backwardReduction = REDUCTION_SUM, .classWeights = NULL};
     trainingStats_t *stats1 =
-        calculateGradsSequential(m1, 3, lossConfig, REDUCTION_SUM, x1, label1, NULL);
+        calculateGradsSequential(&MODEL_CHAIN(m1, 3), lossConfig, REDUCTION_SUM, x1, label1, NULL);
     trainingStats_t *stats2 =
-        calculateGradsSequential(m2, 3, lossConfig, REDUCTION_SUM, x2, label2, NULL);
+        calculateGradsSequential(&MODEL_CHAIN(m2, 3), lossConfig, REDUCTION_SUM, x2, label2, NULL);
 
     float *wg1 = (float *)getGradFromParameter(m1Top->config->linear->weights)->data;
     float *wg2 = (float *)getGradFromParameter(m2Top->config->linear->weights)->data;
@@ -1036,7 +1036,7 @@ void testAllFrozenModelSkipsBackwardEntirely(void) {
     tensor_t *label = makeRowVecN((float[]){1.0f, 0.0f}, 2);
 
     trainingStats_t *stats = tracedGrads(
-        model, 1,
+        &MODEL_CHAIN(model, 1),
         (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM, .classWeights = NULL},
         REDUCTION_SUM, x, label, recordingSink, NULL, NULL);
 
@@ -1099,16 +1099,16 @@ void testCalculateGradsFactoryMaxPoolGrowsToBatch2(void) {
     tensor_t *label2 =
         makeFloatTensor3D(2, 2, 2, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f});
 
-    trainingStats_t *stats =
-        calculateGradsSequential(model, 1, lossConfig, REDUCTION_MEAN, x1, label1, NULL);
+    trainingStats_t *stats = calculateGradsSequential(&MODEL_CHAIN(model, 1), lossConfig,
+                                                      REDUCTION_MEAN, x1, label1, NULL);
 
     /* CAPTURE. */
     float capturedLoss = stats->loss;
     freeTrainingStats(stats);
 
     /* #152 PR3b: the stacked batch-2 input grows the argmax. */
-    trainingStats_t *stats2 =
-        calculateGradsSequential(model, 1, lossConfig, REDUCTION_MEAN, x2, label2, NULL);
+    trainingStats_t *stats2 = calculateGradsSequential(&MODEL_CHAIN(model, 1), lossConfig,
+                                                       REDUCTION_MEAN, x2, label2, NULL);
     float capturedLoss2 = stats2->loss;
     freeTrainingStats(stats2);
 
@@ -1226,8 +1226,8 @@ static void runSpiedGradsCall(const trainingCall_t *call) {
     tensor_t *label = makeRowVec2(1.0f, 0.0f);
     installExecSpies();
 
-    trainingStats_t *stats = calculateGradsSequential(model, 2, defaultLossConfig(CROSS_ENTROPY),
-                                                      REDUCTION_MEAN, x, label, call);
+    trainingStats_t *stats = calculateGradsSequential(
+        &MODEL_CHAIN(model, 2), defaultLossConfig(CROSS_ENTROPY), REDUCTION_MEAN, x, label, call);
 
     restoreExecSpies();
     freeTrainingStats(stats);
@@ -1390,8 +1390,8 @@ void testCalculateGradsIsIndependentOfDrawsAroundItsSteps(void) {
     orderModel_t m;
     buildOrderModel(&m);
     trainingStats_t *stats =
-        calculateGradsSequential(m.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, m.x, m.label,
-                                 &(trainingCall_t){.key = &callKey});
+        calculateGradsSequential(&MODEL_CHAIN(m.model, 2), defaultLossConfig(MSE), REDUCTION_MEAN,
+                                 m.x, m.label, &(trainingCall_t){.key = &callKey});
     size_t plainBytes = captureCallResult(&m, stats, plain);
     freeTrainingStats(stats);
     freeOrderModel(&m);
@@ -1401,8 +1401,8 @@ void testCalculateGradsIsIndependentOfDrawsAroundItsSteps(void) {
                           .gradIn1 = makeRowVec2(0.f, 0.f),
                           .dx1 = makeSymRow(ORDER_HIDDEN),
                           .unrelated = rngOpen(rngKeyFromSeed(0xfeedu))};
-    stats = tracedGrads(m.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, m.x, m.label,
-                        interposingSink, &cap, &(trainingCall_t){.key = &callKey});
+    stats = tracedGrads(&MODEL_CHAIN(m.model, 2), defaultLossConfig(MSE), REDUCTION_MEAN, m.x,
+                        m.label, interposingSink, &cap, &(trainingCall_t){.key = &callKey});
     size_t interposedBytes = captureCallResult(&m, stats, interposed);
     freeTrainingStats(stats);
 

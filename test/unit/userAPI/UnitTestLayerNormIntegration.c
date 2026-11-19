@@ -110,8 +110,8 @@ void testLinearLayerNormLinearOneTrainingStep(void) {
         sgdMCreateOptim(0.1f, 0.9f, 0.0f, &MODEL_CHAIN(model, 3), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
-    trainingStats_t *stats = calculateGradsSequential(model, 3, defaultLossConfig(MSE),
-                                                      REDUCTION_MEAN, input, label, NULL);
+    trainingStats_t *stats = calculateGradsSequential(
+        &MODEL_CHAIN(model, 3), defaultLossConfig(MSE), REDUCTION_MEAN, input, label, NULL);
     sgdStepM(optim, NULL);
 
     bool statsNotNull = (stats != NULL);
@@ -198,8 +198,8 @@ void testLayerNormSymInt32SingleLayerTrainingStep(void) {
     optimizer_t *optimSym =
         sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(modelSym, 1), momentumQSym,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
-    trainingStats_t *statsSym = calculateGradsSequential(modelSym, 1, defaultLossConfig(MSE),
-                                                         REDUCTION_MEAN, inSym, labelSym, NULL);
+    trainingStats_t *statsSym = calculateGradsSequential(
+        &MODEL_CHAIN(modelSym, 1), defaultLossConfig(MSE), REDUCTION_MEAN, inSym, labelSym, NULL);
     /* The factory's SR write-back into the SYM_INT32 params draws. */
     const rngKey_t updateKey = rngKeyFromSeed(158u);
     sgdStepM(optimSym, &updateKey);
@@ -232,8 +232,8 @@ void testLayerNormSymInt32SingleLayerTrainingStep(void) {
     optimizer_t *optimF =
         sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(modelF, 1), momentumQF,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
-    trainingStats_t *statsF = calculateGradsSequential(modelF, 1, defaultLossConfig(MSE),
-                                                       REDUCTION_MEAN, inF, labelF, NULL);
+    trainingStats_t *statsF = calculateGradsSequential(
+        &MODEL_CHAIN(modelF, 1), defaultLossConfig(MSE), REDUCTION_MEAN, inF, labelF, NULL);
     sgdStepM(optimF, NULL);
 
     float gammaF[4], betaF[4];

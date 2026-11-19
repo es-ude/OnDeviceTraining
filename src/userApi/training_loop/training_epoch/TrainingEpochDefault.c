@@ -12,10 +12,10 @@
 #include "TrainingBatchDefault.h"
 #include "TrainingEpochDefault.h"
 
-float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
-                           dataLoader_t *dataLoader, optimizer_t *optimizer,
-                           calculateGradsFn_t calculateGradsFn, reduction_t forwardReduction,
-                           size_t microBatchSize, const trainingCall_t *call) {
+float trainingEpochDefault(const model_t *model, lossConfig_t lossConfig, dataLoader_t *dataLoader,
+                           optimizer_t *optimizer, calculateGradsFn_t calculateGradsFn,
+                           reduction_t forwardReduction, size_t microBatchSize,
+                           const trainingCall_t *call) {
     size_t m = (microBatchSize == 0) ? 1 : microBatchSize;
     if (dataLoader->batchSize % m != 0) {
         /* Divisibility check 3 (#152): covers direct callers; trainingRun checks
@@ -59,7 +59,7 @@ float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossC
          * batch, so labelRef stays valid for computeMeanDivisor below. */
         tensor_t *labelRef = batch->samples[0]->label;
 
-        totalLoss += trainingBatchDefault(model, modelSize, lossConfig, batch, calculateGradsFn,
+        totalLoss += trainingBatchDefault(model, lossConfig, batch, calculateGradsFn,
                                           forwardReduction, m, (call != NULL) ? &next : NULL);
 
         /* The update's key: its mean-scale and its optimizer step draw under it. */

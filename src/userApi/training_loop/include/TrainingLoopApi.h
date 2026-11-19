@@ -7,6 +7,7 @@
 #include "DataLoader.h"
 #include "InferenceApi.h"
 #include "LossFunction.h"
+#include "Model.h"
 #include "Optimizer.h"
 #include "RNG.h"
 #include "Tensor.h"
@@ -170,8 +171,7 @@ typedef struct trainingRunResult {
  *  call is the caller's, NULLable and borrowed for the call: a function that
  *  routes through calculateGradsSequential / tracedGrads forwards it, so a
  *  scheduler set in trainingRunOptions_t.remat reaches the driver. */
-typedef trainingStats_t *(*calculateGradsFn_t)(layer_t **model, size_t modelSize,
-                                               lossConfig_t lossConfig,
+typedef trainingStats_t *(*calculateGradsFn_t)(const model_t *model, lossConfig_t lossConfig,
                                                reduction_t forwardReduction, tensor_t *input,
                                                tensor_t *label, const trainingCall_t *call);
 

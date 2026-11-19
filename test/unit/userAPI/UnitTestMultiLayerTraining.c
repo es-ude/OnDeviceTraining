@@ -158,7 +158,7 @@ void testMultiLayerBackward_WithCrossEntropy_DoesNotCrash() {
     tensorFillFromFloatBuffer(label, (float[]){1.0f, 0.0f}, 2);
 
     trainingStats_t *stats = calculateGradsSequential(
-        model, sizeModel,
+        &MODEL_CHAIN(model, sizeModel),
         (lossConfig_t){.funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_SUM},
         REDUCTION_SUM, input, label, NULL);
 
@@ -279,7 +279,7 @@ void testMultiLayerBackward_WithManualInit_DoesNotCrash() {
     tensorFillFromFloatBuffer(label, (float[]){1.0f, 0.0f}, 2);
 
     trainingStats_t *stats = calculateGradsSequential(
-        model, sizeModel,
+        &MODEL_CHAIN(model, sizeModel),
         (lossConfig_t){.funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_SUM},
         REDUCTION_SUM, input, label, NULL);
 
@@ -422,7 +422,7 @@ void testMultiLayerTraining_MultipleSteps_GradsAccumulate() {
     float capturedLoss[3];
     for (size_t step = 0; step < 3; step++) {
         trainingStats_t *stats = calculateGradsSequential(
-            model, sizeModel,
+            &MODEL_CHAIN(model, sizeModel),
             (lossConfig_t){.funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_SUM},
             REDUCTION_SUM, input, label, NULL);
         capturedNotNull[step] = (stats != NULL);
@@ -587,9 +587,9 @@ void testBfpFakeQuantTrainingLossDecreasesAndGridMoves(void) {
     float lastLoss = NAN;
     for (size_t step = 0; step < STEPS; step++) {
         const updateKeys_t keys = keysOfThisUpdate(&rng);
-        trainingStats_t *stats =
-            calculateGradsSequential(model, sizeModel, defaultLossConfig(MSE), REDUCTION_MEAN,
-                                     input, label, &(trainingCall_t){.key = &keys.callKey});
+        trainingStats_t *stats = calculateGradsSequential(
+            &MODEL_CHAIN(model, sizeModel), defaultLossConfig(MSE), REDUCTION_MEAN, input, label,
+            &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -840,9 +840,9 @@ void testBfpWireFakeQuantTrainingLossDecreasesAndWirePacks(void) {
     float lastLoss = NAN;
     for (size_t step = 0; step < 20; step++) {
         const updateKeys_t keys = keysOfThisUpdate(&rng);
-        trainingStats_t *stats =
-            tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
-                        captureLayer0ForwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
+        trainingStats_t *stats = tracedGrads(
+            &MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
+            captureLayer0ForwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -894,9 +894,9 @@ void testBfpWireGeometryIgnoresTemplateNumGroups(void) {
     const updateKeys_t keys = keysOfThisUpdate(&rng);
 
     bfpWireCapture_t cap = {0};
-    trainingStats_t *stats =
-        tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
-                    captureLayer0ForwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
+    trainingStats_t *stats = tracedGrads(&MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE),
+                                         REDUCTION_MEAN, f.input, f.label, captureLayer0ForwardWire,
+                                         &cap, &(trainingCall_t){.key = &keys.callKey});
     freeTrainingStats(stats);
     freeBfpWireFixture(&f);
 
@@ -919,7 +919,7 @@ void testBfpActWireGroupSizeMismatchDiesNamingTheWire(void) {
 
     ASSERT_EXITS_WITH_OUTPUT(
         1, "BFP groupSize 2 does not divide the 9 elements of wire ACT 1",
-        freeTrainingStats(calculateGradsSequential(f.model, 2, defaultLossConfig(MSE),
+        freeTrainingStats(calculateGradsSequential(&MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE),
                                                    REDUCTION_MEAN, f.input, f.label, NULL)));
 
     freeBfpWireFixture(&f);
@@ -997,9 +997,9 @@ void testBfpDxWireAllocatesThroughInitGradTensor(void) {
     const updateKeys_t keys = keysOfThisUpdate(&rng);
 
     bfpWireCapture_t cap = {0};
-    trainingStats_t *stats =
-        tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
-                    captureLayer0BackwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
+    trainingStats_t *stats = tracedGrads(
+        &MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
+        captureLayer0BackwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
     float loss = stats->loss;
     freeTrainingStats(stats);
     freeBfpWireFixture(&f);
@@ -1027,9 +1027,9 @@ void testBfpWireGroupSizeEqualToWireElementsNormalizesToPerTensor(void) {
     const updateKeys_t keys = keysOfThisUpdate(&rng);
 
     bfpWireCapture_t cap = {0};
-    trainingStats_t *stats =
-        tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
-                    captureLayer0ForwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
+    trainingStats_t *stats = tracedGrads(&MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE),
+                                         REDUCTION_MEAN, f.input, f.label, captureLayer0ForwardWire,
+                                         &cap, &(trainingCall_t){.key = &keys.callKey});
     float loss = stats->loss;
     freeTrainingStats(stats);
     freeBfpWireFixture(&f);
@@ -1054,9 +1054,9 @@ void testBfpDxWireGroupSizeEqualToWireElementsNormalizesToPerTensor(void) {
     const updateKeys_t keys = keysOfThisUpdate(&rng);
 
     bfpWireCapture_t cap = {0};
-    trainingStats_t *stats =
-        tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
-                    captureLayer0BackwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
+    trainingStats_t *stats = tracedGrads(
+        &MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
+        captureLayer0BackwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
     float loss = stats->loss;
     freeTrainingStats(stats);
     freeBfpWireFixture(&f);
@@ -1085,7 +1085,7 @@ void testBfpGradWireGroupSizeMismatchDiesNamingTheWire(void) {
 
     ASSERT_EXITS_WITH_OUTPUT(
         1, "BFP groupSize 2 does not divide the 9 elements of wire GRAD 1",
-        freeTrainingStats(calculateGradsSequential(f.model, 2, defaultLossConfig(MSE),
+        freeTrainingStats(calculateGradsSequential(&MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE),
                                                    REDUCTION_MEAN, f.input, f.label, NULL)));
 
     freeBfpWireFixture(&f);
@@ -1121,9 +1121,9 @@ void testBfpDxWireNativeBackwardTrains(void) {
     float lastLoss = NAN;
     for (size_t step = 0; step < 5; step++) {
         const updateKeys_t keys = keysOfThisUpdate(&rng);
-        trainingStats_t *stats =
-            tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
-                        captureLayer0BackwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
+        trainingStats_t *stats = tracedGrads(
+            &MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
+            captureLayer0BackwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -1367,9 +1367,9 @@ void testBfpNativeForwardTrainingLossDecreasesAndGridMoves(void) {
     float lastLoss = NAN;
     for (size_t step = 0; step < 25; step++) {
         const updateKeys_t keys = keysOfThisUpdate(&rng);
-        trainingStats_t *stats =
-            tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
-                        captureLayer0ForwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
+        trainingStats_t *stats = tracedGrads(
+            &MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
+            captureLayer0ForwardWire, &cap, &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -1460,9 +1460,9 @@ void testBfpPinnedFloat32BackwardTrainingLossDecreases(void) {
     float lastLoss = NAN;
     for (size_t step = 0; step < 25; step++) {
         const updateKeys_t keys = keysOfThisUpdate(&rng);
-        trainingStats_t *stats =
-            calculateGradsSequential(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input,
-                                     f.label, &(trainingCall_t){.key = &keys.callKey});
+        trainingStats_t *stats = calculateGradsSequential(
+            &MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
+            &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -1576,9 +1576,9 @@ void testBfpDxWireThroughPinnedFloat32BackwardTrains(void) {
     float lastLoss = NAN;
     for (size_t step = 0; step < 25; step++) {
         const updateKeys_t keys = keysOfThisUpdate(&rng);
-        trainingStats_t *stats =
-            tracedGrads(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
-                        captureLinear0IncomingDx, &cap, &(trainingCall_t){.key = &keys.callKey});
+        trainingStats_t *stats = tracedGrads(
+            &MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
+            captureLinear0IncomingDx, &cap, &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -1650,9 +1650,9 @@ void testBfpGradStorageTrainingAccumulatesAndSteps(void) {
     uint8_t gradExponentAfterBackward = (uint8_t)bfpExponentBias(w0Grad->quantization->qConfig);
     for (size_t step = 0; step < 5; step++) {
         const updateKeys_t keys = keysOfThisUpdate(&rng);
-        trainingStats_t *stats =
-            calculateGradsSequential(f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, f.input,
-                                     f.label, &(trainingCall_t){.key = &keys.callKey});
+        trainingStats_t *stats = calculateGradsSequential(
+            &MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE), REDUCTION_MEAN, f.input, f.label,
+            &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -1762,8 +1762,8 @@ void testBfpGradStorageTrainsUnderReductionMean(void) {
     float firstEpochLoss = NAN;
     float lastEpochLoss = NAN;
     for (size_t epoch = 0; epoch < 8; epoch++) {
-        float epochLoss = trainingEpochDefault(f.model, 2, defaultLossConfig(MSE), dl, f.sgd,
-                                               calculateGradsSequential, REDUCTION_MEAN, 1,
+        float epochLoss = trainingEpochDefault(&MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE), dl,
+                                               f.sgd, calculateGradsSequential, REDUCTION_MEAN, 1,
                                                &(trainingCall_t){.rng = &rng});
         if (epoch == 0) {
             firstEpochLoss = epochLoss;
@@ -1838,7 +1838,7 @@ static void trainOneUpdateFromTheHelpers(bfpNativeFixture_t *f, trainingRng_t *r
         batchView_t itemView;
         batchView_t labelView;
         freeTrainingStats(calculateGradsSequential(
-            f->model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
+            &MODEL_CHAIN(f->model, 2), defaultLossConfig(MSE), REDUCTION_MEAN,
             batchViewOf(&itemView, bfpMeanEpochItems[j]),
             batchViewOf(&labelView, bfpMeanEpochLabels[j]), &(trainingCall_t){.key = &callKey}));
     }
@@ -1865,7 +1865,7 @@ static size_t trainTwoUpdates(bool throughTheEpochLoop, uint64_t seed, dataLoade
     trainingRngInit(&rng, seed);
     for (size_t u = 0; u < 2; u++) {
         if (throughTheEpochLoop) {
-            trainingEpochDefault(f.model, 2, defaultLossConfig(MSE), dl, f.sgd,
+            trainingEpochDefault(&MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE), dl, f.sgd,
                                  calculateGradsSequential, REDUCTION_MEAN, 1,
                                  &(trainingCall_t){.rng = &rng});
         } else {
@@ -1958,8 +1958,9 @@ static size_t scaledGradsFromTheEpoch(uint64_t seed, dataLoader_t *dl,
     buildSrFixtureWithRng(&f, &rng, seed);
     g_savedScaleStep = optimizerFunctions[SGD_M].step;
     optimizerFunctions[SGD_M].step = gradRecordingStep;
-    trainingEpochDefault(f.model, 2, defaultLossConfig(MSE), dl, f.sgd, calculateGradsSequential,
-                         REDUCTION_MEAN, 1, &(trainingCall_t){.rng = &rng});
+    trainingEpochDefault(&MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE), dl, f.sgd,
+                         calculateGradsSequential, REDUCTION_MEAN, 1,
+                         &(trainingCall_t){.rng = &rng});
     optimizerFunctions[SGD_M].step = g_savedScaleStep;
     freeBfpNativeFixture(&f);
     memcpy(out, g_epochScaledGrads, g_epochScaledGradBytes);
@@ -1980,7 +1981,7 @@ static size_t scaledGradsFromTheHelpers(uint64_t seed, bool underTheUpdateKey,
         batchView_t itemView;
         batchView_t labelView;
         freeTrainingStats(calculateGradsSequential(
-            f.model, 2, defaultLossConfig(MSE), REDUCTION_MEAN,
+            &MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE), REDUCTION_MEAN,
             batchViewOf(&itemView, bfpScaleItems[j]), batchViewOf(&labelView, bfpScaleLabels[j]),
             &(trainingCall_t){.key = &callKey}));
     }
@@ -2154,8 +2155,8 @@ void testBfpConvGradStorageTrainsUnderDefaultEpoch(void) {
     batchView_t seedItemView;
     batchView_t seedLabelView;
     trainingStats_t *seedStats =
-        calculateGradsSequential(model, BFP_CONV_MODEL_SIZE, defaultLossConfig(MSE), REDUCTION_MEAN,
-                                 batchViewOf(&seedItemView, bfpConvEpochItems[0]),
+        calculateGradsSequential(&MODEL_CHAIN(model, BFP_CONV_MODEL_SIZE), defaultLossConfig(MSE),
+                                 REDUCTION_MEAN, batchViewOf(&seedItemView, bfpConvEpochItems[0]),
                                  batchViewOf(&seedLabelView, bfpConvEpochLabels[0]), NULL);
     freeTrainingStats(seedStats);
     /* Sentinels keep the CAPTURE phase crash-free if the grad-storage knob
@@ -2183,8 +2184,8 @@ void testBfpConvGradStorageTrainsUnderDefaultEpoch(void) {
     float lastEpochLoss = NAN;
     for (size_t epoch = 0; epoch < 10; epoch++) {
         float epochLoss =
-            trainingEpochDefault(model, BFP_CONV_MODEL_SIZE, defaultLossConfig(MSE), dl, sgd,
-                                 calculateGradsSequential, REDUCTION_MEAN, 1, NULL);
+            trainingEpochDefault(&MODEL_CHAIN(model, BFP_CONV_MODEL_SIZE), defaultLossConfig(MSE),
+                                 dl, sgd, calculateGradsSequential, REDUCTION_MEAN, 1, NULL);
         if (epoch == 0) {
             firstEpochLoss = epochLoss;
         }
@@ -2420,9 +2421,9 @@ void testBfpUniformPoolActivationModelTrains(void) {
     float lastLoss = NAN;
     for (size_t step = 0; step < 10; step++) {
         const updateKeys_t keys = keysOfThisUpdate(&rng);
-        trainingStats_t *stats =
-            tracedGrads(model, 6, defaultLossConfig(CROSS_ENTROPY), REDUCTION_MEAN, input, label,
-                        capturePr4FlattenCarry, &carry, &(trainingCall_t){.key = &keys.callKey});
+        trainingStats_t *stats = tracedGrads(
+            &MODEL_CHAIN(model, 6), defaultLossConfig(CROSS_ENTROPY), REDUCTION_MEAN, input, label,
+            capturePr4FlattenCarry, &carry, &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }
@@ -2763,9 +2764,9 @@ void testBfpUniformNormModelTrainsAndGridsMove(void) {
         for (size_t s = 0; s < 2; s++) {
             const rngKey_t callKey = trainingRngCallKey(stepKey, s);
             trainingStats_t *stats =
-                tracedGrads(model, BFP_NORM_MODEL_SIZE, defaultLossConfig(CROSS_ENTROPY),
-                            REDUCTION_MEAN, inputs[s], labels[s], capturePr5LayerNormWire, &cap,
-                            &(trainingCall_t){.key = &callKey});
+                tracedGrads(&MODEL_CHAIN(model, BFP_NORM_MODEL_SIZE),
+                            defaultLossConfig(CROSS_ENTROPY), REDUCTION_MEAN, inputs[s], labels[s],
+                            capturePr5LayerNormWire, &cap, &(trainingCall_t){.key = &callKey});
             stepLoss += stats->loss;
             freeTrainingStats(stats);
         }
@@ -2941,8 +2942,8 @@ void testBfpNormGradStorageAccumulatesAndSteps(void) {
     trainingRngInit(&rng, 4242u);
     const updateKeys_t keys = keysOfThisUpdate(&rng);
     trainingStats_t *stats =
-        calculateGradsSequential(model, 1, defaultLossConfig(MSE), REDUCTION_MEAN, input, label,
-                                 &(trainingCall_t){.key = &keys.callKey});
+        calculateGradsSequential(&MODEL_CHAIN(model, 1), defaultLossConfig(MSE), REDUCTION_MEAN,
+                                 input, label, &(trainingCall_t){.key = &keys.callKey});
     float loss = stats->loss;
     freeTrainingStats(stats);
 
@@ -3068,8 +3069,8 @@ void unitTestSoftmaxMseBackwardThroughLoop(void) {
     tensor_t *input = buildFloatTensor2D(1, 3, (float[]){1.0f, -0.5f, 2.0f});
     tensor_t *label = buildFloatTensor2D(1, 3, (float[]){0.2f, 0.5f, 0.3f});
 
-    trainingStats_t *stats = calculateGradsSequential(model, 2, defaultLossConfig(MSE),
-                                                      REDUCTION_MEAN, input, label, NULL);
+    trainingStats_t *stats = calculateGradsSequential(
+        &MODEL_CHAIN(model, 2), defaultLossConfig(MSE), REDUCTION_MEAN, input, label, NULL);
 
     /* CAPTURE. */
     tensor_t *w0GradTensor = getGradFromParameter(w0);
@@ -3120,8 +3121,9 @@ void unitTestSoftmaxCeTwoRowsThroughLoop(void) {
     tensor_t *input = buildFloatTensor2D(2, 3, softmaxTwoRowsE2eX);
     tensor_t *label = buildFloatTensor2D(2, 3, softmaxCeTwoRowsE2eLabel);
 
-    trainingStats_t *stats = calculateGradsSequential(model, 2, defaultLossConfig(CROSS_ENTROPY),
-                                                      REDUCTION_MEAN, input, label, NULL);
+    trainingStats_t *stats =
+        calculateGradsSequential(&MODEL_CHAIN(model, 2), defaultLossConfig(CROSS_ENTROPY),
+                                 REDUCTION_MEAN, input, label, NULL);
 
     /* CAPTURE. */
     float capturedLoss = stats->loss;
@@ -3180,8 +3182,8 @@ void unitTestSoftmaxMseTwoRowsBackwardThroughLoop(void) {
     tensor_t *input = buildFloatTensor2D(2, 3, softmaxTwoRowsE2eX);
     tensor_t *label = buildFloatTensor2D(2, 3, softmaxMseTwoRowsE2eLabel);
 
-    trainingStats_t *stats = calculateGradsSequential(model, 2, defaultLossConfig(MSE),
-                                                      REDUCTION_MEAN, input, label, NULL);
+    trainingStats_t *stats = calculateGradsSequential(
+        &MODEL_CHAIN(model, 2), defaultLossConfig(MSE), REDUCTION_MEAN, input, label, NULL);
 
     /* CAPTURE. */
     float capturedLoss = stats->loss;
@@ -3286,8 +3288,8 @@ void unitTestUniformBfpSoftmaxMseTrains(void) {
     for (size_t step = 0; step < 10; step++) {
         const updateKeys_t keys = keysOfThisUpdate(&rng);
         trainingStats_t *stats =
-            calculateGradsSequential(model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, input, label,
-                                     &(trainingCall_t){.key = &keys.callKey});
+            calculateGradsSequential(&MODEL_CHAIN(model, 2), defaultLossConfig(MSE), REDUCTION_MEAN,
+                                     input, label, &(trainingCall_t){.key = &keys.callKey});
         if (step == 0) {
             firstLoss = stats->loss;
         }

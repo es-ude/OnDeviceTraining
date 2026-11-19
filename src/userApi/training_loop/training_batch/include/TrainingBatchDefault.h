@@ -27,9 +27,8 @@
  *  call (NULLable) goes to every calculateGradsFn call unchanged; a scheduler
  *  in call->remat must be keyed to the input those calls receive: [1, ...]
  *  at m == 1, [m, ...] at m > 1. */
-float trainingBatchDefault(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
-                           batch_t *batch, calculateGradsFn_t calculateGradsFn,
-                           reduction_t forwardReduction, size_t microBatchSize,
-                           const trainingCall_t *call);
+float trainingBatchDefault(const model_t *model, lossConfig_t lossConfig, batch_t *batch,
+                           calculateGradsFn_t calculateGradsFn, reduction_t forwardReduction,
+                           size_t microBatchSize, const trainingCall_t *call);
 
 #endif // TRAINING_BATCH_DEFAULT_H

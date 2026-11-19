@@ -705,8 +705,8 @@ static void captureRun(runner_t runner, zooFixture_t *f, const trainingCall_t *c
 
     cap->memBefore = memProfileCurrentBytes();
     odtHookSet(countingHook, cap);
-    trainingStats_t *stats = tracedGrads(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y,
-                                         recordingSink, &cap->trace, call);
+    trainingStats_t *stats = tracedGrads(&MODEL_CHAIN(f->model, f->n), f->loss, REDUCTION_MEAN,
+                                         f->x, f->y, recordingSink, &cap->trace, call);
     odtHookSet(NULL, NULL);
     cap->loss = stats->loss;
     captureTensor(&cap->values, stats->output);
@@ -799,7 +799,8 @@ static void assertNullPathMatchesTheReference(void (*build)(zooFixture_t *)) {
 }
 
 static trainingStats_t *runOnce(zooFixture_t *f, const trainingCall_t *call) {
-    return calculateGradsSequential(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y, call);
+    return calculateGradsSequential(&MODEL_CHAIN(f->model, f->n), f->loss, REDUCTION_MEAN, f->x,
+                                    f->y, call);
 }
 
 /* A caller that does not zero between calls: the grads accumulate over both,
@@ -845,8 +846,9 @@ void testNullPathMatchesTheReferenceOnTheMlp(void) {
     rematScheduler_t ref;
     initReference(&ref, &f);
     forEachGrad(f.model, f.n, NULL);
-    trainingStats_t *reference = calculateGradsSequential(f.model, f.n, f.loss, REDUCTION_MEAN, f.x,
-                                                          f.y, &(trainingCall_t){.remat = &ref});
+    trainingStats_t *reference =
+        calculateGradsSequential(&MODEL_CHAIN(f.model, f.n), f.loss, REDUCTION_MEAN, f.x, f.y,
+                                 &(trainingCall_t){.remat = &ref});
     g_oracle.values.used = 0;
     g_oracle.loss = reference->loss;
     captureTensor(&g_oracle.values, reference->output);
@@ -855,8 +857,8 @@ void testNullPathMatchesTheReferenceOnTheMlp(void) {
     rematSchedulerDeinit(&ref);
 
     forEachGrad(f.model, f.n, NULL);
-    trainingStats_t *driver =
-        calculateGradsSequential(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, NULL);
+    trainingStats_t *driver = calculateGradsSequential(&MODEL_CHAIN(f.model, f.n), f.loss,
+                                                       REDUCTION_MEAN, f.x, f.y, NULL);
     g_driver.values.used = 0;
     g_driver.loss = driver->loss;
     captureTensor(&g_driver.values, driver->output);
@@ -917,8 +919,8 @@ void testSrForwardConforms(void) {
 static void runTheSrForwardFixtureWithoutAKey(void) {
     zooFixture_t f;
     buildSrForward(&f);
-    freeTrainingStats(
-        calculateGradsSequential(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, NULL));
+    freeTrainingStats(calculateGradsSequential(&MODEL_CHAIN(f.model, f.n), f.loss, REDUCTION_MEAN,
+                                               f.x, f.y, NULL));
 }
 
 /* No key, no randomness: a training call on a fixture that draws stops at
@@ -1028,8 +1030,8 @@ static agradProbe_t probeAgradOrder(void) {
     buildMlp(&f);
     forEachGrad(f.model, f.n, NULL);
     agradProbe_t p = {.f = &f};
-    freeTrainingStats(
-        tracedGrads(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, agradOrderSink, &p, NULL));
+    freeTrainingStats(tracedGrads(&MODEL_CHAIN(f.model, f.n), f.loss, REDUCTION_MEAN, f.x, f.y,
+                                  agradOrderSink, &p, NULL));
     freeZoo(&f);
     return p;
 }
@@ -1051,8 +1053,8 @@ void testAnInputWithoutBytesExitsBeforeLayer0Runs(void) {
     f.x->data = NULL;
     ASSERT_EXITS_WITH_OUTPUT(
         1, "remat[heap]: step #0 FORWARD(layer 0) violates 'operand not resident: in ACT 0'",
-        freeTrainingStats(
-            calculateGradsSequential(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, NULL)));
+        freeTrainingStats(calculateGradsSequential(&MODEL_CHAIN(f.model, f.n), f.loss,
+                                                   REDUCTION_MEAN, f.x, f.y, NULL)));
     f.x->data = bytes;
     freeZoo(&f);
 }
@@ -1063,9 +1065,10 @@ void testAnEmptyModelExitsNamingIt(void) {
     zooFixture_t f;
     buildMlp(&f);
     tensor_t *inputShapedLabel = makeFloatTensor((size_t[]){1, 4}, 2, 0.5f);
-    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireTableInit: modelSize == 0: nothing to schedule",
-                             freeTrainingStats(calculateGradsSequential(
-                                 f.model, 0, f.loss, REDUCTION_MEAN, f.x, inputShapedLabel, NULL)));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "rematWireTableInit: modelSize == 0: nothing to schedule",
+        freeTrainingStats(calculateGradsSequential(&MODEL_CHAIN(f.model, 0), f.loss, REDUCTION_MEAN,
+                                                   f.x, inputShapedLabel, NULL)));
     freeTensor(inputShapedLabel);
     freeZoo(&f);
 }
@@ -1083,8 +1086,8 @@ void testAMarkedInputYieldsAnUnmarkedOutputAndLeaksNothing(void) {
     forEachGrad(f.model, f.n, NULL);
     g_driver.values.used = 0;
     size_t before = memProfileCurrentBytes();
-    trainingStats_t *stats =
-        calculateGradsSequential(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, NULL);
+    trainingStats_t *stats = calculateGradsSequential(&MODEL_CHAIN(f.model, f.n), f.loss,
+                                                      REDUCTION_MEAN, f.x, f.y, NULL);
     bool outputMarked = stats->output->sparsity != NULL;
     g_driver.loss = stats->loss;
     captureTensor(&g_driver.values, stats->output);
@@ -1114,9 +1117,10 @@ void testAFailedEphemeralBuildExitsNamingIt(void) {
     inputLike_t in;
     tensor_t *x = makeInput(&in, (size_t[]){1, (size_t)1 << 60}, 2, &g_floatQ);
     tensor_t *y = makeFloatTensor((size_t[]){1, 1}, 2, 0.5f);
-    ASSERT_EXITS_WITH_OUTPUT(1, "calculateGrads: ephemeral HEAP scheduler: reserveMemory failed",
-                             freeTrainingStats(calculateGradsSequential(
-                                 model, 1, defaultLossConfig(MSE), REDUCTION_MEAN, x, y, NULL)));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "calculateGrads: ephemeral HEAP scheduler: reserveMemory failed",
+        freeTrainingStats(calculateGradsSequential(&MODEL_CHAIN(model, 1), defaultLossConfig(MSE),
+                                                   REDUCTION_MEAN, x, y, NULL)));
     freeTensor(y);
     freeModel(model, 1);
     freeQuantization(bfp);
@@ -1130,8 +1134,8 @@ void testAFailedEphemeralBuildExitsNamingIt(void) {
 static void captureValues(zooFixture_t *f, const trainingCall_t *call, runCapture_t *cap) {
     forEachGrad(f->model, f->n, NULL);
     cap->values.used = 0;
-    trainingStats_t *stats =
-        calculateGradsSequential(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y, call);
+    trainingStats_t *stats = calculateGradsSequential(&MODEL_CHAIN(f->model, f->n), f->loss,
+                                                      REDUCTION_MEAN, f->x, f->y, call);
     cap->loss = stats->loss;
     captureTensor(&cap->values, stats->output);
     freeTrainingStats(stats);
@@ -1185,8 +1189,8 @@ void testTracedGradsRunsOnTheCallersScheduler(void) {
     rematScheduler_t s;
     initFixtureHeap(&s, &f);
     g_driver.trace.used = 0;
-    freeTrainingStats(tracedGrads(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, recordingSink,
-                                  &g_driver.trace, &(trainingCall_t){.remat = &s}));
+    freeTrainingStats(tracedGrads(&MODEL_CHAIN(f.model, f.n), f.loss, REDUCTION_MEAN, f.x, f.y,
+                                  recordingSink, &g_driver.trace, &(trainingCall_t){.remat = &s}));
     rematReport_t after = reportOf(&s);
     rematSchedulerDeinit(&s);
     freeZoo(&f);
@@ -1198,10 +1202,10 @@ void testTracedGradsRunsOnTheCallersScheduler(void) {
 
 static void twoCallsOnOneScheduler(zooFixture_t *f, rematScheduler_t *s) {
     const trainingCall_t call = {.remat = s};
-    freeTrainingStats(
-        calculateGradsSequential(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y, &call));
-    freeTrainingStats(
-        calculateGradsSequential(f->model, f->n, f->loss, REDUCTION_MEAN, f->x, f->y, &call));
+    freeTrainingStats(calculateGradsSequential(&MODEL_CHAIN(f->model, f->n), f->loss,
+                                               REDUCTION_MEAN, f->x, f->y, &call));
+    freeTrainingStats(calculateGradsSequential(&MODEL_CHAIN(f->model, f->n), f->loss,
+                                               REDUCTION_MEAN, f->x, f->y, &call));
 }
 
 /* The driver borrows a caller's scheduler and tears down only its own
@@ -1224,8 +1228,8 @@ void testAZeroInitialisedCallIsTheNullScheduler(void) {
     buildMlp(&f);
     ASSERT_EXITS_WITH_OUTPUT(
         0, "",
-        freeTrainingStats(calculateGradsSequential(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y,
-                                                   &(trainingCall_t){0})));
+        freeTrainingStats(calculateGradsSequential(
+            &MODEL_CHAIN(f.model, f.n), f.loss, REDUCTION_MEAN, f.x, f.y, &(trainingCall_t){0})));
     captureReferenceValues(&f, &g_oracle);
     captureValues(&f, &(trainingCall_t){0}, &g_driver);
     freeZoo(&f);
@@ -1290,8 +1294,8 @@ static liveSampler_t sampleHarCnn(bool explicitScheduler, const rematPlanSpec_t 
     const trainingCall_t call = {.remat = explicitScheduler ? &s : NULL};
     liveSampler_t smp = {0};
     smp.mark = memProfileCurrentBytes();
-    freeTrainingStats(
-        tracedGrads(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, liveBytesSink, &smp, &call));
+    freeTrainingStats(tracedGrads(&MODEL_CHAIN(f.model, f.n), f.loss, REDUCTION_MEAN, f.x, f.y,
+                                  liveBytesSink, &smp, &call));
     rematSchedulerDeinit(&s);
     freeZoo(&f);
     for (size_t l = 0; l < HAR_CNN_AGRADS; l++) {
@@ -2147,8 +2151,8 @@ void testRecomputePlanTraceOrderOnTheMlp(void) {
     rematScheduler_t s;
     TEST_ASSERT_TRUE(rematHeapInit(&s, &MODEL_CHAIN(f.model, f.n), f.loss, f.x, &g_mlp3Recompute));
     traceOrder_t o = {.used = 0};
-    freeTrainingStats(tracedGrads(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y, traceOrderSink,
-                                  &o, &(trainingCall_t){.remat = &s, .key = &key}));
+    freeTrainingStats(tracedGrads(&MODEL_CHAIN(f.model, f.n), f.loss, REDUCTION_MEAN, f.x, f.y,
+                                  traceOrderSink, &o, &(trainingCall_t){.remat = &s, .key = &key}));
     rematSchedulerDeinit(&s);
     freeZoo(&f);
     TEST_ASSERT_EQUAL_STRING("fwd0 fwd1 fwd2 lossgrad3 refwd0 refwd1 agrad2 agrad1 agrad0", o.text);
@@ -2441,8 +2445,8 @@ void testRefwdWireBitIdenticalToFwd(void) {
             rematScheduler_t s;
             const matrixCell_t cell = {e->name, r == 0 ? REMAT_ARENA : REMAT_HEAP, &spec};
             initCell(&s, &cell, &f);
-            freeTrainingStats(tracedGrads(f.model, f.n, f.loss, REDUCTION_MEAN, f.x, f.y,
-                                          refwdCheckSink, &chk,
+            freeTrainingStats(tracedGrads(&MODEL_CHAIN(f.model, f.n), f.loss, REDUCTION_MEAN, f.x,
+                                          f.y, refwdCheckSink, &chk,
                                           &(trainingCall_t){.remat = &s, .key = &key}));
             rematSchedulerDeinit(&s);
             freeZoo(&f);

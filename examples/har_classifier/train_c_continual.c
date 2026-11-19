@@ -276,7 +276,7 @@ static void absorbDomain(ppcaReplaySet_t *set, dataset_t *domainTrain) {
 static void trainEpochs(layer_t **model, optimizer_t *sgd, dataLoader_t *loader, int epochs,
                         int domain, const char *phase, trainingRng_t *rng) {
     for (int e = 0; e < epochs; e++) {
-        float loss = trainingEpochDefault(model, MODEL_SIZE,
+        float loss = trainingEpochDefault(&MODEL_CHAIN(model, MODEL_SIZE),
                                           (lossConfig_t){.funcType = CROSS_ENTROPY,
                                                          .backwardReduction = REDUCTION_MEAN,
                                                          .classWeights = NULL},

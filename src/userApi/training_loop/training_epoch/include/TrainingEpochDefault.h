@@ -10,9 +10,9 @@
  *  divisible by microBatchSize, and when no batch can be formed. Returns the
  *  mean of the per-batch losses. call (NULLable) goes to every
  *  trainingBatchDefault call unchanged. */
-float trainingEpochDefault(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
-                           dataLoader_t *dataLoader, optimizer_t *optimizer,
-                           calculateGradsFn_t calculateGradsFn, reduction_t forwardReduction,
-                           size_t microBatchSize, const trainingCall_t *call);
+float trainingEpochDefault(const model_t *model, lossConfig_t lossConfig, dataLoader_t *dataLoader,
+                           optimizer_t *optimizer, calculateGradsFn_t calculateGradsFn,
+                           reduction_t forwardReduction, size_t microBatchSize,
+                           const trainingCall_t *call);
 
 #endif // TRAINING_EPOCH_DEFAULT_H

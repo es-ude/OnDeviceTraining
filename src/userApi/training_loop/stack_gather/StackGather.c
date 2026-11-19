@@ -27,14 +27,14 @@ uint8_t *stackGatherReserveBuffer(const char *caller, const char *knob, size_t m
     return buffer;
 }
 
-void stackGatherRequireFloat32Model(const char *caller, const char *knob, layer_t **model,
-                                    size_t modelSize, size_t m, nonFloat32FieldFn_t fieldFn) {
-    for (size_t i = 0; i < modelSize; i++) {
-        const char *field = fieldFn(model[i]);
+void stackGatherRequireFloat32Model(const char *caller, const char *knob, const model_t *model,
+                                    size_t m, nonFloat32FieldFn_t fieldFn) {
+    for (size_t i = 0; i < model->numLayers; i++) {
+        const char *field = fieldFn(model->layers[i]);
         if (field != NULL) {
             PRINT_ERROR("%s: %s %zu > 1 is FLOAT32-only, but layer "
                         "%zu (layerType_t %d) has a non-FLOAT32 %s",
-                        caller, knob, m, i, (int)model[i]->type, field);
+                        caller, knob, m, i, (int)model->layers[i]->type, field);
             exit(1);
         }
     }

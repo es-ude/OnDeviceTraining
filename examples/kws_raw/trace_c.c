@@ -367,7 +367,7 @@ int main(int argc, char **argv) {
                             .sampleIdx = NPY_DUMP_NO_SAMPLE};
 
         /* tier 4a: weights before the step (unchanged during accumulation). */
-        traceModelWeights(model, MODEL_SIZE, "w_before", npyDumpSink, &ctx);
+        traceModelWeights(&MODEL_CHAIN(model, MODEL_SIZE), "w_before", npyDumpSink, &ctx);
 
         /* tiers 1 & 2 per sample (first g_actSamples); grads accumulate over ALL B samples.
          * No zero-grad between samples => param->grad ends up the SUM over the batch.
@@ -385,10 +385,11 @@ int main(int argc, char **argv) {
             batchView_t itemView;
             batchView_t labelView;
             const rngKey_t callKey = trainingRngCallKey(stepKey, s);
-            trainingStats_t *stats = tracedGrads(
-                model, MODEL_SIZE, lossCfg, REDUCTION_MEAN, batchViewOf(&itemView, smp->item),
-                batchViewOf(&labelView, label), dumpActs ? npyDumpSink : NULL,
-                dumpActs ? &ctx : NULL, &(trainingCall_t){.key = &callKey});
+            trainingStats_t *stats =
+                tracedGrads(&MODEL_CHAIN(model, MODEL_SIZE), lossCfg, REDUCTION_MEAN,
+                            batchViewOf(&itemView, smp->item), batchViewOf(&labelView, label),
+                            dumpActs ? npyDumpSink : NULL, dumpActs ? &ctx : NULL,
+                            &(trainingCall_t){.key = &callKey});
             sumLoss += (double)stats->loss;
             freeTrainingStats(stats);
             freeSample(smp);
@@ -396,20 +397,20 @@ int main(int argc, char **argv) {
         ctx.sampleIdx = NPY_DUMP_NO_SAMPLE;
 
         /* tier 3a: raw accumulated grads (SUM over the batch, pre-scale). */
-        traceModelGrads(model, MODEL_SIZE, "grad_raw", npyDumpSink, &ctx);
+        traceModelGrads(&MODEL_CHAIN(model, MODEL_SIZE), "grad_raw", npyDumpSink, &ctx);
 
         /* mean-reduction scaling, exactly as TrainingEpochDefault does it. */
         const rngKey_t updateKey = trainingRngUpdateKey(&rng);
         scaleOptimizerGradients(sgd, meanScale, &updateKey);
 
         /* tier 3b: scaled grads (MEAN, pre-step). */
-        traceModelGrads(model, MODEL_SIZE, "grad_scaled", npyDumpSink, &ctx);
+        traceModelGrads(&MODEL_CHAIN(model, MODEL_SIZE), "grad_scaled", npyDumpSink, &ctx);
 
         /* the update (through optimizerStep so an attached profiler sees the
          * OPTIMIZER phase, #432), then tier 4b: weights after. */
         optimizerStep(sgd, &updateKey);
         trainingRngAdvance(&rng);
-        traceModelWeights(model, MODEL_SIZE, "w_after", npyDumpSink, &ctx);
+        traceModelWeights(&MODEL_CHAIN(model, MODEL_SIZE), "w_after", npyDumpSink, &ctx);
         optimFns.zero(sgd);
 
         fprintf(stdout, "trace_c step %zu: effB=%zu mean_loss=%.6f -> %s\n", step, effB,

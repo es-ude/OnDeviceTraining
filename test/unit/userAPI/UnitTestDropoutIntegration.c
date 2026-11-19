@@ -83,7 +83,7 @@ void testTrainingStep_DropoutActiveThenFlagRestored(void) {
     bernoulliFillMaskFn_t saved = bernoulliGetFillMaskFn();
     bernoulliSetFillMaskFn(stubKeepEven);
     trainingStats_t *stats = calculateGradsSequential(
-        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
         REDUCTION_SUM, input, label, NULL);
     bernoulliSetFillMaskFn(saved);
 
@@ -214,7 +214,7 @@ void testMultiLayer_LinearDropoutLinear_BackwardCompletes(void) {
     bernoulliFillMaskFn_t saved = bernoulliGetFillMaskFn();
     bernoulliSetFillMaskFn(stubKeepEven);
     trainingStats_t *stats = calculateGradsSequential(
-        model, 3, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        &MODEL_CHAIN(model, 3), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
         REDUCTION_SUM, input, label, NULL);
     bernoulliSetFillMaskFn(saved);
 

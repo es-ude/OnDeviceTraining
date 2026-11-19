@@ -420,11 +420,11 @@ int main(void) {
         trainingStats_t *stats;
         if (i == 0) {
             /* One traced step: also probes Linear0's own forward wire. */
-            stats = tracedGrads(model, MODEL_SIZE, lossCfg, REDUCTION_MEAN, input, labelBatch,
-                                linear0WireGateSink, &wireCtx, &call);
+            stats = tracedGrads(&MODEL_CHAIN(model, MODEL_SIZE), lossCfg, REDUCTION_MEAN, input,
+                                labelBatch, linear0WireGateSink, &wireCtx, &call);
         } else {
-            stats = calculateGradsSequential(model, MODEL_SIZE, lossCfg, REDUCTION_MEAN, input,
-                                             labelBatch, &call);
+            stats = calculateGradsSequential(&MODEL_CHAIN(model, MODEL_SIZE), lossCfg,
+                                             REDUCTION_MEAN, input, labelBatch, &call);
         }
         freeTrainingStats(stats);
         freeSample(smp);
@@ -448,7 +448,7 @@ int main(void) {
             }
 
             paramGateCtx_t weightsCtx = {.isGrad = false, .count = 0};
-            traceModelWeights(model, MODEL_SIZE, "gate", paramGateSink, &weightsCtx);
+            traceModelWeights(&MODEL_CHAIN(model, MODEL_SIZE), "gate", paramGateSink, &weightsCtx);
             if (weightsCtx.count != 4) {
                 PRINT_ERROR("gate: expected 4 weight/bias param checks (2 Linear layers), saw %d",
                             weightsCtx.count);
@@ -456,7 +456,7 @@ int main(void) {
             }
 
             paramGateCtx_t gradsCtx = {.isGrad = true, .count = 0};
-            traceModelGrads(model, MODEL_SIZE, "gate", paramGateSink, &gradsCtx);
+            traceModelGrads(&MODEL_CHAIN(model, MODEL_SIZE), "gate", paramGateSink, &gradsCtx);
             if (gradsCtx.count != 4) {
                 PRINT_ERROR("gate: expected 4 grad param checks (2 Linear layers), saw %d",
                             gradsCtx.count);
@@ -464,7 +464,7 @@ int main(void) {
             }
 
             gradBytesGateCtx_t bytesCtx = {.totalBytes = 0};
-            traceModelGrads(model, MODEL_SIZE, "gate", gradBytesGateSink, &bytesCtx);
+            traceModelGrads(&MODEL_CHAIN(model, MODEL_SIZE), "gate", gradBytesGateSink, &bytesCtx);
             if (bytesCtx.totalBytes != EXPECTED_GRAD_BYTES) {
                 PRINT_ERROR("gate: expected %d packed grad bytes total, saw %zu",
                             EXPECTED_GRAD_BYTES, bytesCtx.totalBytes);

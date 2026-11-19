@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "Layer.h"
+#include "Model.h"
 #include "Tensor.h"
 
 /* Names the first non-FLOAT32 field of a layer, or NULL when the layer is
@@ -22,8 +23,8 @@ uint8_t *stackGatherReserveBuffer(const char *caller, const char *knob, size_t m
 /* FLOAT32 gate over the whole model, evaluated once per stacked run before any
  * buffer is reserved. Fails fast naming the first layer whose fieldFn reports a
  * non-FLOAT32 field. */
-void stackGatherRequireFloat32Model(const char *caller, const char *knob, layer_t **model,
-                                    size_t modelSize, size_t m, nonFloat32FieldFn_t fieldFn);
+void stackGatherRequireFloat32Model(const char *caller, const char *knob, const model_t *model,
+                                    size_t m, nonFloat32FieldFn_t fieldFn);
 
 /* A stacked sample must be FLOAT32, carry no sparsity and match `reference` in
  * rank, dimensions and order. */

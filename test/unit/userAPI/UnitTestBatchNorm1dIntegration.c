@@ -222,8 +222,8 @@ static void freeBnLinear(layer_t **model) {
 static void runGrads(layer_t **model, size_t n) {
     tensor_t *x = buildFloatTensor((size_t[]){4, 2}, 2, kX);
     tensor_t *y = buildFloatTensor((size_t[]){4, 2}, 2, kY);
-    freeTrainingStats(
-        calculateGradsSequential(model, n, defaultLossConfig(MSE), REDUCTION_MEAN, x, y, NULL));
+    freeTrainingStats(calculateGradsSequential(&MODEL_CHAIN(model, n), defaultLossConfig(MSE),
+                                               REDUCTION_MEAN, x, y, NULL));
     freeTensor(y);
     freeTensor(x);
 }
@@ -290,8 +290,8 @@ void testFrozenBatchNormKeepsLoadedBuffersDuringTraining(void) {
                               (stateDictBuffers_t[]){{.runningMean = rm, .runningVar = rv}}, 1);
     tensor_t *x = buildFloatTensor((size_t[]){1, 2}, 2, kX);
     tensor_t *y = buildFloatTensor((size_t[]){1, 2}, 2, kY);
-    freeTrainingStats(
-        calculateGradsSequential(model, 2, defaultLossConfig(MSE), REDUCTION_MEAN, x, y, NULL));
+    freeTrainingStats(calculateGradsSequential(&MODEL_CHAIN(model, 2), defaultLossConfig(MSE),
+                                               REDUCTION_MEAN, x, y, NULL));
     batchNorm1dConfig_t *c = model[0]->config->batchNorm1d;
     float got[4];
     memcpy(got, c->runningMean->data, 2 * sizeof(float));
@@ -408,8 +408,8 @@ static void runCadence(size_t m, float *rm, float *rv, uint64_t *nbt, float *gra
     batchView_t view;
     float scale = lossFunctions[MSE].computeMeanScale(CAD_B, batchViewOf(&view, labels[0]));
     batch_t *batch = buildCadBatch(items, labels);
-    (void)trainingBatchDefault(model, 2, defaultLossConfig(MSE), batch, calculateGradsSequential,
-                               REDUCTION_MEAN, m, NULL);
+    (void)trainingBatchDefault(&MODEL_CHAIN(model, 2), defaultLossConfig(MSE), batch,
+                               calculateGradsSequential, REDUCTION_MEAN, m, NULL);
     freeBatch(batch);
     batchNorm1dConfig_t *c = model[0]->config->batchNorm1d;
     memcpy(rm, c->runningMean->data, 3 * sizeof(float));

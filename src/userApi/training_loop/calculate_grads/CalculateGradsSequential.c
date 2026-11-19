@@ -24,14 +24,14 @@
 /* Dropout and BatchNorm1d run in training mode exactly for one grads call
  * (forward + backward, #460): inference, inferenceWithLoss and evaluation
  * never flip it, so they see eval mode. */
-static void setLayersTrainingMode(layer_t **model, size_t modelSize, bool training) {
-    for (size_t i = 0; i < modelSize; i++) {
-        switch (model[i]->type) {
+static void setLayersTrainingMode(const model_t *m, bool training) {
+    for (size_t i = 0; i < m->numLayers; i++) {
+        switch (m->layers[i]->type) {
         case DROPOUT:
-            model[i]->config->dropout->training = training;
+            m->layers[i]->config->dropout->training = training;
             break;
         case BATCHNORM1D:
-            model[i]->config->batchNorm1d->training = training;
+            m->layers[i]->config->batchNorm1d->training = training;
             break;
         default:
             break;
@@ -63,20 +63,19 @@ const rematPlanSpec_t *calculateGradsDefaultPlanSpec(void) {
  * validates it and resolves its operands before anything runs, and only then
  * does the driver execute it. Without a caller scheduler every call builds an
  * ephemeral HEAP one on the default plan, one block per wire range. */
-static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
-                                           lossConfig_t lossConfig, reduction_t forwardReduction,
-                                           tensor_t *input, tensor_t *label, traceSink_t sink,
-                                           void *sinkCtx, const trainingCall_t *call) {
+static trainingStats_t *calculateGradsImpl(const model_t *m, lossConfig_t lossConfig,
+                                           reduction_t forwardReduction, tensor_t *input,
+                                           tensor_t *label, traceSink_t sink, void *sinkCtx,
+                                           const trainingCall_t *call) {
     /* Phase hook (OdtHook.h): FORWARD and BACKWARD tile this whole call. */
     odtHookFire(ODT_EVENT_FORWARD_BEGIN);
-    setLayersTrainingMode(model, modelSize, true);
+    setLayersTrainingMode(m, true);
 
-    const model_t chain = MODEL_CHAIN(model, modelSize);
     rematScheduler_t ephemeral;
     rematScheduler_t *s = (call != NULL) ? call->remat : NULL;
     const rngKey_t *callKey = (call != NULL) ? call->key : NULL;
     if (s == NULL) {
-        if (!rematHeapInit(&ephemeral, &chain, lossConfig, input, &defaultPlanSpec)) {
+        if (!rematHeapInit(&ephemeral, m, lossConfig, input, &defaultPlanSpec)) {
             PRINT_ERROR("calculateGrads: ephemeral HEAP scheduler: reserveMemory failed");
             exit(1);
         }
@@ -84,16 +83,16 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
     }
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t chk;
-    rematCheckInit(&chk, s, &chain, lossConfig.funcType, REMAT_MODE_TRAIN, producedGen);
+    rematCheckInit(&chk, s, m, lossConfig.funcType, REMAT_MODE_TRAIN, producedGen);
 
-    rematBegin(s, &chain, lossConfig, input);
+    rematBegin(s, m, lossConfig, input);
     lossFunctions_t lossFns = lossFunctions[lossConfig.funcType];
     trainingStats_t *trainingStats = NULL;
     rematStep_t st;
     while (rematNext(s, &st)) {
         rematOperands_t op;
         rematCheckStep(&chk, &st, &op);
-        layer_t *layer = (st.layer < modelSize) ? model[st.layer] : NULL;
+        layer_t *layer = (st.layer < m->numLayers) ? m->layers[st.layer] : NULL;
         /* From the checked step's layer index only, so the scheduler cannot
          * change which draws a layer sees. */
         layerExec_t exStorage;
@@ -127,7 +126,7 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
         case REMAT_STEP_LOSS_BACKWARD:
             lossFns.backward(op.in, label, op.out, ex);
             if (sink != NULL) {
-                sink(sinkCtx, modelSize, model[modelSize - 1]->type, "lossgrad", op.out);
+                sink(sinkCtx, m->numLayers, m->layers[m->numLayers - 1]->type, "lossgrad", op.out);
             }
             break;
         case REMAT_STEP_BACKWARD: {
@@ -167,32 +166,29 @@ static trainingStats_t *calculateGradsImpl(layer_t **model, size_t modelSize,
         rematSchedulerDeinit(&ephemeral);
     }
 
-    setLayersTrainingMode(model, modelSize, false);
+    setLayersTrainingMode(m, false);
     odtHookFire(ODT_EVENT_BACKWARD_END);
     return trainingStats;
 }
 
-trainingStats_t *calculateGradsSequential(layer_t **model, size_t modelSize,
-                                          lossConfig_t lossConfig, reduction_t forwardReduction,
-                                          tensor_t *input, tensor_t *label,
-                                          const trainingCall_t *call) {
-    return calculateGradsImpl(model, modelSize, lossConfig, forwardReduction, input, label, NULL,
-                              NULL, call);
+trainingStats_t *calculateGradsSequential(const model_t *m, lossConfig_t lossConfig,
+                                          reduction_t forwardReduction, tensor_t *input,
+                                          tensor_t *label, const trainingCall_t *call) {
+    return calculateGradsImpl(m, lossConfig, forwardReduction, input, label, NULL, NULL, call);
 }
 
-trainingStats_t *tracedGrads(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
+trainingStats_t *tracedGrads(const model_t *m, lossConfig_t lossConfig,
                              reduction_t forwardReduction, tensor_t *input, tensor_t *label,
                              traceSink_t sink, void *ctx, const trainingCall_t *call) {
-    return calculateGradsImpl(model, modelSize, lossConfig, forwardReduction, input, label, sink,
-                              ctx, call);
+    return calculateGradsImpl(m, lossConfig, forwardReduction, input, label, sink, ctx, call);
 }
 
-static void traceModelParams(layer_t **model, size_t modelSize, const char *tag, bool wantGrad,
-                             traceSink_t sink, void *ctx) {
+static void traceModelParams(const model_t *m, const char *tag, bool wantGrad, traceSink_t sink,
+                             void *ctx) {
     char phase[64];
-    for (size_t i = 0; i < modelSize; i++) {
+    for (size_t i = 0; i < m->numLayers; i++) {
         parameter_t *w = NULL, *b = NULL;
-        if (!layerParameters(model[i], &w, &b)) {
+        if (!layerParameters(m->layers[i], &w, &b)) {
             continue;
         }
         /* Frozen layers (#380): getGradFromParameter returns NULL (Task 1 elides
@@ -201,24 +197,22 @@ static void traceModelParams(layer_t **model, size_t modelSize, const char *tag,
         tensor_t *wt = wantGrad ? getGradFromParameter(w) : getParamFromParameter(w);
         if (wt != NULL) {
             snprintf(phase, sizeof(phase), "%s.weight", tag);
-            sink(ctx, i, model[i]->type, phase, wt);
+            sink(ctx, i, m->layers[i]->type, phase, wt);
         }
         if (b != NULL) {
             tensor_t *bt = wantGrad ? getGradFromParameter(b) : getParamFromParameter(b);
             if (bt != NULL) {
                 snprintf(phase, sizeof(phase), "%s.bias", tag);
-                sink(ctx, i, model[i]->type, phase, bt);
+                sink(ctx, i, m->layers[i]->type, phase, bt);
             }
         }
     }
 }
 
-void traceModelWeights(layer_t **model, size_t modelSize, const char *tag, traceSink_t sink,
-                       void *ctx) {
-    traceModelParams(model, modelSize, tag, /*wantGrad=*/false, sink, ctx);
+void traceModelWeights(const model_t *m, const char *tag, traceSink_t sink, void *ctx) {
+    traceModelParams(m, tag, /*wantGrad=*/false, sink, ctx);
 }
 
-void traceModelGrads(layer_t **model, size_t modelSize, const char *tag, traceSink_t sink,
-                     void *ctx) {
-    traceModelParams(model, modelSize, tag, /*wantGrad=*/true, sink, ctx);
+void traceModelGrads(const model_t *m, const char *tag, traceSink_t sink, void *ctx) {
+    traceModelParams(m, tag, /*wantGrad=*/true, sink, ctx);
 }

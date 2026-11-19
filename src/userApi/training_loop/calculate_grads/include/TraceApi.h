@@ -5,6 +5,7 @@
 
 #include "Layer.h"
 #include "LossFunction.h"
+#include "Model.h"
 #include "Tensor.h"
 #include "TrainingLoopApi.h"
 
@@ -12,7 +13,7 @@
  *  a tensor to the sink and never opens a file; the sink (above the src/
  *  boundary) decides what to do with it.
  *
- *  - layerIdx:   model index of the layer; for the loss gradient, == modelSize.
+ *  - layerIdx:   model index of the layer; for the loss gradient, == m->numLayers.
  *  - layerType:  the layer's type (for naming / dtype decisions).
  *  - phase:      "fwd" | "refwd" | "agrad" | "lossgrad" for tracedGrads;
  *                "<tag>.weight" / "<tag>.bias" for traceModelWeights/Grads (Task 3).
@@ -24,7 +25,7 @@ typedef void (*traceSink_t)(void *ctx, size_t layerIdx, layerType_t layerType, c
  *  each layer's forward ("fwd"), after each recompute of a layer's forward
  *  that the scheduler's plan asks for during the backward phase ("refwd",
  *  with the recomputed output; a plan may recompute a layer more than once),
- *  after the loss backward ("lossgrad", layerIdx == modelSize), and before
+ *  after the loss backward ("lossgrad", layerIdx == m->numLayers), and before
  *  each layer's backward ("agrad", with the gradient entering it: the
  *  gradient w.r.t. that layer's output).
  *
@@ -34,9 +35,9 @@ typedef void (*traceSink_t)(void *ctx, size_t layerIdx, layerType_t layerType, c
  *  layer in the model trains, backward is skipped entirely -- NO "lossgrad"
  *  and NO "agrad" events fire (the loss value is still computed and "fwd"
  *  still fires for every layer). Preconditions: as for
- *  calculateGradsSequential (modelSize >= 1, and the uint16_t wire cap);
+ *  calculateGradsSequential (m->numLayers >= 1, and the uint16_t wire cap);
  *  call as for calculateGradsSequential. */
-trainingStats_t *tracedGrads(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
+trainingStats_t *tracedGrads(const model_t *m, lossConfig_t lossConfig,
                              reduction_t forwardReduction, tensor_t *input, tensor_t *label,
                              traceSink_t sink, void *ctx, const trainingCall_t *call);
 
@@ -47,11 +48,9 @@ trainingStats_t *tracedGrads(layer_t **model, size_t modelSize, lossConfig_t los
  *  borrowed VALID tensor, never NULL). (Trainable: LINEAR, CONV1D,
  *  CONV1D_TRANSPOSED, LAYERNORM, GROUPNORM, BATCHNORM1D when affine; BN
  *  running buffers are not traced.) */
-void traceModelWeights(layer_t **model, size_t modelSize, const char *tag, traceSink_t sink,
-                       void *ctx);
+void traceModelWeights(const model_t *m, const char *tag, traceSink_t sink, void *ctx);
 
 /*! Same, for the GRAD tensor of each parameter_t. */
-void traceModelGrads(layer_t **model, size_t modelSize, const char *tag, traceSink_t sink,
-                     void *ctx);
+void traceModelGrads(const model_t *m, const char *tag, traceSink_t sink, void *ctx);
 
 #endif /* TRACE_API_H */

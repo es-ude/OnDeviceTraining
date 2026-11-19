@@ -52,7 +52,7 @@ void testTrainingStep_PoolsCorrectly(void) {
     tensor_t *label = build3DFloat(1, 1, 2, (float[]){0.f, 0.f}, 2);
 
     trainingStats_t *stats = calculateGradsSequential(
-        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
         REDUCTION_SUM, input, label, NULL);
 
     bool statsNotNull = (stats != NULL);

@@ -355,7 +355,8 @@ static float evaluateStacked(const char *caller, const char *knob, layer_t **mod
                              size_t numberOfBatches, inferenceWithLossFn_t inferenceFn,
                              reduction_t forwardReduction, size_t m, evalCounts_t *counts,
                              size_t *totalSamples, const trainingCall_t *call) {
-    stackGatherRequireFloat32Model(caller, knob, model, modelSize, m, layerForwardNonFloat32Field);
+    stackGatherRequireFloat32Model(caller, knob, &MODEL_CHAIN(model, modelSize), m,
+                                   layerForwardNonFloat32Field);
     tensor_t *referenceItem = NULL;
     tensor_t *referenceLabel = NULL;
     uint8_t *itemBuffer = NULL;
@@ -744,8 +745,9 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
     requireNonEmptyFirstBatch(firstBatch, "trainingRun");
     size_t numClasses = calcNumberOfElementsByTensor(firstBatch->samples[0]->label);
     if (evalMicroBatchSize > 1) {
-        stackGatherRequireFloat32Model("trainingRun", "evalMicroBatchSize", model, modelSize,
-                                       evalMicroBatchSize, layerForwardNonFloat32Field);
+        stackGatherRequireFloat32Model("trainingRun", "evalMicroBatchSize",
+                                       &MODEL_CHAIN(model, modelSize), evalMicroBatchSize,
+                                       layerForwardNonFloat32Field);
     }
     requireEvaluableChunks(model, modelSize, evalDataLoader, firstBatch->samples[0]->item,
                            evalMicroBatchSize, "trainingRun");
@@ -798,9 +800,9 @@ trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t 
         info.parameterUpdates = trainDataLoader->getDatasetSize() / info.batchSize;
         info.learningRate = optimizerFunctions[optimizer->type].getLr(optimizer);
 
-        float trainLoss =
-            trainingEpochDefault(model, modelSize, lossConfig, trainDataLoader, optimizer,
-                                 calculateGradsFn, forwardReduction, microBatchSize, &trainCall);
+        float trainLoss = trainingEpochDefault(&MODEL_CHAIN(model, modelSize), lossConfig,
+                                               trainDataLoader, optimizer, calculateGradsFn,
+                                               forwardReduction, microBatchSize, &trainCall);
         rngKey_t evalKey;
         trainingCall_t epochEvalCall = evalCall;
         if (rng != NULL) {

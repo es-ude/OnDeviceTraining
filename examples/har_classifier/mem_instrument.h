@@ -126,7 +126,7 @@ size_t memInstrumentHarIoBytes(size_t microBatch);
  *    2 x [16,128] = 16,384 B for HAR). Pass the MICRO-batch.
  *  - HarWireOverhead: the metadata (group exponents/scales) of the 12 forward
  *    wires plus that of the same peak dx pair HarDxPeak models; 0 for FLOAT32. */
-size_t memInstrumentPoolBackwardBytes(layer_t **model, size_t modelSize);
+size_t memInstrumentPoolBackwardBytes(const model_t *m);
 
 /* The BFP trainer's input Quantization layer (FLOAT32 -> BFP, ahead of conv1)
  * adds one forward wire of [9, 128] per sample that the 12-layer tables above
@@ -143,8 +143,7 @@ size_t memInstrumentHarWireOverheadBytes(size_t microBatch,
 /* Everything the stack thunk needs to run one representative training step
  * (zeroGrad -> calculateGradsSequential -> step -> zeroGrad) on one sample. */
 typedef struct memStepCtx {
-    layer_t **model;
-    size_t modelSize;
+    model_t model; /* by value, so no separate model_t local must outlive the context */
     lossConfig_t lossConfig;
     tensor_t *input; /* one dataset sample in its natural shape; the thunk adds */
     tensor_t *label; /* the batch axis with batchViewOf, as trainingBatchDefault does */

@@ -286,7 +286,7 @@ static void sumParamBytesSink(void *ctx, size_t layerIdx, layerType_t layerType,
 
 static size_t modelResidentParamBytes(layer_t **model, size_t modelSize) {
     size_t total = 0;
-    traceModelWeights(model, modelSize, "w", sumParamBytesSink, &total);
+    traceModelWeights(&MODEL_CHAIN(model, modelSize), "w", sumParamBytesSink, &total);
     return total;
 }
 
@@ -612,13 +612,12 @@ int main(void) {
     report.optstate_analytic_b = optstateFrozenB;
     report.activations_b = memInstrumentHarActivationBytes(MICRO_BATCH, NULL);
     report.io_b = memInstrumentHarIoBytes(MICRO_BATCH);
-    report.pool_backward_b = memInstrumentPoolBackwardBytes(model2, MODEL_SIZE);
+    report.pool_backward_b = memInstrumentPoolBackwardBytes(&MODEL_CHAIN(model2, MODEL_SIZE));
     report.dx_peak_b = dxPeakStage2B;
 
     sample_t *stepSample = getTrainSample(0);
     memStepCtx_t stepCtx = {
-        .model = model2,
-        .modelSize = MODEL_SIZE,
+        .model = MODEL_CHAIN(model2, MODEL_SIZE),
         .lossConfig = lossConfig,
         .input = stepSample->item,
         .label = stepSample->label,

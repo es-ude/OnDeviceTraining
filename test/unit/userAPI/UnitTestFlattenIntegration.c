@@ -60,7 +60,7 @@ void testCalculateGradsSequential_WithFlattenFirst_DoesNotCrash(void) {
     tensorFillFromFloatBuffer(label, (float[]){1.0f, 0.0f}, 2);
 
     trainingStats_t *stats = calculateGradsSequential(
-        model, 3, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        &MODEL_CHAIN(model, 3), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
         REDUCTION_SUM, input, label, NULL);
 
     /* CAPTURE before frees. */
@@ -114,7 +114,7 @@ void testCalculateGradsSequential_FlattenRank1_DoesNotOOB(void) {
     layer_t *model[1] = {flatten};
 
     trainingStats_t *stats = calculateGradsSequential(
-        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
         REDUCTION_SUM, input, label, NULL);
 
     /* CAPTURE before frees. */
@@ -166,7 +166,7 @@ void testCalculateGradsSequential_FlattenOnly_PreservesValues(void) {
     layer_t *model[1] = {flatten};
 
     trainingStats_t *stats = calculateGradsSequential(
-        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
         REDUCTION_SUM, input, label, NULL);
 
     /* CAPTURE before frees. */

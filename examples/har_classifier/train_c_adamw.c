@@ -461,13 +461,12 @@ int main(void) {
         report.optstate_analytic_b = memInstrumentOptStateBytes(optim);
         report.activations_b = memInstrumentHarActivationBytes(MICRO_BATCH, NULL);
         report.io_b = memInstrumentHarIoBytes(MICRO_BATCH);
-        report.pool_backward_b = memInstrumentPoolBackwardBytes(model, MODEL_SIZE);
+        report.pool_backward_b = memInstrumentPoolBackwardBytes(&MODEL_CHAIN(model, MODEL_SIZE));
         report.dx_peak_b = memInstrumentHarDxPeakBytes(MICRO_BATCH, NULL);
 
         sample_t *stepSample = getTrainSample(0);
         memStepCtx_t stepCtx = {
-            .model = model,
-            .modelSize = MODEL_SIZE,
+            .model = MODEL_CHAIN(model, MODEL_SIZE),
             .lossConfig = (lossConfig_t){.funcType = CROSS_ENTROPY,
                                          .backwardReduction = REDUCTION_MEAN,
                                          .classWeights = NULL},

@@ -801,9 +801,9 @@ int main(void) {
 
     /* ---- Gate: param + grad storage dtypes -------------------------------- */
     paramGateCtx_t wCtx = {.isGrad = false, .expectBits = g_symBits, .count = 0, .fails = 0};
-    traceModelWeights(model, MODEL_SIZE, "gate", paramGateSink, &wCtx);
+    traceModelWeights(&MODEL_CHAIN(model, MODEL_SIZE), "gate", paramGateSink, &wCtx);
     paramGateCtx_t gCtx = {.isGrad = true, .expectBits = 0, .count = 0, .fails = 0};
-    traceModelGrads(model, MODEL_SIZE, "gate", paramGateSink, &gCtx);
+    traceModelGrads(&MODEL_CHAIN(model, MODEL_SIZE), "gate", paramGateSink, &gCtx);
     /* 4 trainable layers x (weight + bias) = 8 each. */
     if (wCtx.fails != 0 || gCtx.fails != 0 || wCtx.count != 8 || gCtx.count != 8) {
         fprintf(stderr, "GATES FAILED (weight ok=%d fails=%d; grad ok=%d fails=%d)\n", wCtx.count,
@@ -957,13 +957,12 @@ int main(void) {
     report.optstate_analytic_b = memInstrumentOptStateBytes(sgd);
     report.activations_b = memInstrumentHarActivationBytes(MICRO_BATCH, NULL);
     report.io_b = memInstrumentHarIoBytes(MICRO_BATCH);
-    report.pool_backward_b = memInstrumentPoolBackwardBytes(model, MODEL_SIZE);
+    report.pool_backward_b = memInstrumentPoolBackwardBytes(&MODEL_CHAIN(model, MODEL_SIZE));
     report.dx_peak_b = memInstrumentHarDxPeakBytes(MICRO_BATCH, NULL);
 
     sample_t *stepSample = getTrainSample(0);
     memStepCtx_t stepCtx = {
-        .model = model,
-        .modelSize = MODEL_SIZE,
+        .model = MODEL_CHAIN(model, MODEL_SIZE),
         .lossConfig = (lossConfig_t){.funcType = CROSS_ENTROPY,
                                      .backwardReduction = REDUCTION_MEAN,
                                      .classWeights = NULL},

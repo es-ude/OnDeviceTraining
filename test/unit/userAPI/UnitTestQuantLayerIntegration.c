@@ -194,8 +194,8 @@ void testTrainingStepLinearSymThenQuantRequantsOutputAndFiniteLoss(void) {
     tensor_t *input = build2DSym(2, 4, INPUT_VALS, 8);
     tensor_t *label = build2DSym(2, 3, (float[]){0.5f, -1.f, 2.f, 1.5f, -0.5f, 1.f}, 6);
 
-    trainingStats_t *stats = calculateGradsSequential(model, 2, defaultLossConfig(MSE),
-                                                      REDUCTION_MEAN, input, label, NULL);
+    trainingStats_t *stats = calculateGradsSequential(
+        &MODEL_CHAIN(model, 2), defaultLossConfig(MSE), REDUCTION_MEAN, input, label, NULL);
     bool statsNotNull = (stats != NULL);
     float loss = stats ? stats->loss : NAN;
 
@@ -332,8 +332,8 @@ void testFullSymChainTrainingStepMatchesFloatTwin(void) {
     optimizer_t *optimS =
         sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(modelSym, 5), momentumQS,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
-    trainingStats_t *statsS = calculateGradsSequential(modelSym, 5, defaultLossConfig(MSE),
-                                                       REDUCTION_MEAN, inS, labelS, NULL);
+    trainingStats_t *statsS = calculateGradsSequential(
+        &MODEL_CHAIN(modelSym, 5), defaultLossConfig(MSE), REDUCTION_MEAN, inS, labelS, NULL);
     /* The factory's SR write-back into the SYM_INT32 params draws. */
     const rngKey_t updateKey = rngKeyFromSeed(308u);
     sgdStepM(optimS, &updateKey);
@@ -369,8 +369,8 @@ void testFullSymChainTrainingStepMatchesFloatTwin(void) {
     optimizer_t *optimF =
         sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(modelF, 3), momentumQF,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
-    trainingStats_t *statsF = calculateGradsSequential(modelF, 3, defaultLossConfig(MSE),
-                                                       REDUCTION_MEAN, inF, labelF, NULL);
+    trainingStats_t *statsF = calculateGradsSequential(
+        &MODEL_CHAIN(modelF, 3), defaultLossConfig(MSE), REDUCTION_MEAN, inF, labelF, NULL);
     sgdStepM(optimF, NULL);
 
     float w0F[12], b0F[3], gammaF[3], betaF[3], w1F[6], b1F[2];
@@ -478,8 +478,8 @@ void testConv1dTransposedSymChainTrains(void) {
     for (size_t s = 0; s < STEPS; s++) {
         tensor_t *in = build3DSymI12(1, 1, 3, IN_VALS, 3);
         tensor_t *label = build3DSymI12(1, 1, 4, LABEL_VALS, 4);
-        trainingStats_t *st = calculateGradsSequential(model, 2, defaultLossConfig(MSE),
-                                                       REDUCTION_MEAN, in, label, NULL);
+        trainingStats_t *st = calculateGradsSequential(
+            &MODEL_CHAIN(model, 2), defaultLossConfig(MSE), REDUCTION_MEAN, in, label, NULL);
         if (s == 0) {
             firstLoss = st->loss;
         }

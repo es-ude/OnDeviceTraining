@@ -53,9 +53,9 @@ static void makeLabel(size_t outFeatures) {
 }
 
 static void trainOn(fixture_t *f, rematScheduler_t *s) {
-    freeTrainingStats(calculateGradsSequential(f->model, f->n, defaultLossConfig(f->lt),
-                                               REDUCTION_MEAN, f->x, g_label,
-                                               &(trainingCall_t){.remat = s}));
+    freeTrainingStats(calculateGradsSequential(&MODEL_CHAIN(f->model, f->n),
+                                               defaultLossConfig(f->lt), REDUCTION_MEAN, f->x,
+                                               g_label, &(trainingCall_t){.remat = s}));
 }
 
 /* ---- tampered plans: the order and range rules fire first ---- */

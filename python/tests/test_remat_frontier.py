@@ -49,14 +49,14 @@ class GoldenTrainer:
 # wire_metadata_b, recompute_cost, refwd_steps, steps). Derived twice: C's DRY_PLAN lines
 # (the goldens) and the planner's own numbers, which the script requires to agree.
 HAR = [
-    ("retain:1,3,4,6,7,10,12+inplace", 41216, 0, 41216, 6816, 0, 0, 25),
-    ("retain:1,4,6,7,10,12+inplace", 37120, 0, 37120, 6864, 4096, 2, 27),
-    ("retain:1,4,7,10,12+inplace", 36864, 0, 36864, 6912, 8192, 4, 29),
-    ("retain:3,4,6,7,10,12+inplace", 33024, 0, 33024, 6840, 129024, 1, 26),
-    ("retain:4,6,7,10,12+inplace", 28928, 0, 28928, 6888, 133120, 3, 28),
-    ("retain:4,7,10,12+inplace", 28672, 0, 28672, 6936, 137216, 5, 30),
-    ("retain:3,6,7,10,12+inplace", 24832, 0, 24832, 6864, 292864, 2, 27),
-    ("retain:3,6,10,12+inplace", 24576, 0, 24576, 6888, 489472, 3, 28),
+    ("retain:1,3,4,6,7,10,12+inplace", 41216, 0, 41216, 7360, 0, 0, 25),
+    ("retain:1,4,6,7,10,12+inplace", 37120, 0, 37120, 7408, 4096, 2, 27),
+    ("retain:1,4,7,10,12+inplace", 36864, 0, 36864, 7456, 8192, 4, 29),
+    ("retain:3,4,6,7,10,12+inplace", 33024, 0, 33024, 7384, 129024, 1, 26),
+    ("retain:4,6,7,10,12+inplace", 28928, 0, 28928, 7432, 133120, 3, 28),
+    ("retain:4,7,10,12+inplace", 28672, 0, 28672, 7480, 137216, 5, 30),
+    ("retain:3,6,7,10,12+inplace", 24832, 0, 24832, 7408, 292864, 2, 27),
+    ("retain:3,6,10,12+inplace", 24576, 0, 24576, 7432, 489472, 3, 28),
 ]
 
 
@@ -126,7 +126,7 @@ def test_the_csv_has_cs_columns_then_the_planners(tmp_path):
     lines = out.read_text().splitlines()
     assert lines[0] == ",".join(COLUMNS)
     # The plan holds commas, so the CSV quotes it.
-    assert lines[1] == ('41216,"retain:1,3,4,6,7,10,12+inplace",41216,0,41216,6816,0,0,25,'
+    assert lines[1] == ('41216,"retain:1,3,4,6,7,10,12+inplace",41216,0,41216,7360,0,0,25,'
                         "41216,41216,0,0,25")
     assert len(lines) == 1 + len(HAR)
 

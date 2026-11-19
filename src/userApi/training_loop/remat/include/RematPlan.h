@@ -196,9 +196,28 @@ typedef struct rematRange {
     uint16_t wire, begin, end;
 } rematRange_t;
 
+/* One operand of a step's slice. Its wire is REMAT_NONE only for a write: that
+ * input gets no dx. */
+typedef struct rematOperand {
+    uint16_t wire;
+    uint8_t mode; /* opMode_t */
+} rematOperand_t;
+
+/* Where each node's canonical slices start in its program's pool, REMAT_NONE
+ * for none. FORWARD and every REFORWARD of a node share one slice. Entry n
+ * holds the loss: forward = LOSS_FORWARD, backward = LOSS_BACKWARD. */
+typedef struct rematNodeOps {
+    uint16_t forward;
+    uint16_t backward;
+    uint16_t sum; /* always REMAT_NONE on a chain */
+} rematNodeOps_t;
+
 typedef struct rematProgram {
     size_t numSteps;
     rematStep_t *steps;
+    size_t numOperands;       /* at most UINT16_MAX + 1: step offsets are uint16_t */
+    rematOperand_t *operands; /* each step's slice: its reads, then its writes */
+    rematNodeOps_t *nodeOps;  /* [n + 1] */
     size_t numRanges;
     rematRange_t *ranges; /* begin-sorted, ties by wire id */
     uint16_t *endOrder;   /* range ids sorted by end, ties by wire id */

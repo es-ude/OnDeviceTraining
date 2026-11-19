@@ -34,6 +34,7 @@
 #include "RNG.h"
 #include "ReluApi.h"
 #include "RematPlan.h"
+#include "RematPlanPolicy.h"
 #include "RematTestFixtures.h"
 #include "Serialize.h"
 #include "SoftmaxApi.h"
@@ -2345,26 +2346,199 @@ void testStoreAllPeakFinetuneStage2Is57928(void) {
     freeModel(model, HAR_N);
 }
 
-/* One block of steps, ranges and endOrder for both programs. HAR TRAIN arrays:
- * 25 * 4 + 23 * 6 + 23 * 2 = 284 B after the (even-sized) plan struct; EVAL
- * arrays: 13 * 4 + 12 * 6 + 12 * 2 = 148 B. Every array is 2-aligned, so the
- * two programs pack without padding. */
+_Static_assert(sizeof(rematOperand_t) == 4, "an operand is a uint16_t wire and a uint8_t mode");
+
+/* One block of steps, operands, nodeOps, ranges and endOrder for both
+ * programs, after the (even-sized) plan struct. HAR TRAIN arrays:
+ * 25 * 8 + 60 * 4 + 13 * 6 + 23 * 6 + 23 * 2 = 702 B; EVAL arrays:
+ * 13 * 8 + 25 * 4 + 13 * 6 + 12 * 6 + 12 * 2 = 378 B. Every array is
+ * 2-aligned, so the arrays pack without padding. */
 void testPlanBlockHoldsStepsRangesAndEndOrder(void) {
     layer_t *model[HAR_N];
     buildHar(model, false);
     inputLike_t in;
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
     rematPlan_t *p = buildPlan(t, model, NULL);
-    /* TRAIN 25 * 8 + 23 * 6 + 23 * 2 = 384 B; EVAL 13 * 8 + 12 * 6 + 12 * 2 = 200 B. */
-    TEST_ASSERT_EQUAL_size_t(sizeof(rematPlan_t) + 384u + 200u, p->blockBytes);
+    TEST_ASSERT_EQUAL_size_t(sizeof(rematPlan_t) + 702u + 378u, p->blockBytes);
     const uint8_t *begin = (const uint8_t *)p;
     const uint8_t *end = begin + p->blockBytes;
     const rematProgram_t *eval = rematPlanProgram(p, REMAT_MODE_EVAL);
     TEST_ASSERT_TRUE((const uint8_t *)p->train.steps >= begin + sizeof(rematPlan_t));
+    TEST_ASSERT_TRUE((const uint8_t *)p->train.operands >=
+                     (const uint8_t *)(p->train.steps + p->train.numSteps));
+    TEST_ASSERT_TRUE((const uint8_t *)p->train.nodeOps >=
+                     (const uint8_t *)(p->train.operands + p->train.numOperands));
+    TEST_ASSERT_TRUE((const uint8_t *)p->train.ranges >=
+                     (const uint8_t *)(p->train.nodeOps + HAR_N + 1));
     TEST_ASSERT_TRUE((const uint8_t *)eval->steps >=
                      (const uint8_t *)(p->train.endOrder + p->train.numRanges));
     TEST_ASSERT_TRUE((const uint8_t *)(eval->endOrder + eval->numRanges) <= end);
     rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* ---- the operand pool ---- */
+
+static void assertSlice(const rematProgram_t *p, const rematStep_t *st, uint8_t numReads,
+                        uint8_t numWrites, const rematOperand_t *expected) {
+    TEST_ASSERT_EQUAL_UINT8(numReads, st->numReads);
+    TEST_ASSERT_EQUAL_UINT8(numWrites, st->numWrites);
+    TEST_ASSERT_TRUE(st->operands + numReads + numWrites <= p->numOperands);
+    for (size_t i = 0; i < (size_t)numReads + numWrites; i++) {
+        TEST_ASSERT_EQUAL_UINT16(expected[i].wire, p->operands[st->operands + i].wire);
+        TEST_ASSERT_EQUAL_UINT8(expected[i].mode, p->operands[st->operands + i].mode);
+    }
+}
+
+/* HAR STORE_ALL (CE): wires ACT 0..12, seed 13, GRAD l at 24 - l. Pool:
+ * FORWARD(j) at 2j, LOSS_FORWARD 24, LOSS_BACKWARD 25, BACKWARD(10..0) at 27 + 3(10 - l).
+ * A pool, Flatten or Dropout BACKWARD does not read its input: META. */
+void testHarTrainOperandsAreTheDerivedSlices(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlan_t *p = buildPlan(t, model, NULL);
+    const rematProgram_t *tr = &p->train;
+    TEST_ASSERT_EQUAL_size_t(60, tr->numOperands);
+    for (uint16_t j = 0; j < 12; j++) {
+        TEST_ASSERT_EQUAL_UINT16(2 * j, tr->nodeOps[j].forward);
+        TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, tr->nodeOps[j].sum);
+        assertSlice(
+            tr, &tr->steps[j], 1, 1,
+            (const rematOperand_t[]){{j, OP_MODE_READ}, {(uint16_t)(j + 1), OP_MODE_WRITE}});
+    }
+    TEST_ASSERT_EQUAL_UINT16(24, tr->nodeOps[12].forward);
+    TEST_ASSERT_EQUAL_UINT16(25, tr->nodeOps[12].backward);
+    TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, tr->nodeOps[12].sum);
+    TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, tr->nodeOps[11].backward); /* the CE-skipped Softmax */
+    assertSlice(tr, &tr->steps[12], 1, 0, (const rematOperand_t[]){{12, OP_MODE_READ}});
+    assertSlice(tr, &tr->steps[13], 1, 1,
+                (const rematOperand_t[]){{12, OP_MODE_READ}, {13, OP_MODE_WRITE}});
+    static const struct {
+        uint16_t at, dy;
+        uint8_t xMode;
+        uint16_t dx;
+    } b[11] = {
+        {27, 13, OP_MODE_READ, 14}, {30, 14, OP_MODE_META, 15},        {33, 15, OP_MODE_META, 16},
+        {36, 16, OP_MODE_READ, 17}, {39, 17, OP_MODE_READ, 18},        {42, 18, OP_MODE_META, 19},
+        {45, 19, OP_MODE_READ, 20}, {48, 20, OP_MODE_READ, 21},        {51, 21, OP_MODE_META, 22},
+        {54, 22, OP_MODE_READ, 23}, {57, 23, OP_MODE_READ, REMAT_NONE}};
+    for (uint16_t k = 0; k < 11; k++) {
+        uint16_t l = (uint16_t)(10 - k);
+        TEST_ASSERT_EQUAL_UINT16(b[k].at, tr->nodeOps[l].backward);
+        TEST_ASSERT_EQUAL_UINT16(b[k].at, tr->steps[14 + k].operands);
+        assertSlice(tr, &tr->steps[14 + k], 2, 1,
+                    (const rematOperand_t[]){
+                        {b[k].dy, OP_MODE_READ}, {l, b[k].xMode}, {b[k].dx, OP_MODE_WRITE}});
+    }
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* The first n + 1 TRAIN steps, their operands included, are the EVAL program,
+ * under every policy. */
+void testEvalProgramIsTheTrainPrefixOperandsIncluded(void) {
+    const rematPlanSpec_t *specs[3] = {NULL, &g_liveness, &g_livenessInPlace};
+    for (size_t k = 0; k < 3u; k++) {
+        layer_t *model[HAR_N];
+        buildHar(model, false);
+        inputLike_t in;
+        rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+        rematPlan_t *p = buildPlan(t, model, specs[k]);
+        const rematProgram_t *train = &p->train;
+        const rematProgram_t *eval = rematPlanProgram(p, REMAT_MODE_EVAL);
+        TEST_ASSERT_EQUAL_size_t(25, eval->numOperands);
+        TEST_ASSERT_EQUAL_MEMORY(train->operands, eval->operands, 25 * sizeof(rematOperand_t));
+        TEST_ASSERT_EQUAL_size_t(13, eval->numSteps);
+        TEST_ASSERT_EQUAL_MEMORY(train->steps, eval->steps, 13 * sizeof(rematStep_t));
+        for (size_t j = 0; j <= 12; j++) {
+            TEST_ASSERT_EQUAL_UINT16(train->nodeOps[j].forward, eval->nodeOps[j].forward);
+            TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, eval->nodeOps[j].backward);
+            TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, eval->nodeOps[j].sum);
+        }
+        rematPlanFree(p);
+        rematWireTableFree(t);
+        freeModel(model, HAR_N);
+    }
+}
+
+/* A REFORWARD shares its FORWARD's slice; the pool does not depend on the policy. */
+void testAReforwardCarriesItsForwardsSlice(void) {
+    bool retain[HAR_N + 1] = {false};
+    retain[3] = retain[7] = retain[12] = true;
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    rematPlanSpec_t spec = {.policy = REMAT_PLAN_RETAIN_LIST, .retain = retain};
+    rematPlan_t *p = buildPlan(t, model, &spec);
+    const rematProgram_t *train = &p->train;
+    TEST_ASSERT_EQUAL_size_t(60, train->numOperands);
+    TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_REFORWARD, train->steps[14].kind);
+    TEST_ASSERT_EQUAL_UINT16(7, train->steps[14].layer);
+    TEST_ASSERT_EQUAL_UINT16(14, train->nodeOps[7].forward);
+    assertSlice(train, &train->steps[14], 1, 1,
+                (const rematOperand_t[]){{7, OP_MODE_READ}, {8, OP_MODE_WRITE}});
+    TEST_ASSERT_EQUAL_UINT16(14, train->steps[14].operands);
+    size_t reforwards = 0;
+    bool sawLayer0 = false;
+    for (size_t s = 0; s < train->numSteps; s++) {
+        const rematStep_t *st = &train->steps[s];
+        if (st->kind != REMAT_STEP_REFORWARD) {
+            continue;
+        }
+        reforwards++;
+        TEST_ASSERT_EQUAL_UINT16(train->nodeOps[st->layer].forward, st->operands);
+        if (st->layer == 0) {
+            sawLayer0 = true;
+            TEST_ASSERT_EQUAL_UINT16(0, st->operands);
+            assertSlice(train, st, 1, 1,
+                        (const rematOperand_t[]){{0, OP_MODE_READ}, {1, OP_MODE_WRITE}});
+        }
+    }
+    TEST_ASSERT_EQUAL_size_t(7, reforwards);
+    TEST_ASSERT_TRUE(sawLayer0);
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* A caller's step list the grammar will reject still derives safely: the
+ * Softmax's BACKWARD (CE skips it), an unknown kind, and a FORWARD and a
+ * BACKWARD at layer n (whose nodeOps entry holds the loss slices) each get the
+ * empty slice. */
+void testTheDeriverGivesARejectedSequenceStepAnEmptySlice(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    const rematStep_t sequence[4] = {STEP_B(11), {.kind = 9, .layer = 0}, STEP_F(12), STEP_B(12)};
+    rematPlanSpec_t spec = {.policy = REMAT_PLAN_SEQUENCE, .sequence = sequence, .sequenceLen = 4};
+    rematDeriveSize_t size = rematDeriveTrainSize(t, &spec);
+    TEST_ASSERT_EQUAL_size_t(4, size.numSteps);
+    TEST_ASSERT_EQUAL_size_t(60, size.numOperands);
+    rematStep_t steps[4];
+    rematOperand_t operands[60];
+    rematNodeOps_t nodeOps[HAR_N + 1];
+    memset(steps, 0xA5, sizeof steps);
+    memset(operands, 0, sizeof operands);
+    memset(nodeOps, 0, sizeof nodeOps);
+    rematProgram_t p = {.numSteps = size.numSteps,
+                        .steps = steps,
+                        .numOperands = size.numOperands,
+                        .operands = operands,
+                        .nodeOps = nodeOps};
+    rematDeriveTrain(t, &spec, &p);
+    for (size_t s = 0; s < 4u; s++) {
+        TEST_ASSERT_EQUAL_UINT8(sequence[s].kind, steps[s].kind);
+        TEST_ASSERT_EQUAL_UINT16(sequence[s].layer, steps[s].layer);
+        TEST_ASSERT_EQUAL_UINT8(0, steps[s].numReads);
+        TEST_ASSERT_EQUAL_UINT8(0, steps[s].numWrites);
+        TEST_ASSERT_EQUAL_UINT16(0, steps[s].operands);
+    }
     rematWireTableFree(t);
     freeModel(model, HAR_N);
 }
@@ -2732,6 +2906,146 @@ void testEveryStepsOperandsAreCoLiveOnRandomChains(void) {
             (nextRandom(&state) % 2u == 0u || model[n - 1]->type != SOFTMAX) ? MSE : CROSS_ENTROPY;
         inputLike_t in;
         assertCoLiveUnderBothPolicies(model, n, lt, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
+        freeModel(model, n);
+    }
+}
+
+/* The positional backward range of a chain, kept here as an oracle independent of the
+ * table's needs-grad flags: deepest = the first trainable layer (n: none), top = n - 1, or n - 2
+ * under CROSS_ENTROPY, whose backward skips the Softmax. */
+static void positionalRange(layer_t **model, size_t n, lossFuncType_t lt, size_t *deepest,
+                            ptrdiff_t *top) {
+    *deepest = deepestTrainableIndex(model, n);
+    *top = (ptrdiff_t)n - 1 - (lt == CROSS_ENTROPY ? 1 : 0);
+}
+
+typedef struct positionalOperands {
+    rematOperand_t reads[2];
+    size_t numReads;
+    uint16_t write; /* REMAT_NONE: none */
+} positionalOperands_t;
+
+/* The operands of a chain step by position alone: a FORWARD reads ACT l and writes ACT l + 1,
+ * a BACKWARD(l) reads the gradient of its output (the seed at top) and its input, and writes
+ * GRAD l above deepest. A BACKWARD that does not read its input still names it, as META. */
+static positionalOperands_t positionalOperands(const rematWireTable_t *t, layer_t **model,
+                                               size_t deepest, ptrdiff_t top,
+                                               const rematStep_t *st) {
+    size_t n = t->modelSize;
+    size_t l = st->layer;
+    positionalOperands_t o = {.numReads = 0, .write = REMAT_NONE};
+    switch (st->kind) {
+    case REMAT_STEP_FORWARD:
+    case REMAT_STEP_REFORWARD:
+        o.reads[o.numReads++] = (rematOperand_t){rematActId(t, l), OP_MODE_READ};
+        o.write = rematActId(t, l + 1u);
+        break;
+    case REMAT_STEP_LOSS_FORWARD:
+        o.reads[o.numReads++] = (rematOperand_t){rematActId(t, n), OP_MODE_READ};
+        break;
+    case REMAT_STEP_LOSS_BACKWARD:
+        o.reads[o.numReads++] = (rematOperand_t){rematActId(t, n), OP_MODE_READ};
+        o.write = rematGradId(t, n);
+        break;
+    case REMAT_STEP_BACKWARD:
+        o.reads[o.numReads++] = (rematOperand_t){
+            ((ptrdiff_t)l == top) ? rematGradId(t, n) : rematGradId(t, l + 1u), OP_MODE_READ};
+        o.reads[o.numReads++] = (rematOperand_t){
+            rematActId(t, l), layerBackwardReadsInput(model[l]) ? OP_MODE_READ : OP_MODE_META};
+        if (l > deepest) {
+            o.write = rematGradId(t, l);
+        }
+        break;
+    default:
+        TEST_FAIL_MESSAGE("a step of unknown kind in a built plan");
+    }
+    return o;
+}
+
+static void assertStoredOperandsArePositional(const rematProgram_t *p, const rematWireTable_t *t,
+                                              layer_t **model, lossFuncType_t lt) {
+    size_t deepest;
+    ptrdiff_t top;
+    positionalRange(model, t->modelSize, lt, &deepest, &top);
+    for (size_t s = 0; s < p->numSteps; s++) {
+        const rematStep_t *st = &p->steps[s];
+        positionalOperands_t want = positionalOperands(t, model, deepest, top, st);
+        TEST_ASSERT_TRUE(st->operands + st->numReads + st->numWrites <= p->numOperands);
+        const rematOperand_t *got = &p->operands[st->operands];
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(want.numReads, st->numReads, "read count");
+        for (size_t i = 0; i < want.numReads; i++) {
+            TEST_ASSERT_EQUAL_UINT16_MESSAGE(want.reads[i].wire, got[i].wire, "read wire");
+            TEST_ASSERT_EQUAL_UINT8_MESSAGE(want.reads[i].mode, got[i].mode, "read mode");
+        }
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(st->kind == REMAT_STEP_LOSS_FORWARD ? 0u : 1u,
+                                        st->numWrites, "write count");
+        uint16_t write = REMAT_NONE;
+        if (st->numWrites == 1u) {
+            TEST_ASSERT_EQUAL_UINT8_MESSAGE(OP_MODE_WRITE, got[st->numReads].mode, "write mode");
+            write = got[st->numReads].wire;
+        }
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(want.write, write, "write wire");
+    }
+}
+
+/* The largest model of the operand-oracle tests (HAR), plus ACT 0. */
+#define RETAIN_ALL_MAX (HAR_N + 1)
+
+/* STORE_ALL, LIVENESS, LIVENESS + inPlaceDx and RETAIN_LIST keeping every ACT. */
+static void assertStoredOperandsArePositionalUnderEveryPolicy(layer_t **model, size_t n,
+                                                              lossFuncType_t lt,
+                                                              const tensor_t *x) {
+    bool retain[RETAIN_ALL_MAX];
+    TEST_ASSERT_TRUE(n < RETAIN_ALL_MAX);
+    for (size_t j = 0; j <= n; j++) {
+        retain[j] = true;
+    }
+    const rematPlanSpec_t keepAll = {.policy = REMAT_PLAN_RETAIN_LIST, .retain = retain};
+    const rematPlanSpec_t *specs[4] = {NULL, &g_liveness, &g_livenessInPlace, &keepAll};
+    rematWireTable_t *t = initTable(model, n, lt, x);
+    for (size_t k = 0; k < 4u; k++) {
+        rematPlan_t *p = buildPlan(t, model, specs[k]);
+        assertStoredOperandsArePositional(&p->train, t, model, lt);
+        rematPlanFree(p);
+    }
+    rematWireTableFree(t);
+}
+
+/* The positional resolver the deriver replaced, frozen here as the chain
+ * oracle: on the zoo, every stored step's reads, its META input and its write
+ * equal it. */
+void testStoredOperandsAreThePositionalOperandsOnTheZoo(void) {
+    inputLike_t in;
+    layer_t *har[HAR_N];
+    buildHar(har, false);
+    assertStoredOperandsArePositionalUnderEveryPolicy(har, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    freeModel(har, HAR_N);
+    layer_t *finetune[HAR_N];
+    buildHar(finetune, true);
+    assertStoredOperandsArePositionalUnderEveryPolicy(finetune, HAR_N, CROSS_ENTROPY,
+                                                      makeHarInput(&in));
+    freeModel(finetune, HAR_N);
+    layer_t *mnist[MNIST_N];
+    buildMnistCnn(mnist);
+    assertStoredOperandsArePositionalUnderEveryPolicy(
+        mnist, MNIST_N, CROSS_ENTROPY, makeInput(&in, (size_t[]){1, 1, 784}, 3, &g_floatQ));
+    freeModel(mnist, MNIST_N);
+}
+
+/* The 50 random chains of the co-live property, under both losses. */
+void testStoredOperandsAreThePositionalOperandsOnRandomChains(void) {
+    uint32_t state = 0x2545F491u;
+    for (int trial = 0; trial < 50; trial++) {
+        size_t n = 1u + nextRandom(&state) % 6u;
+        layer_t *model[6];
+        for (size_t i = 0; i < n; i++) {
+            model[i] = randomRank2Layer(&state, i);
+        }
+        lossFuncType_t lt =
+            (nextRandom(&state) % 2u == 0u || model[n - 1]->type != SOFTMAX) ? MSE : CROSS_ENTROPY;
+        inputLike_t in;
+        assertStoredOperandsArePositionalUnderEveryPolicy(
+            model, n, lt, makeInput(&in, (size_t[]){1, 4}, 2, &g_floatQ));
         freeModel(model, n);
     }
 }
@@ -3125,6 +3439,19 @@ static rematPlanSpec_t sequenceSpec(const rematStep_t *steps, size_t len) {
     return (rematPlanSpec_t){.policy = REMAT_PLAN_SEQUENCE, .sequence = steps, .sequenceLen = len};
 }
 
+/* The most steps a test feeds back from a built plan (HAR, nothing kept: 3n + 2 = 38). */
+#define STEP_NAMES_MAX 64u
+
+/* A built program's steps as a caller's SEQUENCE: kind and layer only, since
+ * sequence records carry no operands. names holds STEP_NAMES_MAX records. */
+static rematPlanSpec_t namedSequenceSpec(const rematProgram_t *p, rematStep_t *names) {
+    TEST_ASSERT_TRUE(p->numSteps <= STEP_NAMES_MAX);
+    for (size_t s = 0; s < p->numSteps; s++) {
+        names[s] = (rematStep_t){.kind = p->steps[s].kind, .layer = p->steps[s].layer};
+    }
+    return sequenceSpec(names, p->numSteps);
+}
+
 static void assertSameSteps(const rematStep_t *want, size_t numSteps, const rematProgram_t *got) {
     TEST_ASSERT_EQUAL_size_t(numSteps, got->numSteps);
     for (size_t s = 0; s < numSteps; s++) {
@@ -3214,7 +3541,8 @@ static void assertLivenessStepsAsASequenceMatchLiveness(layer_t **model, size_t 
     for (int inPlaceDx = 0; inPlaceDx <= 1; inPlaceDx++) {
         const rematPlanSpec_t liveSpec = {.policy = REMAT_PLAN_LIVENESS, .inPlaceDx = inPlaceDx};
         rematPlan_t *live = buildPlan(t, model, &liveSpec);
-        rematPlanSpec_t spec = sequenceSpec(live->train.steps, live->train.numSteps);
+        rematStep_t names[STEP_NAMES_MAX];
+        rematPlanSpec_t spec = namedSequenceSpec(&live->train, names);
         spec.inPlaceDx = inPlaceDx;
         rematPlan_t *seq = buildPlan(t, model, &spec);
         assertSameRanges(live->train.ranges, live->train.numRanges, &seq->train);
@@ -3282,7 +3610,8 @@ void testSequencePlanRejectsAStepListOfAnotherFreezeState(void) {
     buildHar(frozen, true);
     inputLike_t in;
     rematWireTable_t *t = initTable(frozen, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
-    rematPlanSpec_t spec = sequenceSpec(f.p->train.steps, f.p->train.numSteps);
+    rematStep_t names[STEP_NAMES_MAX];
+    rematPlanSpec_t spec = namedSequenceSpec(&f.p->train, names);
     ASSERT_EXITS_WITH_OUTPUT(1,
                              "step #15 (kind 3, layer 9) violates grammar rule 3: BACKWARD "
                              "top..deepest, descending, after LOSS_BACKWARD",
@@ -3424,6 +3753,29 @@ void testSequencePlanExitsAboveUint16MaxStepsBeforeReserving(void) {
                                   "sequenceLen 65536 is above the step bound 65535 "
                                   "(min(UINT16_MAX, 2n + 2 + n(n+1)/2), n = 360)");
     rematWireTableFree(t);
+    freeReluLayer(relu);
+}
+
+/* Linear(2->2) + 13106 ReLUs under MSE: every node runs its BACKWARD, so the
+ * pool holds 2n + 1 + 2 + 3n = 5n + 3 = 65538 operands > 65536, and the build
+ * exits before it reserves the plan block. */
+#define LONG_RELU_CHAIN_N 13107u
+static layer_t *g_longReluChain[LONG_RELU_CHAIN_N];
+
+void testPlanBuildExitsOnAnOperandPoolAboveUint16Offsets(void) {
+    layer_t *relu = makeRelu(&g_floatQ);
+    g_longReluChain[0] = makeLinear(2, 2, false, 0);
+    for (size_t i = 1; i < LONG_RELU_CHAIN_N; i++) {
+        g_longReluChain[i] = relu;
+    }
+    inputLike_t in;
+    rematWireTable_t *t = initTable(g_longReluChain, LONG_RELU_CHAIN_N, MSE,
+                                    makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
+    assertExitsBeforeThePlanBlock(t, g_longReluChain, NULL,
+                                  "rematPlanBuild: the TRAIN program needs 65538 operands, above "
+                                  "UINT16_MAX + 1 (operand offsets are uint16_t)");
+    rematWireTableFree(t);
+    freeModel(g_longReluChain, 1);
     freeReluLayer(relu);
 }
 
@@ -3666,7 +4018,8 @@ static void assertRetainListPlanIsSound(layer_t **model, size_t n, lossFuncType_
             TEST_ASSERT_EQUAL_size_t_MESSAGE(1, rangesOfAct, "a kept ACT was recomputed");
         }
     }
-    rematPlanSpec_t again = sequenceSpec(kept->train.steps, kept->train.numSteps);
+    rematStep_t names[STEP_NAMES_MAX];
+    rematPlanSpec_t again = namedSequenceSpec(&kept->train, names);
     rematPlan_t *seq = buildPlan(t, model, &again);
     assertSameSteps(kept->train.steps, kept->train.numSteps, &seq->train);
     assertSameRanges(kept->train.ranges, kept->train.numRanges, &seq->train);
@@ -4707,6 +5060,10 @@ int main(void) {
     RUN_TEST(testStoreAllPeakMnistCnnIs175824);
     RUN_TEST(testStoreAllPeakFinetuneStage2Is57928);
     RUN_TEST(testPlanBlockHoldsStepsRangesAndEndOrder);
+    RUN_TEST(testHarTrainOperandsAreTheDerivedSlices);
+    RUN_TEST(testEvalProgramIsTheTrainPrefixOperandsIncluded);
+    RUN_TEST(testAReforwardCarriesItsForwardsSlice);
+    RUN_TEST(testTheDeriverGivesARejectedSequenceStepAnEmptySlice);
     RUN_TEST(testPlanProgramOfTrainIsTheTrainProgram);
     RUN_TEST(testEvalHarStepsAndRangesUnderEveryPolicy);
     RUN_TEST(testEvalPeakIsTheLargestAdjacentActPair);
@@ -4730,6 +5087,8 @@ int main(void) {
     RUN_TEST(testTrainableParameterLayersReadTheirInputInBackward);
     RUN_TEST(testEveryStepsOperandsAreCoLiveOnTheZoo);
     RUN_TEST(testEveryStepsOperandsAreCoLiveOnRandomChains);
+    RUN_TEST(testStoredOperandsAreThePositionalOperandsOnTheZoo);
+    RUN_TEST(testStoredOperandsAreThePositionalOperandsOnRandomChains);
     RUN_TEST(testGrammarRejectsADuplicateForward);
     RUN_TEST(testGrammarRejectsAnEarlyLossForward);
     RUN_TEST(testGrammarRejectsAForwardBeyondTheLastLayer);
@@ -4776,6 +5135,7 @@ int main(void) {
     RUN_TEST(testSequencePlanExitsOneStepAboveTheBoundBeforeReserving);
     RUN_TEST(testSequencePlanAcceptsALengthAtTheBound);
     RUN_TEST(testSequencePlanExitsAboveUint16MaxStepsBeforeReserving);
+    RUN_TEST(testPlanBuildExitsOnAnOperandPoolAboveUint16Offsets);
     RUN_TEST(testPlanBuildExitsOnASequenceForAnotherPolicy);
     RUN_TEST(testPlanBuildExitsOnASequenceLengthForAnotherPolicy);
     RUN_TEST(testSequencePlanRejectsRecomputingATrackedBatchNorm);

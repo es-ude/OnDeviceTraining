@@ -14,18 +14,11 @@ static bool hasBackwardSteps(const rematWireTable_t *t) {
     return t->hasBackward && t->backwardTop >= (ptrdiff_t)t->deepest;
 }
 
-size_t rematTrainStepCount(const rematWireTable_t *t) {
-    size_t backward =
-        hasBackwardSteps(t) ? (size_t)(t->backwardTop - (ptrdiff_t)t->deepest) + 1u : 0u;
-    return t->modelSize + 1u + (t->hasBackward ? 1u + backward : 0u);
-}
-
 size_t rematBackwardStep(const rematWireTable_t *t, size_t l) {
     return t->modelSize + 2u + (size_t)(t->backwardTop - (ptrdiff_t)l);
 }
 
-/* FORWARD 0..n-1, LOSS_FORWARD: the whole EVAL program, and the TRAIN
- * program's first n + 1 steps. */
+/* FORWARD 0..n-1, LOSS_FORWARD: the TRAIN program's first n + 1 steps. */
 static size_t fillForwardSteps(size_t n, rematStep_t *steps) {
     for (size_t l = 0; l < n; l++) {
         steps[l] = (rematStep_t){.kind = REMAT_STEP_FORWARD, .layer = (uint16_t)l};
@@ -41,8 +34,10 @@ void rematFillTrainSteps(const rematWireTable_t *t, rematStep_t *steps) {
         return;
     }
     steps[s++] = (rematStep_t){.kind = REMAT_STEP_LOSS_BACKWARD, .layer = (uint16_t)n};
-    for (ptrdiff_t l = t->backwardTop; l >= (ptrdiff_t)t->deepest; l--) {
-        steps[s++] = (rematStep_t){.kind = REMAT_STEP_BACKWARD, .layer = (uint16_t)l};
+    for (size_t l = n; l-- > 0;) {
+        if (t->runsBackward[l]) {
+            steps[s++] = (rematStep_t){.kind = REMAT_STEP_BACKWARD, .layer = (uint16_t)l};
+        }
     }
 }
 
@@ -284,8 +279,8 @@ static void recomputeIfDropped(const rematWireTable_t *t, const bool *retain, re
     *recomputedFrom = k + 1u;
 }
 
-size_t rematFillRetainSteps(const rematWireTable_t *t, layer_t **model, const bool *retain,
-                            bool inPlaceDx, rematStep_t *steps, size_t *numWrites) {
+size_t rematFillRetainSteps(const rematWireTable_t *t, const bool *retain, bool inPlaceDx,
+                            rematStep_t *steps, size_t *numWrites) {
     size_t n = t->modelSize;
     retainEmitter_t e = {.steps = steps, .numSteps = 0, .numWrites = 0, .inPlaceDx = inPlaceDx};
     for (size_t l = 0; l < n; l++) {
@@ -296,11 +291,14 @@ size_t rematFillRetainSteps(const rematWireTable_t *t, layer_t **model, const bo
         size_t recomputedFrom = n + 1u;
         recomputeIfDropped(t, retain, &e, n, &recomputedFrom);
         emitStep(t, &e, REMAT_STEP_LOSS_BACKWARD, n);
-        for (ptrdiff_t l = t->backwardTop; l >= (ptrdiff_t)t->deepest; l--) {
-            if (layerBackwardReadsInput(model[l])) {
-                recomputeIfDropped(t, retain, &e, (size_t)l, &recomputedFrom);
+        for (size_t l = n; l-- > 0;) {
+            if (!t->runsBackward[l]) {
+                continue;
             }
-            emitStep(t, &e, REMAT_STEP_BACKWARD, (size_t)l);
+            if (t->readsInput[l]) {
+                recomputeIfDropped(t, retain, &e, l, &recomputedFrom);
+            }
+            emitStep(t, &e, REMAT_STEP_BACKWARD, l);
         }
     }
     if (numWrites != NULL) {
@@ -311,9 +309,8 @@ size_t rematFillRetainSteps(const rematWireTable_t *t, layer_t **model, const bo
 
 /* Ping-pong lifetimes: ACT j from the FORWARD that writes it (step j - 1) to
  * the step that reads it (step j: FORWARD(j), or LOSS_FORWARD for ACT n). */
-void rematFillEvalProgram(const rematWireTable_t *t, rematStep_t *steps, rematRange_t *ranges) {
+void rematFillEvalProgram(const rematWireTable_t *t, rematRange_t *ranges) {
     size_t n = t->modelSize;
-    (void)fillForwardSteps(n, steps);
     for (size_t j = 1; j <= n; j++) {
         ranges[j - 1] = (rematRange_t){
             .wire = rematActId(t, j), .begin = (uint16_t)(j - 1u), .end = (uint16_t)j};

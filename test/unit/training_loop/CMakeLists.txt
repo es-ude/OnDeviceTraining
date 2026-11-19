@@ -70,6 +70,8 @@ add_elastic_ai_unit_test(
         Deserialize
         odt_test_death
 )
+target_include_directories(UnitTestRematPlan PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/userApi/training_loop/remat)
 
 # Remat (#4): the RematScheduler library, both rows driven through the const
 # vtable and the rematBegin/Next/Done/End dispatch. The placement tests reach

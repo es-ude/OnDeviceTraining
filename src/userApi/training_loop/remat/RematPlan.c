@@ -574,8 +574,9 @@ static void requireAProgramWithinTheBound(size_t numSteps, size_t n) {
     }
 }
 
-/* SEQUENCE's checks before anything reads the caller's records: the counting
- * pass and the copy read exactly sequenceLen of them. The checked byte count
+/* SEQUENCE's checks before the counting pass and the copy: the length checks
+ * run before any record is read, so every later pass reads exactly sequenceLen
+ * of them. The checked byte count
  * of the copy is layoutProgram's, before reserveMemory; it cannot overflow
  * once the length is at most UINT16_MAX, so it has no death test. */
 static void requireASequenceWithinTheBound(const rematPlanSpec_t *spec, size_t n) {
@@ -594,6 +595,18 @@ static void requireASequenceWithinTheBound(const rematPlanSpec_t *spec, size_t n
                     "(min(UINT16_MAX, 2n + 2 + n(n+1)/2), n = %zu)",
                     spec->sequenceLen, bound, n);
         exit(1);
+    }
+    /* The plan derives every step's operand slice; a caller's record names
+     * the step only. */
+    for (size_t s = 0; s < spec->sequenceLen; s++) {
+        const rematStep_t *st = &spec->sequence[s];
+        if (st->numReads != 0u || st->numWrites != 0u || st->reserved != 0u || st->operands != 0u) {
+            PRINT_ERROR("rematPlanBuild: sequence records carry no operands (step #%zu: "
+                        "numReads %u, numWrites %u, reserved %u, operands %u)",
+                        s, (unsigned)st->numReads, (unsigned)st->numWrites, (unsigned)st->reserved,
+                        (unsigned)st->operands);
+            exit(1);
+        }
     }
 }
 

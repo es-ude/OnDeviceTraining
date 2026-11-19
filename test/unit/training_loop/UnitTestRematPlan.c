@@ -2286,7 +2286,8 @@ void testPlanBlockHoldsStepsRangesAndEndOrder(void) {
     inputLike_t in;
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
     rematPlan_t *p = buildPlan(t, model, NULL);
-    TEST_ASSERT_EQUAL_size_t(sizeof(rematPlan_t) + 284u + 148u, p->blockBytes);
+    /* TRAIN 25 * 8 + 23 * 6 + 23 * 2 = 384 B; EVAL 13 * 8 + 12 * 6 + 12 * 2 = 200 B. */
+    TEST_ASSERT_EQUAL_size_t(sizeof(rematPlan_t) + 384u + 200u, p->blockBytes);
     const uint8_t *begin = (const uint8_t *)p;
     const uint8_t *end = begin + p->blockBytes;
     const rematProgram_t *eval = rematPlanProgram(p, REMAT_MODE_EVAL);
@@ -3250,6 +3251,62 @@ void testSequencePlanExitsOnAnEmptySequenceBeforeReserving(void) {
                                   "REMAT_PLAN_SEQUENCE needs at least one step, got sequenceLen 0");
     rematWireTableFree(t);
     freeModel(model, MLP3_N);
+}
+
+/* A sequence record names a step by kind and layer; the plan derives its
+ * operand slice, so a caller's non-zero count, reserved byte or offset exits. */
+static void sequenceWithOperandsOn(size_t at, rematStep_t carried) {
+    layer_t *model[1] = {makeLinear(2, 2, false, 0)};
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, 1, MSE, makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ));
+    rematStep_t seq[4] = {{.kind = REMAT_STEP_FORWARD, .layer = 0},
+                          {.kind = REMAT_STEP_LOSS_FORWARD, .layer = 1},
+                          {.kind = REMAT_STEP_LOSS_BACKWARD, .layer = 1},
+                          {.kind = REMAT_STEP_BACKWARD, .layer = 0}};
+    seq[at] = carried;
+    rematPlan_t *p;
+    (void)rematPlanBuild(
+        &p, t, &MODEL_CHAIN(model, 1),
+        &(rematPlanSpec_t){.policy = REMAT_PLAN_SEQUENCE, .sequence = seq, .sequenceLen = 4});
+}
+
+static void lossBackwardCarryingOperands(void) {
+    sequenceWithOperandsOn(
+        2, (rematStep_t){.kind = REMAT_STEP_LOSS_BACKWARD, .layer = 1, .operands = 7});
+}
+
+static void forwardCarryingAReservedByte(void) {
+    sequenceWithOperandsOn(0, (rematStep_t){.kind = REMAT_STEP_FORWARD, .layer = 0, .reserved = 1});
+}
+
+static void backwardCarryingCounts(void) {
+    sequenceWithOperandsOn(
+        3, (rematStep_t){.kind = REMAT_STEP_BACKWARD, .layer = 0, .numReads = 2, .numWrites = 1});
+}
+
+static void lossForwardCarryingAReadCount(void) {
+    sequenceWithOperandsOn(
+        1, (rematStep_t){.kind = REMAT_STEP_LOSS_FORWARD, .layer = 1, .numReads = 1});
+}
+
+static void backwardCarryingAWriteCount(void) {
+    sequenceWithOperandsOn(3,
+                           (rematStep_t){.kind = REMAT_STEP_BACKWARD, .layer = 0, .numWrites = 1});
+}
+
+void testSequencePlanExitsOnARecordCarryingOperands(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "sequence records carry no operands (step #2: numReads 0, "
+                             "numWrites 0, reserved 0, operands 7)",
+                             lossBackwardCarryingOperands());
+    ASSERT_EXITS_WITH_OUTPUT(1, "(step #0: numReads 0, numWrites 0, reserved 1, operands 0)",
+                             forwardCarryingAReservedByte());
+    ASSERT_EXITS_WITH_OUTPUT(1, "(step #3: numReads 2, numWrites 1, reserved 0, operands 0)",
+                             backwardCarryingCounts());
+    ASSERT_EXITS_WITH_OUTPUT(1, "(step #1: numReads 1, numWrites 0, reserved 0, operands 0)",
+                             lossForwardCarryingAReadCount());
+    ASSERT_EXITS_WITH_OUTPUT(1, "(step #3: numReads 0, numWrites 1, reserved 0, operands 0)",
+                             backwardCarryingAWriteCount());
 }
 
 /* HAR: 2n + 2 + n(n+1)/2 = 24 + 2 + 78 = 104. The buffer holds exactly 104
@@ -4644,6 +4701,7 @@ int main(void) {
     RUN_TEST(testSequencePlanRejectsAStepListOfAnotherFreezeState);
     RUN_TEST(testSequencePlanExitsOnANullSequenceBeforeReserving);
     RUN_TEST(testSequencePlanExitsOnAnEmptySequenceBeforeReserving);
+    RUN_TEST(testSequencePlanExitsOnARecordCarryingOperands);
     RUN_TEST(testSequencePlanExitsOneStepAboveTheBoundBeforeReserving);
     RUN_TEST(testSequencePlanAcceptsALengthAtTheBound);
     RUN_TEST(testSequencePlanExitsAboveUint16MaxStepsBeforeReserving);

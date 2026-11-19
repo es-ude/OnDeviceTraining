@@ -26,16 +26,20 @@ typedef enum rematStepKind {
 } rematStepKind_t;
 
 /* One record, three roles: plan-table entry, the value a row's next() fills
- * in, and the record of a caller's step list. No tensor pointers: the driver
- * resolves operands positionally. No explicit pad byte until a byte-image
- * consumer (#62 ir2c .rodata) needs one; uint16_t
- * alignment keeps the implicit pad at one byte on every target. */
+ * in, and the record of a caller's step list. No tensor pointers: the operand
+ * slice belongs to the plan, and a row copies the record whole without reading
+ * it. A caller's step list sets kind and layer only. The explicit reserved
+ * byte keeps the record free of implicit padding on every target. */
 typedef struct rematStep {
-    uint8_t kind;   /* rematStepKind_t */
-    uint16_t layer; /* model index; == modelSize for LOSS_*; the table's wire-count guard
-                       implies modelSize < UINT16_MAX */
+    uint8_t kind;      /* rematStepKind_t */
+    uint8_t numReads;  /* operand slice: the reads first ... */
+    uint8_t numWrites; /* ... then the writes */
+    uint8_t reserved;  /* 0 */
+    uint16_t layer;    /* model index; == modelSize for LOSS_*; the table's wire-count guard
+                          implies modelSize < UINT16_MAX */
+    uint16_t operands; /* offset into the program's operand pool */
 } rematStep_t;
-_Static_assert(sizeof(rematStep_t) == 4, "fixed-width step record");
+_Static_assert(sizeof(rematStep_t) == 8, "fixed-width step record");
 
 typedef enum rematPlanPolicy {
     REMAT_PLAN_STORE_ALL = 0,
@@ -49,12 +53,14 @@ typedef enum rematPlanPolicy {
  * REMAT_PLAN_SEQUENCE, retain to REMAT_PLAN_RETAIN_LIST; any other policy with
  * one of them set exits. sequence must point at sequenceLen readable records
  * (C cannot detect a shorter buffer), and 1 <= sequenceLen <= min(UINT16_MAX,
- * 2n + 2 + n(n+1)/2) for a model of n layers. rematPlanBuild copies the steps
- * into the plan and keeps no pointer to them: the caller may free or reuse the
- * buffer once it returns. The buffer must stay unchanged while rematPlanBuild
- * runs: rematPlanBuild reads the steps twice, once to count the ranges and once
- * to copy them. retain points at n + 1 flags, retain[j] for ACT j (retain[0] is
- * ignored: the input is the caller's), read only while rematPlanBuild runs; it
+ * 2n + 2 + n(n+1)/2) for a model of n layers. Its records set kind and layer
+ * only (zero-initialise them): one with a non-zero numReads, numWrites,
+ * reserved or operands exits. rematPlanBuild copies the steps into the plan
+ * and keeps no pointer to them: the caller may free or reuse the buffer once
+ * it returns. The buffer must stay unchanged while rematPlanBuild runs:
+ * rematPlanBuild reads the steps three times, to check the records, to count
+ * the ranges and to copy them. retain points at n + 1 flags, retain[j] for
+ * ACT j (retain[0] is ignored: the input is the caller's), read only while rematPlanBuild runs; it
  * is read more than once too (to check, to count, to write the steps), so it
  * must also stay unchanged meanwhile. A dropped ACT that a backward step
  * reads is recomputed just before that step from the nearest ACT below it

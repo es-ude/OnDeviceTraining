@@ -2542,10 +2542,10 @@ void testHeapReportIsPlacedAndReservedWithoutAnArena(void) {
 /* A SEQUENCE plan's steps live in the one plan block, so HEAP init's
  * reserved == reported check (memory-counter builds) and metadataBytes count
  * them. MLP3 STORE_ALL holds 8 steps and 6 ranges, the recompute-twice
- * SEQUENCE 11 steps and 9 ranges. A TRAIN program costs 4 B per step and 8 B
+ * SEQUENCE 11 steps and 9 ranges. A TRAIN program costs 8 B per step and 8 B
  * per range (a 6 B range and its 2 B endOrder entry; every array is 2-aligned,
  * so no padding), and the EVAL program is the same in both: the block grows
- * by 4 * 3 + 8 * 3 = 36 B. */
+ * by 8 * 3 + 8 * 3 = 48 B. */
 void testHeapPlanBlockHoldsTheSequenceSteps(void) {
     const rematStep_t steps[] = MLP3_RECOMPUTE_TWICE_STEPS;
     layer_t *model[MLP3_N];
@@ -2560,7 +2560,7 @@ void testHeapPlanBlockHoldsTheSequenceSteps(void) {
     rematScheduler_t seq;
     TEST_ASSERT_TRUE(
         rematHeapInit(&seq, &MODEL_CHAIN(model, MLP3_N), defaultLossConfig(MSE), x, &spec));
-    TEST_ASSERT_EQUAL_size_t(all.plan->blockBytes + 36u, seq.plan->blockBytes);
+    TEST_ASSERT_EQUAL_size_t(all.plan->blockBytes + 48u, seq.plan->blockBytes);
     rematReport_t r;
     rematSchedulerReport(&seq, &r);
     TEST_ASSERT_EQUAL_size_t(11, r.numSteps);
@@ -3142,15 +3142,15 @@ static void selfCheckWithOneExtraByte(rowInit_t init) {
 
 void testInitSelfCheckExitsOnAnUnaccountedByteOnHeap(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[heap]: init reserved 6377 B, but its report accounts for "
-                             "6376 B (arenaBytes 0 + metadataBytes 6376)",
+                             "remat[heap]: init reserved 6529 B, but its report accounts for "
+                             "6528 B (arenaBytes 0 + metadataBytes 6528)",
                              selfCheckWithOneExtraByte(initHeap));
 }
 
 void testInitSelfCheckExitsOnAnUnaccountedByteOnArena(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[arena]: init reserved 80849 B, but its report accounts for "
-                             "80848 B (arenaBytes 74288 + metadataBytes 6560)",
+                             "remat[arena]: init reserved 81001 B, but its report accounts for "
+                             "81000 B (arenaBytes 74288 + metadataBytes 6712)",
                              selfCheckWithOneExtraByte(initArena));
 }
 
@@ -3187,15 +3187,15 @@ static void initWithAnUnaccountedReservation(rematSchedulerType_t row) {
 
 void testHeapInitExitsOnAnUnaccountedReservation(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[heap]: init reserved 6384 B, but its report accounts for "
-                             "6376 B (arenaBytes 0 + metadataBytes 6376)",
+                             "remat[heap]: init reserved 6536 B, but its report accounts for "
+                             "6528 B (arenaBytes 0 + metadataBytes 6528)",
                              initWithAnUnaccountedReservation(REMAT_HEAP));
 }
 
 void testArenaInitExitsOnAnUnaccountedReservation(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[arena]: init reserved 80856 B, but its report accounts for "
-                             "80848 B (arenaBytes 74288 + metadataBytes 6560)",
+                             "remat[arena]: init reserved 81008 B, but its report accounts for "
+                             "81000 B (arenaBytes 74288 + metadataBytes 6712)",
                              initWithAnUnaccountedReservation(REMAT_ARENA));
 }
 #endif

@@ -56,5 +56,5 @@ log's `config` records the choice:
 
 ```bash
 REMAT_STORAGE=arena DRY_PLAN=1 ./build/examples/examples/mnist_cnn/train_c_mnist_cnn
-# DRY_PLAN example=mnist_cnn storage=arena plan=liveness planned=1 placed=1 data_reserved=1 steps=21 wires_peak_b=112896 activations_peak_b=100352 arena_b=112896 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=5504 refwd_steps=0 forward_cost=197738 recompute_cost=0
+# DRY_PLAN example=mnist_cnn storage=arena plan=liveness planned=1 placed=1 data_reserved=1 steps=21 wires_peak_b=112896 activations_peak_b=100352 arena_b=112896 arena_pad_b=0 arena_gap_b=0 wire_metadata_b=5632 refwd_steps=0 forward_cost=197738 recompute_cost=0
 ```

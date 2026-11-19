@@ -43,9 +43,10 @@ are plain objects their owner places, e.g. on a stack frame):
 Every row satisfies these before it joins the conformance matrix.
 - **R1 Bytes, never metadata.** Set `->data` only through `rematWireBind` /
   `rematWireRelease`. Never write header content.
-- **R2 Values, not pointers.** `next` fills a caller-provided `rematStep_t`.
-  The driver resolves operands through `RematCheck`; a row never hands them
-  over.
+- **R2 Values, not pointers.** `next` fills a caller-provided `rematStep_t`,
+  an 8-byte `{kind, numReads, numWrites, reserved, layer, operands}` record;
+  the plan fills the operand slice and a row copies the record whole. The
+  driver resolves operands through `RematCheck`; a row never hands them over.
 - **R3 Versioned binding.** Every bind increments `bindGen`. Bind a wire only
   for a step that produces it (FORWARD, REFORWARD, LOSS_BACKWARD, BACKWARD).
   An in-place member is never bound by a row: the SDK binds it with its
@@ -319,8 +320,12 @@ decisions and those with nothing in force yet are left out.
   functions pass none.
 - **remat D20** n = 1 under CrossEntropy keeps the signed `top = -1`: the
   stream has a LOSS_BACKWARD step and no BACKWARD step.
-- **remat D23** A step is a 4-byte `{kind, layer}` value (`rematStep_t`);
-  the driver resolves its operands (R2).
+- **remat D23** A step is an 8-byte
+  `{kind, numReads, numWrites, reserved, layer, operands}` record
+  (`rematStep_t`); the plan fills the operand slice and a row copies the
+  record whole. A `REMAT_PLAN_SEQUENCE` caller sets `kind` and `layer` only;
+  any other non-zero field exits in `rematPlanBuild`. The driver resolves the
+  operands (R2).
 - **remat D24** Rows dispatch through a `const` vtable and a per-instance
   `fns` pointer that the row's init sets. Tests inject faults with
   decorator rows on their own instance, never by patching the vtable.
@@ -406,8 +411,9 @@ decisions and those with nothing in force yet are left out.
 **Row contract** (in full above).
 - **remat R1** A row writes a header's `data` pointer only through
   `rematWireBind` / `rematWireRelease`, and no other header content.
-- **remat R2** `next` fills a caller-provided `rematStep_t`; the driver
-  resolves the operands, a row never hands them over.
+- **remat R2** `next` fills a caller-provided 8-byte `rematStep_t`; the plan
+  fills the operand slice, a row copies the record whole, and the driver
+  resolves the operands; a row never hands them over.
 - **remat R3** Every bind increments `bindGen`; a wire is bound only for a
   step that produces it, except an in-place member, which the SDK binds
   with its chain's root (remat D41).

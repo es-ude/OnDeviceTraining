@@ -17,6 +17,7 @@ target_link_libraries(TrainingLoopApi PRIVATE
         Rounding
         Layer
         BatchNorm1d
+        Model
         LossFunction
         Optimizer
         RNG

@@ -15,6 +15,7 @@
 #include "Layer.h"
 #include "LayerConfigAccess.h"
 #include "LrScheduler.h"
+#include "Model.h"
 #include "Optimizer.h"
 #include "StackGather.h"
 #include "StorageApi.h"
@@ -166,7 +167,7 @@ static void countPrediction(evalCounts_t *counts, size_t predicted, size_t targe
     }
 }
 
-/* #467/#468: an untracked BatchNorm1d normalizes with batch statistics even
+/* An untracked BatchNorm1d normalizes with batch statistics even
  * in evaluation -- over its chunk of `rows` samples. Walk [rows, ...item]
  * through the model and fail before any forward instead of mid-epoch. Models
  * without an untracked BN skip the walk entirely. */
@@ -188,29 +189,41 @@ static void requireUntrackedBatchNormsEvaluable(const model_t *model, const tens
     }
     size_t dimsA[BATCH_VIEW_MAX_RANK];
     size_t orderA[BATCH_VIEW_MAX_RANK];
-    size_t dimsB[BATCH_VIEW_MAX_RANK];
-    size_t orderB[BATCH_VIEW_MAX_RANK];
     shape_t a = {.dimensions = dimsA, .orderOfDimensions = orderA, .numberOfDimensions = rank + 1};
-    shape_t b = {.dimensions = dimsB, .orderOfDimensions = orderB, .numberOfDimensions = 0};
     dimsA[0] = rows;
     for (size_t d = 0; d < rank; d++) {
         dimsA[d + 1] = evalItem->shape->dimensions[d];
     }
     setOrderOfDimsForNewTensor(rank + 1, orderA);
-    shape_t *in = &a;
-    shape_t *out = &b;
+
+    /* A topological prefix is a valid wiring, so the shape pass stops at the last such BN. */
+    model_t prefix = {model->layers, last + 1, model->inputStart, model->inputIds};
+    size_t numShapes = last + 2;
+    size_t maxRank = (rank + 1 > 2u) ? rank + 1 : 2u;
+    /* Heap, not stack: the shapes of a deep model would cost too much MCU stack. */
+    shape_t *shapes =
+        reserveMemory(numShapes * sizeof(shape_t) + 2u * numShapes * maxRank * sizeof(size_t));
+    if (shapes == NULL) {
+        PRINT_ERROR("%s pre-flight: no memory for %zu shapes", caller, numShapes);
+        exit(1);
+    }
+    size_t *pool = (size_t *)(shapes + numShapes);
+    for (size_t s = 0; s < numShapes; s++) {
+        shapes[s] = (shape_t){.dimensions = pool + 2u * s * maxRank,
+                              .orderOfDimensions = pool + (2u * s + 1u) * maxRank};
+    }
+    modelShapePass(&prefix, &a, shapes, maxRank);
     for (size_t i = 0; i <= last; i++) {
         if (model->layers[i]->type == BATCHNORM1D) {
+            uint16_t ids[MODEL_MAX_ARITY];
+            (void)modelNodeInputs(model, i, ids);
             char what[128];
             snprintf(what, sizeof what, "%s pre-flight (model layer %zu, %zu-row evaluation chunk)",
                      caller, i, rows);
-            batchNorm1dRequireEvaluable(model->layers[i], in, what);
+            batchNorm1dRequireEvaluable(model->layers[i], &shapes[ids[0]], what);
         }
-        layerFunctions[model->layers[i]->type].calcOutputShape(model->layers[i], in, out);
-        shape_t *t = in;
-        in = out;
-        out = t;
     }
+    freeReservedMemory(shapes);
 }
 
 /* numClasses and the evaluation pre-flight are read off the first sample of

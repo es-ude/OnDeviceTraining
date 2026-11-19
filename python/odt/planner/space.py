@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from odt.planner.cmodel import (BACKWARD, LOSS_BACKWARD, LOSS_FORWARD, REFORWARD, WireTable,
-                                place_portfolio, placed, plan_numbers, retain_steps,
+                                derive_steps, place_portfolio, placed, plan_numbers,
                                 scan_ranges, step_live, wire_table)
 from odt.planner.plan import Plan
 from odt.planner.schema import Problem
@@ -25,11 +25,12 @@ from odt.planner.schema import Problem
 def _segment_live(t: WireTable, k: int, k2: int, ip: bool) -> int:
     """The segment's own peak, read off the plan that keeps k, k2 and every ACT above k2."""
     retain = tuple(j == k or j >= k2 for j in range(t.n + 1))
-    steps = retain_steps(t, retain)
+    steps = derive_steps(t, retain)
     live = step_live(t, scan_ranges(t, steps, ip), len(steps), True)
-    return max(live[s] for s, (kind, l) in enumerate(steps)
-               if (s < t.n and k <= l < k2) or (kind in (REFORWARD, BACKWARD) and k <= l < k2)
-               or (k2 == t.n and kind in (LOSS_FORWARD, LOSS_BACKWARD)))
+    return max(live[s] for s, step in enumerate(steps)
+               if (s < t.n and k <= step.layer < k2)
+               or (step.kind in (REFORWARD, BACKWARD) and k <= step.layer < k2)
+               or (k2 == t.n and step.kind in (LOSS_FORWARD, LOSS_BACKWARD)))
 
 
 def _segment_allowed(needed: tuple[bool, ...], seg: Mapping, k: int, k2: int) -> bool:

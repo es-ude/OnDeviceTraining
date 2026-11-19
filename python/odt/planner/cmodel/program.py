@@ -1,5 +1,6 @@
-"""A retain plan's TRAIN program as C generates it: steps (rematFillRetainSteps), ranges
-(rematScanRanges with the in-place dx rule), and the numbers DRY_PLAN prints."""
+"""A retain plan's TRAIN program as C derives it: steps (rematFillRetainSteps) with the
+operands the deriver attaches to each, ranges (rematScanRanges over those operands, with the
+in-place dx rule), and the numbers DRY_PLAN prints. Chain models only."""
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
@@ -14,7 +15,22 @@ REFORWARD = "REFORWARD"
 IN_PLACE_TYPES = ("RELU", "DROPOUT", "FLATTEN")
 IN_PLACE_DTYPES = ("FLOAT32", "SYM_INT32")
 
-Step = tuple[str, int]  # (kind, layer)
+READ = "READ"
+META = "META"  # the step needs the wire's header only, so the wire's range is not extended
+WRITE = "WRITE"
+NONE = 0xFFFF  # the wire of a write nothing receives: the dx of the deepest backward
+
+
+class Operand(NamedTuple):
+    wire: int
+    mode: str
+
+
+class Step(NamedTuple):
+    kind: str
+    layer: int
+    reads: tuple[Operand, ...]
+    writes: tuple[Operand, ...]
 
 
 class Range(NamedTuple):
@@ -40,13 +56,18 @@ class PlanNumbers:
         return self.placed_peak_b - self.wires_peak_b
 
 
-def retain_steps(t: WireTable, retain: Sequence[bool]) -> list[Step]:
+def derive_steps(t: WireTable, retain: Sequence[bool]) -> list[Step]:
     """retain[j]: ACT j is kept (index 0 is the input, always present)."""
     n = t.n
     if len(retain) != n + 1:
         raise ValueError(f"retain: {len(retain)} entries for a {n}-layer model; "
                          f"expected {n + 1} (ACT 0 to ACT {n})")
-    steps: list[Step] = [(FORWARD, l) for l in range(n)] + [(LOSS_FORWARD, n)]
+
+    def forward(kind: str, l: int) -> Step:
+        return Step(kind, l, (Operand(l, READ),), (Operand(l + 1, WRITE),))
+
+    steps = [forward(FORWARD, l) for l in range(n)]
+    steps.append(Step(LOSS_FORWARD, n, (Operand(n, READ),), ()))
     if not t.has_backward:
         return steps
     recomputed_from = n + 1
@@ -58,15 +79,18 @@ def retain_steps(t: WireTable, retain: Sequence[bool]) -> list[Step]:
         k = j - 1
         while k > 0 and not retain[k]:
             k -= 1
-        steps.extend((REFORWARD, l) for l in range(k, j))
+        steps.extend(forward(REFORWARD, l) for l in range(k, j))
         recomputed_from = k + 1
 
     recompute_if_dropped(n)
-    steps.append((LOSS_BACKWARD, n))
+    steps.append(Step(LOSS_BACKWARD, n, (Operand(n, READ),), (Operand(t.grad_id(n), WRITE),)))
     for l in range(t.top, t.deepest - 1, -1):
         if t.reads_input[l]:
             recompute_if_dropped(l)
-        steps.append((BACKWARD, l))
+        dy = Operand(t.grad_id(l + 1), READ)
+        x = Operand(l, READ if t.reads_input[l] else META)
+        dx = Operand(t.grad_id(l) if l > t.deepest else NONE, WRITE)
+        steps.append(Step(BACKWARD, l, (dy, x), (dx,)))
     return steps
 
 
@@ -81,52 +105,35 @@ def in_place_member(t: WireTable, in_place: bool, w: int) -> bool:
             and out.bytes == upstream.bytes)
 
 
-def _backward_runs(t: WireTable, l: int) -> bool:
-    return t.has_backward and t.deepest <= l <= t.top
-
-
-def _writes(t: WireTable, in_place: bool, step: Step) -> int | None:
-    kind, l = step
-    if kind in (FORWARD, REFORWARD):
-        return l + 1 if l < t.n else None
-    if kind == LOSS_BACKWARD:
-        return t.grad_id(t.n) if t.has_backward else None
-    if kind == BACKWARD and _backward_runs(t, l) and l > t.deepest:
-        w = t.grad_id(l)
-        return None if in_place_member(t, in_place, w) else w
-    return None
-
-
 def _root(t: WireTable, in_place: bool, w: int) -> int:
     while in_place_member(t, in_place, w):
         w -= 1
     return w
 
 
-def _reads(t: WireTable, in_place: bool, step: Step) -> list[int]:
-    kind, l = step
-    if kind in (FORWARD, REFORWARD):
-        return [] if l >= t.n else [l]
-    if kind in (LOSS_FORWARD, LOSS_BACKWARD):
-        return [t.n]
-    if kind == BACKWARD and _backward_runs(t, l):
-        grad_in = t.grad_id(t.n) if l == t.top else t.grad_id(l + 1)
-        return [_root(t, in_place, grad_in)] + ([l] if t.reads_input[l] else [])
-    return []
+def _extend_newest(ranges: list[list[int]], w: int, s: int) -> None:
+    for r in reversed(ranges):
+        if r[0] == w:
+            r[2] = s
+            return
 
 
 def scan_ranges(t: WireTable, steps: Sequence[Step], in_place: bool) -> list[Range]:
-    """A read extends the newest range of its wire; each written wire opens a range."""
+    """A READ extends the newest range of its wire's root; META extends nothing. A write opens
+    a range when its wire is its own root; an in-place member's write extends its root's."""
     ranges: list[list[int]] = []
     for s, step in enumerate(steps):
-        for w in _reads(t, in_place, step):
-            for r in reversed(ranges):
-                if r[0] == w:
-                    r[2] = s
-                    break
-        w = _writes(t, in_place, step)
-        if w is not None:
-            ranges.append([w, s, s])
+        for op in step.reads:
+            if op.mode == READ:
+                _extend_newest(ranges, _root(t, in_place, op.wire), s)
+        for op in step.writes:
+            if op.wire == NONE:
+                continue
+            root = _root(t, in_place, op.wire)
+            if root == op.wire and op.mode == WRITE:
+                ranges.append([op.wire, s, s])
+            else:
+                _extend_newest(ranges, root, s)
     return [Range(*r) for r in ranges]
 
 
@@ -148,9 +155,9 @@ def retain_name(t: WireTable, retain: Sequence[bool], in_place: bool) -> str:
 
 
 def plan_numbers(t: WireTable, retain: Sequence[bool], in_place: bool) -> PlanNumbers:
-    steps = retain_steps(t, retain)
+    steps = derive_steps(t, retain)
     ranges = scan_ranges(t, steps, in_place)
-    refwd = [l for kind, l in steps if kind == REFORWARD]
+    refwd = [step.layer for step in steps if step.kind == REFORWARD]
     return PlanNumbers(
         plan=retain_name(t, retain, in_place), steps=len(steps),
         wires_peak_b=max(step_live(t, ranges, len(steps), False)),

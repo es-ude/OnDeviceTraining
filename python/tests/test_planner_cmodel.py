@@ -19,15 +19,21 @@ from odt.planner.cmodel import (
     LOSS_BACKWARD,
     LOSS_FORWARD,
     MEMBERS,
+    META,
+    NONE,
+    READ,
     REFORWARD,
+    WRITE,
+    Operand,
     Range,
+    Step,
     Wire,
     WireTable,
+    derive_steps,
     extent,
     place_portfolio,
     place_two_ended,
     plan_numbers,
-    retain_steps,
     scan_ranges,
     step_live,
     wire_table,
@@ -92,7 +98,7 @@ def test_reads_and_costs_follow_c_per_layer():
 
 def test_a_retain_list_recomputes_each_dropped_segment_once_from_the_act_below_it():
     t = table("har")
-    steps = retain_steps(t, retain_of(12, {3, 7, 12}))
+    steps = [(s.kind, s.layer) for s in derive_steps(t, retain_of(12, {3, 7, 12}))]
     assert steps == ([(FORWARD, l) for l in range(12)] + [(LOSS_FORWARD, 12), (LOSS_BACKWARD, 12)]
                      + [(REFORWARD, 7), (REFORWARD, 8), (REFORWARD, 9), (BACKWARD, 10),
                         (BACKWARD, 9), (BACKWARD, 8), (BACKWARD, 7), (REFORWARD, 3), (REFORWARD, 4),
@@ -102,9 +108,25 @@ def test_a_retain_list_recomputes_each_dropped_segment_once_from_the_act_below_i
     assert (numbers.steps, numbers.refwd_steps, numbers.recompute_cost) == (32, 7, 301056)
 
 
+def test_derived_steps_carry_cs_operands():
+    t = table("har")
+    all_kept = derive_steps(t, retain_of(12, set(range(1, 13))))
+    assert all_kept[0] == Step(FORWARD, 0, (Operand(0, READ),), (Operand(1, WRITE),))
+    assert all_kept[12] == Step(LOSS_FORWARD, 12, (Operand(12, READ),), ())
+    assert all_kept[13] == Step(LOSS_BACKWARD, 12, (Operand(12, READ),), (Operand(13, WRITE),))
+    assert all_kept[14] == Step(BACKWARD, 10, (Operand(13, READ), Operand(10, READ)),
+                                (Operand(14, WRITE),))
+    assert all_kept[15] == Step(BACKWARD, 9, (Operand(14, READ), Operand(9, META)),
+                                (Operand(15, WRITE),))
+    assert all_kept[24] == Step(BACKWARD, 0, (Operand(23, READ), Operand(0, READ)),
+                                (Operand(NONE, WRITE),))
+    recompute = derive_steps(t, retain_of(12, {3, 7, 12}))
+    assert recompute[14] == Step(REFORWARD, 7, (Operand(7, READ),), (Operand(8, WRITE),))
+
+
 def test_in_place_dx_folds_the_relu_and_flatten_gradients_into_their_upstream_range():
     t = table("har")
-    steps = retain_steps(t, retain_of(12, set(range(1, 13))))
+    steps = derive_steps(t, retain_of(12, set(range(1, 13))))
     assert len(scan_ranges(t, steps, False)) == 23
     folded = scan_ranges(t, steps, True)
     assert len(folded) == 19
@@ -262,7 +284,7 @@ def test_forward_cost_follows_cs_switch_for_every_schema_type():
 def test_a_retain_list_of_the_wrong_length_is_refused(length):
     with pytest.raises(ValueError, match=rf"^retain: {length} entries for a 12-layer model; "
                                          r"expected 13 \(ACT 0 to ACT 12\)$"):
-        retain_steps(table("har"), (True,) * length)
+        derive_steps(table("har"), (True,) * length)
 
 
 def test_the_portfolio_refuses_to_place_with_no_member():

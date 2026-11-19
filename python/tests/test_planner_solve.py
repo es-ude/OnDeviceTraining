@@ -8,7 +8,7 @@ import pytest
 
 from odt.planner import (ExactRetainStrategy, NothingFits, Plan, PlanSpace, UnsupportedProblem,
                          load_problem, peak_floor)
-from odt.planner.cmodel import plan_numbers, retain_steps
+from odt.planner.cmodel import derive_steps, plan_numbers
 from tests.planner_oracle import all_plans, best, frontier, random_chain
 
 GOLDENS = Path(__file__).resolve().parent / "planner_goldens"
@@ -113,7 +113,7 @@ def test_the_segment_numbers_reproduce_every_mask(model):
             reduced = plan_numbers(sp.table, sp.retain_of(sp.plan(mask, ip).mask), ip)
             assert raw.ranges == reduced.ranges
             assert sp.decomposed_peak(path, ip) == raw.placed_peak_b
-        program = tuple(retain_steps(sp.table, sp.retain_of(mask)))
+        program = tuple(derive_steps(sp.table, sp.retain_of(mask)))
         by_program[program] = min(by_program.get(program, mask), mask)
     for program, smallest in by_program.items():
         assert sp.plan(smallest, False).mask == smallest

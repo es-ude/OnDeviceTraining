@@ -437,13 +437,14 @@ int main(void) {
     clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
     g_currentStage = 1;
     trainingRunResult_t stage1Result =
-        trainingRun(model, MODEL_SIZE, lossConfig, trainLoader, valLoader, sgd1, g_stage1Epochs,
-                    calculateGradsSequential, inferenceWithLoss,
+        trainingRun(&MODEL_CHAIN(model, MODEL_SIZE), lossConfig, trainLoader, valLoader, sgd1,
+                    g_stage1Epochs, calculateGradsSequential, inferenceWithLoss,
                     &(trainingRunOptions_t){.callback = epochCallback, .rng = &rng});
     (void)stage1Result;
 
-    epochStats_t stage1TestStats = evaluationEpochWithMetrics(
-        model, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
+    epochStats_t stage1TestStats =
+        evaluationEpochWithMetrics(&MODEL_CHAIN(model, MODEL_SIZE), CROSS_ENTROPY, testLoader,
+                                   inferenceWithLoss, REDUCTION_MEAN, 0);
     fprintf(stdout, "STAGE1 test_loss=%.4f test_acc=%.4f\n", (double)stage1TestStats.loss,
             (double)stage1TestStats.accuracy);
 
@@ -518,13 +519,14 @@ int main(void) {
     clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
     g_currentStage = 2;
     trainingRunResult_t stage2Result = trainingRun(
-        model2, MODEL_SIZE, lossConfig, trainLoader, valLoader, sgd2, g_stage2Epochs,
+        &MODEL_CHAIN(model2, MODEL_SIZE), lossConfig, trainLoader, valLoader, sgd2, g_stage2Epochs,
         calculateGradsSequential, inferenceWithLoss,
         &(trainingRunOptions_t){.callback = epochCallback, .remat = rematCall.remat, .rng = &rng});
     (void)stage2Result;
 
-    epochStats_t stage2TestStats = evaluationEpochWithMetrics(
-        model2, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
+    epochStats_t stage2TestStats =
+        evaluationEpochWithMetrics(&MODEL_CHAIN(model2, MODEL_SIZE), CROSS_ENTROPY, testLoader,
+                                   inferenceWithLoss, REDUCTION_MEAN, 0);
     fprintf(stdout, "STAGE2 test_loss=%.4f test_acc=%.4f\n", (double)stage2TestStats.loss,
             (double)stage2TestStats.accuracy);
 
@@ -567,7 +569,8 @@ int main(void) {
     for (size_t i = 0; i < numTest; ++i) {
         sample_t *s = getTestSample(i);
         batchView_t itemView;
-        tensor_t *out = inference(model2, MODEL_SIZE, batchViewOf(&itemView, s->item));
+        tensor_t *out =
+            inference(&MODEL_CHAIN(model2, MODEL_SIZE), batchViewOf(&itemView, s->item));
         float *probs = (float *)out->data;
         size_t argmax = 0;
         float best = probs[0];

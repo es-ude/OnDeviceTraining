@@ -242,7 +242,7 @@ static int writeAllReconstructions(layer_t **model, size_t modelSize,
     for (size_t i = 0; i < n; ++i) {
         sample_t *s = getSample(i);
         batchView_t itemView;
-        tensor_t *out = inference(model, modelSize, batchViewOf(&itemView, s->item));
+        tensor_t *out = inference(&MODEL_CHAIN(model, modelSize), batchViewOf(&itemView, s->item));
         const float *recon = (const float *)out->data;
         memcpy(buf + i * IN_CHANNELS * LEN_INPUT, recon, IN_CHANNELS * LEN_INPUT * sizeof(float));
         freeTensor(out);
@@ -331,15 +331,15 @@ int main(void) {
         clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
 
         trainingRunResult_t result = trainingRun(
-            model, MODEL_SIZE,
+            &MODEL_CHAIN(model, MODEL_SIZE),
             (lossConfig_t){
                 .funcType = MSE, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
             trainLoader, valLoader, sgd, EPOCHS, calculateGradsSequential, inferenceWithLoss,
             &(trainingRunOptions_t){.callback = epochCallback, .rng = &rng});
         (void)result;
 
-        float testLoss = evaluationEpoch(model, MODEL_SIZE, MSE, testLoader, inferenceWithLoss,
-                                         REDUCTION_MEAN, 0);
+        float testLoss = evaluationEpoch(&MODEL_CHAIN(model, MODEL_SIZE), MSE, testLoader,
+                                         inferenceWithLoss, REDUCTION_MEAN, 0);
 
         fprintf(g_log_file,
                 "\n  ],\n"

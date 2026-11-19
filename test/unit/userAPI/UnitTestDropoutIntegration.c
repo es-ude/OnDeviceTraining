@@ -118,7 +118,7 @@ void testInference_DropoutIsIdentity(void) {
     layer_t *model[1] = {drop};
 
     tensor_t *input = build2DFloat(1, 4, (float[]){1.f, 2.f, 3.f, 4.f}, 4);
-    tensor_t *output = inference(model, 1, input);
+    tensor_t *output = inference(&MODEL_CHAIN(model, 1), input);
 
     bool outNotNull = (output != NULL);
     float captured[4];
@@ -322,7 +322,7 @@ static void buildResumeRun(resumeRun_t *r, uint64_t initSeed) {
 }
 
 static void runResume(resumeRun_t *r, size_t epochs, trainingRng_t *rng) {
-    (void)trainingRun(r->model, 3,
+    (void)trainingRun(&MODEL_CHAIN(r->model, 3),
                       (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_MEAN},
                       r->trainDl, r->evalDl, r->sgd, epochs, calculateGradsSequential,
                       inferenceWithLoss, &(trainingRunOptions_t){.rng = rng});

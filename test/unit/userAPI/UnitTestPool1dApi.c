@@ -400,7 +400,7 @@ void testInferenceAtBatch4GrowsFactoryMaxPool(void) {
     layer_t *model[1] = {layer};
     tensor_t *in4 = buildPoolTensor(4, 1, 4, POOL_ROWS);
 
-    tensor_t *out = inference(model, 1, in4);
+    tensor_t *out = inference(&MODEL_CHAIN(model, 1), in4);
     size_t outRank = out->shape->numberOfDimensions;
     size_t outBatch = out->shape->dimensions[0];
     float gotOut[8];

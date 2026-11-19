@@ -162,7 +162,7 @@ void testMnistSmoke_FullTrainingPipelineReducesLoss() {
     cbInvocations = 0;
     size_t numberOfEpochs = 20;
     trainingRunResult_t result =
-        trainingRun(model, MODEL_SIZE,
+        trainingRun(&MODEL_CHAIN(model, MODEL_SIZE),
                     (lossConfig_t){.funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN},
                     trainDl, evalDl, sgd, numberOfEpochs, calculateGradsSequential,
                     inferenceWithLoss, &(trainingRunOptions_t){.callback = captureEpoch});
@@ -231,7 +231,7 @@ void testMnistSmoke_SnprintfGmtimeRBetweenSetupAndTrainingRun_NoSilentExit() {
 
     cbInvocations = 0;
     trainingRunResult_t result =
-        trainingRun(model, MODEL_SIZE,
+        trainingRun(&MODEL_CHAIN(model, MODEL_SIZE),
                     (lossConfig_t){.funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN},
                     trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
                     &(trainingRunOptions_t){.callback = captureEpoch});

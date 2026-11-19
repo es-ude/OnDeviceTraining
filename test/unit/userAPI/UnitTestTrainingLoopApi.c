@@ -41,12 +41,12 @@
  * batch-size scheduler, callback) travel in ONE NULL-able options struct as
  * the last argument; the callback receives epochInfo_t. Compile-time pins. */
 _Static_assert(_Generic(&trainingRun,
-                   trainingRunResult_t (*)(layer_t **, size_t, lossConfig_t, dataLoader_t *,
+                   trainingRunResult_t (*)(const model_t *, lossConfig_t, dataLoader_t *,
                                            dataLoader_t *, optimizer_t *, size_t,
                                            calculateGradsFn_t, inferenceWithLossFn_t,
                                            const trainingRunOptions_t *): 1,
                    default: 0),
-               "trainingRun must be (model, modelSize, lossConfig, trainDl, evalDl, optimizer, "
+               "trainingRun must be (model, lossConfig, trainDl, evalDl, optimizer, "
                "numberOfEpochs, calculateGradsFn, inferenceFn, options)");
 _Static_assert(_Generic((epochCallbackFn_t)0, void (*)(epochInfo_t, epochStats_t): 1, default: 0),
                "epochCallbackFn_t must be (epochInfo_t info, epochStats_t evalStats)");
@@ -202,11 +202,11 @@ void testEvaluationBatch_ReturnsAverageLoss() {
      * pure sum (no division); expected = sum of per-sample MEAN losses. */
     batchView_t in0View, lb0View, in1View, lb1View;
     inferenceStats_t *stats0 =
-        inferenceWithLoss(model, 1, batchViewOf(&in0View, input0), batchViewOf(&lb0View, label0),
-                          MSE, REDUCTION_MEAN, NULL);
+        inferenceWithLoss(&MODEL_CHAIN(model, 1), batchViewOf(&in0View, input0),
+                          batchViewOf(&lb0View, label0), MSE, REDUCTION_MEAN, NULL);
     inferenceStats_t *stats1 =
-        inferenceWithLoss(model, 1, batchViewOf(&in1View, input1), batchViewOf(&lb1View, label1),
-                          MSE, REDUCTION_MEAN, NULL);
+        inferenceWithLoss(&MODEL_CHAIN(model, 1), batchViewOf(&in1View, input1),
+                          batchViewOf(&lb1View, label1), MSE, REDUCTION_MEAN, NULL);
     float expectedSumLoss = stats0->loss + stats1->loss;
     freeInferenceStats(stats0);
     freeInferenceStats(stats1);
@@ -222,7 +222,8 @@ void testEvaluationBatch_ReturnsAverageLoss() {
     sample_t *samples[] = {s0, s1};
     batch_t batch = {.samples = samples, .size = 2};
 
-    float actualSumLoss = evaluationBatch(model, 1, MSE, &batch, inferenceWithLoss, REDUCTION_MEAN);
+    float actualSumLoss =
+        evaluationBatch(&MODEL_CHAIN(model, 1), MSE, &batch, inferenceWithLoss, REDUCTION_MEAN);
 
     /* CAPTURE. */
     float capturedExpected = expectedSumLoss;
@@ -330,7 +331,8 @@ void testEvaluationEpoch_ReturnsAverageLossAcrossBatches() {
     dataLoader_t *dl =
         dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
-    float totalAvg = evaluationEpoch(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
+    float totalAvg =
+        evaluationEpoch(&MODEL_CHAIN(model, 1), MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
 
     /* CAPTURE. */
     float capturedTotalAvg = totalAvg;
@@ -374,7 +376,8 @@ void testEvaluationEpoch_MinibatchMatchesMicrobatchAverage() {
     dataLoader_t *dl =
         dataLoaderInit(getEpochSample, getEpochDatasetSize, 2, NULL, NULL, false, true);
 
-    float totalAvg = evaluationEpoch(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
+    float totalAvg =
+        evaluationEpoch(&MODEL_CHAIN(model, 1), MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
 
     /* CAPTURE. */
     float capturedTotalAvg = totalAvg;
@@ -689,9 +692,9 @@ void testTrainingRun_ReturnsResult() {
     dataLoader_t *evalDl =
         dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
-    trainingRunResult_t result =
-        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss, NULL);
+    trainingRunResult_t result = trainingRun(
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss, NULL);
 
     /* CAPTURE. */
     float capturedFinalTrainLoss = result.finalTrainLoss;
@@ -756,10 +759,10 @@ void testTrainingRun_CallsCallbackEachEpochWithStats() {
         dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     size_t numberOfEpochs = 3;
-    trainingRunResult_t result =
-        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    trainDl, evalDl, sgd, numberOfEpochs, calculateGradsSequential,
-                    inferenceWithLoss, &(trainingRunOptions_t){.callback = captureCallback});
+    trainingRunResult_t result = trainingRun(
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        trainDl, evalDl, sgd, numberOfEpochs, calculateGradsSequential, inferenceWithLoss,
+        &(trainingRunOptions_t){.callback = captureCallback});
 
     /* CAPTURE. */
     size_t capturedCbCallCount = cbCallCount;
@@ -867,8 +870,8 @@ void testEvaluationEpochWithMetrics_SymOutputWire() {
     dataLoader_t *dl =
         dataLoaderInit(getSymMetricsSample, getSymMetricsDatasetSize, 1, NULL, NULL, false, true);
 
-    epochStats_t stats =
-        evaluationEpochWithMetrics(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
+    epochStats_t stats = evaluationEpochWithMetrics(&MODEL_CHAIN(model, 1), MSE, dl,
+                                                    inferenceWithLoss, REDUCTION_MEAN, 0);
 
     float capturedAccuracy = stats.accuracy;
 
@@ -902,8 +905,8 @@ void testEvaluationEpochWithMetrics_AllCorrect() {
         dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     /* Identity model: all 4 samples predict correctly (same as testEvaluationEpochAccuracy) */
-    epochStats_t stats =
-        evaluationEpochWithMetrics(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
+    epochStats_t stats = evaluationEpochWithMetrics(&MODEL_CHAIN(model, 1), MSE, dl,
+                                                    inferenceWithLoss, REDUCTION_MEAN, 0);
 
     /* CAPTURE. */
     float capturedLoss = stats.loss;
@@ -1119,8 +1122,8 @@ void testEvaluationEpochWithMetrics_PartiallyCorrect() {
     dataLoader_t *dl =
         dataLoaderInit(getPartialSample, getPartialDatasetSize, 1, NULL, NULL, false, true);
 
-    epochStats_t stats =
-        evaluationEpochWithMetrics(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
+    epochStats_t stats = evaluationEpochWithMetrics(&MODEL_CHAIN(model, 1), MSE, dl,
+                                                    inferenceWithLoss, REDUCTION_MEAN, 0);
 
     /* CAPTURE. */
     float capturedAccuracy = stats.accuracy;
@@ -1227,8 +1230,8 @@ void testEvaluationEpochWithMetrics_HandlesZeroPredictionClass() {
     dataLoader_t *dl =
         dataLoaderInit(getZeroPredSample, getZeroPredDatasetSize, 1, NULL, NULL, false, true);
 
-    epochStats_t stats =
-        evaluationEpochWithMetrics(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
+    epochStats_t stats = evaluationEpochWithMetrics(&MODEL_CHAIN(model, 1), MSE, dl,
+                                                    inferenceWithLoss, REDUCTION_MEAN, 0);
 
     /* CAPTURE. */
     float capturedAccuracy = stats.accuracy;
@@ -1284,8 +1287,8 @@ void testEvaluationEpochWithReport_ReturnsConfusionMatrix() {
 
     /* Pre-fill with non-zero to verify WithReport zeroes the caller's buffer before accumulating */
     size_t cm[2 * 2] = {99, 99, 99, 99};
-    classificationReport_t report =
-        evaluationEpochWithReport(model, 1, MSE, dl, inferenceWithLoss, cm, 2, REDUCTION_MEAN, 0);
+    classificationReport_t report = evaluationEpochWithReport(
+        &MODEL_CHAIN(model, 1), MSE, dl, inferenceWithLoss, cm, 2, REDUCTION_MEAN, 0);
 
     /* CAPTURE. */
     size_t capturedCM[4];
@@ -1336,9 +1339,9 @@ void testInferenceWithLoss_PropagatesForwardReductionSum() {
 
     /* SUM: (5-1)² + (1-0)² = 17. MEAN: 17 / 2 = 8.5. Different by construction. */
     inferenceStats_t *sumStats =
-        inferenceWithLoss(model, 1, input, label, MSE, REDUCTION_SUM, NULL);
+        inferenceWithLoss(&MODEL_CHAIN(model, 1), input, label, MSE, REDUCTION_SUM, NULL);
     inferenceStats_t *meanStats =
-        inferenceWithLoss(model, 1, input, label, MSE, REDUCTION_MEAN, NULL);
+        inferenceWithLoss(&MODEL_CHAIN(model, 1), input, label, MSE, REDUCTION_MEAN, NULL);
 
     float capturedSum = sumStats->loss;
     float capturedMean = meanStats->loss;
@@ -1501,7 +1504,8 @@ void testEvaluationEpoch_FlatAggregator_DivisionByTotalSamples() {
         dataLoaderInit(getEpochSample, getEpochDatasetSize, 2, NULL, NULL, false, true);
 
     /* MEAN: divides by totalSamples. */
-    float meanLoss = evaluationEpoch(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
+    float meanLoss =
+        evaluationEpoch(&MODEL_CHAIN(model, 1), MSE, dl, inferenceWithLoss, REDUCTION_MEAN, 0);
 
     float capturedMean = meanLoss;
 
@@ -1534,7 +1538,8 @@ void testEvaluationEpoch_SumPath_ReturnsRawTotal() {
 
     /* SUM forwardReduction: returns raw totalLoss = sum of per-sample
      * SUM losses. Per-sample SUM: 17, 17, 5, 5 (= per-sample MEAN * F=2). */
-    float sumLoss = evaluationEpoch(model, 1, MSE, dl, inferenceWithLoss, REDUCTION_SUM, 0);
+    float sumLoss =
+        evaluationEpoch(&MODEL_CHAIN(model, 1), MSE, dl, inferenceWithLoss, REDUCTION_SUM, 0);
 
     float capturedSum = sumLoss;
 
@@ -1583,7 +1588,7 @@ void testTrainingRun_HardcodesForwardReductionMean() {
      * eval loss would be F× larger than train loss, failing the assertion below. */
     lossConfig_t cfg = defaultLossConfig(MSE);
 
-    trainingRunResult_t result = trainingRun(model, 1, cfg, trainDl, evalDl, sgd, 2,
+    trainingRunResult_t result = trainingRun(&MODEL_CHAIN(model, 1), cfg, trainDl, evalDl, sgd, 2,
                                              calculateGradsSequential, inferenceWithLoss, NULL);
 
     float capturedTrain = result.finalTrainLoss;
@@ -1643,10 +1648,10 @@ void testTrainingRunStepsSchedulerOncePerEpoch(void) {
 
     lrScheduler_t sched;
     stepLrInit(&sched, sgd, 1, 0.5f); /* halve every epoch */
-    trainingRunResult_t result =
-        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss,
-                    &(trainingRunOptions_t){.lrScheduler = &sched});
+    trainingRunResult_t result = trainingRun(
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss,
+        &(trainingRunOptions_t){.lrScheduler = &sched});
     (void)result;
     /* base 0.4f halved twice: *0.25 is a power-of-two scale -> exact float */
     TEST_ASSERT_EQUAL_FLOAT(0.4f * 0.25f, optimizerFunctions[SGD_M].getLr(sgd));
@@ -1685,9 +1690,9 @@ void testTrainingRunNullSchedulerKeepsLrConstant(void) {
         dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     float lrBefore = optimizerFunctions[SGD_M].getLr(sgd);
-    trainingRunResult_t result =
-        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss, NULL);
+    trainingRunResult_t result = trainingRun(
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss, NULL);
     (void)result;
     TEST_ASSERT_EQUAL_FLOAT(lrBefore, optimizerFunctions[SGD_M].getLr(sgd));
 
@@ -1733,10 +1738,10 @@ void testTrainingRunRejectsSchedulerWiredToDifferentOptimizer(void) {
         .type = SGD_M, .impl = &otherImpl, .parameter = NULL, .states = NULL, .sizeStates = 0};
     lrScheduler_t sched;
     stepLrInit(&sched, &otherOptim, 1, 0.5f);
-    ASSERT_EXITS_WITH_FAILURE(
-        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
-                    &(trainingRunOptions_t){.lrScheduler = &sched}));
+    ASSERT_EXITS_WITH_FAILURE(trainingRun(
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
+        &(trainingRunOptions_t){.lrScheduler = &sched}));
 
     freeOptim(sgd);
     freeQuantization(momentumQ);
@@ -1780,10 +1785,10 @@ void testTrainingRunCallbackObservesTheEpochsOwnLr(void) {
     g_capturedOptim = sgd;
     lrScheduler_t sched;
     stepLrInit(&sched, sgd, 1, 0.5f);
-    trainingRunResult_t result =
-        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    trainDl, evalDl, sgd, 3, calculateGradsSequential, inferenceWithLoss,
-                    &(trainingRunOptions_t){.lrScheduler = &sched, .callback = captureLrCallback});
+    trainingRunResult_t result = trainingRun(
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        trainDl, evalDl, sgd, 3, calculateGradsSequential, inferenceWithLoss,
+        &(trainingRunOptions_t){.lrScheduler = &sched, .callback = captureLrCallback});
     (void)result;
     TEST_ASSERT_EQUAL_size_t(3, g_lrCaptureCount);
     /* halving by 0.5 is exponent-only: exact floats */
@@ -1847,9 +1852,9 @@ void testTrainingRunZeroOptionsBehavesLikeNull(void) {
         dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
     trainingRunOptions_t zero = {0};
-    trainingRunResult_t result =
-        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss, &zero);
+    trainingRunResult_t result = trainingRun(
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss, &zero);
 
     /* CAPTURE. */
     float capturedLr = optimizerFunctions[SGD_M].getLr(sgd);
@@ -1899,8 +1904,8 @@ void testTrainingRunStepsBsSchedulerOncePerEpochAndCallbackSeesTheEpochsBatch(vo
     bsScheduler_t bsSched;
     exponentialBsInit(&bsSched, trainDl, NULL, 0.5f, 8);
     trainingRunResult_t result = trainingRun(
-        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl,
-        evalDl, sgd, 3, calculateGradsSequential, inferenceWithLoss,
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        trainDl, evalDl, sgd, 3, calculateGradsSequential, inferenceWithLoss,
         &(trainingRunOptions_t){.bsScheduler = &bsSched, .callback = captureInfoCallback});
     (void)result;
 
@@ -1973,8 +1978,8 @@ void testTrainingRunCallbackObservesTheEpochsOwnLrAndBatchWithBothSchedulers(voi
     bsScheduler_t bsSched;
     exponentialBsInit(&bsSched, trainDl, NULL, 0.5f, 4);
     trainingRunResult_t result = trainingRun(
-        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl,
-        evalDl, sgd, 3, calculateGradsSequential, inferenceWithLoss,
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        trainDl, evalDl, sgd, 3, calculateGradsSequential, inferenceWithLoss,
         &(trainingRunOptions_t){
             .lrScheduler = &lrSched, .bsScheduler = &bsSched, .callback = captureInfoCallback});
     (void)result;
@@ -2043,8 +2048,8 @@ void testTrainingRunCompensatingBsSchedulerWritesTheLrEachEpoch(void) {
     bsScheduler_t bsSched;
     exponentialBsInit(&bsSched, trainDl, sgd, 0.8f, 8); /* sgd != NULL: compensating */
     trainingRunResult_t result = trainingRun(
-        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl,
-        evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss,
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceWithLoss,
         &(trainingRunOptions_t){.bsScheduler = &bsSched, .callback = captureInfoCallback});
     (void)result;
 
@@ -2138,10 +2143,10 @@ void testTrainingRunRejectsBsSchedulerWiredToAnotherLoader(void) {
     /* Wired to the EVAL loader — the eval loader must never be resized. */
     bsScheduler_t bsSched;
     exponentialBsInit(&bsSched, evalDl, NULL, 0.5f, 4);
-    ASSERT_EXITS_WITH_FAILURE(
-        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
-                    &(trainingRunOptions_t){.bsScheduler = &bsSched}));
+    ASSERT_EXITS_WITH_FAILURE(trainingRun(
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
+        &(trainingRunOptions_t){.bsScheduler = &bsSched}));
 
     freeOptim(sgd);
     freeQuantization(momentumQ);
@@ -2185,10 +2190,10 @@ void testTrainingRunRejectsBsCompensationWiredToAnotherOptimizer(void) {
         .type = SGD_M, .impl = &otherImpl, .parameter = NULL, .states = NULL, .sizeStates = 0};
     bsScheduler_t bsSched;
     exponentialBsInit(&bsSched, trainDl, &otherOptim, 0.5f, 4);
-    ASSERT_EXITS_WITH_FAILURE(
-        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
-                    &(trainingRunOptions_t){.bsScheduler = &bsSched}));
+    ASSERT_EXITS_WITH_FAILURE(trainingRun(
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
+        &(trainingRunOptions_t){.bsScheduler = &bsSched}));
 
     freeOptim(sgd);
     freeQuantization(momentumQ);
@@ -2229,10 +2234,10 @@ void testTrainingRunRejectsLrSchedulerNextToCompensatingBsScheduler(void) {
     stepLrInit(&lrSched, sgd, 1, 0.5f);
     bsScheduler_t bsSched;
     exponentialBsInit(&bsSched, trainDl, sgd, 0.5f, 4);
-    ASSERT_EXITS_WITH_FAILURE(
-        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
-                    &(trainingRunOptions_t){.lrScheduler = &lrSched, .bsScheduler = &bsSched}));
+    ASSERT_EXITS_WITH_FAILURE(trainingRun(
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
+        &(trainingRunOptions_t){.lrScheduler = &lrSched, .bsScheduler = &bsSched}));
 
     freeOptim(sgd);
     freeQuantization(momentumQ);
@@ -2269,8 +2274,9 @@ void testTrainingRunRejectsOneLoaderPassedAsTrainAndEvalLoader(void) {
 
     ASSERT_EXITS_WITH_OUTPUT(
         1, "trainingRun: trainDataLoader and evalDataLoader must be distinct loader objects",
-        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    dl, dl, sgd, 1, calculateGradsSequential, inferenceWithLoss, NULL));
+        trainingRun(&MODEL_CHAIN(model, 1),
+                    (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, dl, dl,
+                    sgd, 1, calculateGradsSequential, inferenceWithLoss, NULL));
 
     freeOptim(sgd);
     freeQuantization(momentumQ);
@@ -2357,8 +2363,8 @@ static void recordShuffleOrders(epochInfo_t info, epochStats_t evalStats) {
 static void runShuffled(shuffleRunFixture_t *f, size_t epochs, trainingRng_t *rng) {
     g_shuffleTrainDl = f->trainDl;
     g_shuffleEvalDl = f->evalDl;
-    (void)trainingRun(f->model, 1, defaultLossConfig(MSE), f->trainDl, f->evalDl, f->sgd, epochs,
-                      calculateGradsSequential, inferenceWithLoss,
+    (void)trainingRun(&MODEL_CHAIN(f->model, 1), defaultLossConfig(MSE), f->trainDl, f->evalDl,
+                      f->sgd, epochs, calculateGradsSequential, inferenceWithLoss,
                       &(trainingRunOptions_t){.callback = recordShuffleOrders, .rng = rng});
 }
 
@@ -2468,7 +2474,8 @@ static void runWithoutAnRngOverAShuffledTrainLoader(void) {
 static void evaluateANeverShuffledLoader(void) {
     shuffleRunFixture_t f;
     buildShuffleRunFixture(&f, false, true);
-    (void)evaluationEpoch(f.model, 1, MSE, f.evalDl, inferenceWithLoss, REDUCTION_MEAN, 1);
+    (void)evaluationEpoch(&MODEL_CHAIN(f.model, 1), MSE, f.evalDl, inferenceWithLoss,
+                          REDUCTION_MEAN, 1);
 }
 
 /* Without options->rng a shuffle = true loader has no key: the eval loader's
@@ -2599,9 +2606,9 @@ void testTrainingRun_DefaultRunsAllEpochsThroughNonFiniteLoss(void) {
     dataLoader_t *evalDl =
         dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
-    trainingRunResult_t result =
-        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    trainDl, evalDl, sgd, 6, calculateGradsSequential, inferenceWithLoss, NULL);
+    trainingRunResult_t result = trainingRun(
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        trainDl, evalDl, sgd, 6, calculateGradsSequential, inferenceWithLoss, NULL);
 
     size_t capturedEpochs = result.epochsCompleted;
     bool capturedStopped = result.stoppedOnNonFiniteLoss;
@@ -2642,8 +2649,8 @@ void testTrainingRun_StopsOnNonFiniteLossWhenRequested(void) {
     cbCallCount = 0;
 
     trainingRunResult_t result = trainingRun(
-        model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM}, trainDl,
-        evalDl, sgd, 6, calculateGradsSequential, inferenceWithLoss,
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        trainDl, evalDl, sgd, 6, calculateGradsSequential, inferenceWithLoss,
         &(trainingRunOptions_t){.callback = captureCallback, .stopOnNonFiniteLoss = true});
 
     size_t capturedEpochs = result.epochsCompleted;
@@ -2690,10 +2697,10 @@ void testTrainingRun_StopOnNonFiniteLoss_LastEpochStillCountsAsCompleted(void) {
     dataLoader_t *evalDl =
         dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
 
-    trainingRunResult_t result =
-        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
-                    &(trainingRunOptions_t){.stopOnNonFiniteLoss = true});
+    trainingRunResult_t result = trainingRun(
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        trainDl, evalDl, sgd, 1, calculateGradsSequential, inferenceWithLoss,
+        &(trainingRunOptions_t){.stopOnNonFiniteLoss = true});
 
     size_t capturedEpochs = result.epochsCompleted;
     bool capturedStopped = result.stoppedOnNonFiniteLoss;
@@ -2738,10 +2745,10 @@ void testTrainingRun_StopOnNonFiniteLoss_DoesNotStepSchedulersOnTheStoppingEpoch
 
     lrScheduler_t sched;
     stepLrInit(&sched, sgd, 1, 0.5f); /* halve every epoch */
-    trainingRunResult_t result =
-        trainingRun(model, 1, (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
-                    trainDl, evalDl, sgd, 6, calculateGradsSequential, inferenceWithLoss,
-                    &(trainingRunOptions_t){.lrScheduler = &sched, .stopOnNonFiniteLoss = true});
+    trainingRunResult_t result = trainingRun(
+        &MODEL_CHAIN(model, 1), (lossConfig_t){.funcType = MSE, .backwardReduction = REDUCTION_SUM},
+        trainDl, evalDl, sgd, 6, calculateGradsSequential, inferenceWithLoss,
+        &(trainingRunOptions_t){.lrScheduler = &sched, .stopOnNonFiniteLoss = true});
 
     size_t capturedEpochs = result.epochsCompleted;
     size_t capturedSchedulerSteps = sched.lastEpoch;
@@ -2797,14 +2804,12 @@ static tensor_t *buildBfpTwoClassOutput(void) {
  * functions are outside this task's scope) -- but argmaxByTensor consumes
  * whatever wire the inference function returns, so this stub exercises exactly
  * the contract under test. */
-static inferenceStats_t *bfpOutputWireInference(layer_t **model, size_t numberOfLayers,
-                                                tensor_t *input, tensor_t *label,
-                                                lossFuncType_t funcType,
+static inferenceStats_t *bfpOutputWireInference(const model_t *model, tensor_t *input,
+                                                tensor_t *label, lossFuncType_t funcType,
                                                 reduction_t forwardReduction,
                                                 const trainingCall_t *call) {
     (void)call;
     (void)model;
-    (void)numberOfLayers;
     (void)input;
     (void)label;
     (void)funcType;
@@ -2837,8 +2842,8 @@ void testEvaluationEpochWithMetrics_BfpOutputWireDequantCompares() {
     dataLoader_t *dl =
         dataLoaderInit(getBfpMetricsSample, getBfpMetricsDatasetSize, 1, NULL, NULL, false, true);
 
-    epochStats_t stats =
-        evaluationEpochWithMetrics(NULL, 0, MSE, dl, bfpOutputWireInference, REDUCTION_MEAN, 0);
+    epochStats_t stats = evaluationEpochWithMetrics(&MODEL_CHAIN(NULL, 0), MSE, dl,
+                                                    bfpOutputWireInference, REDUCTION_MEAN, 0);
 
     float capturedAccuracy = stats.accuracy;
 
@@ -2910,12 +2915,11 @@ static trainingStats_t *probeGrads(const model_t *model, lossConfig_t lossConfig
 }
 
 /* Echoes the label as a [1, C] output row, so predicted == target. */
-static inferenceStats_t *probeInference(layer_t **model, size_t numberOfLayers, tensor_t *input,
-                                        tensor_t *label, lossFuncType_t funcType,
-                                        reduction_t forwardReduction, const trainingCall_t *call) {
+static inferenceStats_t *probeInference(const model_t *model, tensor_t *input, tensor_t *label,
+                                        lossFuncType_t funcType, reduction_t forwardReduction,
+                                        const trainingCall_t *call) {
     (void)call;
     (void)model;
-    (void)numberOfLayers;
     (void)funcType;
     (void)forwardReduction;
     recordProbe(input, label);
@@ -2997,7 +3001,8 @@ void testEvaluationBatchHandsInferenceBatchAxisViews(void) {
     batch_t batch = {.samples = samples, .size = 1};
     g_probe = (shapeProbe_t){0};
 
-    float sumLoss = evaluationBatch(NULL, 0, MSE, &batch, probeInference, REDUCTION_SUM);
+    float sumLoss =
+        evaluationBatch(&MODEL_CHAIN(NULL, 0), MSE, &batch, probeInference, REDUCTION_SUM);
 
     bool itemDataShared = g_probe.inputData == item->data;
     bool labelDataShared = g_probe.labelData == label->data;
@@ -3033,8 +3038,8 @@ void testEvaluationEpochWithMetricsHandsInferenceBatchAxisViews(void) {
         dataLoaderInit(getProbeSample, getProbeDatasetSize, 1, NULL, NULL, false, true);
     g_probe = (shapeProbe_t){0};
 
-    epochStats_t stats =
-        evaluationEpochWithMetrics(NULL, 0, MSE, dl, probeInference, REDUCTION_MEAN, 0);
+    epochStats_t stats = evaluationEpochWithMetrics(&MODEL_CHAIN(NULL, 0), MSE, dl, probeInference,
+                                                    REDUCTION_MEAN, 0);
 
     bool itemDataShared = g_probe.inputData == probeDatasetItem->data;
     bool labelDataShared = g_probe.labelData == probeDatasetLabel->data;
@@ -3141,7 +3146,7 @@ static remRun_t runTwoEpochs(bool withScheduler, bool deinitBeforeTheRun) {
         }
     }
     run.result =
-        trainingRun(model, 1, cfg, trainDl, evalDl, sgd, 2, calculateGradsSequential,
+        trainingRun(&MODEL_CHAIN(model, 1), cfg, trainDl, evalDl, sgd, 2, calculateGradsSequential,
                     inferenceWithLoss, &(trainingRunOptions_t){.remat = withScheduler ? &s : NULL});
     if (withScheduler) {
         rematSchedulerReport(&s, &run.report);
@@ -3204,15 +3209,14 @@ static size_t g_forwardedCalls;
 static size_t g_forwardedOnScheduler;
 static rematScheduler_t *g_expectedRemat;
 
-static inferenceStats_t *forwardingInference(layer_t **model, size_t numberOfLayers,
-                                             tensor_t *input, tensor_t *label,
+static inferenceStats_t *forwardingInference(const model_t *model, tensor_t *input, tensor_t *label,
                                              lossFuncType_t funcType, reduction_t forwardReduction,
                                              const trainingCall_t *call) {
     g_forwardedCalls++;
     if (call != NULL && call->remat != NULL && call->remat == g_expectedRemat) {
         g_forwardedOnScheduler++;
     }
-    return inferenceWithLoss(model, numberOfLayers, input, label, funcType, forwardReduction, call);
+    return inferenceWithLoss(model, input, label, funcType, forwardReduction, call);
 }
 
 /* runTwoEpochs at training micro-batch m, evaluated at mEval over the first
@@ -3257,7 +3261,7 @@ static remRun_t runMicroBatched(size_t m, size_t mEval, size_t evalCount,
     g_forwardedOnScheduler = 0;
     g_expectedRemat = withScheduler ? &s : NULL;
     run.result = trainingRun(
-        model, 1, cfg, trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceFn,
+        &MODEL_CHAIN(model, 1), cfg, trainDl, evalDl, sgd, 2, calculateGradsSequential, inferenceFn,
         &(trainingRunOptions_t){
             .remat = withScheduler ? &s : NULL, .microBatchSize = m, .evalMicroBatchSize = mEval});
     g_expectedRemat = NULL; /* s ends with this frame */
@@ -3862,13 +3866,12 @@ static trainingStats_t *keyRecordingGrads(const model_t *model, lossConfig_t los
     return calculateGradsSequential(model, lossConfig, forwardReduction, input, label, call);
 }
 
-static inferenceStats_t *keyRecordingInference(layer_t **model, size_t numberOfLayers,
-                                               tensor_t *input, tensor_t *label,
-                                               lossFuncType_t funcType,
+static inferenceStats_t *keyRecordingInference(const model_t *model, tensor_t *input,
+                                               tensor_t *label, lossFuncType_t funcType,
                                                reduction_t forwardReduction,
                                                const trainingCall_t *call) {
     recordCallKey(g_evalKeys, &g_evalKeyCount, call);
-    return inferenceWithLoss(model, numberOfLayers, input, label, funcType, forwardReduction, call);
+    return inferenceWithLoss(model, input, label, funcType, forwardReduction, call);
 }
 
 /* runMicroBatched's one-Linear model and SGD over the 4-sample dataset:
@@ -3921,8 +3924,8 @@ static void runKeyed(uint16_t trainBatch, size_t m, uint16_t evalBatch, size_t e
     keyedFixture_t f;
     buildKeyedFixture(&f, trainBatch, evalBatch, evalCount);
     (void)trainingRun(
-        f.model, 1, defaultLossConfig(MSE), f.trainDl, f.evalDl, f.sgd, 2, keyRecordingGrads,
-        keyRecordingInference,
+        &MODEL_CHAIN(f.model, 1), defaultLossConfig(MSE), f.trainDl, f.evalDl, f.sgd, 2,
+        keyRecordingGrads, keyRecordingInference,
         &(trainingRunOptions_t){.microBatchSize = m, .evalMicroBatchSize = mEval, .rng = rng});
     freeKeyedFixture(&f);
 }
@@ -4051,8 +4054,8 @@ void testTrainingRunCountsTheEpochBeforeTheCallback(void) {
     keyedFixture_t f;
     buildKeyedFixture(&f, 2, 2, 4);
 
-    (void)trainingRun(f.model, 1, defaultLossConfig(MSE), f.trainDl, f.evalDl, f.sgd, 2,
-                      calculateGradsSequential, inferenceWithLoss,
+    (void)trainingRun(&MODEL_CHAIN(f.model, 1), defaultLossConfig(MSE), f.trainDl, f.evalDl, f.sgd,
+                      2, calculateGradsSequential, inferenceWithLoss,
                       &(trainingRunOptions_t){.callback = recordRngEpochCallback, .rng = &rng});
     freeKeyedFixture(&f);
 
@@ -4125,8 +4128,8 @@ static void runSrEvaluation(uint64_t seed, float losses[2]) {
     buildSrEvalFixture(&f);
     trainingRng_t rng;
     trainingRngInit(&rng, seed);
-    (void)trainingRun(f.model, 2, defaultLossConfig(MSE), f.trainDl, f.evalDl, f.sgd, 2,
-                      calculateGradsSequential, inferenceWithLoss,
+    (void)trainingRun(&MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE), f.trainDl, f.evalDl, f.sgd,
+                      2, calculateGradsSequential, inferenceWithLoss,
                       &(trainingRunOptions_t){.callback = recordSrEvalLoss, .rng = &rng});
     losses[0] = g_srEvalLosses[0];
     losses[1] = g_srEvalLosses[1];
@@ -4245,7 +4248,7 @@ static void evaluateAnSrForwardWithoutAKey(void) {
     s->label = buildFloatTensor1D(2, (float[]){10.f, 20.f});
     sample_t *samples[] = {s};
     batch_t batch = {.samples = samples, .size = 1};
-    (void)evaluationBatch(model, 1, MSE, &batch, inferenceWithLoss, REDUCTION_MEAN);
+    (void)evaluationBatch(&MODEL_CHAIN(model, 1), MSE, &batch, inferenceWithLoss, REDUCTION_MEAN);
 }
 
 /* No key, no randomness: the public evaluation entry points are key-less, so

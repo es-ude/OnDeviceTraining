@@ -631,8 +631,9 @@ static void runOdtsRoundtrip(layer_t **model, dataLoader_t *testLoader, epochSta
     deserializeModel(&MODEL_CHAIN(model2, MODEL_SIZE), fIn);
     fclose(fIn);
 
-    epochStats_t reloaded = evaluationEpochWithMetrics(
-        model2, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
+    epochStats_t reloaded =
+        evaluationEpochWithMetrics(&MODEL_CHAIN(model2, MODEL_SIZE), CROSS_ENTROPY, testLoader,
+                                   inferenceWithLoss, REDUCTION_MEAN, 0);
 
     if (reloaded.loss != original.loss || reloaded.accuracy != original.accuracy) {
         fprintf(stderr,
@@ -822,8 +823,9 @@ int main(void) {
                                               /*shuffle*/ false, /*dropLast*/ true);
 
     /* ---- Gate: sane initial loss (~ln(6)=1.7918 for 6-class near-uniform) -- */
-    epochStats_t initStats = evaluationEpochWithMetrics(model, MODEL_SIZE, CROSS_ENTROPY, valLoader,
-                                                        inferenceWithLoss, REDUCTION_MEAN, 0);
+    epochStats_t initStats =
+        evaluationEpochWithMetrics(&MODEL_CHAIN(model, MODEL_SIZE), CROSS_ENTROPY, valLoader,
+                                   inferenceWithLoss, REDUCTION_MEAN, 0);
     fprintf(stdout, "initial_val_loss=%.6f initial_val_acc=%.6f (expected ~%.4f)\n",
             (double)initStats.loss, (double)initStats.accuracy, log(6.0));
     fflush(stdout);
@@ -910,15 +912,16 @@ int main(void) {
     clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
 
     trainingRunResult_t result = trainingRun(
-        model, MODEL_SIZE,
+        &MODEL_CHAIN(model, MODEL_SIZE),
         (lossConfig_t){
             .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL},
         trainLoader, valLoader, sgd, g_epochs, calculateGradsSequential, inferenceWithLoss,
         &(trainingRunOptions_t){.lrScheduler = sched, .callback = epochCallback, .rng = &rng});
     (void)result;
 
-    epochStats_t testStats = evaluationEpochWithMetrics(
-        model, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
+    epochStats_t testStats =
+        evaluationEpochWithMetrics(&MODEL_CHAIN(model, MODEL_SIZE), CROSS_ENTROPY, testLoader,
+                                   inferenceWithLoss, REDUCTION_MEAN, 0);
 
     fprintf(stdout, "FINAL test_loss=%.4f test_acc=%.4f\n", (double)testStats.loss,
             (double)testStats.accuracy);

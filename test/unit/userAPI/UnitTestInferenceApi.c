@@ -54,7 +54,7 @@ void testInferenceLinearReluFloat() {
     layer_t *model[] = {linear, relu};
 
     /* 6. Exercise the system. */
-    tensor_t *output = inference(model, 2, input);
+    tensor_t *output = inference(&MODEL_CHAIN(model, 2), input);
 
     /* 7. CAPTURE assertion values into stack locals BEFORE frees. */
     float capturedOutput[2];
@@ -128,7 +128,7 @@ void testInferenceLinearReluSymInt32() {
     layer_t *model[] = {linear, relu};
 
     /* Run inference (returns a heap tensor in SymInt32 form). */
-    tensor_t *outputSymInt32 = inference(model, 2, input);
+    tensor_t *outputSymInt32 = inference(&MODEL_CHAIN(model, 2), input);
 
     /* Convert SymInt32 → Float32 view for comparison. The output buffer is
      * heap-allocated to keep us in the heap-tier idiom. */
@@ -202,7 +202,7 @@ void testInferenceWithLossLinearReluFloat() {
     /* Run inferenceWithLoss. inferenceStats owns its `output` tensor; its
      * matching free is freeInferenceStats. */
     inferenceStats_t *inferenceStats =
-        inferenceWithLoss(model, 2, input, label0, MSE, REDUCTION_MEAN, NULL);
+        inferenceWithLoss(&MODEL_CHAIN(model, 2), input, label0, MSE, REDUCTION_MEAN, NULL);
 
     /* CAPTURE. */
     float capturedLoss = inferenceStats->loss;
@@ -266,8 +266,8 @@ void testInferenceWithLossRejectsRank1LabelAgainstBatchedOutput(void) {
     layer_t *model[] = {linear, relu};
     size_t modelSize = 2;
 
-    ASSERT_EXITS_WITH_FAILURE(
-        (void)inferenceWithLoss(model, modelSize, input, label, MSE, REDUCTION_MEAN, NULL));
+    ASSERT_EXITS_WITH_FAILURE((void)inferenceWithLoss(&MODEL_CHAIN(model, modelSize), input, label,
+                                                      MSE, REDUCTION_MEAN, NULL));
 
     freeReluLayer(relu);
     freeLinearLayer(linear);
@@ -307,7 +307,7 @@ void testInferenceLayerNormSymInt32(void) {
     tensor_t *input = initTensor(inShape, quantizationInitSymInt32(HALF_AWAY), NULL);
     tensorFillFromFloatBuffer(input, (float[]){1.f, 2.f, 3.f, 4.f, 10.f, 20.f, 30.f, 40.f}, 8);
 
-    tensor_t *output = inference(model, 1, input);
+    tensor_t *output = inference(&MODEL_CHAIN(model, 1), input);
 
     bool typeOk = (output->quantization->type == SYM_INT32);
     float scale = ((symInt32QConfig_t *)output->quantization->qConfig)->scale;
@@ -377,7 +377,7 @@ void testInferenceOutputWireHonorsDeclaredQMaxBits(void) {
     linear->config->linear->outputQ = outputQ8;
     layer_t *model[] = {linear};
 
-    tensor_t *output = inference(model, 1, input);
+    tensor_t *output = inference(&MODEL_CHAIN(model, 1), input);
 
     uint8_t qMaxBits = ((symInt32QConfig_t *)output->quantization->qConfig)->qMaxBits;
 
@@ -433,7 +433,7 @@ void testInferenceBufferOutputCarriesBfpWire(void) {
                      (float[]){0.f, 0.f, 0.f, 0.f});
     layer_t *model[] = {linear};
 
-    tensor_t *output = inference(model, 1, input);
+    tensor_t *output = inference(&MODEL_CHAIN(model, 1), input);
 
     /* CAPTURE. */
     int capturedType = (int)output->quantization->type;
@@ -492,7 +492,7 @@ void testInferenceBufferOutputBfpGroupSizeEqualToWireNormalizesToPerTensor(void)
                      (float[]){0.f, 0.f, 0.f, 0.f});
     layer_t *model[] = {linear};
 
-    tensor_t *output = inference(model, 1, input);
+    tensor_t *output = inference(&MODEL_CHAIN(model, 1), input);
 
     /* CAPTURE. */
     int capturedType = (int)output->quantization->type;
@@ -557,7 +557,7 @@ void testInferenceBufferInputCarriesBfpExponents(void) {
     layerLoadWeights(linear, (float[]){1.f, 0.f, 0.f, 1.f}, (float[]){0.f, 0.f});
     layer_t *model[] = {linear};
 
-    tensor_t *output = inference(model, 1, input);
+    tensor_t *output = inference(&MODEL_CHAIN(model, 1), input);
 
     /* CAPTURE. */
     float capturedOutput[2] = {((float *)output->data)[0], ((float *)output->data)[1]};
@@ -597,7 +597,7 @@ void testInitBufferOutputBfpGroupSizeMismatchDies(void) {
         &lq);
     layer_t *model[] = {linear};
 
-    ASSERT_EXITS_WITH_FAILURE(freeTensor(inference(model, 1, input)));
+    ASSERT_EXITS_WITH_FAILURE(freeTensor(inference(&MODEL_CHAIN(model, 1), input)));
 
     freeLinearLayer(linear);
     freeTensor(input);
@@ -644,7 +644,7 @@ void testInferenceFactoryMaxPoolGrowsToBatch2(void) {
     tensor_t *batch1 = buildFloatTensor3DInf(1, 2, 4, kMaxPoolBatch1);
     tensor_t *batch2 = buildFloatTensor3DInf(2, 2, 4, kMaxPoolBatch2);
 
-    tensor_t *output = inference(model, 1, batch1);
+    tensor_t *output = inference(&MODEL_CHAIN(model, 1), batch1);
 
     /* CAPTURE. */
     size_t capturedDims[3] = {output->shape->dimensions[0], output->shape->dimensions[1],
@@ -657,7 +657,7 @@ void testInferenceFactoryMaxPoolGrowsToBatch2(void) {
 
     /* #152 PR3b: the forward grows the factory's [1, C, Lout] argmax to
      * batch 2 instead of dying. */
-    tensor_t *output2 = inference(model, 1, batch2);
+    tensor_t *output2 = inference(&MODEL_CHAIN(model, 1), batch2);
     size_t capturedBatch2Dims[3] = {output2->shape->dimensions[0], output2->shape->dimensions[1],
                                     output2->shape->dimensions[2]};
     float capturedBatch2Values[8];
@@ -699,7 +699,7 @@ void testInferenceWithLossFactoryMaxPoolGrowsToBatch2(void) {
         buildFloatTensor3DInf(2, 2, 2, (float[]){0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f});
 
     inferenceStats_t *stats =
-        inferenceWithLoss(model, 1, batch1, label1, MSE, REDUCTION_MEAN, NULL);
+        inferenceWithLoss(&MODEL_CHAIN(model, 1), batch1, label1, MSE, REDUCTION_MEAN, NULL);
 
     /* CAPTURE. */
     float capturedLoss = stats->loss;
@@ -707,7 +707,7 @@ void testInferenceWithLossFactoryMaxPoolGrowsToBatch2(void) {
 
     /* #152 PR3b: batch 2 grows the argmax and scores both rows. */
     inferenceStats_t *stats2 =
-        inferenceWithLoss(model, 1, batch2, label2, MSE, REDUCTION_MEAN, NULL);
+        inferenceWithLoss(&MODEL_CHAIN(model, 1), batch2, label2, MSE, REDUCTION_MEAN, NULL);
     float capturedLoss2 = stats2->loss;
     freeInferenceStats(stats2);
 
@@ -761,7 +761,7 @@ void testInferenceBatchedAddsBatchAxisToNaturalSamples(void) {
     sample_t *samples[] = {s0, s1};
     batch_t batch = {.samples = samples, .size = 2};
 
-    tensor_t **outputs = inferenceBatched(model, 1, &batch);
+    tensor_t **outputs = inferenceBatched(&MODEL_CHAIN(model, 1), &batch);
 
     size_t rank[2];
     size_t dims[2][3] = {{0}};
@@ -855,7 +855,7 @@ void testInferenceWithLossRunsOnACallersScheduler(void) {
     evalFixture_t f;
     buildEvalFixture(&f);
     inferenceStats_t *ref =
-        inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN, NULL);
+        inferenceWithLoss(&MODEL_CHAIN(f.model, 2), f.input, f.label, MSE, REDUCTION_MEAN, NULL);
     rematScheduler_t heap;
     rematScheduler_t arena;
     TEST_ASSERT_TRUE(
@@ -865,12 +865,13 @@ void testInferenceWithLossRunsOnACallersScheduler(void) {
     rematScheduler_t *rows[2] = {&heap, &arena};
     for (size_t k = 0; k < 2u; k++) {
         const trainingCall_t call = {.remat = rows[k]};
-        ASSERT_EXITS_WITH_OUTPUT(0, "",
-                                 freeInferenceStats(inferenceWithLoss(f.model, 2, f.input, f.label,
-                                                                      MSE, REDUCTION_MEAN, &call)));
+        ASSERT_EXITS_WITH_OUTPUT(
+            0, "",
+            freeInferenceStats(inferenceWithLoss(&MODEL_CHAIN(f.model, 2), f.input, f.label, MSE,
+                                                 REDUCTION_MEAN, &call)));
         for (int rep = 0; rep < 2; rep++) {
-            inferenceStats_t *got =
-                inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN, &call);
+            inferenceStats_t *got = inferenceWithLoss(&MODEL_CHAIN(f.model, 2), f.input, f.label,
+                                                      MSE, REDUCTION_MEAN, &call);
             TEST_ASSERT_EQUAL_MEMORY(&ref->loss, &got->loss, sizeof(float));
             TEST_ASSERT_EQUAL_size_t(2, got->output->shape->numberOfDimensions);
             TEST_ASSERT_EQUAL_size_t(2, got->output->shape->dimensions[1]);
@@ -896,12 +897,12 @@ void testInferenceWithLossTakesACallWithoutAScheduler(void) {
     buildEvalFixture(&f);
     ASSERT_EXITS_WITH_OUTPUT(
         0, "",
-        freeInferenceStats(inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN,
-                                             &(trainingCall_t){0})));
+        freeInferenceStats(inferenceWithLoss(&MODEL_CHAIN(f.model, 2), f.input, f.label, MSE,
+                                             REDUCTION_MEAN, &(trainingCall_t){0})));
     inferenceStats_t *viaNull =
-        inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN, NULL);
-    inferenceStats_t *viaCall =
-        inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN, &(trainingCall_t){0});
+        inferenceWithLoss(&MODEL_CHAIN(f.model, 2), f.input, f.label, MSE, REDUCTION_MEAN, NULL);
+    inferenceStats_t *viaCall = inferenceWithLoss(&MODEL_CHAIN(f.model, 2), f.input, f.label, MSE,
+                                                  REDUCTION_MEAN, &(trainingCall_t){0});
     float loss[2] = {viaNull->loss, viaCall->loss};
     float out[2][2];
     memcpy(out[0], viaNull->output->data, sizeof out[0]);
@@ -997,13 +998,14 @@ void testInferenceWithLossHandsEachLayerItsLayerKey(void) {
         rematHeapInit(&heap, &MODEL_CHAIN(f.model, 2), defaultLossConfig(MSE), f.input, NULL));
 
     installExecSpies();
-    freeInferenceStats(inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN,
-                                         &(trainingCall_t){.key = &callKey}));
+    freeInferenceStats(inferenceWithLoss(&MODEL_CHAIN(f.model, 2), f.input, f.label, MSE,
+                                         REDUCTION_MEAN, &(trainingCall_t){.key = &callKey}));
     restoreExecSpies();
     assertThreeLayerKeys(callKey);
 
     installExecSpies();
-    freeInferenceStats(inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN,
+    freeInferenceStats(inferenceWithLoss(&MODEL_CHAIN(f.model, 2), f.input, f.label, MSE,
+                                         REDUCTION_MEAN,
                                          &(trainingCall_t){.remat = &heap, .key = &callKey}));
     restoreExecSpies();
     assertThreeLayerKeys(callKey);
@@ -1018,10 +1020,11 @@ void testInferenceWithoutAKeyHandsNoLayerContext(void) {
     buildEvalFixture(&f);
     installExecSpies();
 
-    freeInferenceStats(inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN, NULL));
     freeInferenceStats(
-        inferenceWithLoss(f.model, 2, f.input, f.label, MSE, REDUCTION_MEAN, &(trainingCall_t){0}));
-    freeTensor(inference(f.model, 2, f.input));
+        inferenceWithLoss(&MODEL_CHAIN(f.model, 2), f.input, f.label, MSE, REDUCTION_MEAN, NULL));
+    freeInferenceStats(inferenceWithLoss(&MODEL_CHAIN(f.model, 2), f.input, f.label, MSE,
+                                         REDUCTION_MEAN, &(trainingCall_t){0}));
+    freeTensor(inference(&MODEL_CHAIN(f.model, 2), f.input));
 
     restoreExecSpies();
     freeEvalFixture(&f);
@@ -1045,7 +1048,8 @@ static void inferThroughADropoutLeftInTrainingMode(void) {
     layer_t *dropout = dropoutLayerInit(0.5f, mask, q, q);
     dropout->config->dropout->training = true;
     layer_t *model[1] = {dropout};
-    (void)inference(model, 1, buildFloatTensor2DInf(1, 4, (float[]){1.f, 2.f, 3.f, 4.f}));
+    (void)inference(&MODEL_CHAIN(model, 1),
+                    buildFloatTensor2DInf(1, 4, (float[]){1.f, 2.f, 3.f, 4.f}));
 }
 
 /* No key, no randomness: inference() is key-less, so a forward that draws
@@ -1078,7 +1082,7 @@ void testInferenceExitsOnAReluOutputNarrowerThanItsInput(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
                              "layer 0 (Relu) forward: its destination wire is declared SYM_INT32 "
                              "qMaxBits 8, narrower than its source wire's 16",
-                             freeTensor(inference(model, 1, input)));
+                             freeTensor(inference(&MODEL_CHAIN(model, 1), input)));
 
     freeReluLayer(relu);
     freeTensor(input);

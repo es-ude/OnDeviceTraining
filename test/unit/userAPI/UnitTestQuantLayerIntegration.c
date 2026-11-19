@@ -233,7 +233,7 @@ void testInferenceLinearSymThenQuantOutputsInt16RangeMantissas(void) {
     layer_t *model[2] = {linear, quant};
 
     tensor_t *input = build2DSym(2, 4, INPUT_VALS, 8);
-    tensor_t *predicted = inference(model, 2, input);
+    tensor_t *predicted = inference(&MODEL_CHAIN(model, 2), input);
 
     bool predictedNotNull = (predicted != NULL);
     bool dequantFinite = true;

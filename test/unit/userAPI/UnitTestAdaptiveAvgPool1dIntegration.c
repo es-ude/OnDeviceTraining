@@ -81,7 +81,7 @@ void testInference_ProducesAdaptiveMeans(void) {
     layer_t *model[1] = {pool};
 
     tensor_t *input = build3DFloat(1, 1, 4, (float[]){1.f, 2.f, 3.f, 4.f}, 4);
-    tensor_t *output = inference(model, 1, input);
+    tensor_t *output = inference(&MODEL_CHAIN(model, 1), input);
 
     bool outNotNull = (output != NULL);
     float out0 = (output && output->data) ? ((float *)output->data)[0] : 0.f;

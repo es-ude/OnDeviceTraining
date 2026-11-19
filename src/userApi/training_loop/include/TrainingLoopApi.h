@@ -186,9 +186,8 @@ typedef trainingStats_t *(*calculateGradsFn_t)(const model_t *model, lossConfig_
  *  .rng), the public evaluation
  *  functions pass NULL; a function that routes through inferenceWithLoss
  *  forwards call. */
-typedef inferenceStats_t *(*inferenceWithLossFn_t)(layer_t **model, size_t numberOfLayers,
-                                                   tensor_t *input, tensor_t *label,
-                                                   lossFuncType_t funcType,
+typedef inferenceStats_t *(*inferenceWithLossFn_t)(const model_t *model, tensor_t *input,
+                                                   tensor_t *label, lossFuncType_t funcType,
                                                    reduction_t forwardReduction,
                                                    const trainingCall_t *call);
 
@@ -267,32 +266,30 @@ void freeTrainingStats(trainingStats_t *trainingStats);
  * set its order. */
 
 /*! Per-sample primitive over one batch_t: never stacks (the epoch entry points do, #468). */
-float evaluationBatch(layer_t **model, size_t modelSize, lossFuncType_t funcType, batch_t *batch,
+float evaluationBatch(const model_t *model, lossFuncType_t funcType, batch_t *batch,
                       inferenceWithLossFn_t inferenceFn, reduction_t forwardReduction);
 
 /* microBatchSize: rows per inferenceFn call; 0 means 1. m > 1 stacks consecutive samples of the
  * loader's stream into [rows, ...] chunks (rows <= m, the last chunk holds the remainder) --
  * FLOAT32 forwards only (#468). */
-float evaluationEpoch(layer_t **model, size_t modelSize, lossFuncType_t funcType,
-                      dataLoader_t *dataLoader, inferenceWithLossFn_t inferenceFn,
-                      reduction_t forwardReduction, size_t microBatchSize);
+float evaluationEpoch(const model_t *model, lossFuncType_t funcType, dataLoader_t *dataLoader,
+                      inferenceWithLossFn_t inferenceFn, reduction_t forwardReduction,
+                      size_t microBatchSize);
 
 /* microBatchSize: rows per inferenceFn call; 0 means 1. m > 1 stacks consecutive samples of the
  * loader's stream into [rows, ...] chunks (rows <= m, the last chunk holds the remainder) --
  * FLOAT32 forwards only (#468). */
-epochStats_t evaluationEpochWithMetrics(layer_t **model, size_t modelSize, lossFuncType_t funcType,
+epochStats_t evaluationEpochWithMetrics(const model_t *model, lossFuncType_t funcType,
                                         dataLoader_t *dataLoader, inferenceWithLossFn_t inferenceFn,
                                         reduction_t forwardReduction, size_t microBatchSize);
 
 /* microBatchSize: rows per inferenceFn call; 0 means 1. m > 1 stacks consecutive samples of the
  * loader's stream into [rows, ...] chunks (rows <= m, the last chunk holds the remainder) --
  * FLOAT32 forwards only (#468). */
-classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSize,
-                                                 lossFuncType_t funcType, dataLoader_t *dataLoader,
-                                                 inferenceWithLossFn_t inferenceFn,
-                                                 size_t *cmBuffer, size_t numClasses,
-                                                 reduction_t forwardReduction,
-                                                 size_t microBatchSize);
+classificationReport_t
+evaluationEpochWithReport(const model_t *model, lossFuncType_t funcType, dataLoader_t *dataLoader,
+                          inferenceWithLossFn_t inferenceFn, size_t *cmBuffer, size_t numClasses,
+                          reduction_t forwardReduction, size_t microBatchSize);
 
 /*! Runs numberOfEpochs of train+eval. Before the first epoch a shuffle = true
  * eval loader is shuffled once under trainingRngShuffleEvalKey (never again).
@@ -322,7 +319,7 @@ classificationReport_t evaluationEpochWithReport(layer_t **model, size_t modelSi
  * forward with an evaluation micro-batch > 1; or an untracked (noRunningStats)
  * BatchNorm1d whose evaluation chunk -- full or the N mod m tail -- has fewer
  * than 2 values per channel (#467/#468). */
-trainingRunResult_t trainingRun(layer_t **model, size_t modelSize, lossConfig_t lossConfig,
+trainingRunResult_t trainingRun(const model_t *model, lossConfig_t lossConfig,
                                 dataLoader_t *trainDataLoader, dataLoader_t *evalDataLoader,
                                 optimizer_t *optimizer, size_t numberOfEpochs,
                                 calculateGradsFn_t calculateGradsFn,

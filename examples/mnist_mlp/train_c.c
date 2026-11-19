@@ -274,7 +274,7 @@ int main(void) {
         clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
 
         trainingRunResult_t result = trainingRun(
-            model, MODEL_SIZE,
+            &MODEL_CHAIN(model, MODEL_SIZE),
             (lossConfig_t){.funcType = CROSS_ENTROPY,
                            .backwardReduction = REDUCTION_MEAN,
                            .classWeights = NULL},
@@ -282,8 +282,9 @@ int main(void) {
             &(trainingRunOptions_t){.callback = epochCallback, .rng = &rng});
         (void)result;
 
-        epochStats_t testStats = evaluationEpochWithMetrics(
-            model, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
+        epochStats_t testStats =
+            evaluationEpochWithMetrics(&MODEL_CHAIN(model, MODEL_SIZE), CROSS_ENTROPY, testLoader,
+                                       inferenceWithLoss, REDUCTION_MEAN, 0);
 
         fprintf(g_log_file,
                 "\n  ],\n"
@@ -308,7 +309,7 @@ int main(void) {
     for (size_t i = 0; i < numTest; ++i) {
         sample_t *s = getTestSample(i);
         batchView_t itemView;
-        tensor_t *out = inference(model, MODEL_SIZE, batchViewOf(&itemView, s->item));
+        tensor_t *out = inference(&MODEL_CHAIN(model, MODEL_SIZE), batchViewOf(&itemView, s->item));
         float *probs = (float *)out->data;
         size_t argmax = 0;
         float best = probs[0];

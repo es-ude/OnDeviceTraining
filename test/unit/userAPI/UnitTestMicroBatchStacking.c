@@ -1592,8 +1592,8 @@ static trainingRunResult_t runClassifier(getSampleFn_t getSample, uint16_t batch
     }
     g_epochCount = 0;
     trainingRunResult_t result =
-        trainingRun(model, CLS_SIZE, defaultLossConfig(CROSS_ENTROPY), trainDl, evalDl, sgd,
-                    numberOfEpochs, calculateGradsFn, inferenceWithLoss,
+        trainingRun(&MODEL_CHAIN(model, CLS_SIZE), defaultLossConfig(CROSS_ENTROPY), trainDl,
+                    evalDl, sgd, numberOfEpochs, calculateGradsFn, inferenceWithLoss,
                     (baseOptions == NULL && mode == NO_SCHEDULER) ? NULL : &options);
     if (params != NULL) {
         snapshotParams(model, CLS_SIZE, params, CLS_PARAMS);

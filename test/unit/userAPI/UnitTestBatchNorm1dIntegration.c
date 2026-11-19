@@ -253,7 +253,7 @@ void testInferenceUsesRunningStatsAndWritesNothing(void) {
     memcpy(before, c->runningMean->data, 2 * sizeof(float));
     memcpy(before + 2, c->runningVar->data, 2 * sizeof(float));
     tensor_t *x = buildFloatTensor((size_t[]){1, 2}, 2, kX); /* [1, 2]: fine in eval */
-    tensor_t *out = inference(model, 2, x);
+    tensor_t *out = inference(&MODEL_CHAIN(model, 2), x);
     float after[4];
     memcpy(after, c->runningMean->data, 2 * sizeof(float));
     memcpy(after + 2, c->runningVar->data, 2 * sizeof(float));
@@ -322,7 +322,7 @@ void testCustomGradsFnWithoutFlipRunsBatchNormInEvalMode(void) {
     layer_t *model[2];
     buildBnLinear(model, TRAINABLE_DEFAULT);
     tensor_t *x = buildFloatTensor((size_t[]){4, 2}, 2, kX);
-    tensor_t *out = inference(model, 2, x); /* stands in for a hand-rolled forward */
+    tensor_t *out = inference(&MODEL_CHAIN(model, 2), x); /* stands in for a hand-rolled forward */
     uint64_t nbt = model[0]->config->batchNorm1d->numBatchesTracked;
     freeTensor(out);
     freeTensor(x);
@@ -499,7 +499,7 @@ static void runPreflightOnly(layer_t **model, size_t n, size_t evalMicroBatchSiz
         sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, n), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingRunOptions_t opts = {.microBatchSize = 2, .evalMicroBatchSize = evalMicroBatchSize};
-    (void)trainingRun(model, n, defaultLossConfig(MSE), &trainDl, evalDl, sgd, 1,
+    (void)trainingRun(&MODEL_CHAIN(model, n), defaultLossConfig(MSE), &trainDl, evalDl, sgd, 1,
                       calculateGradsSequential, inferenceWithLoss, &opts);
 }
 
@@ -608,8 +608,9 @@ void testTrainingRunAcceptsTrackedRank2BatchNorm(void) {
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingRunOptions_t opts = {.microBatchSize = 2, .evalMicroBatchSize = 1};
 
-    trainingRunResult_t result = trainingRun(model, 2, defaultLossConfig(MSE), trainDl, evalDl, sgd,
-                                             1, calculateGradsSequential, inferenceWithLoss, &opts);
+    trainingRunResult_t result =
+        trainingRun(&MODEL_CHAIN(model, 2), defaultLossConfig(MSE), trainDl, evalDl, sgd, 1,
+                    calculateGradsSequential, inferenceWithLoss, &opts);
 
     size_t epochsCompleted = result.epochsCompleted;
 
@@ -647,8 +648,9 @@ static size_t acceptUntrackedRank3(size_t evalMicroBatchSize) {
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingRunOptions_t opts = {.microBatchSize = 2, .evalMicroBatchSize = evalMicroBatchSize};
 
-    trainingRunResult_t result = trainingRun(model, 3, defaultLossConfig(MSE), trainDl, evalDl, sgd,
-                                             1, calculateGradsSequential, inferenceWithLoss, &opts);
+    trainingRunResult_t result =
+        trainingRun(&MODEL_CHAIN(model, 3), defaultLossConfig(MSE), trainDl, evalDl, sgd, 1,
+                    calculateGradsSequential, inferenceWithLoss, &opts);
 
     size_t epochsCompleted = result.epochsCompleted;
 
@@ -753,7 +755,7 @@ static void runSymForwardPreflight(void) {
         sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingRunOptions_t opts = {.microBatchSize = 1, .evalMicroBatchSize = 2};
-    (void)trainingRun(model, 1, defaultLossConfig(MSE), &trainDl, evalDl, sgd, 1,
+    (void)trainingRun(&MODEL_CHAIN(model, 1), defaultLossConfig(MSE), &trainDl, evalDl, sgd, 1,
                       calculateGradsSequential, inferenceWithLoss, &opts);
 }
 
@@ -821,7 +823,7 @@ static void runEmptyEvalLoader(void) {
     optimizer_t *sgd =
         sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
-    (void)trainingRun(model, 1, defaultLossConfig(MSE), &trainDl, &evalDl, sgd, 1,
+    (void)trainingRun(&MODEL_CHAIN(model, 1), defaultLossConfig(MSE), &trainDl, &evalDl, sgd, 1,
                       calculateGradsSequential, inferenceWithLoss, NULL);
 }
 
@@ -850,7 +852,7 @@ static void runEmptyFirstEvalBatch(void) {
     optimizer_t *sgd =
         sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
-    (void)trainingRun(model, 1, defaultLossConfig(MSE), &trainDl, &evalDl, sgd, 1,
+    (void)trainingRun(&MODEL_CHAIN(model, 1), defaultLossConfig(MSE), &trainDl, &evalDl, sgd, 1,
                       calculateGradsSequential, inferenceWithLoss, NULL);
 }
 
@@ -875,10 +877,10 @@ static size_t fourSamples(void) {
 /* Records every output the evaluation hands out, per call. */
 static float e2eOutputs[2][4];
 static size_t e2eCalls;
-static inferenceStats_t *recordingInference(layer_t **model, size_t n, tensor_t *in,
-                                            tensor_t *label, lossFuncType_t f, reduction_t r,
+static inferenceStats_t *recordingInference(const model_t *model, tensor_t *in, tensor_t *label,
+                                            lossFuncType_t f, reduction_t r,
                                             const trainingCall_t *call) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
+    inferenceStats_t *s = inferenceWithLoss(model, in, label, f, r, call);
     if (e2eCalls < 2) {
         memcpy(e2eOutputs[e2eCalls], s->output->data, 4 * sizeof(float));
     }
@@ -898,8 +900,8 @@ void testUntrackedRank2BatchNormEvaluatesPerChunk(void) {
     layer_t *model[1] = {bnLayer(2, true /* noAffine */, true, TRAINABLE_DEFAULT)};
     dataLoader_t *evalDl = dataLoaderInit(e2eGetSample, fourSamples, 1, NULL, NULL, false, true);
     e2eCalls = 0;
-    epochStats_t stats =
-        evaluationEpochWithMetrics(model, 1, MSE, evalDl, recordingInference, REDUCTION_MEAN, 2);
+    epochStats_t stats = evaluationEpochWithMetrics(&MODEL_CHAIN(model, 1), MSE, evalDl,
+                                                    recordingInference, REDUCTION_MEAN, 2);
     size_t calls = e2eCalls;
     /* Manual reference: chunk 0 = rows {0, 1}, chunk 1 = rows {2, 3}. */
     float expected[2][4];
@@ -908,7 +910,7 @@ void testUntrackedRank2BatchNormEvaluatesPerChunk(void) {
         float *d = (float *)stack->data;
         memcpy(d, x[2 * c], 2 * sizeof(float));
         memcpy(d + 2, x[2 * c + 1], 2 * sizeof(float));
-        tensor_t *out = inference(model, 1, stack);
+        tensor_t *out = inference(&MODEL_CHAIN(model, 1), stack);
         memcpy(expected[c], out->data, 4 * sizeof(float));
         freeTensor(out);
         freeTensor(stack);
@@ -948,8 +950,9 @@ void testTrainingRunTrainsAndEvaluatesUntrackedRank2BatchNorm(void) {
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingRunOptions_t opts = {.microBatchSize = 2};
 
-    trainingRunResult_t result = trainingRun(model, 2, defaultLossConfig(MSE), trainDl, evalDl, sgd,
-                                             1, calculateGradsSequential, inferenceWithLoss, &opts);
+    trainingRunResult_t result =
+        trainingRun(&MODEL_CHAIN(model, 2), defaultLossConfig(MSE), trainDl, evalDl, sgd, 1,
+                    calculateGradsSequential, inferenceWithLoss, &opts);
     size_t epochsCompleted = result.epochsCompleted;
     float evalLoss = result.finalEvalStats.loss;
 
@@ -971,11 +974,10 @@ void testTrainingRunTrainsAndEvaluatesUntrackedRank2BatchNorm(void) {
  * already fetch (no extra getBatch call): at m = 1 this model is
  * rejected BEFORE the first inferenceFn call (the tripwire would exit 2);
  * at m = 2 it evaluates. */
-static inferenceStats_t *inferenceMustNotRun(layer_t **model, size_t n, tensor_t *in,
-                                             tensor_t *label, lossFuncType_t f, reduction_t r,
+static inferenceStats_t *inferenceMustNotRun(const model_t *model, tensor_t *in, tensor_t *label,
+                                             lossFuncType_t f, reduction_t r,
                                              const trainingCall_t *call) {
     (void)model;
-    (void)n;
     (void)in;
     (void)label;
     (void)f;
@@ -990,7 +992,7 @@ static void untrackedMetrics(inferenceWithLossFn_t fn, size_t m) {
     g_pfDatasetSize = 2;
     layer_t *model[1] = {bnLayer(2, true, true, TRAINABLE_DEFAULT)};
     dataLoader_t *evalDl = dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, true);
-    (void)evaluationEpochWithMetrics(model, 1, MSE, evalDl, fn, REDUCTION_MEAN, m);
+    (void)evaluationEpochWithMetrics(&MODEL_CHAIN(model, 1), MSE, evalDl, fn, REDUCTION_MEAN, m);
 }
 
 void testEntryPointPreflightsUntrackedBatchNormInline(void) {
@@ -1023,10 +1025,11 @@ static void untrackedAfterEmptyFirstBatch(bool viaReport) {
     evalDl->getBatch = emptyFirstGetBatch;
     if (viaReport) {
         size_t cm[4];
-        (void)evaluationEpochWithReport(model, 1, MSE, evalDl, inferenceMustNotRun, cm, 2,
-                                        REDUCTION_MEAN, 1);
+        (void)evaluationEpochWithReport(&MODEL_CHAIN(model, 1), MSE, evalDl, inferenceMustNotRun,
+                                        cm, 2, REDUCTION_MEAN, 1);
     } else {
-        (void)evaluationEpoch(model, 1, MSE, evalDl, inferenceMustNotRun, REDUCTION_MEAN, 1);
+        (void)evaluationEpoch(&MODEL_CHAIN(model, 1), MSE, evalDl, inferenceMustNotRun,
+                              REDUCTION_MEAN, 1);
     }
 }
 

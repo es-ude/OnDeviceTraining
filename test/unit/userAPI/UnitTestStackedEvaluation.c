@@ -30,17 +30,17 @@
 
 /* #468: the evaluation entry points take a trailing size_t microBatchSize. */
 _Static_assert(_Generic(&evaluationEpoch,
-                   float (*)(layer_t **, size_t, lossFuncType_t, dataLoader_t *,
-                             inferenceWithLossFn_t, reduction_t, size_t): 1,
+                   float (*)(const model_t *, lossFuncType_t, dataLoader_t *, inferenceWithLossFn_t,
+                             reduction_t, size_t): 1,
                    default: 0),
                "evaluationEpoch must take a trailing size_t microBatchSize (#468)");
 _Static_assert(_Generic(&evaluationEpochWithMetrics,
-                   epochStats_t (*)(layer_t **, size_t, lossFuncType_t, dataLoader_t *,
+                   epochStats_t (*)(const model_t *, lossFuncType_t, dataLoader_t *,
                                     inferenceWithLossFn_t, reduction_t, size_t): 1,
                    default: 0),
                "evaluationEpochWithMetrics must take a trailing size_t microBatchSize (#468)");
 _Static_assert(_Generic(&evaluationEpochWithReport,
-                   classificationReport_t (*)(layer_t **, size_t, lossFuncType_t, dataLoader_t *,
+                   classificationReport_t (*)(const model_t *, lossFuncType_t, dataLoader_t *,
                                               inferenceWithLossFn_t, size_t *, size_t, reduction_t,
                                               size_t): 1,
                    default: 0),
@@ -167,15 +167,16 @@ static void evaluateEmptyLoader(entryPoint_t via) {
     size_t cm[CLS * CLS];
     switch (via) {
     case VIA_EPOCH:
-        (void)evaluationEpoch(model, MODEL_SIZE, MSE, &dl, inferenceWithLoss, REDUCTION_MEAN, 0);
+        (void)evaluationEpoch(&MODEL_CHAIN(model, MODEL_SIZE), MSE, &dl, inferenceWithLoss,
+                              REDUCTION_MEAN, 0);
         break;
     case VIA_METRICS:
-        (void)evaluationEpochWithMetrics(model, MODEL_SIZE, MSE, &dl, inferenceWithLoss,
-                                         REDUCTION_MEAN, 0);
+        (void)evaluationEpochWithMetrics(&MODEL_CHAIN(model, MODEL_SIZE), MSE, &dl,
+                                         inferenceWithLoss, REDUCTION_MEAN, 0);
         break;
     case VIA_REPORT:
-        (void)evaluationEpochWithReport(model, MODEL_SIZE, MSE, &dl, inferenceWithLoss, cm, CLS,
-                                        REDUCTION_MEAN, 0);
+        (void)evaluationEpochWithReport(&MODEL_CHAIN(model, MODEL_SIZE), MSE, &dl,
+                                        inferenceWithLoss, cm, CLS, REDUCTION_MEAN, 0);
         break;
     }
 }
@@ -196,8 +197,8 @@ static void reportWithNumClasses(size_t numClasses, size_t m) {
     buildModel(model);
     dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
     size_t cm[(CLS + 1) * (CLS + 1)];
-    (void)evaluationEpochWithReport(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, cm, numClasses,
-                                    REDUCTION_MEAN, m);
+    (void)evaluationEpochWithReport(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl, inferenceWithLoss, cm,
+                                    numClasses, REDUCTION_MEAN, m);
 }
 
 void testReportRejectsNumClassesNotMatchingTheLabel(void) {
@@ -216,7 +217,7 @@ static classificationReport_t runReport(size_t m, uint16_t batchSize, size_t *cm
     dataLoader_t *dl =
         dataLoaderInit(getSample, getDatasetSize, batchSize, NULL, NULL, false, true);
     classificationReport_t r = evaluationEpochWithReport(
-        model, MODEL_SIZE, MSE, dl, inferenceWithLoss, cm, CLS, REDUCTION_MEAN, m);
+        &MODEL_CHAIN(model, MODEL_SIZE), MSE, dl, inferenceWithLoss, cm, CLS, REDUCTION_MEAN, m);
     freeDataLoader(dl);
     freeModel(model);
     return r;
@@ -226,7 +227,8 @@ static float runPlainLoss(size_t m, reduction_t reduction) {
     layer_t *model[MODEL_SIZE];
     buildModel(model);
     dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
-    float loss = evaluationEpoch(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, reduction, m);
+    float loss =
+        evaluationEpoch(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl, inferenceWithLoss, reduction, m);
     freeDataLoader(dl);
     freeModel(model);
     return loss;
@@ -315,15 +317,16 @@ static size_t countGetBatch(entryPoint_t via, size_t m) {
     size_t cm[CLS * CLS];
     switch (via) {
     case VIA_EPOCH:
-        (void)evaluationEpoch(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, m);
+        (void)evaluationEpoch(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl, inferenceWithLoss,
+                              REDUCTION_MEAN, m);
         break;
     case VIA_METRICS:
-        (void)evaluationEpochWithMetrics(model, MODEL_SIZE, MSE, dl, inferenceWithLoss,
-                                         REDUCTION_MEAN, m);
+        (void)evaluationEpochWithMetrics(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl,
+                                         inferenceWithLoss, REDUCTION_MEAN, m);
         break;
     case VIA_REPORT:
-        (void)evaluationEpochWithReport(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, cm, CLS,
-                                        REDUCTION_MEAN, m);
+        (void)evaluationEpochWithReport(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl, inferenceWithLoss,
+                                        cm, CLS, REDUCTION_MEAN, m);
         break;
     }
     freeDataLoader(dl);
@@ -370,7 +373,8 @@ static float runGrownLoss(size_t m, reduction_t reduction) {
     dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
     g_realGetBatch = dl->getBatch;
     dl->getBatch = oneExtraSampleGetBatch;
-    float loss = evaluationEpoch(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, reduction, m);
+    float loss =
+        evaluationEpoch(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl, inferenceWithLoss, reduction, m);
     freeDataLoader(dl);
     freeModel(model);
     return loss;
@@ -394,75 +398,76 @@ static void metricsWith(inferenceWithLossFn_t fn, size_t m) {
     layer_t *model[MODEL_SIZE];
     buildModel(model);
     dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
-    (void)evaluationEpochWithMetrics(model, MODEL_SIZE, MSE, dl, fn, REDUCTION_MEAN, m);
+    (void)evaluationEpochWithMetrics(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl, fn, REDUCTION_MEAN,
+                                     m);
 }
 
-static inferenceStats_t *symOutputInference(layer_t **model, size_t n, tensor_t *in,
-                                            tensor_t *label, lossFuncType_t f, reduction_t r,
+static inferenceStats_t *symOutputInference(const model_t *model, tensor_t *in, tensor_t *label,
+                                            lossFuncType_t f, reduction_t r,
                                             const trainingCall_t *call) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
+    inferenceStats_t *s = inferenceWithLoss(model, in, label, f, r, call);
     s->output->quantization->type = SYM_INT32;
     return s;
 }
-static inferenceStats_t *extraRowInference(layer_t **model, size_t n, tensor_t *in, tensor_t *label,
+static inferenceStats_t *extraRowInference(const model_t *model, tensor_t *in, tensor_t *label,
                                            lossFuncType_t f, reduction_t r,
                                            const trainingCall_t *call) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
+    inferenceStats_t *s = inferenceWithLoss(model, in, label, f, r, call);
     s->output->shape->dimensions[0] += 1;
     return s;
 }
 /* Same element count, rows moved out of axis 0: [1, rows * C]. */
-static inferenceStats_t *flatRowInference(layer_t **model, size_t n, tensor_t *in, tensor_t *label,
+static inferenceStats_t *flatRowInference(const model_t *model, tensor_t *in, tensor_t *label,
                                           lossFuncType_t f, reduction_t r,
                                           const trainingCall_t *call) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
+    inferenceStats_t *s = inferenceWithLoss(model, in, label, f, r, call);
     size_t *d = s->output->shape->dimensions;
     d[1] *= d[0];
     d[0] = 1;
     return s;
 }
-static inferenceStats_t *shortRowInference(layer_t **model, size_t n, tensor_t *in, tensor_t *label,
+static inferenceStats_t *shortRowInference(const model_t *model, tensor_t *in, tensor_t *label,
                                            lossFuncType_t f, reduction_t r,
                                            const trainingCall_t *call) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
+    inferenceStats_t *s = inferenceWithLoss(model, in, label, f, r, call);
     s->output->shape->dimensions[1] -= 1;
     return s;
 }
-static inferenceStats_t *swappedOrderInference(layer_t **model, size_t n, tensor_t *in,
-                                               tensor_t *label, lossFuncType_t f, reduction_t r,
+static inferenceStats_t *swappedOrderInference(const model_t *model, tensor_t *in, tensor_t *label,
+                                               lossFuncType_t f, reduction_t r,
                                                const trainingCall_t *call) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
+    inferenceStats_t *s = inferenceWithLoss(model, in, label, f, r, call);
     size_t *o = s->output->shape->orderOfDimensions;
     size_t t = o[0];
     o[0] = o[1];
     o[1] = t;
     return s;
 }
-static inferenceStats_t *nullDataInference(layer_t **model, size_t n, tensor_t *in, tensor_t *label,
+static inferenceStats_t *nullDataInference(const model_t *model, tensor_t *in, tensor_t *label,
                                            lossFuncType_t f, reduction_t r,
                                            const trainingCall_t *call) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
+    inferenceStats_t *s = inferenceWithLoss(model, in, label, f, r, call);
     s->output->data = NULL; /* leaks in the forked child only */
     return s;
 }
-static inferenceStats_t *nullOrderInference(layer_t **model, size_t n, tensor_t *in,
-                                            tensor_t *label, lossFuncType_t f, reduction_t r,
+static inferenceStats_t *nullOrderInference(const model_t *model, tensor_t *in, tensor_t *label,
+                                            lossFuncType_t f, reduction_t r,
                                             const trainingCall_t *call) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
+    inferenceStats_t *s = inferenceWithLoss(model, in, label, f, r, call);
     s->output->shape->orderOfDimensions = NULL; /* leaks in the forked child only */
     return s;
 }
 
-static inferenceStats_t *nullStatsInference(layer_t **model, size_t n, tensor_t *in,
-                                            tensor_t *label, lossFuncType_t f, reduction_t r,
+static inferenceStats_t *nullStatsInference(const model_t *model, tensor_t *in, tensor_t *label,
+                                            lossFuncType_t f, reduction_t r,
                                             const trainingCall_t *call) {
-    (void)inferenceWithLoss(model, n, in, label, f, r, call); /* leaks in the forked child only */
+    (void)inferenceWithLoss(model, in, label, f, r, call); /* leaks in the forked child only */
     return NULL;
 }
-static inferenceStats_t *nullShapeInference(layer_t **model, size_t n, tensor_t *in,
-                                            tensor_t *label, lossFuncType_t f, reduction_t r,
+static inferenceStats_t *nullShapeInference(const model_t *model, tensor_t *in, tensor_t *label,
+                                            lossFuncType_t f, reduction_t r,
                                             const trainingCall_t *call) {
-    inferenceStats_t *s = inferenceWithLoss(model, n, in, label, f, r, call);
+    inferenceStats_t *s = inferenceWithLoss(model, in, label, f, r, call);
     s->output->shape = NULL; /* leaks in the forked child only */
     return s;
 }
@@ -484,7 +489,8 @@ static void metricsOverEmptyStream(size_t m) {
     buildModel(model);
     dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
     dl->getBatch = emptyGetBatch;
-    (void)evaluationEpoch(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, REDUCTION_MEAN, m);
+    (void)evaluationEpoch(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl, inferenceWithLoss,
+                          REDUCTION_MEAN, m);
 }
 
 void testEmptyStreamFailsFast(void) {
@@ -499,8 +505,8 @@ static void metricsWithEmptyFirstBatch(void) {
     buildModel(model);
     dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
     dl->getBatch = emptyGetBatch;
-    (void)evaluationEpochWithMetrics(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, REDUCTION_MEAN,
-                                     1);
+    (void)evaluationEpochWithMetrics(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl, inferenceWithLoss,
+                                     REDUCTION_MEAN, 1);
 }
 
 /* The numClasses peek reads samples[0] of getBatch(0): a loader that reports
@@ -569,8 +575,8 @@ static void metricsWithSymForward(size_t m) {
     dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
     g_realGetBatch = dl->getBatch;
     dl->getBatch = getBatchMustNotRunAfterGate;
-    (void)evaluationEpochWithMetrics(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, REDUCTION_MEAN,
-                                     m);
+    (void)evaluationEpochWithMetrics(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl, inferenceWithLoss,
+                                     REDUCTION_MEAN, m);
 }
 
 void testStackedForwardGateFiresBeforeTheStream(void) {
@@ -589,8 +595,8 @@ static void reportWithSymPropLoss(size_t m, size_t *cm, epochStats_t *out) {
     quantization_t *saved = model[0]->config->linear->propLossQ;
     model[0]->config->linear->propLossQ = symQ;
     dataLoader_t *dl = dataLoaderInit(getSample, getDatasetSize, 1, NULL, NULL, false, true);
-    *out = evaluationEpochWithReport(model, MODEL_SIZE, MSE, dl, inferenceWithLoss, cm, CLS,
-                                     REDUCTION_MEAN, m)
+    *out = evaluationEpochWithReport(&MODEL_CHAIN(model, MODEL_SIZE), MSE, dl, inferenceWithLoss,
+                                     cm, CLS, REDUCTION_MEAN, m)
                .stats;
     model[0]->config->linear->propLossQ = saved;
     freeDataLoader(dl);
@@ -636,9 +642,9 @@ static void convReport(size_t m, size_t *cm, epochStats_t *out) {
     fillPattern(model[3]->config->linear->weights->param, 1.1f);
     fillPattern(model[3]->config->linear->bias->param, 2.3f);
     dataLoader_t *dl = dataLoaderInit(getConvSample, getDatasetSize, 1, NULL, NULL, false, true);
-    *out =
-        evaluationEpochWithReport(model, 4, MSE, dl, inferenceWithLoss, cm, CLS, REDUCTION_MEAN, m)
-            .stats;
+    *out = evaluationEpochWithReport(&MODEL_CHAIN(model, 4), MSE, dl, inferenceWithLoss, cm, CLS,
+                                     REDUCTION_MEAN, m)
+               .stats;
     freeDataLoader(dl);
     freeLinearLayer(model[3]);
     freeFlattenLayer(model[2]);

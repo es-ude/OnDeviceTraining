@@ -183,13 +183,13 @@ static void deInitBuffer(tensor_t *buffer) {
     freeQuantization(buffer->quantization);
 }
 
-tensor_t *inference(layer_t **model, size_t numberOfLayers, tensor_t *input) {
+tensor_t *inference(const model_t *m, tensor_t *input) {
     tensor_t outputNext;
 
     initBufferInput(input, &outputNext);
 
-    for (size_t i = 0; i < numberOfLayers; i++) {
-        layer_t *currentLayer = model[i];
+    for (size_t i = 0; i < m->numLayers; i++) {
+        layer_t *currentLayer = m->layers[i];
         layerType_t currentLayerType = currentLayer->type;
         forwardFn_t forward = layerFunctions[currentLayerType].forward;
 
@@ -208,14 +208,13 @@ tensor_t *inference(layer_t **model, size_t numberOfLayers, tensor_t *input) {
     return output;
 }
 
-tensor_t **inferenceBatched(layer_t **model, size_t numberOfLayers, batch_t *batch) {
+tensor_t **inferenceBatched(const model_t *m, batch_t *batch) {
     tensor_t **tensorArr = reserveMemory(batch->size * sizeof(*tensorArr));
 
     for (size_t i = 0; i < batch->size; i++) {
         /* batch_t consumer: the sample is natural-shape, inference() takes [B, ...]. */
         batchView_t itemView;
-        tensorArr[i] =
-            inference(model, numberOfLayers, batchViewOf(&itemView, batch->samples[i]->item));
+        tensorArr[i] = inference(m, batchViewOf(&itemView, batch->samples[i]->item));
     }
 
     return tensorArr;
@@ -241,15 +240,13 @@ void freeInferenceStats(inferenceStats_t *inferenceStats) {
  * the scheduler hands out FORWARD and LOSS_FORWARD steps of its EVAL program,
  * the checker validates each before it runs, and ACT 0 is the caller's input,
  * borrowed, not copied. No hook fires and no training-mode flag changes. */
-static inferenceStats_t *inferenceOnScheduler(layer_t **model, size_t numberOfLayers,
-                                              tensor_t *input, tensor_t *label,
+static inferenceStats_t *inferenceOnScheduler(const model_t *m, tensor_t *input, tensor_t *label,
                                               lossFuncType_t funcType, reduction_t forwardReduction,
                                               rematScheduler_t *s, const rngKey_t *callKey) {
-    const model_t chain = MODEL_CHAIN(model, numberOfLayers);
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t chk;
-    rematCheckInit(&chk, s, &chain, funcType, REMAT_MODE_EVAL, producedGen);
-    rematBeginEval(s, &chain, funcType, input);
+    rematCheckInit(&chk, s, m, funcType, REMAT_MODE_EVAL, producedGen);
+    rematBeginEval(s, m, funcType, input);
     inferenceStats_t *inferenceStats = NULL;
     for (;;) {
         rematStep_t st;
@@ -262,7 +259,7 @@ static inferenceStats_t *inferenceOnScheduler(layer_t **model, size_t numberOfLa
         layerExec_t exStorage;
         const layerExec_t *ex = layerExecForLayer(callKey, st.layer, &exStorage);
         if (st.kind == REMAT_STEP_FORWARD) {
-            layer_t *layer = model[st.layer];
+            layer_t *layer = m->layers[st.layer];
             layerFunctions[layer->type].forward(layer, op.in, op.out, ex);
         } else { /* LOSS_FORWARD: the checker admits nothing else in EVAL */
             /* As on the NULL path: the loss first (a label whose shape differs
@@ -281,19 +278,19 @@ static inferenceStats_t *inferenceOnScheduler(layer_t **model, size_t numberOfLa
     return inferenceStats;
 }
 
-inferenceStats_t *inferenceWithLoss(layer_t **model, size_t numberOfLayers, tensor_t *input,
-                                    tensor_t *label, lossFuncType_t funcType,
-                                    reduction_t forwardReduction, const trainingCall_t *call) {
+inferenceStats_t *inferenceWithLoss(const model_t *m, tensor_t *input, tensor_t *label,
+                                    lossFuncType_t funcType, reduction_t forwardReduction,
+                                    const trainingCall_t *call) {
     const rngKey_t *callKey = (call != NULL) ? call->key : NULL;
     if (call != NULL && call->remat != NULL) {
-        return inferenceOnScheduler(model, numberOfLayers, input, label, funcType, forwardReduction,
-                                    call->remat, callKey);
+        return inferenceOnScheduler(m, input, label, funcType, forwardReduction, call->remat,
+                                    callKey);
     }
     tensor_t outputNext;
     initBufferInput(input, &outputNext);
 
-    for (size_t i = 0; i < numberOfLayers; i++) {
-        layer_t *currentLayer = model[i];
+    for (size_t i = 0; i < m->numLayers; i++) {
+        layer_t *currentLayer = m->layers[i];
         layerType_t currentLayerType = currentLayer->type;
         forwardFn_t forward = layerFunctions[currentLayerType].forward;
 
@@ -312,7 +309,7 @@ inferenceStats_t *inferenceWithLoss(layer_t **model, size_t numberOfLayers, tens
     lossFunctions_t lossFns = lossFunctions[funcType];
     layerExec_t lossExec;
     float loss = lossFns.forward(&outputNext, label, forwardReduction,
-                                 layerExecForLayer(callKey, numberOfLayers, &lossExec));
+                                 layerExecForLayer(callKey, m->numLayers, &lossExec));
 
     inferenceStats_t *inferenceStats = reserveInferenceStats(&outputNext);
     convertTensor(&outputNext, inferenceStats->output, NULL);

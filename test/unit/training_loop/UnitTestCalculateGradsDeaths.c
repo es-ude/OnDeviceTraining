@@ -627,8 +627,8 @@ void testAZeroedOrDeinitialisedSchedulerExitsNamingIt(void) {
 
 /* MLP EVAL: FORWARD 0, 1, 2 (#0-#2), LOSS_FORWARD (#3). */
 static void evalOn(fixture_t *f, rematScheduler_t *s) {
-    freeInferenceStats(inferenceWithLoss(f->model, f->n, f->x, g_label, f->lt, REDUCTION_MEAN,
-                                         &(trainingCall_t){.remat = s}));
+    freeInferenceStats(inferenceWithLoss(&MODEL_CHAIN(f->model, f->n), f->x, g_label, f->lt,
+                                         REDUCTION_MEAN, &(trainingCall_t){.remat = s}));
 }
 
 static void assertDecoratedEvalExitsOnBothRows(const rematSchedulerFunctions_t *fns,

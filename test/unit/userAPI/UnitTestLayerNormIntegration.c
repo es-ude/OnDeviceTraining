@@ -124,7 +124,7 @@ void testLinearLayerNormLinearOneTrainingStep(void) {
      * routes layer outputs through CalculateGradsSequential's own switch, so
      * this is the only coverage of initBufferOutput's LAYERNORM case (mirrors
      * UnitTestDropoutIntegration). */
-    tensor_t *predicted = inference(model, 3, input);
+    tensor_t *predicted = inference(&MODEL_CHAIN(model, 3), input);
     bool predictedNotNull = (predicted != NULL);
     bool predictedFinite = predictedNotNull;
     for (size_t i = 0; predictedNotNull && i < 4; i++) {

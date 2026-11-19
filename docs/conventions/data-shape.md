@@ -58,7 +58,7 @@ Datasets never carry a batch axis; the loop owns it.
 
 ```c
 batchView_t itemView;
-tensor_t *out = inference(model, modelSize, batchViewOf(&itemView, sample->item));
+tensor_t *out = inference(&MODEL_CHAIN(model, modelSize), batchViewOf(&itemView, sample->item));
 ```
 
 ### Documented exception: mnist_cnn

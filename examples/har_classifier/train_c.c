@@ -621,11 +621,12 @@ int main(void) {
         clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
 
         trainingRunResult_t result =
-            trainingRun(model, MODEL_SIZE, lossConfig, trainLoader, valLoader, sgd, g_epochs,
-                        calculateGradsSequential, inferenceWithLoss, &options);
+            trainingRun(&MODEL_CHAIN(model, MODEL_SIZE), lossConfig, trainLoader, valLoader, sgd,
+                        g_epochs, calculateGradsSequential, inferenceWithLoss, &options);
 
-        epochStats_t testStats = evaluationEpochWithMetrics(
-            model, MODEL_SIZE, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
+        epochStats_t testStats =
+            evaluationEpochWithMetrics(&MODEL_CHAIN(model, MODEL_SIZE), CROSS_ENTROPY, testLoader,
+                                       inferenceWithLoss, REDUCTION_MEAN, 0);
 
         /* Additive: evaluate the test set on the snapshot, then put the FINAL
          * parameters back, so predictions, plots and final.test_* all describe
@@ -634,8 +635,8 @@ int main(void) {
         if (g_haveSnapshot) {
             paramsCopy(g_snapshotOptim, g_finalArena, SNAPSHOT_ARENA_FLOATS, /*toArena*/ 1);
             paramsCopy(g_snapshotOptim, g_snapshotArena, SNAPSHOT_ARENA_FLOATS, /*toArena*/ 0);
-            bestTest = evaluationEpochWithMetrics(model, MODEL_SIZE, CROSS_ENTROPY, testLoader,
-                                                  inferenceWithLoss, REDUCTION_MEAN, 0);
+            bestTest = evaluationEpochWithMetrics(&MODEL_CHAIN(model, MODEL_SIZE), CROSS_ENTROPY,
+                                                  testLoader, inferenceWithLoss, REDUCTION_MEAN, 0);
             paramsCopy(g_snapshotOptim, g_finalArena, SNAPSHOT_ARENA_FLOATS, /*toArena*/ 0);
         }
 
@@ -682,7 +683,7 @@ int main(void) {
     for (size_t i = 0; i < numTest; ++i) {
         sample_t *s = getTestSample(i);
         batchView_t itemView;
-        tensor_t *out = inference(model, MODEL_SIZE, batchViewOf(&itemView, s->item));
+        tensor_t *out = inference(&MODEL_CHAIN(model, MODEL_SIZE), batchViewOf(&itemView, s->item));
         float *probs = (float *)out->data;
         size_t argmax = 0;
         float best = probs[0];

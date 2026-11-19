@@ -3482,7 +3482,7 @@ void testInferenceOneLinearModelRejectsRank1Sample(void) {
     size_t sampleDims[] = {3};
     tensor_t *sample = makeFloatTensor(sampleDims, 1, (float[]){1.f, 2.f, 3.f});
 
-    ASSERT_EXITS_WITH_FAILURE(freeTensor(inference(model, 1, sample)));
+    ASSERT_EXITS_WITH_FAILURE(freeTensor(inference(&MODEL_CHAIN(model, 1), sample)));
 
     freeTensor(sample);
     freeLinearLayer(layer);

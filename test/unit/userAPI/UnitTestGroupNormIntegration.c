@@ -262,7 +262,7 @@ void testGroupNormClassifierTrainsAndRoundTrips(void) {
     /* (b) 30 epochs; captureEpoch records the first and last training loss. */
     cbInvocations = 0;
     size_t numberOfEpochs = 30;
-    trainingRun(model, MODEL_SIZE,
+    trainingRun(&MODEL_CHAIN(model, MODEL_SIZE),
                 (lossConfig_t){.funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN},
                 trainDl, evalDl, optim, numberOfEpochs, calculateGradsSequential, inferenceWithLoss,
                 &(trainingRunOptions_t){.callback = captureEpoch});
@@ -278,8 +278,8 @@ void testGroupNormClassifierTrainsAndRoundTrips(void) {
     tensor_t *probeA = build3DFloat(1, IN_CHANNELS, SEQ_LEN, probeBufA, IN_CHANNELS * SEQ_LEN);
     tensor_t *probeB = build3DFloat(1, IN_CHANNELS, SEQ_LEN, probeBufB, IN_CHANNELS * SEQ_LEN);
 
-    tensor_t *predA0 = inference(model, MODEL_SIZE, probeA);
-    tensor_t *predB0 = inference(model, MODEL_SIZE, probeB);
+    tensor_t *predA0 = inference(&MODEL_CHAIN(model, MODEL_SIZE), probeA);
+    tensor_t *predB0 = inference(&MODEL_CHAIN(model, MODEL_SIZE), probeB);
     float predA0v[NUM_CLASSES], predB0v[NUM_CLASSES];
     for (size_t c = 0; c < NUM_CLASSES; c++) {
         predA0v[c] = ((float *)predA0->data)[c];
@@ -303,14 +303,14 @@ void testGroupNormClassifierTrainsAndRoundTrips(void) {
     fillParamConstant(model[5]->config->linear->weights, 0.5f);
     fillParamConstant(model[5]->config->linear->bias, 0.5f);
 
-    tensor_t *predAperturbed = inference(model, MODEL_SIZE, probeA);
+    tensor_t *predAperturbed = inference(&MODEL_CHAIN(model, MODEL_SIZE), probeA);
     float predAperturbedv[NUM_CLASSES];
     for (size_t c = 0; c < NUM_CLASSES; c++) {
         predAperturbedv[c] = ((float *)predAperturbed->data)[c];
     }
     freeTensor(predAperturbed);
 
-    tensor_t *predBperturbed = inference(model, MODEL_SIZE, probeB);
+    tensor_t *predBperturbed = inference(&MODEL_CHAIN(model, MODEL_SIZE), probeB);
     float predBperturbedv[NUM_CLASSES];
     for (size_t c = 0; c < NUM_CLASSES; c++) {
         predBperturbedv[c] = ((float *)predBperturbed->data)[c];
@@ -326,8 +326,8 @@ void testGroupNormClassifierTrainsAndRoundTrips(void) {
     };
     modelLoadStateDict(&MODEL_CHAIN(model, MODEL_SIZE), entries, 3);
 
-    tensor_t *predA1 = inference(model, MODEL_SIZE, probeA);
-    tensor_t *predB1 = inference(model, MODEL_SIZE, probeB);
+    tensor_t *predA1 = inference(&MODEL_CHAIN(model, MODEL_SIZE), probeA);
+    tensor_t *predB1 = inference(&MODEL_CHAIN(model, MODEL_SIZE), probeB);
     float predA1v[NUM_CLASSES], predB1v[NUM_CLASSES];
     for (size_t c = 0; c < NUM_CLASSES; c++) {
         predA1v[c] = ((float *)predA1->data)[c];

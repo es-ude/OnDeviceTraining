@@ -1836,8 +1836,8 @@ static void captureEval(zooFixture_t *f, const trainingCall_t *call, evalCapture
     snapshotInput(&g_input, f->x);
     cap->output.used = 0;
     cap->memBefore = memProfileCurrentBytes();
-    inferenceStats_t *stats =
-        inferenceWithLoss(f->model, f->n, f->x, f->y, f->loss.funcType, REDUCTION_MEAN, call);
+    inferenceStats_t *stats = inferenceWithLoss(&MODEL_CHAIN(f->model, f->n), f->x, f->y,
+                                                f->loss.funcType, REDUCTION_MEAN, call);
     cap->loss = stats->loss;
     captureTensor(&cap->output, stats->output);
     freeInferenceStats(stats);
@@ -1919,8 +1919,9 @@ void testAMarkedInputEvaluatesToAnUnmarkedOutputOnEitherRow(void) {
         f.x->sparsity = &marker;
         snapshotInput(&g_input, f.x);
         size_t before = memProfileCurrentBytes();
-        inferenceStats_t *stats = inferenceWithLoss(f.model, f.n, f.x, f.y, f.loss.funcType,
-                                                    REDUCTION_MEAN, &(trainingCall_t){.remat = &s});
+        inferenceStats_t *stats =
+            inferenceWithLoss(&MODEL_CHAIN(f.model, f.n), f.x, f.y, f.loss.funcType, REDUCTION_MEAN,
+                              &(trainingCall_t){.remat = &s});
         assertInputUnchanged(&g_input, f.x);
         bool outputMarked = stats->output->sparsity != NULL;
         g_evalCell.loss = stats->loss;

@@ -2020,7 +2020,7 @@ void testLinearSymInt32GradAccumulatesOverTwoMicrobatchesAndSteps(void) {
     layer_t *symModel[] = {symLayer};
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *symOptim =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, symModel, 1, momentumQ,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(symModel, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     optimizerFunctions[symOptim->type].step(symOptim, NULL);
     tensor_t *symWParam = symLayer->config->linear->weights->param;

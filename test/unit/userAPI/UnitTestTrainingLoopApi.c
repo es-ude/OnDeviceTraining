@@ -107,7 +107,7 @@ void testCalculateGradsSequential_MatchesPyTorch() {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, sizeModel, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, sizeModel), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
     /* Pre-existing test hack: only step weights, leaving bias unchanged across
@@ -557,7 +557,7 @@ void testTrainingEpochDefault_DoesOptimizerStepPerBatch() {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, sizeModel, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, sizeModel), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* Use epoch dataset (batchSize=1 → 4 batches) */
@@ -623,7 +623,7 @@ void testTrainingEpochDefault_MinibatchStepsOncePerMinibatch() {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, sizeModel, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, sizeModel), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -675,7 +675,7 @@ void testTrainingRun_ReturnsResult() {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -741,7 +741,7 @@ void testTrainingRun_CallsCallbackEachEpochWithStats() {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -1006,7 +1006,7 @@ void testTrainingEpochDefault_MeanScalesGradByOneOverNF() {
     /* momentumFactor=0 makes SGD_M behave like plain SGD. */
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initSingleSampleDataset();
@@ -1372,7 +1372,7 @@ void testTrainingEpochDefault_SumBackwardSkipsOptimizerScaling() {
      * larger by N*F than MEAN gradients on the same data. */
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.001f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.001f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -1431,7 +1431,7 @@ void testTrainingEpochDefault_MeanForwardSumBackward_MixedCombination() {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.001f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.001f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -1562,7 +1562,7 @@ void testTrainingRun_HardcodesForwardReductionMean() {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -1626,7 +1626,7 @@ void testTrainingRunStepsSchedulerOncePerEpoch(void) {
     quantization_t *momentumQ = quantizationInitFloat();
     /* base 0.4f halved twice: *0.25 is a power-of-two scale -> exact float */
     optimizer_t *sgd =
-        sgdMCreateOptim(0.4f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.4f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -1669,7 +1669,7 @@ void testTrainingRunNullSchedulerKeepsLrConstant(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -1709,7 +1709,7 @@ void testTrainingRunRejectsSchedulerWiredToDifferentOptimizer(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -1761,7 +1761,7 @@ void testTrainingRunCallbackObservesTheEpochsOwnLr(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.4f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.4f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -1831,7 +1831,7 @@ void testTrainingRunZeroOptionsBehavesLikeNull(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -1880,7 +1880,7 @@ void testTrainingRunStepsBsSchedulerOncePerEpochAndCallbackSeesTheEpochsBatch(vo
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -1952,7 +1952,7 @@ void testTrainingRunCallbackObservesTheEpochsOwnLrAndBatchWithBothSchedulers(voi
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.4f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.4f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -2024,7 +2024,7 @@ void testTrainingRunCompensatingBsSchedulerWritesTheLrEachEpoch(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -2085,7 +2085,7 @@ void testTrainingEpochDefaultRejectsBatchLargerThanDataset(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -2120,7 +2120,7 @@ void testTrainingRunRejectsBsSchedulerWiredToAnotherLoader(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -2161,7 +2161,7 @@ void testTrainingRunRejectsBsCompensationWiredToAnotherOptimizer(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -2208,7 +2208,7 @@ void testTrainingRunRejectsLrSchedulerNextToCompensatingBsScheduler(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -2254,7 +2254,7 @@ void testTrainingRunRejectsOneLoaderPassedAsTrainAndEvalLoader(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     initEpochDataset();
@@ -2310,7 +2310,7 @@ static void buildShuffleRunFixture(shuffleRunFixture_t *f, bool reshufflePerEpoc
                                          &f->testQ);
     f->model[0] = f->linear;
     f->momentumQ = quantizationInitFloat();
-    f->sgd = sgdMCreateOptim(0.01f, 0.f, 0.f, f->model, 1, f->momentumQ,
+    f->sgd = sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(f->model, 1), f->momentumQ,
                              (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
     f->trainDl = dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, true, true);
@@ -2585,7 +2585,7 @@ void testTrainingRun_DefaultRunsAllEpochsThroughNonFiniteLoss(void) {
     layer_t *model[] = {linear};
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(1e30f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(1e30f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
     dataLoader_t *trainDl =
@@ -2626,7 +2626,7 @@ void testTrainingRun_StopsOnNonFiniteLossWhenRequested(void) {
     layer_t *model[] = {linear};
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(1e30f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(1e30f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
     dataLoader_t *trainDl =
@@ -2676,7 +2676,7 @@ void testTrainingRun_StopOnNonFiniteLoss_LastEpochStillCountsAsCompleted(void) {
     layer_t *model[] = {linear};
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(1e30f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(1e30f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
     dataLoader_t *trainDl =
@@ -2722,7 +2722,7 @@ void testTrainingRun_StopOnNonFiniteLoss_DoesNotStepSchedulersOnTheStoppingEpoch
     layer_t *model[] = {linear};
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(1e30f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(1e30f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
     dataLoader_t *trainDl =
@@ -3065,7 +3065,7 @@ void testTrainingEpochDefaultMeanScaleSeesLabelBatchAxis(void) {
     layer_t *model[] = {linear};
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(1.0f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(1.0f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     dataLoader_t *dl =
         dataLoaderInit(getProbeSample, getProbeDatasetSize, 1, NULL, NULL, false, true);
@@ -3116,7 +3116,7 @@ static remRun_t runTwoEpochs(bool withScheduler, bool deinitBeforeTheRun) {
     layer_t *model[] = {linear};
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
     dataLoader_t *trainDl =
@@ -3226,7 +3226,7 @@ static remRun_t runMicroBatched(size_t m, size_t mEval, size_t evalCount,
     layer_t *model[] = {linear};
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
     g_evalCount = evalCount;
@@ -3890,7 +3890,7 @@ static void buildKeyedFixture(keyedFixture_t *f, uint16_t trainBatch, uint16_t e
     f->linear = buildBorrowedLinearLayer(w, b, &f->testQ);
     f->model[0] = f->linear;
     f->momentumQ = quantizationInitFloat();
-    f->sgd = sgdMCreateOptim(0.01f, 0.f, 0.f, f->model, 1, f->momentumQ,
+    f->sgd = sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(f->model, 1), f->momentumQ,
                              (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
     g_evalCount = evalCount;
@@ -4091,7 +4091,7 @@ static void buildSrEvalFixture(srEvalFixture_t *f) {
     f->model[1] = buildBorrowedLinearLayer(buildFloatParam(2, SR_EVAL_HIDDEN, 0.05f, -0.3f),
                                            buildFloatParam(1, 2, 0.f, 0.f), &f->testQ);
     f->momentumQ = quantizationInitFloat();
-    f->sgd = sgdMCreateOptim(0.f, 0.f, 0.f, f->model, 2, f->momentumQ,
+    f->sgd = sgdMCreateOptim(0.f, 0.f, 0.f, &MODEL_CHAIN(f->model, 2), f->momentumQ,
                              (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     initEpochDataset();
     f->trainDl = dataLoaderInit(getEpochSample, getEpochDatasetSize, 1, NULL, NULL, false, true);
@@ -4309,7 +4309,7 @@ static void runMeanScaleEpoch(size_t batch, bool bfpGrads) {
     layer_t *model[] = {linear};
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     freeQuantization(momentumQ);
 

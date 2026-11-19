@@ -80,11 +80,11 @@ void testOptimizer_OneStateForBiaslessConv1d(void) {
         &lq);
     layer_t *model[1] = {conv};
 
-    size_t numStates = calcTotalNumberOfStates(model, 1);
+    size_t numStates = calcTotalNumberOfStates(&MODEL_CHAIN(model, 1));
 
     quantization_t *momentumQuant = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 1, momentumQuant,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 1), momentumQuant,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     bool optimNotNull = (optim != NULL);
 
@@ -119,11 +119,11 @@ void testOptimizer_TwoStatesForBiasedConv1d(void) {
         &lq);
     layer_t *model[1] = {conv};
 
-    size_t numStates = calcTotalNumberOfStates(model, 1);
+    size_t numStates = calcTotalNumberOfStates(&MODEL_CHAIN(model, 1));
 
     quantization_t *momentumQuant = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 1, momentumQuant,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 1), momentumQuant,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     bool optimNotNull = (optim != NULL);
 
@@ -157,11 +157,11 @@ void testOptimizer_OneStateForBiaslessConv1dTransposed(void) {
         &lq);
     layer_t *model[1] = {convT};
 
-    size_t numStates = calcTotalNumberOfStates(model, 1);
+    size_t numStates = calcTotalNumberOfStates(&MODEL_CHAIN(model, 1));
 
     quantization_t *momentumQuant = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 1, momentumQuant,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 1), momentumQuant,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     bool optimNotNull = (optim != NULL);
 
@@ -196,11 +196,11 @@ void testBiaslessLinearCountsOneStateAndOptimizerSurvives(void) {
         &lq);
     layer_t *model[1] = {linear};
 
-    size_t numStates = calcTotalNumberOfStates(model, 1);
+    size_t numStates = calcTotalNumberOfStates(&MODEL_CHAIN(model, 1));
 
     quantization_t *momentumQuant = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 1, momentumQuant,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 1), momentumQuant,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     bool optimNotNull = (optim != NULL);
 

@@ -429,9 +429,9 @@ int main(void) {
     buildModel(model, &lq, /*freezeConv*/ false, &rng);
 
     quantization_t *momentumQ1 = quantizationInitFloat();
-    optimizer_t *sgd1 =
-        sgdMCreateOptim(g_lr, g_momentum, /*weightDecay*/ 0.0f, model, MODEL_SIZE, momentumQ1,
-                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimizer_t *sgd1 = sgdMCreateOptim(
+        g_lr, g_momentum, /*weightDecay*/ 0.0f, &MODEL_CHAIN(model, MODEL_SIZE), momentumQ1,
+        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
     g_currentStage = 1;
@@ -493,9 +493,9 @@ int main(void) {
     markBeforeOpt2 = memProfileMark();
 #endif
     quantization_t *momentumQ2 = quantizationInitFloat();
-    optimizer_t *sgd2 =
-        sgdMCreateOptim(g_lr, g_momentum, /*weightDecay*/ 0.0f, model2, MODEL_SIZE, momentumQ2,
-                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimizer_t *sgd2 = sgdMCreateOptim(
+        g_lr, g_momentum, /*weightDecay*/ 0.0f, &MODEL_CHAIN(model2, MODEL_SIZE), momentumQ2,
+        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 #ifdef ODT_MEM_PROFILE
     markAfterOpt2 = memProfileMark(); /* optstate_b = delta */
 #endif

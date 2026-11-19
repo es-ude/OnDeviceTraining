@@ -242,7 +242,7 @@ void testGroupNormClassifierTrainsAndRoundTrips(void) {
     buildModel(model, q);
 
     /* (a) 5 optimizer states: conv (bias-less) 1 + groupNorm 2 + linear 2. */
-    size_t numStates = calcTotalNumberOfStates(model, MODEL_SIZE);
+    size_t numStates = calcTotalNumberOfStates(&MODEL_CHAIN(model, MODEL_SIZE));
 
     /* Full-batch (batchSize == dataset size): one deterministic step per epoch,
      * no shuffling. */
@@ -256,7 +256,7 @@ void testGroupNormClassifierTrainsAndRoundTrips(void) {
      * assertion is deterministic and far from the knife-edge (weight init is
      * RNG-seeded to a fixed constant, so every run is bit-identical). */
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.5f, 0.0f, model, MODEL_SIZE, momentumQ,
+        sgdMCreateOptim(0.1f, 0.5f, 0.0f, &MODEL_CHAIN(model, MODEL_SIZE), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* (b) 30 epochs; captureEpoch records the first and last training loss. */

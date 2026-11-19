@@ -1,6 +1,7 @@
 #ifndef OPTIMIZER_API_H
 #define OPTIMIZER_API_H
 
+#include "Model.h"
 #include "Optimizer.h"
 
 /* No standalone `SGD` factory: sgdMCreateOptim() with momentumFactor == 0
@@ -78,7 +79,7 @@ void scaleOptimizerGradientsMean(optimizer_t *optimizer, size_t divisor, const r
 float optimizerClipGradNorm(optimizer_t *optimizer, float maxNorm);
 
 /* Fills the caller-allocated `slots` array (sized via calcTotalNumberOfStates)
- * with every trainable parameter_t* in `model`, in model order. Per-layer-type
+ * with every trainable parameter_t* in `m`, in layer order. Per-layer-type
  * switch: LINEAR/CONV1D/CONV1D_TRANSPOSED contribute weights (+ bias, if
  * present -- BIAS_FALSE layers carry none); LAYERNORM/GROUPNORM/BATCHNORM1D
  * contribute gamma + beta (BATCHNORM1D only when affine; its running buffers
@@ -88,16 +89,16 @@ float optimizerClipGradNorm(optimizer_t *optimizer, float maxNorm);
  *
  * Extracted from SgdApi.c (#328 groundwork) so non-SGD factories (e.g. PR C's
  * adamWCreateOptim) can reuse the same collection logic. */
-void collectTrainableParameters(layer_t **model, size_t sizeModel, parameter_t **slots);
+void collectTrainableParameters(const model_t *m, parameter_t **slots);
 
-/* #380: true iff at least one layer in `model` is frozen (layerIsFrozen).
+/* #380: true iff at least one layer in `m` is frozen (layerIsFrozen).
  * Distinguishes "every parameter-bearing layer got frozen" (a mis-built,
  * nothing-to-train model -- the factories fail-fast on this) from "the model
  * simply has no parameter-bearing layer types at all" (e.g. a lone Dropout/
  * pooling layer -- a pre-existing, deliberately-supported zero-state
  * configuration, #279/#308 sibling contracts): sizeStates == 0 alone can't
  * tell the two apart, since both land on zero collected parameters. */
-bool modelHasFrozenLayer(layer_t **model, size_t sizeModel);
+bool modelHasFrozenLayer(const model_t *m);
 
 /* #261, PR3: validates that every parameter's grad storage tracked by `optim`
  * is one of the accepted dtypes -- FLOAT32 (default), SYM_INT32 (explicit

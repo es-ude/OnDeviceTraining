@@ -397,9 +397,9 @@ int main(void) {
      * getQLike and does NOT take ownership. One optimizer spans all domains so
      * momentum carries across the sequential protocol. */
     quantization_t *momentumQ = quantizationInitFloat();
-    optimizer_t *sgd =
-        sgdMCreateOptim(g_lr, g_momentum, /*weightDecay*/ 0.0f, model, MODEL_SIZE, momentumQ,
-                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimizer_t *sgd = sgdMCreateOptim(
+        g_lr, g_momentum, /*weightDecay*/ 0.0f, &MODEL_CHAIN(model, MODEL_SIZE), momentumQ,
+        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* Replay source (only when REPLAY=1): PPCA set for ppca/mean modes, raw
      * exemplar buffer for exemplar mode (no generators, no workspace). */

@@ -57,8 +57,8 @@ static tensor_t *momentStateInit(tensor_t *param, quantization_t *momentQuant) {
 }
 
 optimizer_t *adamWCreateOptim(float learningRate, double beta1, double beta2, double eps,
-                              double weightDecay, layer_t **model, size_t sizeModel,
-                              quantization_t *momentQuant, arithmetic_t updateMath) {
+                              double weightDecay, const model_t *m, quantization_t *momentQuant,
+                              arithmetic_t updateMath) {
     optimizer_t *optim = reserveMemory(sizeof(optimizer_t));
     optim->type = ADAM_W;
     /* #279 ratified default: seeded-SR training write-back (dead-zone escape);
@@ -71,14 +71,14 @@ optimizer_t *adamWCreateOptim(float learningRate, double beta1, double beta2, do
     impl->adamW = adamW;
     optim->impl = impl;
 
-    size_t sizeStates = calcTotalNumberOfStates(model, sizeModel);
+    size_t sizeStates = calcTotalNumberOfStates(m);
     /* #380: a zero-state model is only an error when it's DEGENERATE -- every
      * parameter-bearing layer got frozen (nothing to optimize). A model that
      * simply has no parameter-bearing layer types at all (e.g. a lone
      * Dropout/pooling layer) is a pre-existing, deliberately-supported
      * zero-state configuration (SgdApi sibling contract) and must keep
      * working. */
-    if (sizeStates == 0 && modelHasFrozenLayer(model, sizeModel)) {
+    if (sizeStates == 0 && modelHasFrozenLayer(m)) {
         PRINT_ERROR("adamWCreateOptim: model has no trainable parameters "
                     "(every parameter-bearing layer is frozen) - nothing to optimize");
         exit(1);
@@ -86,7 +86,7 @@ optimizer_t *adamWCreateOptim(float learningRate, double beta1, double beta2, do
     optim->sizeStates = sizeStates;
     parameter_t **parameter = reserveMemory(sizeStates * sizeof(parameter_t *));
     optim->parameter = parameter;
-    collectTrainableParameters(model, sizeModel, parameter);
+    collectTrainableParameters(m, parameter);
 
     /* AdamW always carries both moments (m = stateBuffers[0], v = [1]);
      * there is no SGD-style momentum==0 stateless arm. reserveMemory

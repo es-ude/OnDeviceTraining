@@ -56,9 +56,9 @@ void testOptimizerCountsAndCollectsGammaBetaOnlyWhenAffineAndTrainable(void) {
     layer_t *noAffine = bnLayer(3, true, false, TRAINABLE_DEFAULT);
     layer_t *frozen = bnLayer(3, false, false, TRAINABLE_FALSE);
     layer_t *model[] = {affine, noAffine, frozen};
-    size_t n = calcTotalNumberOfStates(model, 3);
+    size_t n = calcTotalNumberOfStates(&MODEL_CHAIN(model, 3));
     parameter_t *slots[2] = {NULL, NULL};
-    collectTrainableParameters(model, 3, slots);
+    collectTrainableParameters(&MODEL_CHAIN(model, 3), slots);
     bool order = slots[0] == affine->config->batchNorm1d->gamma &&
                  slots[1] == affine->config->batchNorm1d->beta;
     freeBatchNorm1dLayer(frozen);
@@ -416,8 +416,8 @@ static void runCadence(size_t m, float *rm, float *rv, uint64_t *nbt, float *gra
     memcpy(rv, c->runningVar->data, 3 * sizeof(float));
     *nbt = c->numBatchesTracked;
     parameter_t *slots[4];
-    TEST_ASSERT_EQUAL_size_t(4, calcTotalNumberOfStates(model, 2));
-    collectTrainableParameters(model, 2, slots);
+    TEST_ASSERT_EQUAL_size_t(4, calcTotalNumberOfStates(&MODEL_CHAIN(model, 2)));
+    collectTrainableParameters(&MODEL_CHAIN(model, 2), slots);
     size_t k = 0;
     for (size_t p = 0; p < 4; p++) {
         size_t n = calcNumberOfElementsByTensor(slots[p]->grad);
@@ -496,7 +496,7 @@ static void runPreflightOnly(layer_t **model, size_t n, size_t evalMicroBatchSiz
     dataLoader_t *evalDl = dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, true);
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, n, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, n), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingRunOptions_t opts = {.microBatchSize = 2, .evalMicroBatchSize = evalMicroBatchSize};
     (void)trainingRun(model, n, defaultLossConfig(MSE), &trainDl, evalDl, sgd, 1,
@@ -604,7 +604,7 @@ void testTrainingRunAcceptsTrackedRank2BatchNorm(void) {
     dataLoader_t *evalDl = dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, true);
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 2, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 2), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingRunOptions_t opts = {.microBatchSize = 2, .evalMicroBatchSize = 1};
 
@@ -643,7 +643,7 @@ static size_t acceptUntrackedRank3(size_t evalMicroBatchSize) {
     dataLoader_t *evalDl = dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, true);
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 3, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 3), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingRunOptions_t opts = {.microBatchSize = 2, .evalMicroBatchSize = evalMicroBatchSize};
 
@@ -750,7 +750,7 @@ static void runSymForwardPreflight(void) {
     dataLoader_t *evalDl = dataLoaderInit(pfGetSample, pfDatasetSize, 1, NULL, NULL, false, true);
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingRunOptions_t opts = {.microBatchSize = 1, .evalMicroBatchSize = 2};
     (void)trainingRun(model, 1, defaultLossConfig(MSE), &trainDl, evalDl, sgd, 1,
@@ -819,7 +819,7 @@ static void runEmptyEvalLoader(void) {
         .getDatasetSize = oneSample, .batchSize = 2, .getBatch = evalGetBatchMustNotRun};
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     (void)trainingRun(model, 1, defaultLossConfig(MSE), &trainDl, &evalDl, sgd, 1,
                       calculateGradsSequential, inferenceWithLoss, NULL);
@@ -848,7 +848,7 @@ static void runEmptyFirstEvalBatch(void) {
         .getDatasetSize = oneSample, .batchSize = 1, .getBatch = emptyEvalGetBatch};
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     (void)trainingRun(model, 1, defaultLossConfig(MSE), &trainDl, &evalDl, sgd, 1,
                       calculateGradsSequential, inferenceWithLoss, NULL);
@@ -944,7 +944,7 @@ void testTrainingRunTrainsAndEvaluatesUntrackedRank2BatchNorm(void) {
     dataLoader_t *evalDl = dataLoaderInit(e2eGetSample, fourSamples, 1, NULL, NULL, false, true);
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, 2, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, 2), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingRunOptions_t opts = {.microBatchSize = 2};
 

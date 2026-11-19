@@ -848,9 +848,9 @@ int main(void) {
      * dead-zone in the accumulator; a FLOAT32 accumulator keeps velocity precise
      * so ONLY the weights carry the memory win. */
     quantization_t *momentumQ = quantizationInitFloat();
-    optimizer_t *sgd =
-        sgdMCreateOptim(g_lr, g_momentum, /*weightDecay*/ 0.0f, model, MODEL_SIZE, momentumQ,
-                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimizer_t *sgd = sgdMCreateOptim(
+        g_lr, g_momentum, /*weightDecay*/ 0.0f, &MODEL_CHAIN(model, MODEL_SIZE), momentumQ,
+        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     /* Set explicitly in BOTH directions (factory already defaults SR): the
      * A/B arms of the #279 sweep should read symmetrically from the code. */
     optimizerSetWriteBackRounding(sgd, symRounding);

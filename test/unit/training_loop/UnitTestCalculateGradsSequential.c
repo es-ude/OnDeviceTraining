@@ -766,7 +766,7 @@ void testFrozenLayerSurvivesTrainingUntouched(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.05f, 0.0f, 0.0f, model, 3, momentumQ,
+        sgdMCreateOptim(0.05f, 0.0f, 0.0f, &MODEL_CHAIN(model, 3), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     optimizerFunctions_t optimFns = optimizerFunctions[optim->type];
 

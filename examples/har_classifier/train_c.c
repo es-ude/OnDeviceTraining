@@ -549,7 +549,8 @@ int main(void) {
         /* FLOAT32 momentum accumulator (the conventional default). The optimizer
          * clones this config per state via getQLike and does NOT take ownership. */
         quantization_t *momentumQ = quantizationInitFloat();
-        sgd = sgdMCreateOptim(g_lr, g_momentum, /*weightDecay*/ 0.0f, model, MODEL_SIZE, momentumQ,
+        sgd = sgdMCreateOptim(g_lr, g_momentum, /*weightDecay*/ 0.0f,
+                              &MODEL_CHAIN(model, MODEL_SIZE), momentumQ,
                               (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 #ifdef ODT_MEM_PROFILE
         markAfterOpt = memProfileMark(); /* optstate_b = delta */

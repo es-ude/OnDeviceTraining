@@ -156,7 +156,7 @@ void testMnistSmoke_FullTrainingPipelineReducesLoss() {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, MODEL_SIZE, momentumQ,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, MODEL_SIZE), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     cbInvocations = 0;
@@ -217,7 +217,7 @@ void testMnistSmoke_SnprintfGmtimeRBetweenSetupAndTrainingRun_NoSilentExit() {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, MODEL_SIZE, momentumQ,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, MODEL_SIZE), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* The poison block from #94's reproducer: gmtime_r + snprintf wedged

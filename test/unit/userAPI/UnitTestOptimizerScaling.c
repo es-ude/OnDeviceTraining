@@ -77,7 +77,7 @@ static optimizer_t *buildOneLayerOptimWithGrads(layer_t **modelOut, parameter_t 
      * via getQLike, so it's safe to free right after the call. */
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, modelOut, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(modelOut, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     freeQuantization(momentumQ);
     return optim;
@@ -232,7 +232,7 @@ static optimizer_t *buildSymInt32OneLayerOptim(layer_t **modelOut, parameter_t *
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(lr, momentum, 0.f, modelOut, 1, momentumQ,
+        sgdMCreateOptim(lr, momentum, 0.f, &MODEL_CHAIN(modelOut, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     freeQuantization(momentumQ);
     return optim;
@@ -467,7 +467,7 @@ static optimizer_t *buildSymOneLayerOptim(layer_t **modelOut, parameter_t **wOut
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(lr, momentum, 0.f, modelOut, 1, momentumQ,
+        sgdMCreateOptim(lr, momentum, 0.f, &MODEL_CHAIN(modelOut, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     freeQuantization(momentumQ);
     return optim;
@@ -596,7 +596,7 @@ static optimizer_t *buildAsymOneLayerOptim(layer_t **modelOut, parameter_t **wOu
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(lr, momentum, 0.f, modelOut, 1, momentumQ,
+        sgdMCreateOptim(lr, momentum, 0.f, &MODEL_CHAIN(modelOut, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     freeQuantization(momentumQ);
     return optim;
@@ -741,7 +741,7 @@ static optimizer_t *buildBfpOneLayerOptim(layer_t **modelOut, parameter_t **wOut
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(lr, momentum, 0.f, modelOut, 1, momentumQ,
+        sgdMCreateOptim(lr, momentum, 0.f, &MODEL_CHAIN(modelOut, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     freeQuantization(momentumQ);
     return optim;

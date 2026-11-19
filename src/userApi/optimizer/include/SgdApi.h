@@ -31,7 +31,7 @@
  *       must not mutate sgd_t.momentumFactor from 0 to nonzero after creation.
  */
 optimizer_t *sgdMCreateOptim(float learningRate, float momentumFactor, float weightDecay,
-                             layer_t **model, size_t sizeModel, quantization_t *momentumQuant,
+                             const model_t *m, quantization_t *momentumQuant,
                              arithmetic_t updateMath);
 
 #endif // SGD_API_H

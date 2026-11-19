@@ -2,6 +2,7 @@
 #define OPTIMIZER_H
 
 #include "Layer.h"
+#include "Model.h"
 #include "Quantization.h"
 #include "Tensor.h"
 
@@ -87,6 +88,6 @@ void optimizerSetWriteBackRounding(optimizer_t *optimizer, roundingMode_t writeB
  * parameters stop the program with a named error before the step begins. */
 void optimizerStep(optimizer_t *optimizer, const rngKey_t *updateKey);
 
-size_t calcTotalNumberOfStates(layer_t **model, size_t sizeModel);
+size_t calcTotalNumberOfStates(const model_t *m);
 
 #endif // OPTIMIZER_H

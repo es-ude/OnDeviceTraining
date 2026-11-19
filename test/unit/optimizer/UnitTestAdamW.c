@@ -34,11 +34,11 @@ _Static_assert(_Generic(&adamWInit,
 
 /* #328 PR C factory signature contract. */
 _Static_assert(_Generic(&adamWCreateOptim,
-                   optimizer_t *(*)(float, double, double, double, double, layer_t **, size_t,
+                   optimizer_t *(*)(float, double, double, double, double, const model_t *,
                                     quantization_t *, arithmetic_t): 1,
                    default: 0),
                "#328: adamWCreateOptim must be (lr, beta1, beta2, eps, weightDecay, model, "
-               "sizeModel, momentQuant, updateMath)");
+               "momentQuant, updateMath)");
 
 void setUp() {}
 void tearDown() {}
@@ -363,7 +363,7 @@ void testAdamWCreateOptimAllocatesTwoZeroMomentBuffersPerParameter(void) {
 
     quantization_t *momentQ = quantizationInitFloat();
     optimizer_t *optim =
-        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, model, 1, momentQ,
+        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, &MODEL_CHAIN(model, 1), momentQ,
                          (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* capture */
@@ -431,7 +431,7 @@ void testAdamWCreateOptimStepMatchesHandAssembledGold(void) {
 
     quantization_t *momentQ = quantizationInitFloat();
     optimizer_t *optim =
-        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, model, 1, momentQ,
+        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, &MODEL_CHAIN(model, 1), momentQ,
                          (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     optimizerFunctions[optim->type].step(optim, NULL);
@@ -486,7 +486,7 @@ void testAdamWCreateOptimSymMomentSmoke(void) {
     layer_t *modelF[] = {linearF};
     quantization_t *momentQF = quantizationInitFloat();
     optimizer_t *optimF =
-        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, modelF, 1, momentQF,
+        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, &MODEL_CHAIN(modelF, 1), momentQF,
                          (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* SYM@12-moment run: separate parameters (freeOptim frees each
@@ -508,7 +508,7 @@ void testAdamWCreateOptimSymMomentSmoke(void) {
     layer_t *modelS[] = {linearS};
     quantization_t *momentQS = quantizationInitSym(12, HALF_AWAY);
     optimizer_t *optimS =
-        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, modelS, 1, momentQS,
+        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, &MODEL_CHAIN(modelS, 1), momentQS,
                          (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     /* #279: this smoke pins the DETERMINISTIC HALF_AWAY moment quantization
      * (the 2*scale bounds were margin-audited for it, PR #367) -- opt out of
@@ -642,7 +642,7 @@ void testAdamWCreateOptimRejectsInt32GradStorage(void) {
     quantization_t *momentQ = quantizationInitFloat();
 
     ASSERT_EXITS_WITH_FAILURE(
-        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, model, 1, momentQ,
+        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, &MODEL_CHAIN(model, 1), momentQ,
                          (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY}));
 
     /* Teardown (parent continues after the fork-based assert; file
@@ -676,7 +676,7 @@ void testAdamWCreateOptimDefaultsWriteBackRoundingToSr(void) {
 
     quantization_t *momentQ = quantizationInitFloat();
     optimizer_t *optim =
-        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, model, 1, momentQ,
+        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, &MODEL_CHAIN(model, 1), momentQ,
                          (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* CAPTURE -> free -> assert. */
@@ -853,11 +853,11 @@ void testAdamWOptimizerSkipsFrozenLayerInCountAndCollection(void) {
     layer_t *frozenL = buildFloatLinearWithTrainable(TRAINABLE_FALSE);
     layer_t *trainL = buildFloatLinearWithTrainable(TRAINABLE_DEFAULT);
     layer_t *model[] = {frozenL, trainL};
-    size_t count = calcTotalNumberOfStates(model, 2);
+    size_t count = calcTotalNumberOfStates(&MODEL_CHAIN(model, 2));
 
     quantization_t *momentQ = quantizationInitFloat();
     optimizer_t *optim =
-        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, model, 2, momentQ,
+        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, &MODEL_CHAIN(model, 2), momentQ,
                          (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     size_t sizeStates = optim->sizeStates;
     bool slot0IsTrainWeights = optim->parameter[0] == trainL->config->linear->weights;
@@ -880,7 +880,7 @@ void testAdamWCreateAllFrozenModelExits(void) {
         layer_t *frozenL = buildFloatLinearWithTrainable(TRAINABLE_FALSE);
         layer_t *model[] = {frozenL};
         quantization_t *momentQ = quantizationInitFloat();
-        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, model, 1, momentQ,
+        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, &MODEL_CHAIN(model, 1), momentQ,
                          (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     });
 }
@@ -918,7 +918,7 @@ void testAdamWCreateGroupedSymMomentQuantExits(void) {
         layer_t *model[] = {linear};
 
         quantization_t *momentQ = quantizationInitSymGrouped(4, HALF_AWAY, 2, 4);
-        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, model, 1, momentQ,
+        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, &MODEL_CHAIN(model, 1), momentQ,
                          (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     });
 }
@@ -948,7 +948,7 @@ void testAdamWCreateGroupedAsymMomentQuantExits(void) {
         layer_t *model[] = {linear};
 
         quantization_t *momentQ = quantizationInitAsymGrouped(4, HALF_AWAY, 2, 4);
-        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, model, 1, momentQ,
+        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, &MODEL_CHAIN(model, 1), momentQ,
                          (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     });
 }
@@ -978,7 +978,7 @@ void testAdamWCreateAdmitsPerTensorBfpMoments(void) {
 
     quantization_t *momentQ = quantizationInitBfp(8, 8, HALF_AWAY);
     optimizer_t *optim =
-        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, model, 1, momentQ,
+        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, &MODEL_CHAIN(model, 1), momentQ,
                          (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* CAPTURE -> free -> assert (file convention). */
@@ -1036,7 +1036,7 @@ void testAdamWCreateRejectsGroupedBfpMoments(void) {
         layer_t *model[] = {linear};
 
         quantization_t *momentQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 4);
-        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, model, 1, momentQ,
+        adamWCreateOptim(0.001f, 0.9, 0.999, 1e-8, 0.01, &MODEL_CHAIN(model, 1), momentQ,
                          (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     });
 }
@@ -1208,7 +1208,7 @@ void testAdamWStepBfpMomentsRunAndRequantize(void) {
 
     quantization_t *momentQ = quantizationInitBfp(8, 8, HALF_AWAY);
     optimizer_t *optim =
-        adamWCreateOptim(0.01f, 0.9, 0.999, 1e-8, 0.01, model, 1, momentQ,
+        adamWCreateOptim(0.01f, 0.9, 0.999, 1e-8, 0.01, &MODEL_CHAIN(model, 1), momentQ,
                          (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     optimizerSetWriteBackRounding(optim, HALF_AWAY);
 

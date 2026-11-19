@@ -33,26 +33,26 @@
 /* #310 contract: sgdMCreateOptim takes a by-value arithmetic_t updateMath
  * (mirroring the layer-side forwardMath/weightGradMath knobs) as its last
  * parameter -- the arithmetic the three SGD update ops run in. _Generic
- * picks 1 only for the exact 7-arg signature; anything else fails at
+ * picks 1 only for the exact 6-arg signature; anything else fails at
  * compile time. */
 _Static_assert(_Generic(&sgdMCreateOptim,
-                   optimizer_t *(*)(float, float, float, layer_t **, size_t, quantization_t *,
+                   optimizer_t *(*)(float, float, float, const model_t *, quantization_t *,
                                     arithmetic_t): 1,
                    default: 0),
                "#310: sgdMCreateOptim must be (lr, momentumFactor, weightDecay, "
-               "model, sizeModel, momentumQuant, updateMath)");
+               "model, momentumQuant, updateMath)");
 
 /* #328 groundwork: the shared factory helpers PR C's adamWCreateOptim reuses. */
 _Static_assert(_Generic(&collectTrainableParameters,
-                   void (*)(layer_t **, size_t, parameter_t **): 1,
+                   void (*)(const model_t *, parameter_t **): 1,
                    default: 0),
-               "#328: collectTrainableParameters must be (model, sizeModel, slots)");
+               "#328: collectTrainableParameters must be (model, slots)");
 _Static_assert(_Generic(&validateOptimizerGradStorage,
                    void (*)(optimizer_t *, const char *): 1,
                    default: 0),
                "#328: validateOptimizerGradStorage must be (optim, factoryName)");
-_Static_assert(_Generic(&modelHasFrozenLayer, bool (*)(layer_t **, size_t): 1, default: 0),
-               "#380: modelHasFrozenLayer must be (model, sizeModel)");
+_Static_assert(_Generic(&modelHasFrozenLayer, bool (*)(const model_t *): 1, default: 0),
+               "#380: modelHasFrozenLayer must be (model)");
 _Static_assert(_Generic(&freeOptim, void (*)(optimizer_t *): 1, default: 0),
                "#328: freeOptim must be (optim)");
 _Static_assert(_Generic(&optimizerClipGradNorm, float (*)(optimizer_t *, float): 1, default: 0),
@@ -84,10 +84,10 @@ void testOptimizerSkipsFrozenLayerInCountAndCollection(void) {
     layer_t *frozenL = buildFloatLinearWithTrainable(TRAINABLE_FALSE);
     layer_t *trainL = buildFloatLinearWithTrainable(TRAINABLE_DEFAULT);
     layer_t *model[] = {frozenL, trainL};
-    size_t count = calcTotalNumberOfStates(model, 2);
+    size_t count = calcTotalNumberOfStates(&MODEL_CHAIN(model, 2));
 
     quantization_t *momentumQ = quantizationInitFloat();
-    optimizer_t *optim = sgdMCreateOptim(0.1f, 0.9f, 0.0f, model, 2, momentumQ,
+    optimizer_t *optim = sgdMCreateOptim(0.1f, 0.9f, 0.0f, &MODEL_CHAIN(model, 2), momentumQ,
                                          (arithmetic_t){.type = ARITH_FLOAT32});
     size_t sizeStates = optim->sizeStates;
     bool slot0IsTrainWeights = optim->parameter[0] == trainL->config->linear->weights;
@@ -114,7 +114,7 @@ void testSgdCreateAllFrozenModelExits(void) {
         layer_t *frozenL = buildFloatLinearWithTrainable(TRAINABLE_FALSE);
         layer_t *model[] = {frozenL};
         quantization_t *momentumQ = quantizationInitFloat();
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32});
     });
 }
@@ -195,7 +195,7 @@ void testSgdMCreateOptim() {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(lr, momentumFactor, weightDecay, model, sizeModel, momentumQ,
+        sgdMCreateOptim(lr, momentumFactor, weightDecay, &MODEL_CHAIN(model, sizeModel), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     sgd_t *sgd = optim->impl->sgd;
 
@@ -320,7 +320,7 @@ void testSGDStep() {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(lr, momentumFactor, weightDecay, model, modelSize, momentumQ,
+        sgdMCreateOptim(lr, momentumFactor, weightDecay, &MODEL_CHAIN(model, modelSize), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     optimizerFunctions_t sgdFns = optimizerFunctions[sgd->type];
@@ -411,7 +411,7 @@ void testSGDZeroGrad() {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(lr, momentumFactor, weightDecay, model, modelSize, momentumQ,
+        sgdMCreateOptim(lr, momentumFactor, weightDecay, &MODEL_CHAIN(model, modelSize), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     optimizerZeroGrad(sgd);
@@ -475,7 +475,7 @@ void testSgdZeroGradOnSymInt32GradZeroesMantissasAndResetsScale(void) {
     layer_t *model[] = {layer};
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.9f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.1f, 0.9f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     optimizerZeroGrad(optim);
@@ -546,7 +546,7 @@ void testSgdZeroGradBfpResetsExponentsToZeroState(void) {
     layer_t *model[] = {layer};
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.9f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.1f, 0.9f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     optimizerZeroGrad(optim);
@@ -616,7 +616,7 @@ void testSgdMCreateOptimMomentumStateIsFloatIndependentOfSymInt32ParamDtype(void
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.9f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.1f, 0.9f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* CAPTURE before frees. */
@@ -689,7 +689,7 @@ void testSgdMCreateOptimRegistersLayerNormGammaAndBeta(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(lr, momentumFactor, weightDecay, model, sizeModel, momentumQ,
+        sgdMCreateOptim(lr, momentumFactor, weightDecay, &MODEL_CHAIN(model, sizeModel), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* CAPTURE before frees. */
@@ -734,7 +734,7 @@ void testLayerNormContributesTwoOptimizerStates(void) {
     layer_t *model[] = {&layer};
     size_t sizeModel = 1;
 
-    size_t nStates = calcTotalNumberOfStates(model, sizeModel);
+    size_t nStates = calcTotalNumberOfStates(&MODEL_CHAIN(model, sizeModel));
 
     TEST_ASSERT_EQUAL_size_t(2, nStates);
 }
@@ -991,7 +991,7 @@ void testSgdMCreateOptimAdmitsPackedSymGradStorage(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* CAPTURE before frees. */
@@ -1046,7 +1046,7 @@ void testSgdMCreateOptimAdmitsBfpGradStorage(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* CAPTURE before frees. */
@@ -1098,7 +1098,7 @@ void testSgdMCreateOptimRejectsBoolGradStorage(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     ASSERT_EXITS_WITH_FAILURE(
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY}));
 
     /* Teardown (parent continues after the fork-based assert; file convention). */
@@ -1132,7 +1132,7 @@ void testSgdMCreateOptimRejectsNullGradSlot(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     ASSERT_EXITS_WITH_FAILURE(
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY}));
 
     /* Teardown (parent continues after the fork-based assert; weights is
@@ -1166,7 +1166,7 @@ void testSgdMCreateOptimRejectsNonFloat32UpdateMath(void) {
     quantization_t *momentumQ = quantizationInitFloat();
 
     ASSERT_EXITS_WITH_FAILURE(
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_SYM_INT32, .roundingMode = HALF_AWAY}));
 
     freeParameter(weights);
@@ -1693,7 +1693,7 @@ void testSgdMCreateOptimMomentumZeroAllocatesNoStates(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* CAPTURE -> free -> assert. */
@@ -1733,7 +1733,7 @@ void testSgdMCreateOptimDefaultsWriteBackRoundingToSr(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* CAPTURE -> free -> assert. */
@@ -1772,7 +1772,7 @@ void testOptimizerSetWriteBackRoundingOptsOutToDeterministic(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     optimizerSetWriteBackRounding(optim, HALF_AWAY);
@@ -2077,7 +2077,7 @@ void testSgdCreateGroupedSymMomentumQuantExits(void) {
         layer_t *model[] = {linear};
 
         quantization_t *momentumQ = quantizationInitSymGrouped(4, HALF_AWAY, 2, 4);
-        sgdMCreateOptim(0.1f, 0.9f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.1f, 0.9f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     });
 }
@@ -2107,7 +2107,7 @@ void testSgdCreateAdmitsPerTensorBfpMomentum(void) {
 
     quantization_t *momentumQ = quantizationInitBfp(8, 8, HALF_AWAY);
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.9f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.1f, 0.9f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* CAPTURE -> free -> assert (file convention). */
@@ -2160,7 +2160,7 @@ void testSgdCreateRejectsGroupedBfpMomentum(void) {
         layer_t *model[] = {linear};
 
         quantization_t *momentumQ = quantizationInitBfpGrouped(8, 8, HALF_AWAY, 2, 4);
-        sgdMCreateOptim(0.1f, 0.9f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.1f, 0.9f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     });
 }
@@ -2502,7 +2502,7 @@ void testSgdCreateGroupedAsymMomentumQuantExits(void) {
         layer_t *model[] = {linear};
 
         quantization_t *momentumQ = quantizationInitAsymGrouped(4, HALF_AWAY, 2, 4);
-        sgdMCreateOptim(0.1f, 0.9f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.1f, 0.9f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     });
 }
@@ -3017,7 +3017,7 @@ static void createBfpMomentumOnBfpGradWith(float mu, float wd) {
     parameter_t *bias = parameterInit(bParam, gradInitFloat(bParam, NULL));
     layer_t *layer = buildBorrowedLinearLayer(weights, bias, quantizationInitFloat());
     layer_t *model[1] = {layer};
-    (void)sgdMCreateOptim(0.1f, mu, wd, model, 1, bfpQ,
+    (void)sgdMCreateOptim(0.1f, mu, wd, &MODEL_CHAIN(model, 1), bfpQ,
                           (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 }
 static void createBfpMomentumWithWeightDecay(void) {
@@ -3310,7 +3310,7 @@ static void createStatelessBfpWith(float lr, float wd) {
     parameter_t *bias = parameterInit(bParam, gradInitFloat(bParam, NULL));
     layer_t *layer = buildBorrowedLinearLayer(weights, bias, quantizationInitFloat());
     layer_t *model[1] = {layer};
-    (void)sgdMCreateOptim(lr, 0.0f, wd, model, 1, quantizationInitFloat(),
+    (void)sgdMCreateOptim(lr, 0.0f, wd, &MODEL_CHAIN(model, 1), quantizationInitFloat(),
                           (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 }
 static void createStatelessBfpWithWeightDecay(void) {

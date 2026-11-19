@@ -200,7 +200,7 @@ Notes on the qualified cells:
   that case (`optim->states == NULL`) and `sgdStepM` runs a single stateless update
   op per parameter instead of the two-op momentum path (mathematically identical at
   momentum 0).
-- **AdamW** (`adamWCreateOptim(lr, beta1, beta2, eps, weightDecay, model, sizeModel,
+- **AdamW** (`adamWCreateOptim(lr, beta1, beta2, eps, weightDecay, model,
   momentQuant, updateMath)`, torch.optim.AdamW-faithful (documented-order replication;
   torch cross-checked to ≤1 ulp)) — weight decay is
   **decoupled** (`param *= 1 - lr*wd`), unlike SGD's coupled L2 (`grad += wd*param`).

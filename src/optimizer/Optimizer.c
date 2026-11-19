@@ -132,10 +132,10 @@ static size_t calcNumberOfStatesByLayer(const layer_t *layer) {
     }
 }
 
-size_t calcTotalNumberOfStates(layer_t **model, size_t sizeModel) {
+size_t calcTotalNumberOfStates(const model_t *m) {
     size_t number = 0;
-    for (size_t i = 0; i < sizeModel; i++) {
-        number += calcNumberOfStatesByLayer(model[i]);
+    for (size_t i = 0; i < m->numLayers; i++) {
+        number += calcNumberOfStatesByLayer(m->layers[i]);
     }
     return number;
 }

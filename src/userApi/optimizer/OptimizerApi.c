@@ -253,10 +253,10 @@ float optimizerClipGradNorm(optimizer_t *optimizer, float maxNorm) {
     return totalNorm;
 }
 
-void collectTrainableParameters(layer_t **model, size_t sizeModel, parameter_t **slots) {
+void collectTrainableParameters(const model_t *m, parameter_t **slots) {
     size_t paramSlot = 0;
-    for (size_t i = 0; i < sizeModel; i++) {
-        layer_t *currentLayer = model[i];
+    for (size_t i = 0; i < m->numLayers; i++) {
+        layer_t *currentLayer = m->layers[i];
         if (layerIsFrozen(currentLayer)) {
             continue;
         }
@@ -348,9 +348,9 @@ void collectTrainableParameters(layer_t **model, size_t sizeModel, parameter_t *
     }
 }
 
-bool modelHasFrozenLayer(layer_t **model, size_t sizeModel) {
-    for (size_t i = 0; i < sizeModel; i++) {
-        if (layerIsFrozen(model[i])) {
+bool modelHasFrozenLayer(const model_t *m) {
+    for (size_t i = 0; i < m->numLayers; i++) {
+        if (layerIsFrozen(m->layers[i])) {
             return true;
         }
     }

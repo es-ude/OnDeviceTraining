@@ -104,10 +104,10 @@ void testOptimizer_ZeroStatesForParameterlessPool(void) {
     layer_t *pool = buildPool(q, 2);
     layer_t *model[1] = {pool};
 
-    size_t numStates = calcTotalNumberOfStates(model, 1);
+    size_t numStates = calcTotalNumberOfStates(&MODEL_CHAIN(model, 1));
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.01f, 0.9f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.9f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     size_t sizeStates = optim->sizeStates;
 

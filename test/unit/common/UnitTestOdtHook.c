@@ -265,7 +265,7 @@ void testSixEventsFireInOrderForOneGradsCallPlusOneStep(void) {
     tensor_t *label = makeRowVec2(1.0f, 0.0f);
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 2, momentumQ,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 2), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     odtHookSet(recordingHook, &g_ctxToken);
@@ -301,7 +301,7 @@ void testNothingFiresWhenHookUnset(void) {
     tensor_t *label = makeRowVec2(1.0f, 0.0f);
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 2, momentumQ,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 2), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     odtHookSet(recordingHook, &g_ctxToken);
@@ -361,7 +361,7 @@ void testTrainingEpochDefaultStepsThroughOptimizerStep(void) {
     buildLinearSoftmaxModel(model, q, TRAINABLE_DEFAULT);
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 2, momentumQ,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 2), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     dataLoader_t *dl = dataLoaderInit(getEpochSample, getEpochDatasetSize, /*batchSize*/ 2, NULL,
                                       NULL, /*shuffle*/ false, /*dropLast*/ true);
@@ -422,7 +422,7 @@ void testTrainingEpochDefaultFiresOneQuadPerMicroBatchChunk(void) {
     buildLinearSoftmaxModel(model, q, TRAINABLE_DEFAULT); /* FLOAT32-only, no Dropout */
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 2, momentumQ,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 2), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     dataLoader_t *dl = dataLoaderInit(getEpochSample, getEpochDatasetSize, /*batchSize*/ 4, NULL,
                                       NULL, /*shuffle*/ false, /*dropLast*/ true);

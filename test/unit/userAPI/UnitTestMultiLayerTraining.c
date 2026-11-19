@@ -390,7 +390,7 @@ void testMultiLayerTraining_MultipleSteps_GradsAccumulate() {
     /* Optimizer takes references to w0/b0/w1/b1 — its free will cascade. */
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.f, 0.f, model, sizeModel, momentumQ,
+        sgdMCreateOptim(0.01f, 0.f, 0.f, &MODEL_CHAIN(model, sizeModel), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
 
@@ -555,7 +555,7 @@ void testBfpFakeQuantTrainingLossDecreasesAndGridMoves(void) {
     /* Optimizer takes references to w0/b0/w1/b1 — its free will cascade. */
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.002f, 0.f, 0.f, model, sizeModel, momentumQ,
+        sgdMCreateOptim(0.002f, 0.f, 0.f, &MODEL_CHAIN(model, sizeModel), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     optimizerFunctions_t sgdFns = optimizerFunctions[SGD_M];
 
@@ -805,7 +805,7 @@ static void buildBfpWireFixture(bfpWireFixture_t *f, size_t hidden, size_t templ
     f->model[1] = f->linear1;
 
     f->momentumQ = quantizationInitFloat();
-    f->sgd = sgdMCreateOptim(0.002f, 0.f, 0.f, f->model, 2, f->momentumQ,
+    f->sgd = sgdMCreateOptim(0.002f, 0.f, 0.f, &MODEL_CHAIN(f->model, 2), f->momentumQ,
                              (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     f->input = buildFloatTensor2D(1, 3, (float[]){1.0f, 2.0f, 3.0f});
@@ -1309,7 +1309,7 @@ static void buildBfpNativeFixture(bfpNativeFixture_t *f, bool pinWeightGradMath,
     f->model[1] = f->linear1;
 
     f->momentumQ = quantizationInitFloat();
-    f->sgd = sgdMCreateOptim(0.002f, 0.f, 0.f, f->model, 2, f->momentumQ,
+    f->sgd = sgdMCreateOptim(0.002f, 0.f, 0.f, &MODEL_CHAIN(f->model, 2), f->momentumQ,
                              (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* BFP-stored input: layer 0's integer forward writes a BFP wire, so it
@@ -2144,7 +2144,7 @@ void testBfpConvGradStorageTrainsUnderDefaultEpoch(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.02f, 0.f, 0.f, model, BFP_CONV_MODEL_SIZE, momentumQ,
+        sgdMCreateOptim(0.02f, 0.f, 0.f, &MODEL_CHAIN(model, BFP_CONV_MODEL_SIZE), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* (a, strong form) ONE backward before the epoch loop, so the grads can be
@@ -2398,7 +2398,7 @@ void testBfpUniformPoolActivationModelTrains(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.05f, 0.9f, 0.f, model, 6, momentumQ,
+        sgdMCreateOptim(0.05f, 0.9f, 0.f, &MODEL_CHAIN(model, 6), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     float inputValues[8] = {0.9f, -0.4f, 1.3f, 0.2f, -1.1f, 0.7f, 0.3f, -0.6f};
@@ -2721,7 +2721,7 @@ void testBfpUniformNormModelTrainsAndGridsMove(void) {
      * regression moves the endpoint and stays observable. */
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.01f, 0.9f, 0.f, model, BFP_NORM_MODEL_SIZE, momentumQ,
+        sgdMCreateOptim(0.01f, 0.9f, 0.f, &MODEL_CHAIN(model, BFP_NORM_MODEL_SIZE), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     /* Two-sample, two-class fixture: channel 0 positive / channel 1 negative is
@@ -2895,7 +2895,7 @@ void testBfpNormGradStorageAccumulatesAndSteps(void) {
     layer_t *model[1] = {layerNorm};
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.2f, 0.f, 0.f, model, 1, momentumQ,
+        sgdMCreateOptim(0.2f, 0.f, 0.f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     tensor_t *input =
@@ -3264,7 +3264,7 @@ void unitTestUniformBfpSoftmaxMseTrains(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(0.05f, 0.9f, 0.f, model, 2, momentumQ,
+        sgdMCreateOptim(0.05f, 0.9f, 0.f, &MODEL_CHAIN(model, 2), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     float inputValues[4] = {0.9f, -0.4f, 1.3f, 0.2f};

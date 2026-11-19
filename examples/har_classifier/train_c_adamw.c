@@ -357,9 +357,9 @@ int main(void) {
         markBeforeOpt = memProfileMark();
 #endif
         quantization_t *momentQ = quantizationInitFloat();
-        optim =
-            adamWCreateOptim(g_lr, kBeta1, kBeta2, kEps, kWeightDecay, model, MODEL_SIZE, momentQ,
-                             (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+        optim = adamWCreateOptim(g_lr, kBeta1, kBeta2, kEps, kWeightDecay,
+                                 &MODEL_CHAIN(model, MODEL_SIZE), momentQ,
+                                 (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 #ifdef ODT_MEM_PROFILE
         markAfterOpt = memProfileMark(); /* optstate_b = delta */
 #endif

@@ -172,7 +172,7 @@ void testSgdMCreateOptimSkipsQuantizationLayer(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, model, 2, momentumQ,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(model, 2), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     size_t sizeStates = optim->sizeStates;
 
@@ -330,7 +330,7 @@ void testFullSymChainTrainingStepMatchesFloatTwin(void) {
 
     quantization_t *momentumQS = quantizationInitFloat();
     optimizer_t *optimS =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, modelSym, 5, momentumQS,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(modelSym, 5), momentumQS,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingStats_t *statsS = calculateGradsSequential(modelSym, 5, defaultLossConfig(MSE),
                                                        REDUCTION_MEAN, inS, labelS, NULL);
@@ -367,7 +367,7 @@ void testFullSymChainTrainingStepMatchesFloatTwin(void) {
 
     quantization_t *momentumQF = quantizationInitFloat();
     optimizer_t *optimF =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, modelF, 3, momentumQF,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(modelF, 3), momentumQF,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingStats_t *statsF = calculateGradsSequential(modelF, 3, defaultLossConfig(MSE),
                                                        REDUCTION_MEAN, inF, labelF, NULL);
@@ -469,7 +469,7 @@ void testConv1dTransposedSymChainTrains(void) {
 
     quantization_t *momentumQ2 = quantizationInitFloat();
     optimizer_t *opt =
-        sgdMCreateOptim(0.05f, 0.0f, 0.0f, model, 2, momentumQ2,
+        sgdMCreateOptim(0.05f, 0.0f, 0.0f, &MODEL_CHAIN(model, 2), momentumQ2,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     size_t STEPS = 40;

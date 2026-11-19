@@ -107,7 +107,7 @@ void testLinearLayerNormLinearOneTrainingStep(void) {
 
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.1f, 0.9f, 0.0f, model, 3, momentumQ,
+        sgdMCreateOptim(0.1f, 0.9f, 0.0f, &MODEL_CHAIN(model, 3), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
     trainingStats_t *stats = calculateGradsSequential(model, 3, defaultLossConfig(MSE),
@@ -196,7 +196,7 @@ void testLayerNormSymInt32SingleLayerTrainingStep(void) {
 
     quantization_t *momentumQSym = quantizationInitFloat();
     optimizer_t *optimSym =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, modelSym, 1, momentumQSym,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(modelSym, 1), momentumQSym,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingStats_t *statsSym = calculateGradsSequential(modelSym, 1, defaultLossConfig(MSE),
                                                          REDUCTION_MEAN, inSym, labelSym, NULL);
@@ -230,7 +230,7 @@ void testLayerNormSymInt32SingleLayerTrainingStep(void) {
 
     quantization_t *momentumQF = quantizationInitFloat();
     optimizer_t *optimF =
-        sgdMCreateOptim(0.1f, 0.0f, 0.0f, modelF, 1, momentumQF,
+        sgdMCreateOptim(0.1f, 0.0f, 0.0f, &MODEL_CHAIN(modelF, 1), momentumQF,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     trainingStats_t *statsF = calculateGradsSequential(modelF, 1, defaultLossConfig(MSE),
                                                        REDUCTION_MEAN, inF, labelF, NULL);

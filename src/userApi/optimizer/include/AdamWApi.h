@@ -16,7 +16,7 @@
  * (FLOAT32/SYM_INT32/SYM/ASYM; INT32/BOOL fail fast, #261).
  * Free with freeOptim(). */
 optimizer_t *adamWCreateOptim(float learningRate, double beta1, double beta2, double eps,
-                              double weightDecay, layer_t **model, size_t sizeModel,
-                              quantization_t *momentQuant, arithmetic_t updateMath);
+                              double weightDecay, const model_t *m, quantization_t *momentQuant,
+                              arithmetic_t updateMath);
 
 #endif // ADAM_W_API_H

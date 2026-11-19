@@ -116,8 +116,8 @@ static batch_t *buildBatch(tensor_t **items, tensor_t **labels, size_t n) {
 
 static void zeroGrads(layer_t **model, size_t modelSize) {
     parameter_t *slots[MAX_PARAMS];
-    size_t n = calcTotalNumberOfStates(model, modelSize);
-    collectTrainableParameters(model, modelSize, slots);
+    size_t n = calcTotalNumberOfStates(&MODEL_CHAIN(model, modelSize));
+    collectTrainableParameters(&MODEL_CHAIN(model, modelSize), slots);
     for (size_t p = 0; p < n; p++) {
         memset(slots[p]->grad->data, 0, calcBytesPerTensor(slots[p]->grad));
     }
@@ -128,8 +128,8 @@ static void zeroGrads(layer_t **model, size_t modelSize) {
 static size_t snapshotScaledGrads(layer_t **model, size_t modelSize, float scale, float *out,
                                   size_t capacity) {
     parameter_t *slots[MAX_PARAMS];
-    size_t n = calcTotalNumberOfStates(model, modelSize);
-    collectTrainableParameters(model, modelSize, slots);
+    size_t n = calcTotalNumberOfStates(&MODEL_CHAIN(model, modelSize));
+    collectTrainableParameters(&MODEL_CHAIN(model, modelSize), slots);
     size_t k = 0;
     for (size_t p = 0; p < n; p++) {
         const float *g = (const float *)slots[p]->grad->data;
@@ -1392,7 +1392,7 @@ static void freeClassifierShells(layer_t **model) {
 
 static optimizer_t *buildSgd(layer_t **model, quantization_t *momentumQ) {
     optimizer_t *sgd =
-        sgdMCreateOptim(0.5f, 0.0f, 0.0f, model, CLS_SIZE, momentumQ,
+        sgdMCreateOptim(0.5f, 0.0f, 0.0f, &MODEL_CHAIN(model, CLS_SIZE), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     optimizerSetWriteBackRounding(sgd, HALF_AWAY); /* deterministic write-backs */
     return sgd;
@@ -1400,8 +1400,8 @@ static optimizer_t *buildSgd(layer_t **model, quantization_t *momentumQ) {
 
 static size_t snapshotParams(layer_t **model, size_t modelSize, float *out, size_t capacity) {
     parameter_t *slots[MAX_PARAMS];
-    size_t n = calcTotalNumberOfStates(model, modelSize);
-    collectTrainableParameters(model, modelSize, slots);
+    size_t n = calcTotalNumberOfStates(&MODEL_CHAIN(model, modelSize));
+    collectTrainableParameters(&MODEL_CHAIN(model, modelSize), slots);
     size_t k = 0;
     for (size_t p = 0; p < n; p++) {
         const float *v = (const float *)slots[p]->param->data;

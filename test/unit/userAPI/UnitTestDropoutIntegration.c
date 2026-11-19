@@ -147,10 +147,10 @@ void testOptimizer_ZeroStatesForDropout(void) {
     layer_t *drop = dropoutLayerInit(0.5f, mask, fq, bq);
     layer_t *model[1] = {drop};
 
-    size_t numStates = calcTotalNumberOfStates(model, 1);
+    size_t numStates = calcTotalNumberOfStates(&MODEL_CHAIN(model, 1));
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *optim =
-        sgdMCreateOptim(0.01f, 0.9f, 0.0f, model, 1, momentumQ,
+        sgdMCreateOptim(0.01f, 0.9f, 0.0f, &MODEL_CHAIN(model, 1), momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     size_t sizeStates = optim->sizeStates;
 
@@ -314,7 +314,7 @@ static void buildResumeRun(resumeRun_t *r, uint64_t initSeed) {
             .inFeatures = 3, .outFeatures = 2, .bias = BIAS_TRUE, .weightInit.key = &initKey2},
         &r->lq);
     r->momentumQ = quantizationInitFloat();
-    r->sgd = sgdMCreateOptim(0.05f, 0.f, 0.f, r->model, 3, r->momentumQ,
+    r->sgd = sgdMCreateOptim(0.05f, 0.f, 0.f, &MODEL_CHAIN(r->model, 3), r->momentumQ,
                              (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     r->trainDl = dataLoaderInit(getResumeSample, resumeDatasetSize, 1, NULL, NULL, true, true);
     dataLoaderSetReshufflePerEpoch(r->trainDl, true);

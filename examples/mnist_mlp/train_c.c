@@ -251,9 +251,10 @@ int main(void) {
                                                  /*shuffle*/ false,
                                                  /*dropLast*/ true);
 
-        optimizer_t *sgd = sgdMCreateOptim(
-            LR, MOMENTUM, /*weightDecay*/ 0.0f, model, MODEL_SIZE, quantizationInitFloat(),
-            (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+        optimizer_t *sgd =
+            sgdMCreateOptim(LR, MOMENTUM, /*weightDecay*/ 0.0f, &MODEL_CHAIN(model, MODEL_SIZE),
+                            quantizationInitFloat(),
+                            (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
 
         g_log_file = fopen("examples/mnist_mlp/logs/c.json", "w");
         if (!g_log_file) {

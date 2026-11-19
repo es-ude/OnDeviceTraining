@@ -104,7 +104,7 @@ static tensor_t *momentumStateInit(tensor_t *param, quantization_t *momentumQuan
 }
 
 optimizer_t *sgdMCreateOptim(float learningRate, float momentumFactor, float weightDecay,
-                             layer_t **model, size_t sizeModel, quantization_t *momentumQuant,
+                             const model_t *m, quantization_t *momentumQuant,
                              arithmetic_t updateMath) {
     optimizer_t *optim = reserveMemory(sizeof(optimizer_t));
     optim->type = SGD_M;
@@ -118,14 +118,14 @@ optimizer_t *sgdMCreateOptim(float learningRate, float momentumFactor, float wei
     sgdImpl->sgd = sgd;
     optim->impl = sgdImpl;
 
-    size_t sizeStates = calcTotalNumberOfStates(model, sizeModel);
+    size_t sizeStates = calcTotalNumberOfStates(m);
     /* #380: a zero-state model is only an error when it's DEGENERATE -- every
      * parameter-bearing layer got frozen (nothing to optimize). A model that
      * simply has no parameter-bearing layer types at all (e.g. a lone
      * Dropout/pooling layer) is a pre-existing, deliberately-supported
      * zero-state configuration (UnitTestDropoutIntegration/
      * UnitTestAdaptiveAvgPool1dIntegration) and must keep working. */
-    if (sizeStates == 0 && modelHasFrozenLayer(model, sizeModel)) {
+    if (sizeStates == 0 && modelHasFrozenLayer(m)) {
         PRINT_ERROR("sgdMCreateOptim: model has no trainable parameters "
                     "(every parameter-bearing layer is frozen) - nothing to optimize");
         exit(1);
@@ -133,7 +133,7 @@ optimizer_t *sgdMCreateOptim(float learningRate, float momentumFactor, float wei
     optim->sizeStates = sizeStates;
     parameter_t **parameter = reserveMemory(sizeStates * sizeof(parameter_t *));
     optim->parameter = parameter;
-    collectTrainableParameters(model, sizeModel, parameter);
+    collectTrainableParameters(m, parameter);
 
     /* momentumFactor == 0: momentum state is semantically nonexistent --
      * allocate none (sgdStepM's momentum==0 path never reads states, #308).

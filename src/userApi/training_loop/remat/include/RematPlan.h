@@ -85,15 +85,22 @@ typedef struct rematWireFact {
 typedef struct rematWireTable {
     size_t modelSize;
     lossFuncType_t lossType;
-    size_t deepest; /* built facts: a bind compares them with the live model */
+    size_t deepest; /* positional facts the plan generators still read; not part of the key */
     ptrdiff_t backwardTop;
     bool hasBackward;
     size_t numWires;
-    rematWire_t *wires; /* ACT j at id j (0..n), then GRAD n, top, top-1, ..., deepest+1 */
-    uint16_t *gradIdOf; /* [n+1]: id of GRAD j, REMAT_NONE if it does not exist */
-    uint8_t *layerType; /* [n], key */
-    uint8_t *frozen;    /* [n], key */
-    size_t inputRank;   /* ACT 0 key: rank, dims, order, dtype */
+    rematWire_t *wires;    /* ACT j at id j (0..n), then GRAD n, top, top-1, ..., deepest+1 */
+    uint16_t *gradIdOf;    /* [n+1]: the GRAD holding buffer b's gradient, else REMAT_NONE; under
+                              CROSS_ENTROPY the seed is the Softmax input's gradient too */
+    uint8_t *layerType;    /* [n], key */
+    uint8_t *frozen;       /* [n], key */
+    uint8_t *runsBackward; /* [n], key (modelGradFlags) */
+    uint8_t *needsGrad;    /* [n + 1], follows from the key */
+    uint8_t *readsInput;   /* [n], layerBackwardReadsInput: from type and frozen, both keyed */
+    uint16_t *dxWire; /* [n * MODEL_MAX_ARITY]: the wire node j's BACKWARD writes for input slot i,
+                         REMAT_NONE = no dx (rematDeriveGradWires) */
+    uint8_t *dxMode;  /* [n * MODEL_MAX_ARITY]: opMode_t of that slot; READ when nothing runs */
+    size_t inputRank; /* ACT 0 key: rank, dims, order, dtype */
     size_t *inputDims;
     size_t *inputOrder;
     uint8_t inputType;

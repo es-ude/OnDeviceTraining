@@ -7,13 +7,14 @@
 # inherits debug); OFF in firmware and the examples.
 option(ODT_REMAT_VERIFY "Poison remat wire bytes at bind and release (test builds)" OFF)
 
-add_library(RematPlan RematWireTable.c RematPlan.c RematPlanPolicy.c)
+add_library(RematPlan RematWireTable.c RematDerive.c RematPlan.c RematPlanPolicy.c)
 target_include_directories(RematPlan PUBLIC include)
 # PUBLIC, like ODT_MEM_PROFILE on StorageApi: tests that link RematPlan
 # directly can #ifdef their poison assertions.
 target_compile_definitions(RematPlan PUBLIC $<$<BOOL:${ODT_REMAT_VERIFY}>:ODT_REMAT_VERIFY>)
 target_link_libraries(RematPlan PRIVATE
         Model
+        OpTable
         Tensor
         Quantization
         TensorApi

@@ -3142,15 +3142,15 @@ static void selfCheckWithOneExtraByte(rowInit_t init) {
 
 void testInitSelfCheckExitsOnAnUnaccountedByteOnHeap(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[heap]: init reserved 6529 B, but its report accounts for "
-                             "6528 B (arenaBytes 0 + metadataBytes 6528)",
+                             "remat[heap]: init reserved 6673 B, but its report accounts for "
+                             "6672 B (arenaBytes 0 + metadataBytes 6672)",
                              selfCheckWithOneExtraByte(initHeap));
 }
 
 void testInitSelfCheckExitsOnAnUnaccountedByteOnArena(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[arena]: init reserved 81001 B, but its report accounts for "
-                             "81000 B (arenaBytes 74288 + metadataBytes 6712)",
+                             "remat[arena]: init reserved 81145 B, but its report accounts for "
+                             "81144 B (arenaBytes 74288 + metadataBytes 6856)",
                              selfCheckWithOneExtraByte(initArena));
 }
 
@@ -3187,15 +3187,15 @@ static void initWithAnUnaccountedReservation(rematSchedulerType_t row) {
 
 void testHeapInitExitsOnAnUnaccountedReservation(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[heap]: init reserved 6536 B, but its report accounts for "
-                             "6528 B (arenaBytes 0 + metadataBytes 6528)",
+                             "remat[heap]: init reserved 6680 B, but its report accounts for "
+                             "6672 B (arenaBytes 0 + metadataBytes 6672)",
                              initWithAnUnaccountedReservation(REMAT_HEAP));
 }
 
 void testArenaInitExitsOnAnUnaccountedReservation(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
-                             "remat[arena]: init reserved 81008 B, but its report accounts for "
-                             "81000 B (arenaBytes 74288 + metadataBytes 6712)",
+                             "remat[arena]: init reserved 81152 B, but its report accounts for "
+                             "81144 B (arenaBytes 74288 + metadataBytes 6856)",
                              initWithAnUnaccountedReservation(REMAT_ARENA));
 }
 #endif

@@ -26,6 +26,7 @@
 #include "LinearApi.h"
 #include "LossFunction.h"
 #include "Model.h"
+#include "OpTable.h"
 #include "Pool1dApi.h"
 #include "QuantLayerApi.h"
 #include "Quantization.h"
@@ -628,10 +629,71 @@ void testHarTableNumbersWiresInProductionOrder(void) {
     TEST_ASSERT_EQUAL_UINT16(9, t->wires[15].inheritFrom);
     TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, t->wires[14].inheritFrom);
     TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, t->wires[16].inheritFrom);
-    /* No GRAD 11 under CE (the positional skip), no GRAD 0 (deepest, grads-only). */
-    TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, t->gradIdOf[11]);
+    /* Under CE the seed is buffer 11's gradient; no GRAD 0 (the input needs none). */
+    TEST_ASSERT_EQUAL_UINT16(13, t->gradIdOf[11]);
     TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, t->gradIdOf[0]);
 
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* HAR under CE: everything below the Softmax runs; buffers 1..12 need a
+ * gradient; the read-set is the per-type rule; the seed is buffer 11's
+ * gradient (the Softmax's input). */
+void testHarTableHoldsTheGradFlagsAndTheDxWires(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    const uint8_t reads[HAR_N] = {1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1};
+    for (size_t j = 0; j < HAR_N; j++) {
+        TEST_ASSERT_EQUAL_UINT8(j < 11 ? 1 : 0, t->runsBackward[j]);
+        TEST_ASSERT_EQUAL_UINT8(reads[j], t->readsInput[j]);
+        TEST_ASSERT_EQUAL_UINT16(j >= 1 && j <= 10 ? (uint16_t)(24 - j) : REMAT_NONE,
+                                 t->dxWire[j * MODEL_MAX_ARITY]);
+        TEST_ASSERT_EQUAL_UINT8(j <= 10 ? OP_MODE_WRITE : OP_MODE_READ,
+                                t->dxMode[j * MODEL_MAX_ARITY]);
+        TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, t->dxWire[j * MODEL_MAX_ARITY + 1]);
+        TEST_ASSERT_EQUAL_UINT8(OP_MODE_READ, t->dxMode[j * MODEL_MAX_ARITY + 1]);
+    }
+    for (size_t b = 0; b <= HAR_N; b++) {
+        TEST_ASSERT_EQUAL_UINT8(b >= 1 ? 1 : 0, t->needsGrad[b]);
+    }
+    TEST_ASSERT_TRUE(t->hasBackward);
+    TEST_ASSERT_EQUAL_UINT16(13, t->gradIdOf[11]); /* the seed is buffer 11's gradient */
+    TEST_ASSERT_EQUAL_UINT16(13, t->gradIdOf[12]);
+    rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* Frozen convs: only the Linear runs backward, grads-only (its input needs no
+ * gradient, so its one slot writes nothing); a frozen conv reads no input. */
+void testFrozenHarTableRunsOnlyTheLinearGradsOnly(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, true);
+    inputLike_t in;
+    rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
+    TEST_ASSERT_EQUAL_size_t(14, t->numWires);
+    TEST_ASSERT_TRUE(t->hasBackward);
+    for (size_t j = 0; j < HAR_N; j++) {
+        TEST_ASSERT_EQUAL_UINT8(j == 10 ? 1 : 0, t->runsBackward[j]);
+        for (size_t i = 0; i < MODEL_MAX_ARITY; i++) {
+            TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, t->dxWire[j * MODEL_MAX_ARITY + i]);
+            TEST_ASSERT_EQUAL_UINT8(j == 10 && i == 0 ? OP_MODE_WRITE : OP_MODE_READ,
+                                    t->dxMode[j * MODEL_MAX_ARITY + i]);
+        }
+    }
+    for (size_t b = 0; b <= HAR_N; b++) {
+        TEST_ASSERT_EQUAL_UINT8(b >= 11 ? 1 : 0, t->needsGrad[b]);
+    }
+    TEST_ASSERT_EQUAL_UINT8(0, t->readsInput[0]);
+    TEST_ASSERT_EQUAL_UINT8(0, t->readsInput[3]);
+    TEST_ASSERT_EQUAL_UINT8(0, t->readsInput[6]);
+    TEST_ASSERT_EQUAL_UINT16(13, t->gradIdOf[11]);
+    TEST_ASSERT_EQUAL_UINT16(13, t->gradIdOf[12]);
+    for (size_t b = 0; b <= 10; b++) {
+        TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, t->gradIdOf[b]);
+    }
     rematWireTableFree(t);
     freeModel(model, HAR_N);
 }
@@ -886,8 +948,8 @@ void testAccessorsReadTheTableAndHeadersAreLinked(void) {
     TEST_ASSERT_EQUAL_UINT16(5, rematActId(t, 5));
     TEST_ASSERT_EQUAL_UINT16(13, rematGradId(t, 12));
     TEST_ASSERT_EQUAL_UINT16(14, rematGradId(t, 10));
-    TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, rematGradId(t, 11));
-    TEST_ASSERT_NULL(rematGradHdr(t, 11));
+    TEST_ASSERT_EQUAL_UINT16(13, rematGradId(t, 11));
+    TEST_ASSERT_EQUAL_PTR(t->wires[13].hdr, rematGradHdr(t, 11));
     TEST_ASSERT_NULL(rematGradHdr(t, 0));
     TEST_ASSERT_EQUAL_PTR(t->wires[13].hdr, rematGradHdr(t, 12));
     TEST_ASSERT_EQUAL_PTR(t->wires[3].hdr, rematActHdr(t, 3));
@@ -1139,12 +1201,14 @@ void testTableInitExitsOnAByteCountOverflowBeforeReservingTheTable(void) {
     tensor_t *x = makeInput(&in, (size_t[]){1, SIZE_MAX / 4u + 2u}, 2, &g_floatQ);
     ASSERT_EXITS_WITH_OUTPUT(1, "size overflow computing bytes of wire ACT 0",
                              initExpectingAnExit(model, 1, x));
-    /* Only the transient derivation scratch (2 wire facts, and 2 shapes with
-     * dims and order of maxRank 2) is live at the exit: the table block is
+    /* Only the transient init scratch is live at the exit: the gradient flags
+     * (n = 1: 2 dx slots x (2 + 1) bytes, needsGrad 2, runsBackward 1), 2 wire
+     * facts, and 2 shapes with dims and order of maxRank 2. The table block is
      * never reserved. */
 #ifdef ODT_MEM_PROFILE
-    size_t expectedReserved =
-        2u * sizeof(rematWireFact_t) + 2u * (sizeof(shape_t) + 2u * 2u * sizeof(size_t));
+    size_t expectedReserved = 2u * (sizeof(uint16_t) + 1u) + 2u + 1u +
+                              2u * sizeof(rematWireFact_t) +
+                              2u * (sizeof(shape_t) + 2u * 2u * sizeof(size_t));
 #else
     size_t expectedReserved = 0u; /* the counters are no-ops without ODT_MEM_PROFILE */
 #endif
@@ -1483,17 +1547,20 @@ void testBindRunsSampleBOnATableBuiltOnSampleA(void) {
 
 /* The bind's per-wire derivation scratch and the n + 1 ACT shapes live inside
  * the table block. LP64 layout arithmetic (not a scan-model pin): table struct
- * 160 + 24 records x 40 + gradIdOf 26 + layerType/frozen 24, rounded to 8, +
- * the input key 48 = 1224; the 13 ACT shapes 13 x (24 + 2 x 3 x 8) = 936; the
- * bind scratch 960; the headers 2680. Total 5800 = 4856 + sizeof(shape_t *) 8
- * + 936: every added object is a multiple of 8 bytes, so no padding moves.
- * Every host preset is LP64. */
+ * 200 (160 + the 5 gradient-flag pointers 40) + 24 records x 40 = 1160;
+ * gradIdOf 26, layerType/frozen 24, runsBackward 12, needsGrad 13, readsInput
+ * 12 = 1247, rounded to 2 for dxWire 24 x 2 = 1296, dxMode 24 = 1320 (already
+ * a multiple of 8), + the input key 48 = 1368; the 13 ACT shapes 13 x (24 +
+ * 2 x 3 x 8) = 936; the bind scratch 960; the headers 2680. Total 5944 =
+ * 1368 + 936 + 960 + 2680 = 5800 + 144: the 5 pointers 40, the 5 arrays
+ * 12 + 13 + 12 + 48 + 24 = 109, 1 pad byte before dxWire, less the 6 pad bytes
+ * the key had before inputDims when frozen ended it. Every host preset is LP64. */
 void testHarSlabHoldsTheBindScratch(void) {
     layer_t *model[HAR_N];
     buildHar(model, false);
     inputLike_t in;
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
-    TEST_ASSERT_EQUAL_size_t(5800, t->slabBytes);
+    TEST_ASSERT_EQUAL_size_t(5944, t->slabBytes);
     const uint8_t *scratch = (const uint8_t *)t->bindScratch;
     TEST_ASSERT_TRUE(scratch >= (const uint8_t *)(t->inputOrder + t->inputRank));
     TEST_ASSERT_TRUE(scratch + t->numWires * sizeof(rematWireFact_t) <=
@@ -1577,8 +1644,9 @@ void testBindExitsOnALayerTypeSwap(void) {
     freeSoftmaxLayer(softmax);
 }
 
-/* Freezing the deepest trainable layer moves deepest (0 -> 3 on HAR). */
-void testBindExitsWhenFreezingMovesDeepest(void) {
+/* Freezing conv 0 makes conv 3 the first trainable layer, so nodes 0..2 stop
+ * running backward; index 0 differs first. */
+void testBindExitsWhenFreezingStopsALayersBackward(void) {
     layer_t *model[HAR_N];
     buildHar(model, false);
     inputLike_t in;
@@ -1586,14 +1654,15 @@ void testBindExitsWhenFreezingMovesDeepest(void) {
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, x);
     model[0]->config->conv1d->frozen = true;
     ASSERT_EXITS_WITH_OUTPUT(
-        1, "key mismatch on 'deepest': built 0, live 3",
+        1, "key mismatch on 'runsBackward[0]': built 1, live 0",
         rematWireTableBind(t, &MODEL_CHAIN(model, HAR_N), CROSS_ENTROPY, REMAT_MODE_TRAIN, x));
     model[0]->config->conv1d->frozen = false;
     rematWireTableFree(t);
     freeModel(model, HAR_N);
 }
 
-/* Freezing a layer above deepest keeps deepest; the frozen[] key catches it. */
+/* Freezing a layer above the first trainable one changes no runsBackward flag; the frozen[]
+ * key catches it. */
 void testBindExitsWhenFreezingALayerAboveDeepest(void) {
     layer_t *model[HAR_N];
     buildHar(model, false);
@@ -4548,6 +4617,8 @@ int main(void) {
     RUN_TEST(testBfpWireGroupingMatchesTheDriverRule);
     RUN_TEST(testBfpWireGroupingExitsNamingTheWireOnAnIndivisibleGroupSize);
     RUN_TEST(testHarTableNumbersWiresInProductionOrder);
+    RUN_TEST(testHarTableHoldsTheGradFlagsAndTheDxWires);
+    RUN_TEST(testFrozenHarTableRunsOnlyTheLinearGradsOnly);
     RUN_TEST(testHarTableRecordsBytesRanksAndKey);
     RUN_TEST(testHarTableKeepsEveryActShape);
     RUN_TEST(testBindRewritesTheActShapes);
@@ -4596,7 +4667,7 @@ int main(void) {
     RUN_TEST(testBindExitsOnAChangedModelSize);
     RUN_TEST(testBindExitsOnAChangedLossType);
     RUN_TEST(testBindExitsOnALayerTypeSwap);
-    RUN_TEST(testBindExitsWhenFreezingMovesDeepest);
+    RUN_TEST(testBindExitsWhenFreezingStopsALayersBackward);
     RUN_TEST(testBindExitsWhenFreezingALayerAboveDeepest);
     RUN_TEST(testBindExitsOnAChangedInputRank);
     RUN_TEST(testBindExitsOnAChangedBatch);

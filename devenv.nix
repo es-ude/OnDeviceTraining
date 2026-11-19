@@ -238,6 +238,7 @@ in
 					# here as shared code; include/ is scanned too. Each exclusion is shared,
 					# never a row, because:
 					#   RematCheck.c         the validator, run by the driver
+					#   RematDerive.c        shared, because it is the deriver (the one operand writer)
 					#   RematPlan.c          the static-plan generator
 					#   RematPlanPolicy.c/.h the plan policies, private to RematPlan
 					#   RematScheduler.c     the shared dispatch and the row vtable
@@ -249,6 +250,7 @@ in
 						shift
 						git -C "$root" "$@" -- "$REMAT/*.c" "$REMAT/*.h" \
 							":!$REMAT/RematCheck.c" \
+							":!$REMAT/RematDerive.c" \
 							":!$REMAT/RematPlan.c" \
 							":!$REMAT/RematPlanPolicy.c" \
 							":!$REMAT/RematPlanPolicy.h" \

@@ -529,11 +529,11 @@ static void thawLayer0(fixture_t *f) {
     freezeLayer(f, 0, false);
 }
 
-/* Layer 1 (ReLU) has no parameters, so freezing layer 0 moves deepest to 2. */
+/* Freezing layer 0 stops nodes 0 and 1 from running backward. */
 void testFreezingTheDeepestLayerExitsIdenticallyOnBothRows(void) {
     assertKeyChangeExitsOnBothRows(
         buildMlpModel, freezeLayer0, thawLayer0,
-        "rematWireTableBind: key mismatch on 'deepest': built 0, live 2");
+        "rematWireTableBind: key mismatch on 'runsBackward[0]': built 1, live 0");
 }
 
 static void freezeLayer2(fixture_t *f) {
@@ -544,7 +544,7 @@ static void thawLayer2(fixture_t *f) {
     freezeLayer(f, 2, false);
 }
 
-/* Above deepest: deepest stays 0, the frozen[] key catches it. */
+/* Above the first trainable layer no runsBackward flag changes; the frozen[] key catches it. */
 void testFreezingALayerAboveDeepestExitsIdenticallyOnBothRows(void) {
     assertKeyChangeExitsOnBothRows(
         buildMlpModel, freezeLayer2, thawLayer2,

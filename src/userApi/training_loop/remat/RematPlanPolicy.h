@@ -8,6 +8,17 @@
 
 /* The program generators, private to the RematPlan library. */
 
+/* The one owner of the gradient-wire decision, made once at table init (and repeated at every
+ * bind from the same key, so it gives the same values). Numbers the seed (only when a backward
+ * runs), then, walking the runsBackward nodes in descending order and each node's inputs in input
+ * order, a GRAD for every input buffer that needs a gradient, at that buffer's first
+ * contribution; ids start at n + 1. Fills dxWire/dxMode for every node's MODEL_MAX_ARITY slots.
+ * With facts == NULL it only counts, so the table can be sized first; dxWire/dxMode may then be
+ * NULL too. Returns the number of GRAD wires. */
+size_t rematDeriveGradWires(const model_t *m, lossFuncType_t lt, const uint8_t *needsGrad,
+                            const uint8_t *runsBackward, rematWireFact_t *facts, uint16_t *dxWire,
+                            uint8_t *dxMode);
+
 size_t rematTrainStepCount(const rematWireTable_t *t);
 /* BACKWARD(l) = n + 2 + (top - l), for deepest <= l <= top. */
 size_t rematBackwardStep(const rematWireTable_t *t, size_t l);

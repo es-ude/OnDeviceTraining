@@ -2402,8 +2402,9 @@ the Softmax's dx, so the remat wire table gives it the Softmax's
 SYM head, and under MSE, the seed still inherits the model output's config
 and `propLossQ` stays unused, exactly as before the heads existed).
 `requireCrossEntropyHead` (`LayerConfigAccess.c`, called by
-`rematWireTableInit` and every `rematWireTableBind`) accepts a head without any BFP unchanged (FLOAT32 and
-SYM models), and with any BFP exactly two tuples:
+`rematWireTableInit` and every `rematWireTableBind`) accepts a head without
+any BFP unchanged (FLOAT32 and SYM models), and with any BFP exactly two
+tuples:
 
 | head | forwardMath | propLossMath | outputQ (`p`) | propLossQ (loss grad) |
 |---|---|---|---|---|

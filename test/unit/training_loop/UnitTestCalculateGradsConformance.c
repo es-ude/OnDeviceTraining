@@ -310,8 +310,8 @@ static void buildGroupedBfp(zooFixture_t *f) {
     mseLabel(f, 2);
 }
 
-/* n = 1 under CE: the Softmax alone (CE requires the last Softmax), top = -1,
- * nothing trains: forward and loss only. */
+/* n = 1 under CrossEntropy: the Softmax alone (CE requires the last Softmax);
+ * nothing trains, no BACKWARD step: forward and loss only. */
 static void buildSingleLayerCe(zooFixture_t *f) {
     beginZoo(f);
     f->model[0] = makeSoftmax();

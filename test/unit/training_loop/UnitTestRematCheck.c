@@ -1338,9 +1338,9 @@ void testFinishExitsWhenARowEatsTheLastStepInternally(void) {
     freeFixture(&f, &s);
 }
 
-/* [Softmax] under CE, n = 1 (CE requires the last Softmax): top = -1, and
- * nothing trains, so the stream is FORWARD 0, LOSS_FORWARD and no BACKWARD
- * at all. */
+/* [Softmax], n = 1 under CrossEntropy (CE requires the last Softmax): nothing
+ * trains, no BACKWARD step, so the stream is FORWARD 0, LOSS_FORWARD and no
+ * BACKWARD at all. */
 static void buildCeSingleLinearModel(fixture_t *f) {
     f->model[0] = makeSoftmax();
     f->n = 1;

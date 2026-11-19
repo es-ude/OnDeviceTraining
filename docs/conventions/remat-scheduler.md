@@ -46,8 +46,8 @@ Every row satisfies these before it joins the conformance matrix.
 - **R2 Values, not pointers.** `next` fills a caller-provided `rematStep_t`,
   an 8-byte `{kind, numReads, numWrites, reserved, layer, operands}` record;
   the plan fills the operand slice and a row copies the record whole. The
-  driver gets each step's operands from `RematCheck`, which looks them up in
-  the step's slice; a row never hands them over.
+  driver executes the operand slice the validator (`RematCheck`) looked up
+  for the step; a row never hands operands over.
 - **R3 Versioned binding.** Every bind increments `bindGen`. Bind a wire only
   for a step that produces it (FORWARD, REFORWARD, LOSS_BACKWARD, BACKWARD).
   An in-place member is never bound by a row: the SDK binds it with its
@@ -116,7 +116,9 @@ A scheduler binds against the model as it is at each call.
   and stream checks, and ARENA's init-time placement verifier. There is no
   opt-out macro.
 - **`ODT_REMAT_VERIFY`** (a CMake option, default OFF): dtype-aware poison of
-  wire bytes at bind and at release, and the driver's strict dead-wire check.
+  wire bytes at bind and at release, and strict W_dead, keyed on the operand
+  mode: the driver passes every META input of a BACKWARD as a header without
+  bytes.
   ON in the `unit_test`, `unit_test_debug` and `unit_test_asan` presets, and in
   `unit_test_ubsan` through `unit_test_debug`; OFF in `unit_test_error`,
   `unit_test_info` and every non-test preset. It is a PUBLIC compile definition
@@ -320,8 +322,10 @@ decisions and those with nothing in force yet are left out.
   differs from the key exits with a named error, at its call's bind or, when
   evaluation stacks samples, at the gather check. The public `evaluation*`
   functions pass none.
-- **remat D20** n = 1 under CrossEntropy keeps the signed `top = -1`: the
-  stream has a LOSS_BACKWARD step and no BACKWARD step.
+- **remat D20** n = 1 under CrossEntropy: the Softmax head has no parameters
+  and its input needs no gradient, so no node runs backward (`runsBackward`
+  is false everywhere) and nothing trains: the TRAIN stream is FORWARD 0 and
+  LOSS_FORWARD, with no LOSS_BACKWARD and no BACKWARD step.
 - **remat D23** A step is an 8-byte
   `{kind, numReads, numWrites, reserved, layer, operands}` record
   (`rematStep_t`); the plan fills the operand slice and a row copies the
@@ -409,6 +413,14 @@ decisions and those with nothing in force yet are left out.
 - **remat D60** Every size product and sum in the remat libraries is
   overflow-checked. An overflow exits at init, naming the wire and the
   quantity, before any reservation.
+- **remat D61** Each step carries an explicit operand slice: its reads, then
+  its writes, each a wire id and a mode (READ, META, WRITE). One deriver
+  (`RematDerive.c`) writes every slice from the table's flags
+  (`runsBackward`, `needsGrad`, `readsInput`, the dx wires); the grammar
+  re-derives each step's slice from the model on its own and compares; the
+  runtime validator looks each step's slice up and the driver executes it.
+  Ranges come from one scan over the slices, for every policy; nothing
+  depends on a step's position in the stream.
 
 **Row contract** (in full above).
 - **remat R1** A row writes a header's `data` pointer only through
@@ -460,8 +472,9 @@ STORE_ALL reference, remat D57).
 - **remat P10** Clean under ASan and UBSan.
 
 **Rule names.**
-- **W_dead** A BACKWARD whose layer does not read its input
-  (`layerBackwardReadsInput` false) may get that input as a header with
+- **W_dead** A BACKWARD input whose operand mode is META (its layer does not
+  read it: `layerBackwardReadsInput` false) may be a header with
   `data == NULL` (the LIVENESS state). Under `ODT_REMAT_VERIFY` the driver
-  passes such a dead header on every plan (strict W_dead), so a read the
-  read-set table denies crashes under STORE_ALL too.
+  passes every META input as such a dead header on every plan (strict
+  W_dead, keyed on the operand mode), so a read the read-set table denies
+  crashes under STORE_ALL too.

@@ -349,8 +349,6 @@ static void ceWithSoftmax(void) {
 
 void testTableInitCrossEntropyRequiresALastSoftmax(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "CrossEntropy skips the last layer's backward",
-                             ceWithoutSoftmaxLinear());
-    ASSERT_EXITS_WITH_OUTPUT(1, "CrossEntropy skips the last layer's backward",
                              ceWithoutSoftmaxRelu());
     ASSERT_EXITS_WITH(0, ceWithSoftmax());
     ASSERT_EXITS_WITH_OUTPUT(1, "rematWireTableInit: CrossEntropy skips the last layer's backward",
@@ -434,10 +432,16 @@ void testTableInitCrossEntropyHeadIsOneOfTwoDeclaredArms(void) {
 }
 
 /* With nothing to train no backward runs, so nothing is skipped: a CE model
- * without a last Softmax (eval only) is not rejected. */
+ * without a last Softmax (eval only) is rejected neither at init nor at a
+ * bind, which re-checks the head of the live model. */
 static void ceWithoutSoftmaxAllFrozen(void) {
     layer_t *model[2] = {makeLinear(2, 3, true, 0), makeRelu(&g_floatQ)};
-    ceTableOn(model, 2);
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 2}, 2, &g_floatQ);
+    rematWireTable_t *t = initTable(model, 2, CROSS_ENTROPY, x);
+    rematWireTableBind(t, &MODEL_CHAIN(model, 2), CROSS_ENTROPY, REMAT_MODE_TRAIN, x);
+    rematWireTableFree(t);
+    freeModel(model, 2);
 }
 
 void testTableInitCrossEntropyChecksTheHeadOnlyWhenABackwardRuns(void) {

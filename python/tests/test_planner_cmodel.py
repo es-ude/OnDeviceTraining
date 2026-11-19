@@ -124,6 +124,15 @@ def test_derived_steps_carry_cs_operands():
     assert recompute[14] == Step(REFORWARD, 7, (Operand(7, READ),), (Operand(8, WRITE),))
 
 
+def test_a_meta_read_does_not_extend_the_range_its_wire_opened():
+    t = table("har")
+    write = Step(FORWARD, 0, (), (Operand(1, WRITE),))
+    meta = Step(BACKWARD, 1, (Operand(1, META),), ())
+    read = Step(BACKWARD, 1, (Operand(1, READ),), ())
+    assert scan_ranges(t, [write, meta], False) == [Range(1, 0, 0)]
+    assert scan_ranges(t, [write, read], False) == [Range(1, 0, 1)]
+
+
 def test_in_place_dx_folds_the_relu_and_flatten_gradients_into_their_upstream_range():
     t = table("har")
     steps = derive_steps(t, retain_of(12, set(range(1, 13))))

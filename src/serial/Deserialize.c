@@ -138,7 +138,7 @@ void deserializeParameter(parameter_t *parameter, FILE *f) {
      * optimizerZeroGrad re-zeros before every batch anyway. */
 }
 
-void deserializeModel(layer_t **model, size_t sizeModel, FILE *f) {
+void deserializeModel(const model_t *m, FILE *f) {
     char magic[4];
     serialReadBytes(magic, 4, f);
     if (memcmp(magic, SERIALIZE_MAGIC, 4) != 0) {
@@ -154,23 +154,23 @@ void deserializeModel(layer_t **model, size_t sizeModel, FILE *f) {
     }
 
     uint32_t layerCount = serialReadU32LE(f);
-    if (layerCount != (uint32_t)sizeModel) {
+    if (layerCount != (uint32_t)m->numLayers) {
         PRINT_ERROR("deserializeModel: layerCount mismatch (file has %u, caller expects %zu)",
-                    (unsigned)layerCount, sizeModel);
+                    (unsigned)layerCount, m->numLayers);
         exit(1);
     }
 
-    for (size_t i = 0; i < sizeModel; i++) {
+    for (size_t i = 0; i < m->numLayers; i++) {
         /* Tag byte = layerType_t enum position (append-only wire contract; see
          * Layer.h and the pins in test/unit/serial/UnitTestSerialize.c). */
         uint8_t tag = serialReadU8(f);
-        if (tag != (uint8_t)model[i]->type) {
+        if (tag != (uint8_t)m->layers[i]->type) {
             PRINT_ERROR("deserializeModel: record tag %u does not match expected layer type "
                         "%u at index %zu",
-                        (unsigned)tag, (unsigned)model[i]->type, i);
+                        (unsigned)tag, (unsigned)m->layers[i]->type, i);
             exit(1);
         }
-        deserializeLayer(model[i], f);
+        deserializeLayer(m->layers[i], f);
     }
 }
 

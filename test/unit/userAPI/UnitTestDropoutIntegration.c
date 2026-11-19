@@ -380,7 +380,7 @@ void testResumingAtAnEpochBoundaryContinuesTheRunBitForBit(void) {
     trainingRngInit(&firstRng, 7u);
     runResume(&first, 1, &firstRng);
     FILE *f = tmpfile();
-    serializeModel(first.model, 3, f);
+    serializeModel(&MODEL_CHAIN(first.model, 3), f);
     trainingRngSerialize(&firstRng, f);
     freeResumeRun(&first);
 
@@ -389,7 +389,7 @@ void testResumingAtAnEpochBoundaryContinuesTheRunBitForBit(void) {
     trainingRng_t resumedRng;
     trainingRngInit(&resumedRng, 999u);
     rewind(f);
-    deserializeModel(resumed.model, 3, f);
+    deserializeModel(&MODEL_CHAIN(resumed.model, 3), f);
     trainingRngDeserialize(&resumedRng, f);
     fclose(f);
     runResume(&resumed, 1, &resumedRng);

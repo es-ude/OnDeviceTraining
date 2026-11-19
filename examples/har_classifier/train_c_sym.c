@@ -604,7 +604,7 @@ static void runOdtsRoundtrip(layer_t **model, dataLoader_t *testLoader, epochSta
         fprintf(stderr, "ODTS_ROUNDTRIP: cannot open %s for writing\n", path);
         exit(1);
     }
-    serializeModel(model, MODEL_SIZE, fOut);
+    serializeModel(&MODEL_CHAIN(model, MODEL_SIZE), fOut);
     fclose(fOut);
 
     /* Fresh per-tensor skeleton: same topology (buildModel), same WEIGHT_DTYPE
@@ -628,7 +628,7 @@ static void runOdtsRoundtrip(layer_t **model, dataLoader_t *testLoader, epochSta
         fprintf(stderr, "ODTS_ROUNDTRIP: cannot open %s for reading\n", path);
         exit(1);
     }
-    deserializeModel(model2, MODEL_SIZE, fIn);
+    deserializeModel(&MODEL_CHAIN(model2, MODEL_SIZE), fIn);
     fclose(fIn);
 
     epochStats_t reloaded = evaluationEpochWithMetrics(

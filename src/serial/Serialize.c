@@ -114,16 +114,16 @@ void serializeParameter(parameter_t *parameter, FILE *f) {
     }
 }
 
-void serializeModel(layer_t **model, size_t sizeModel, FILE *f) {
+void serializeModel(const model_t *m, FILE *f) {
     serialWriteBytes(SERIALIZE_MAGIC, 4, f);
     serialWriteU32LE(SERIALIZE_FORMAT_VERSION, f);
-    serialWriteSizeAsU32LE(sizeModel, f);
+    serialWriteSizeAsU32LE(m->numLayers, f);
 
-    for (size_t i = 0; i < sizeModel; i++) {
+    for (size_t i = 0; i < m->numLayers; i++) {
         /* The tag byte is the layerType_t enum position -- append-only wire
          * contract, pinned in test/unit/serial/UnitTestSerialize.c. */
-        serialWriteU8((uint8_t)model[i]->type, f);
-        serializeLayer(model[i], f);
+        serialWriteU8((uint8_t)m->layers[i]->type, f);
+        serializeLayer(m->layers[i], f);
     }
 }
 

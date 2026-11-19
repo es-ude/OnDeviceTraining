@@ -12,6 +12,7 @@
 #include "FlattenApi.h"
 #include "Layer.h"
 #include "LayerQuant.h"
+#include "Model.h"
 #include "OdtAssert.h"
 #include "QuantizationApi.h"
 #include "Relu.h"
@@ -144,7 +145,7 @@ static void testDeserializeRejectsBadMagic(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -163,7 +164,7 @@ static void testDeserializeRejectsWrongVersion(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -187,7 +188,7 @@ static void testDeserializeRejectsV3Version(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -217,7 +218,7 @@ static void testDeserializeRejectsV4Version(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -241,7 +242,7 @@ static void testDeserializeRejectsV5Version(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -263,7 +264,7 @@ static void testDeserializeRejectsV6Version(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -282,7 +283,7 @@ static void testDeserializeRejectsLayerCountMismatch(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -301,7 +302,7 @@ static void testDeserializeRejectsTagMismatch(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -435,7 +436,7 @@ static void testDeserializeModelFailsFastOnTruncatedHeader(void) {
     layer_t *layer = flattenLayerInit();
     layer_t *model[] = {layer};
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -1054,7 +1055,7 @@ static void testBfpDeserializeRejectsZeroNumGroupsInWireConfig(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -1158,7 +1159,7 @@ static void testBfpDeserializeRejectsMantissaBitsOutOfRange(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -1215,7 +1216,7 @@ static void testBfpDeserializeRejectsExponentBitsOutOfRange(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -1270,7 +1271,7 @@ static void testBfpDeserializeRejectsNonFiniteScaleExponent(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -1624,7 +1625,7 @@ static void testDeserializeSymRejectsOversizedNumGroupsInWireConfig(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -1680,7 +1681,7 @@ static void testDeserializeAsymRejectsOversizedNumGroupsInWireConfig(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -1732,7 +1733,7 @@ static void testDeserializeSymRejectsZeroNumGroupsInWireConfig(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -1780,7 +1781,7 @@ static void testDeserializeAsymRejectsZeroNumGroupsInWireConfig(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -1889,7 +1890,7 @@ static void assertSymWireConfigQBitsRejected(uint8_t qBits) {
     layer_t *model[] = {layer};
     FILE *f = fopen(FILE_PATH, "rb");
     ASSERT_EXITS_WITH_OUTPUT(1, "deserializeQConfig: SYM file qBits",
-                             deserializeModel(model, 1, f));
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
     freeReluLayer(layer);
     freeQuantization(symOutputQ);
@@ -1936,7 +1937,7 @@ static void testDeserializeSymAcceptsWireQBitsBoundsInWireConfig(void) {
         layer_t *layer = reluLayerInit(&lq);
         layer_t *model[] = {layer};
         FILE *f = fopen(FILE_PATH, "rb");
-        deserializeModel(model, 1, f);
+        deserializeModel(&MODEL_CHAIN(model, 1), f);
         fclose(f);
         symQConfig_t *qC = layer->config->relu->outputQ->qConfig;
         uint8_t capturedQBits = qC->qBits;
@@ -2250,11 +2251,11 @@ static void testDeserializeArithmeticRoundTripsBfp(void) {
     layer_t *deserialModel[] = {deserialLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(deserialModel, 1, f);
+    deserializeModel(&MODEL_CHAIN(deserialModel, 1), f);
     fclose(f);
 
     /* CAPTURE before any free. */
@@ -2306,7 +2307,7 @@ static void testDeserializeArithmeticRejectsUnknownTypeTag(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -2347,7 +2348,7 @@ static void testDeserializeArithmeticRejectsUnknownRoundingModeTag(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -2399,7 +2400,7 @@ static void writeValidBatchNorm1dFile(void) {
 
     layer_t *model[] = {layer};
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(model, 1, f);
+    serializeModel(&MODEL_CHAIN(model, 1), f);
     fclose(f);
 
     freeBatchNorm1dLayer(layer);
@@ -2424,7 +2425,7 @@ static void writeMinimalBatchNorm1dFile(size_t numChannels) {
 
     layer_t *model[] = {layer};
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(model, 1, f);
+    serializeModel(&MODEL_CHAIN(model, 1), f);
     fclose(f);
 
     freeBatchNorm1dLayer(layer);
@@ -2482,7 +2483,7 @@ static void testDeserializeBatchNormRejectsChannelMismatch(void) {
     layer_t *model[] = {skeleton};
 
     FILE *f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeBatchNorm1dLayer(skeleton);
@@ -2494,7 +2495,7 @@ static void testDeserializeBatchNormRejectsAffineMismatch(void) {
     layer_t *model[] = {skeleton};
 
     FILE *f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeBatchNorm1dLayer(skeleton);
@@ -2507,7 +2508,7 @@ static void testDeserializeBatchNormRejectsNonFiniteEps(void) {
     layer_t *model[] = {skeleton};
 
     FILE *f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeBatchNorm1dLayer(skeleton);
@@ -2520,7 +2521,7 @@ static void testDeserializeBatchNormRejectsMomentumOutOfRange(void) {
     layer_t *model[] = {skeleton};
 
     FILE *f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeBatchNorm1dLayer(skeleton);
@@ -2533,7 +2534,7 @@ static void testDeserializeBatchNormRejectsUnknownMomentumMode(void) {
     layer_t *model[] = {skeleton};
 
     FILE *f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeBatchNorm1dLayer(skeleton);
@@ -2546,7 +2547,7 @@ static void testDeserializeBatchNormRejectsNaNRunningMean(void) {
     layer_t *model[] = {skeleton};
 
     FILE *f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeBatchNorm1dLayer(skeleton);
@@ -2559,7 +2560,7 @@ static void testDeserializeBatchNormRejectsNegativeRunningVar(void) {
     layer_t *model[] = {skeleton};
 
     FILE *f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeBatchNorm1dLayer(skeleton);
@@ -2582,7 +2583,7 @@ static void testDeserializeBatchNormFileHyperparametersWin(void) {
         &lq);
     layer_t *sourceModel[] = {sourceLayer};
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(sourceModel, 1, f);
+    serializeModel(&MODEL_CHAIN(sourceModel, 1), f);
     fclose(f);
     freeBatchNorm1dLayer(sourceLayer);
 
@@ -2592,7 +2593,7 @@ static void testDeserializeBatchNormFileHyperparametersWin(void) {
     layer_t *skeletonModel[] = {skeletonLayer};
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(skeletonModel, 1, f);
+    deserializeModel(&MODEL_CHAIN(skeletonModel, 1), f);
     fclose(f);
 
     /* CAPTURE every assertion value before any free. */
@@ -2635,7 +2636,7 @@ static void testDeserializeBatchNormRejectsNonFloat32ForwardMath(void) {
     layer_t *model[] = {skeleton};
 
     FILE *f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(model, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeBatchNorm1dLayer(skeleton);

@@ -1281,7 +1281,7 @@ void testBindAfterDeserializeModel(void) {
     layer_t *saved[1] = {makeQuant(&savedQ, &g_floatQ)};
     FILE *file = tmpfile();
     TEST_ASSERT_NOT_NULL(file);
-    serializeModel(saved, 1, file);
+    serializeModel(&MODEL_CHAIN(saved, 1), file);
     rewind(file);
 
     symInt32QConfig_t skeletonQc;
@@ -1295,7 +1295,7 @@ void testBindAfterDeserializeModel(void) {
     symInt32QConfig_t *slabQc = rematActHdr(t, 1)->quantization->qConfig;
     TEST_ASSERT_EQUAL_UINT8(16, slabQc->qMaxBits);
 
-    deserializeModel(skeleton, 1, file);
+    deserializeModel(&MODEL_CHAIN(skeleton, 1), file);
     (void)fclose(file);
     rematWireTableBind(t, skeleton, 1, MSE, REMAT_MODE_TRAIN, x);
     TEST_ASSERT_EQUAL_UINT8(8, slabQc->qMaxBits);

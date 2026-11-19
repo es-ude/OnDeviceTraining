@@ -463,7 +463,7 @@ Notes on the qualified cells:
   already written into the skeleton, so it protects only the data buffer. Every
   failure is `PRINT_ERROR` + `exit(1)`.
 - **Gaps** — `serializeSparsity` is a TODO stub (shape is fully serialized). The
-  full-model save is `serializeModel(model, size, FILE*)` (`Serialize.h`, used by
+  full-model save is `serializeModel(&MODEL_CHAIN(model, size), FILE*)` (`Serialize.h`, used by
   `train_c_finetune.c` and `train_c_sym.c`'s ODTS round-trip demo); there is no
   userApi save wrapper, `StateDictApi` is weight-**load** only, and optimizer state
   is never serialized.

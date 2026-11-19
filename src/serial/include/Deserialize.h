@@ -2,6 +2,7 @@
 #define DESERIALIZE_H
 
 #include "Layer.h"
+#include "Model.h"
 
 /*! Deserializes tensor from a given file.
  *
@@ -33,10 +34,9 @@ void deserializeParameter(parameter_t *parameter, FILE *f);
  *  grad-presence tolerance (#380 PR3), which discards a mismatched grad
  *  record via fseek rather than allocating a scratch buffer for it.
  *
- * \param model: Pointer to model to write deserialized data to
- * \param sizeModel: Size of model
+ * \param m: Model whose layers receive the deserialized data
  * \param f: Pointer of file to deserialize from
  */
-void deserializeModel(layer_t **model, size_t sizeModel, FILE *f);
+void deserializeModel(const model_t *m, FILE *f);
 
 #endif // DESERIALIZE_H

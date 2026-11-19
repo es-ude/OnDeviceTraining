@@ -457,7 +457,7 @@ int main(void) {
         fprintf(stderr, "ERROR: cannot open %s for writing\n", checkpointPath);
         return 1;
     }
-    serializeModel(model, MODEL_SIZE, fOut);
+    serializeModel(&MODEL_CHAIN(model, MODEL_SIZE), fOut);
     fclose(fOut);
 
     /* Teardown: freeOptim frees the tensor data/grad it collected (every
@@ -486,7 +486,7 @@ int main(void) {
         fprintf(stderr, "ERROR: cannot open %s for reading\n", checkpointPath);
         return 1;
     }
-    deserializeModel(model2, MODEL_SIZE, fIn);
+    deserializeModel(&MODEL_CHAIN(model2, MODEL_SIZE), fIn);
     fclose(fIn);
 
 #ifdef ODT_MEM_PROFILE

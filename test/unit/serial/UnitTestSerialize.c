@@ -30,6 +30,7 @@
 #include "Linear.h"
 #include "LinearApi.h"
 #include "MaxPool1d.h"
+#include "Model.h"
 #include "OdtAssert.h"
 #include "Pool1dApi.h"
 #include "QuantLayerApi.h"
@@ -142,11 +143,11 @@ static void testRoundTripLinear(void) {
     layer_t *deserialModel[] = {deserialLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(deserialModel, 1, f);
+    deserializeModel(&MODEL_CHAIN(deserialModel, 1), f);
     fclose(f);
 
     linearConfig_t *deserialCfg = deserialLayer->config->linear;
@@ -260,11 +261,11 @@ static void testRoundTripLinearFrozen(void) {
     layer_t *deserialModel[] = {deserialLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(deserialModel, 1, f);
+    deserializeModel(&MODEL_CHAIN(deserialModel, 1), f);
     fclose(f);
 
     /* CAPTURE every assertion value before any free. */
@@ -334,11 +335,11 @@ static void testRoundTripLinearNoBias(void) {
     layer_t *deserialModel[] = {deserialNoBias, deserialBias};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 2, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 2), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(deserialModel, 2, f);
+    deserializeModel(&MODEL_CHAIN(deserialModel, 2), f);
     fclose(f);
 
     linearConfig_t *serialNoBiasCfg = serialNoBias->config->linear;
@@ -399,11 +400,11 @@ static void assertLinearBiasPresenceMismatchRejected(bias_t serialBias, bias_t s
     layer_t *skeletonModel[] = {skeletonLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(skeletonModel, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(skeletonModel, 1), f));
     fclose(f);
 
     freeLinearLayer(skeletonLayer);
@@ -438,11 +439,11 @@ static void assertConv1dBiasPresenceMismatchRejected(bias_t serialBias, bias_t s
     layer_t *skeletonModel[] = {skeletonLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(skeletonModel, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(skeletonModel, 1), f));
     fclose(f);
 
     freeConv1dLayer(skeletonLayer);
@@ -478,11 +479,11 @@ static void assertConv1dTransposedBiasPresenceMismatchRejected(bias_t serialBias
     layer_t *skeletonModel[] = {skeletonLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(skeletonModel, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(skeletonModel, 1), f));
     fclose(f);
 
     freeConv1dTransposedLayer(skeletonLayer);
@@ -523,7 +524,7 @@ static void testDeserializeRejectsLinearHasBiasByteOutOfRange(void) {
     layer_t *skeletonModel[] = {skeletonLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "r+b");
@@ -536,7 +537,7 @@ static void testDeserializeRejectsLinearHasBiasByteOutOfRange(void) {
     TEST_ASSERT_EQUAL_INT(0x00, originalByte);
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(skeletonModel, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(skeletonModel, 1), f));
     fclose(f);
 
     freeLinearLayer(skeletonLayer);
@@ -567,11 +568,11 @@ static void testRoundTripRelu(void) {
     layer_t *deserialModel[] = {deserialLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(deserialModel, 1, f);
+    deserializeModel(&MODEL_CHAIN(deserialModel, 1), f);
     fclose(f);
 
     reluConfig_t *serialCfg = serialLayer->config->relu;
@@ -640,11 +641,11 @@ static void testRoundTripSoftmax(void) {
     layer_t *deserialModel[] = {deserialLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(deserialModel, 1, f);
+    deserializeModel(&MODEL_CHAIN(deserialModel, 1), f);
     fclose(f);
 
     softmaxConfig_t *serialCfg = serialLayer->config->softmax;
@@ -707,11 +708,11 @@ static void testRoundTripFlatten(void) {
     layer_t *deserialModel[] = {deserialFlatten, deserialRelu};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 2, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 2), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(deserialModel, 2, f);
+    deserializeModel(&MODEL_CHAIN(deserialModel, 2), f);
     fclose(f);
 
     reluConfig_t *serialCfg = serialRelu->config->relu;
@@ -807,11 +808,11 @@ static void testRoundTripConv1d(void) {
     layer_t *deserialModel[] = {deserialBias, deserialNoBias};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 2, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 2), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(deserialModel, 2, f);
+    deserializeModel(&MODEL_CHAIN(deserialModel, 2), f);
     fclose(f);
 
     conv1dConfig_t *deserialBiasCfg = deserialBias->config->conv1d;
@@ -981,11 +982,11 @@ static void testRoundTripConv1dTransposed(void) {
     layer_t *deserialModel[] = {deserialLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(deserialModel, 1, f);
+    deserializeModel(&MODEL_CHAIN(deserialModel, 1), f);
     fclose(f);
 
     conv1dTransposedConfig_t *deserialCfg = deserialLayer->config->conv1dTransposed;
@@ -1104,11 +1105,11 @@ static void testRoundTripMaxPool1d(void) {
     layer_t *deserialModel[] = {deserialLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(deserialModel, 1, f);
+    deserializeModel(&MODEL_CHAIN(deserialModel, 1), f);
     fclose(f);
 
     maxPool1dConfig_t *serialCfg = serialLayer->config->maxPool1d;
@@ -1169,11 +1170,11 @@ static void testRoundTripAvgPool1d(void) {
     layer_t *deserialModel[] = {deserialLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(deserialModel, 1, f);
+    deserializeModel(&MODEL_CHAIN(deserialModel, 1), f);
     fclose(f);
 
     avgPool1dConfig_t *serialCfg = serialLayer->config->avgPool1d;
@@ -1231,11 +1232,11 @@ static void testRoundTripAdaptiveAvgPool1d(void) {
     layer_t *deserialModel[] = {deserialLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(deserialModel, 1, f);
+    deserializeModel(&MODEL_CHAIN(deserialModel, 1), f);
     fclose(f);
 
     adaptiveAvgPool1dConfig_t *serialCfg = serialLayer->config->adaptiveAvgPool1d;
@@ -1303,11 +1304,11 @@ static void testRoundTripDropout(void) {
     layer_t *deserialModel[] = {deserialLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(deserialModel, 1, f);
+    deserializeModel(&MODEL_CHAIN(deserialModel, 1), f);
     fclose(f);
 
     dropoutConfig_t *serialCfg = serialLayer->config->dropout;
@@ -1408,11 +1409,11 @@ static void testRoundTripLayerNorm(void) {
     layer_t *deserialModel[] = {deserialLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(deserialModel, 1, f);
+    deserializeModel(&MODEL_CHAIN(deserialModel, 1), f);
     fclose(f);
 
     layerNormConfig_t *deserialCfg = deserialLayer->config->layerNorm;
@@ -1564,11 +1565,11 @@ static void testRoundTripGroupNorm(void) {
     layer_t *deserialModel[] = {deserialLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(deserialModel, 1, f);
+    deserializeModel(&MODEL_CHAIN(deserialModel, 1), f);
     fclose(f);
 
     groupNormConfig_t *deserialCfg = deserialLayer->config->groupNorm;
@@ -1718,11 +1719,11 @@ static void testRoundTripBatchNorm1dVariants(void) {
             layer_t *deserialModel[] = {deserialLayer};
 
             FILE *f = fopen(FILE_PATH, "wb");
-            serializeModel(serialModel, 1, f);
+            serializeModel(&MODEL_CHAIN(serialModel, 1), f);
             fclose(f);
 
             f = fopen(FILE_PATH, "rb");
-            deserializeModel(deserialModel, 1, f);
+            deserializeModel(&MODEL_CHAIN(deserialModel, 1), f);
             fclose(f);
 
             /* CAPTURE every assertion value before any free. */
@@ -1835,11 +1836,11 @@ static void testRoundTripQuantizationLayer(void) {
     layer_t *deserialModel[] = {deserialLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(deserialModel, 1, f);
+    deserializeModel(&MODEL_CHAIN(deserialModel, 1), f);
     fclose(f);
 
     quantizationConfig_t *serialCfg = serialLayer->config->quantization;
@@ -1924,7 +1925,7 @@ static void testRoundTripLinearSymPackedWeights(void) {
     layer_t *serialModel[] = {serialLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     tensor_t *deserialWeightsParam = initTensor(getShapeLike(serialWeightsParam->shape),
@@ -1937,7 +1938,7 @@ static void testRoundTripLinearSymPackedWeights(void) {
     layer_t *deserialModel[] = {deserialLayer};
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(deserialModel, 1, f);
+    deserializeModel(&MODEL_CHAIN(deserialModel, 1), f);
     fclose(f);
 
     /* CAPTURE before frees. */
@@ -2212,7 +2213,7 @@ static void testGoldenBytesModelReluV5(void) {
 
     layer_t *model[] = {layer};
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(model, 1, f);
+    serializeModel(&MODEL_CHAIN(model, 1), f);
     fclose(f);
     freeReluLayer(layer);
     freeQuantization(asymPropLossQ);
@@ -2268,7 +2269,7 @@ static void testGoldenBytesModelReluAsymGroupedPropLossV5(void) {
 
     layer_t *model[] = {layer};
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(model, 1, f);
+    serializeModel(&MODEL_CHAIN(model, 1), f);
     fclose(f);
     freeReluLayer(layer);
     freeQuantization(asymGroupedPropLossQ);
@@ -2326,7 +2327,7 @@ static void testGoldenBytesModelReluSymOutputV5(void) {
 
     layer_t *model[] = {layer};
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(model, 1, f);
+    serializeModel(&MODEL_CHAIN(model, 1), f);
     fclose(f);
     freeReluLayer(layer);
     freeQuantization(symOutputQ);
@@ -2377,7 +2378,7 @@ static void testGoldenBytesModelReluSymGroupedOutputV5(void) {
 
     layer_t *model[] = {layer};
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(model, 1, f);
+    serializeModel(&MODEL_CHAIN(model, 1), f);
     fclose(f);
     freeReluLayer(layer);
     freeQuantization(symGroupedOutputQ);
@@ -2421,7 +2422,7 @@ static void testGoldenBytesModelMaxPool1dV5(void) {
 
     layer_t *model[] = {layer};
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(model, 1, f);
+    serializeModel(&MODEL_CHAIN(model, 1), f);
     fclose(f);
     freeMaxPool1dLayer(layer);
     freeQuantization(floatQ);
@@ -2501,7 +2502,7 @@ static void testGoldenBytesModelLinearFrozenV7(void) {
 
     layer_t *model[] = {layer};
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(model, 1, f);
+    serializeModel(&MODEL_CHAIN(model, 1), f);
     fclose(f);
     freeLinearLayer(layer);
     freeQuantization(floatQ);
@@ -2610,7 +2611,7 @@ static void testGoldenBytesModelBatchNorm1dV6(void) {
 
     layer_t *model[] = {layer};
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(model, 1, f);
+    serializeModel(&MODEL_CHAIN(model, 1), f);
     fclose(f);
     freeBatchNorm1dLayer(layer);
     freeQuantization(floatQ);
@@ -2774,11 +2775,11 @@ static void testDeserializeLayerNormRejectsNumNormDimsMismatch(void) {
     layer_t *skeletonModel[] = {skeletonLayer};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(skeletonModel, 1, f));
+    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(skeletonModel, 1), f));
     fclose(f);
 
     freeLayerNormLayer(skeletonLayer);
@@ -2838,7 +2839,7 @@ static void testDeserializeSkipsGradIntoFrozenSkeleton(void) {
     layer_t *serialModel[] = {serialLayer1, serialLayer2};
 
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 2, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 2), f);
     fclose(f);
 
     linearInit_t frozenInit1 = init1;
@@ -2850,7 +2851,7 @@ static void testDeserializeSkipsGradIntoFrozenSkeleton(void) {
     layer_t *skeletonModel[] = {skeletonLayer1, skeletonLayer2};
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(skeletonModel, 2, f);
+    deserializeModel(&MODEL_CHAIN(skeletonModel, 2), f);
     fclose(f);
 
     linearConfig_t *skeletonCfg1 = skeletonLayer1->config->linear;
@@ -2967,7 +2968,7 @@ static void testDeserializeSkipsSymGradIntoFrozenSkeleton(void) {
 
     layer_t *serialModel[] = {serialLayer};
     FILE *f = fopen(FILE_PATH, "wb");
-    serializeModel(serialModel, 1, f);
+    serializeModel(&MODEL_CHAIN(serialModel, 1), f);
     fclose(f);
 
     linearInit_t frozenInit = init;
@@ -2977,7 +2978,7 @@ static void testDeserializeSkipsSymGradIntoFrozenSkeleton(void) {
     layer_t *skeletonModel[] = {skeletonLayer};
 
     f = fopen(FILE_PATH, "rb");
-    deserializeModel(skeletonModel, 1, f);
+    deserializeModel(&MODEL_CHAIN(skeletonModel, 1), f);
     fclose(f);
 
     linearConfig_t *skeletonCfg = skeletonLayer->config->linear;

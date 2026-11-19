@@ -2,6 +2,7 @@
 #define MODELSTORAGE_H
 
 #include "Layer.h"
+#include "Model.h"
 
 /*! Serializes tensor to a given file.
  *
@@ -19,10 +20,9 @@ void serializeParameter(parameter_t *parameter, FILE *f);
 
 /*! Serializes model to a given file.
  *
- * \param model: Pointer to model
- * \param sizeModel: Size of model
+ * \param m: Model to serialize
  * \param f: Pointer of file to serialize to
  */
-void serializeModel(layer_t **model, size_t sizeModel, FILE *f);
+void serializeModel(const model_t *m, FILE *f);
 
 #endif // MODELSTORAGE_H

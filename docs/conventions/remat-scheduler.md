@@ -46,7 +46,8 @@ Every row satisfies these before it joins the conformance matrix.
 - **R2 Values, not pointers.** `next` fills a caller-provided `rematStep_t`,
   an 8-byte `{kind, numReads, numWrites, reserved, layer, operands}` record;
   the plan fills the operand slice and a row copies the record whole. The
-  driver resolves operands through `RematCheck`; a row never hands them over.
+  driver gets each step's operands from `RematCheck`, which looks them up in
+  the step's slice; a row never hands them over.
 - **R3 Versioned binding.** Every bind increments `bindGen`. Bind a wire only
   for a step that produces it (FORWARD, REFORWARD, LOSS_BACKWARD, BACKWARD).
   An in-place member is never bound by a row: the SDK binds it with its
@@ -325,8 +326,8 @@ decisions and those with nothing in force yet are left out.
   `{kind, numReads, numWrites, reserved, layer, operands}` record
   (`rematStep_t`); the plan fills the operand slice and a row copies the
   record whole. A `REMAT_PLAN_SEQUENCE` caller sets `kind` and `layer` only;
-  any other non-zero field exits in `rematPlanBuild`. The driver resolves the
-  operands (R2).
+  any other non-zero field exits in `rematPlanBuild`. The validator looks
+  each step's operands up in its slice, which must be its node's (R2).
 - **remat D24** Rows dispatch through a `const` vtable and a per-instance
   `fns` pointer that the row's init sets. Tests inject faults with
   decorator rows on their own instance, never by patching the vtable.
@@ -414,7 +415,7 @@ decisions and those with nothing in force yet are left out.
   `rematWireBind` / `rematWireRelease`, and no other header content.
 - **remat R2** `next` fills a caller-provided 8-byte `rematStep_t`; the plan
   fills the operand slice, a row copies the record whole, and the driver
-  resolves the operands; a row never hands them over.
+  executes the operands the validator looks up; a row never hands them over.
 - **remat R3** Every bind increments `bindGen`; a wire is bound only for a
   step that produces it, except an in-place member, which the SDK binds
   with its chain's root (remat D41).

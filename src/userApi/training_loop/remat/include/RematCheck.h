@@ -16,14 +16,18 @@
  * on, firmware included; every violation exits naming the row, the step
  * and the rule. Rows never link it, and it links no RNG. */
 
-/* The operands of one step, resolved positionally from the step and the live
- * model; the driver executes the step on exactly these.
- * NULL where the step has no such operand: gradIn outside BACKWARD, out for
- * LOSS_FORWARD and for the grads-only BACKWARD at deepest. */
+/* The operands of one step, looked up from the step's operand slice in the
+ * plan; the driver executes the step on exactly these. NULL where the step has
+ * no such operand: dy outside BACKWARD, out for LOSS_FORWARD and BACKWARD, and
+ * dx[i] outside BACKWARD or where input i gets no gradient. */
 typedef struct rematOperands {
-    tensor_t *in;
-    tensor_t *gradIn;
-    tensor_t *out;
+    uint8_t k;                       /* node arity; 0 for LOSS_* */
+    tensor_t *in[MODEL_MAX_ARITY];   /* forward inputs; LOSS_*: in[0] = ACT n */
+    bool inMeta[MODEL_MAX_ARITY];    /* a BACKWARD input it does not read: its header may be dead */
+    tensor_t *dy;                    /* BACKWARD only */
+    tensor_t *out;                   /* FORWARD/REFORWARD: ACT j+1; LOSS_BACKWARD: the seed */
+    tensor_t *dx[MODEL_MAX_ARITY];   /* BACKWARD: one per input, NULL = no dx */
+    uint8_t dxMode[MODEL_MAX_ARITY]; /* opMode_t of dx[i] */
 } rematOperands_t;
 
 /* One call's checker state, on the driver's frame. */
@@ -31,11 +35,11 @@ typedef struct rematCheck {
     rematScheduler_t *sched; /* borrowed: the table, and the row name for messages */
     rematMode_t mode;        /* EVAL admits FORWARD and LOSS_FORWARD only */
     const model_t *m;        /* borrowed: the live model; a named model_t that outlives the call */
-    size_t deepest;          /* rematBackwardRange on the LIVE model */
-    ptrdiff_t backwardTop;
-    bool hasBackward;
+    bool hasBackward;        /* the keyed table's: bind compared it with the live model */
     size_t nextForward;
-    ptrdiff_t nextBackward; /* -1 once BACKWARD(0) ran: compare it only as ptrdiff_t */
+    /* The highest node with runsBackward whose BACKWARD has not run, -1 when
+     * none: compare it only as ptrdiff_t. */
+    ptrdiff_t nextBackward;
     bool lossForwardSeen, lossBackwardSeen;
     size_t stepIndex;
     size_t maxSteps;       /* 2n + 2 + n(n+1)/2: no REFORWARD at or past this step index */
@@ -52,12 +56,12 @@ size_t rematCheckNumWires(const rematScheduler_t *s);
  * producedGen[0..numWires) (a VLA has no initialiser). */
 void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, const model_t *m, lossFuncType_t lt,
                     rematMode_t mode, uint32_t *producedGen);
-/* Checks one step and resolves its operands into *ops; exits on a violation,
+/* Checks one step and looks its operands up into *ops; exits on a violation,
  * before the driver runs anything. */
 void rematCheckStep(rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops);
 /* After the last step, before rematEnd: every FORWARD, LOSS_FORWARD, and in
- * TRAIN when something trains LOSS_BACKWARD and every BACKWARD down to
- * deepest ran; else exits naming the first missing step. */
+ * TRAIN when something trains LOSS_BACKWARD and the BACKWARD of every node
+ * that runs backward ran; else exits naming the first missing step. */
 void rematCheckFinish(const rematCheck_t *c);
 /* After rematEnd: no non-borrowed wire is bound and ACT 0 is unbound. */
 void rematCheckReleased(const rematCheck_t *c);

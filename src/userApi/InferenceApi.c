@@ -268,14 +268,14 @@ static inferenceStats_t *inferenceOnScheduler(const model_t *m, tensor_t *input,
         const layerExec_t *ex = layerExecForLayer(callKey, st.layer, &exStorage);
         if (st.kind == REMAT_STEP_FORWARD) {
             layer_t *layer = m->layers[st.layer];
-            layerFunctions[layer->type].forward(layer, op.in, op.out, ex);
+            layerFunctions[layer->type].forward(layer, op.in[0], op.out, ex);
         } else { /* LOSS_FORWARD: the checker admits nothing else in EVAL */
             /* As on the NULL path: the loss first (a label whose shape differs
              * from the output exits before the stats exist, #153), and all of it
              * before rematDone releases ACT n. */
-            float loss = lossFunctions[funcType].forward(op.in, label, forwardReduction, ex);
-            inferenceStats = reserveInferenceStats(op.in);
-            convertTensor(op.in, inferenceStats->output, NULL);
+            float loss = lossFunctions[funcType].forward(op.in[0], label, forwardReduction, ex);
+            inferenceStats = reserveInferenceStats(op.in[0]);
+            convertTensor(op.in[0], inferenceStats->output, NULL);
             inferenceStats->loss = loss;
         }
         rematDone(s, &st);

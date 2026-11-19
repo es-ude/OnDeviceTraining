@@ -339,6 +339,15 @@ static void buildMnistCnnModel(fixture_t *f) {
     f->x = makeResidentInput(&f->in, (size_t[]){1, 1, 784}, 3);
 }
 
+/* The positional backward range of a chain, an oracle independent of the table's needs-grad
+ * flags and of the plan's operand slices: deepest = the first trainable layer (n: none),
+ * top = n - 1, or n - 2 under CROSS_ENTROPY, whose backward skips the Softmax. */
+static void positionalRange(layer_t **model, size_t n, lossFuncType_t lt, size_t *deepest,
+                            ptrdiff_t *top) {
+    *deepest = deepestTrainableIndex(model, n);
+    *top = (ptrdiff_t)n - 1 - (lt == CROSS_ENTROPY ? 1 : 0);
+}
+
 /* Both inits share one shape, so a test can run on either row. */
 typedef rematScheduler_t (*rowInit_t)(fixture_t *f, const rematPlanSpec_t *spec);
 

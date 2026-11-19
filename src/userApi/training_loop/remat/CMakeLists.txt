@@ -52,6 +52,8 @@ target_include_directories(RematCheck PUBLIC include)
 target_link_libraries(RematCheck PRIVATE
         RematPlan
         RematScheduler
+        Model
+        OpTable
         Layer
         LayerConfigAccess
         LossFunction

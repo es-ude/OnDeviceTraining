@@ -10,6 +10,8 @@
 #include "Layer.h"
 #include "LayerConfigAccess.h"
 #include "LossFunction.h"
+#include "Model.h"
+#include "OpTable.h"
 #include "RematCheck.h"
 #include "RematPlan.h"
 #include "RematScheduler.h"
@@ -23,8 +25,20 @@ size_t rematCheckNumWires(const rematScheduler_t *s) {
     return s->wires->numWires;
 }
 
+/* The highest node below `below` whose BACKWARD runs, -1 when none. Amortised
+ * O(1) per BACKWARD over a call: each node is passed at most once. */
+static ptrdiff_t highestRunningBelow(const rematWireTable_t *t, ptrdiff_t below) {
+    for (ptrdiff_t j = below - 1; j >= 0; j--) {
+        if (t->runsBackward[j] != 0u) {
+            return j;
+        }
+    }
+    return -1;
+}
+
 void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, const model_t *m, lossFuncType_t lt,
                     rematMode_t mode, uint32_t *producedGen) {
+    (void)lt; /* keyed in the table: the bind compares it with the call's */
     size_t numWires = rematCheckNumWires(s);
     size_t n = m->numLayers;
     /* REFORWARD's step budget, 2n + 2 + n(n+1)/2: the minimum-memory
@@ -41,16 +55,14 @@ void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, const model_t *m, loss
                     n);
         exit(1);
     }
-    size_t deepest;
-    ptrdiff_t top;
-    rematBackwardRange(m->layers, m->numLayers, lt, &deepest, &top);
+    /* The keyed table's flags, not the live model's: the bind compares the
+     * two before the first step, and a mismatch exits there by name. */
+    const rematWireTable_t *t = s->wires;
     *c = (rematCheck_t){.sched = s,
                         .mode = mode,
                         .m = m,
-                        .deepest = deepest,
-                        .backwardTop = top,
-                        .hasBackward = deepest < n,
-                        .nextBackward = top,
+                        .hasBackward = t->hasBackward,
+                        .nextBackward = highestRunningBelow(t, (ptrdiff_t)t->modelSize),
                         .maxSteps = maxSteps,
                         .producedGen = producedGen};
     for (size_t w = 0; w < numWires; w++) {
@@ -151,9 +163,9 @@ static void requireOrder(const rematCheck_t *c, const rematStep_t *st) {
         break;
     case REMAT_STEP_REFORWARD:
         /* A pending step still reads ACT l+1. hasBackward is implied by the
-         * deepest clause (without it deepest == n > top >= nextBackward); it
+         * cursor clause (with nothing running backward the cursor is -1); it
          * stays as the rule reads. */
-        if (!c->lossForwardSeen || !c->hasBackward || c->nextBackward < (ptrdiff_t)c->deepest ||
+        if (!c->lossForwardSeen || !c->hasBackward || c->nextBackward < 0 ||
             (ptrdiff_t)st->layer >=
                 (c->lossBackwardSeen ? c->nextBackward : (ptrdiff_t)c->m->numLayers)) {
             REMAT_CHECK_EXIT(c, st, "'reforward outside window'");
@@ -176,10 +188,8 @@ static void requireOrder(const rematCheck_t *c, const rematStep_t *st) {
         if (!c->lossBackwardSeen) {
             REMAT_CHECK_EXIT(c, st, "'backward before loss-backward'");
         }
-        if (c->nextBackward < (ptrdiff_t)c->deepest) {
-            REMAT_CHECK_EXIT(c, st,
-                             "'backward order: expected no further BACKWARD' (deepest = %zu)",
-                             c->deepest);
+        if (c->nextBackward < 0) {
+            REMAT_CHECK_EXIT(c, st, "'backward order: expected no further BACKWARD'");
         }
         if ((ptrdiff_t)st->layer != c->nextBackward) {
             REMAT_CHECK_EXIT(c, st, "'backward order: expected BACKWARD(%ld)'",
@@ -191,48 +201,117 @@ static void requireOrder(const rematCheck_t *c, const rematStep_t *st) {
     }
 }
 
-/* A step's operand wire ids; REMAT_NONE where it has no such operand. */
-typedef struct stepWires {
-    uint16_t in, gradIn, out;
-    bool readsIn; /* false only for a BACKWARD whose layer does not read its input */
-} stepWires_t;
-
-/* Rule 3: positional, from the checker's own live-model deepest
- * and backwardTop; GRAD ids come from the table's gradIdOf (rematGradId),
- * never from arithmetic on ids. */
-static stepWires_t resolve(const rematCheck_t *c, const rematStep_t *st) {
-    const rematWireTable_t *t = c->sched->wires;
-    size_t l = st->layer;
-    stepWires_t w = {REMAT_NONE, REMAT_NONE, REMAT_NONE, true};
+/* Rule 3: the step's slice is its node's canonical one, inside the pool and
+ * of the kind's counts. A lookup, not a re-derivation: the grammar checked
+ * every slice's content at build, so this rule only stops a step record that
+ * no longer points at it. A plan block corrupted beyond its step records is
+ * out of scope. Returns the slice; the rules after it read only that. */
+static const rematOperand_t *requireOperands(const rematCheck_t *c, const rematStep_t *st) {
+    const rematProgram_t *p = rematPlanProgram(c->sched->plan, c->mode);
+    if ((size_t)st->operands + st->numReads + st->numWrites > p->numOperands) {
+        REMAT_CHECK_EXIT(c, st, "'operand slice out of the pool' (operands %u + %u + %u > %zu)",
+                         (unsigned)st->operands, (unsigned)st->numReads, (unsigned)st->numWrites,
+                         p->numOperands);
+    }
+    bool backward = st->kind == REMAT_STEP_BACKWARD || st->kind == REMAT_STEP_LOSS_BACKWARD;
+    uint16_t canonical = backward ? p->nodeOps[st->layer].backward : p->nodeOps[st->layer].forward;
+    if (st->operands != canonical) {
+        REMAT_CHECK_EXIT(c, st, "'operand slice is not the node's' (operands %u, canonical %u)",
+                         (unsigned)st->operands, (unsigned)canonical);
+    }
+    unsigned k = 1u;
+    if (st->kind != REMAT_STEP_LOSS_FORWARD && st->kind != REMAT_STEP_LOSS_BACKWARD) {
+        uint16_t ids[MODEL_MAX_ARITY];
+        k = modelNodeInputs(c->m, st->layer, ids);
+    }
+    unsigned reads = k;
+    unsigned writes = 1u;
     switch (st->kind) {
-    case REMAT_STEP_FORWARD:
-    case REMAT_STEP_REFORWARD:
-        w.in = rematActId(t, l);
-        w.out = rematActId(t, l + 1u);
-        break;
     case REMAT_STEP_LOSS_FORWARD:
-        w.in = rematActId(t, c->m->numLayers);
-        break;
-    case REMAT_STEP_LOSS_BACKWARD:
-        w.in = rematActId(t, c->m->numLayers);
-        w.out = rematGradId(t, c->m->numLayers);
+        writes = 0u;
         break;
     case REMAT_STEP_BACKWARD:
-        w.in = rematActId(t, l);
-        w.readsIn = layerBackwardReadsInput(c->m->layers[l]);
-        w.gradIn = rematGradId(t, (ptrdiff_t)l == c->backwardTop ? c->m->numLayers : l + 1u);
-        /* REMAT_NONE at deepest (the grads-only call): the table has no GRAD
-         * deepest, and the bind keeps its deepest equal to the live one. */
-        w.out = rematGradId(t, l);
+        reads = 1u + k; /* dy, then every input */
+        writes = k;     /* one dx slot per input */
         break;
     default:
-        break; /* unreachable: rule 1 exits on an unknown kind first */
+        break; /* FORWARD, REFORWARD, LOSS_BACKWARD: k reads, one write */
     }
-    return w;
+    if (st->numReads != reads || st->numWrites != writes) {
+        REMAT_CHECK_EXIT(c, st,
+                         "'operand counts differ from the kind' (numReads %u, numWrites %u, "
+                         "expected %u, %u)",
+                         (unsigned)st->numReads, (unsigned)st->numWrites, reads, writes);
+    }
+    return &p->operands[st->operands];
 }
 
 static tensor_t *hdrOrNull(const rematWireTable_t *t, uint16_t w) {
     return w == REMAT_NONE ? NULL : rematWireHdr(t, w);
+}
+
+/* The driver's view of the slice: a BACKWARD reads dy first, then its inputs,
+ * and writes one dx slot per input; every other kind reads its inputs and
+ * writes out, if anything. */
+static void fillOperands(const rematCheck_t *c, const rematStep_t *st, const rematOperand_t *slice,
+                         rematOperands_t *ops) {
+    const rematWireTable_t *t = c->sched->wires;
+    bool backward = st->kind == REMAT_STEP_BACKWARD;
+    *ops = (rematOperands_t){0};
+    if (st->kind == REMAT_STEP_FORWARD || st->kind == REMAT_STEP_REFORWARD || backward) {
+        ops->k = (uint8_t)(backward ? st->numWrites : st->numReads);
+    }
+    size_t first = 0;
+    if (backward) {
+        ops->dy = rematWireHdr(t, slice[0].wire);
+        first = 1u;
+    }
+    for (size_t i = first; i < st->numReads; i++) {
+        ops->in[i - first] = rematWireHdr(t, slice[i].wire);
+        ops->inMeta[i - first] = slice[i].mode == OP_MODE_META;
+    }
+    const rematOperand_t *writes = slice + st->numReads;
+    for (size_t i = 0; i < st->numWrites; i++) {
+        if (backward) {
+            ops->dx[i] = hdrOrNull(t, writes[i].wire);
+            ops->dxMode[i] = writes[i].mode;
+        } else {
+            ops->out = rematWireHdr(t, writes[i].wire);
+        }
+    }
+}
+
+/* One operand the step touches, with the role its messages name it by. */
+typedef struct touched {
+    uint16_t wire;
+    bool dy;
+    bool write;
+    const char *role;
+} touched_t;
+
+#define REMAT_CHECK_MAX_TOUCHED (2u * MODEL_MAX_ARITY + 1u)
+
+/* The operands the step touches, inputs first, then dy, then the writes: a
+ * META input (a BACKWARD's dead input, W_dead) and a write slot without dx
+ * are not touched. Rule 3 bounded the counts. */
+static size_t touchedOperands(const rematStep_t *st, const rematOperand_t *slice,
+                              touched_t out[REMAT_CHECK_MAX_TOUCHED]) {
+    size_t first = st->kind == REMAT_STEP_BACKWARD ? 1u : 0u;
+    size_t num = 0;
+    for (size_t i = first; i < st->numReads; i++) {
+        if (slice[i].mode != OP_MODE_META) {
+            out[num++] = (touched_t){slice[i].wire, false, false, "in"};
+        }
+    }
+    if (first == 1u) {
+        out[num++] = (touched_t){slice[0].wire, true, false, "gradIn"};
+    }
+    for (size_t i = st->numReads; i < (size_t)st->numReads + st->numWrites; i++) {
+        if (slice[i].wire != REMAT_NONE) {
+            out[num++] = (touched_t){slice[i].wire, false, true, "out"};
+        }
+    }
+    return num;
 }
 
 static const char *wireKindName(const rematWire_t *rec) {
@@ -273,17 +352,16 @@ static void requireWritable(const rematCheck_t *c, const rematStep_t *st, uint16
     }
 }
 
-/* A BACKWARD whose layer does not read its input may get a dead one
- * (W_dead): only its header's static metadata is used. */
-static void requireResident(const rematCheck_t *c, const rematStep_t *st, const stepWires_t *w) {
-    if (w->readsIn) {
-        requireReadable(c, st, w->in, "in");
-    }
-    if (w->gradIn != REMAT_NONE) {
-        requireReadable(c, st, w->gradIn, "gradIn");
-    }
-    if (w->out != REMAT_NONE) {
-        requireWritable(c, st, w->out);
+/* A BACKWARD input its layer does not read (META) may be dead (W_dead): only
+ * its header's static metadata is used, so it is not in the touched list. */
+static void requireResident(const rematCheck_t *c, const rematStep_t *st, const touched_t *ops,
+                            size_t num) {
+    for (size_t i = 0; i < num; i++) {
+        if (ops[i].write) {
+            requireWritable(c, st, ops[i].wire);
+        } else {
+            requireReadable(c, st, ops[i].wire, ops[i].role);
+        }
     }
 }
 
@@ -304,53 +382,38 @@ static void requireApart(const rematCheck_t *c, const rematStep_t *st, uint16_t 
 }
 
 /* The one sharing the rules admit: a BACKWARD that writes its dx into the
- * bytes of the gradient it reads, for a pair the plan marked (out right after
- * gradIn), at an identical base and of equal bytes, never a partial overlap.
- * The marks come from the plan, not from the table the rows bind through, so
- * a call whose table missed them stops by name. The overwritten gradient
- * needs no stale-read guard: it is read by exactly one BACKWARD, this one, and
- * rule 3 fixes the order. */
-static bool inPlacePair(const rematCheck_t *c, const stepWires_t *w) {
+ * bytes of the gradient it reads, for a pair the plan marked (the dx wire
+ * right after dy), at an identical base and of equal bytes, never a partial
+ * overlap. The marks come from the plan, not from the table the rows bind
+ * through, so a call whose table missed them stops by name. The overwritten
+ * gradient needs no stale-read guard: it is read by exactly one BACKWARD,
+ * this one, and rule 2 fixes the order. */
+static bool inPlacePair(const rematCheck_t *c, uint16_t dy, uint16_t dx) {
     const uint8_t *marks = c->sched->plan->inPlace;
     const rematWireTable_t *t = c->sched->wires;
-    return marks != NULL && w->gradIn != REMAT_NONE && w->out != REMAT_NONE &&
-           marks[w->out] != 0u && w->gradIn + 1u == w->out &&
-           rematWireHdr(t, w->gradIn)->data == rematWireHdr(t, w->out)->data &&
-           rematWireBytes(t, w->gradIn) == rematWireBytes(t, w->out);
+    return marks != NULL && marks[dx] != 0u && dy + 1u == dx &&
+           rematWireHdr(t, dy)->data == rematWireHdr(t, dx)->data &&
+           rematWireBytes(t, dy) == rematWireBytes(t, dx);
 }
 
-/* Pairwise over every operand the step touches, not only gradIn/out: a
- * LayerNorm-style backward writes dx while it still reads x. A
- * dead input (W_dead) is not touched, so it is not compared. */
-static void requireDisjoint(const rematCheck_t *c, const rematStep_t *st, const stepWires_t *w) {
-    uint16_t ids[3];
-    const char *roles[3];
-    size_t k = 0;
-    if (w->readsIn) {
-        ids[k] = w->in;
-        roles[k++] = "in";
-    }
-    if (w->gradIn != REMAT_NONE) {
-        ids[k] = w->gradIn;
-        roles[k++] = "gradIn";
-    }
-    if (w->out != REMAT_NONE) {
-        ids[k] = w->out;
-        roles[k++] = "out";
-    }
-    bool alias = inPlacePair(c, w);
-    for (size_t i = 0; i < k; i++) {
-        for (size_t j = i + 1u; j < k; j++) {
-            if (alias && ids[i] == w->gradIn && ids[j] == w->out) {
+/* Pairwise over every operand the step touches, not only dy and dx: a
+ * LayerNorm-style backward writes dx while it still reads x. A dead input
+ * (W_dead) is not touched, so it is not compared. */
+static void requireDisjoint(const rematCheck_t *c, const rematStep_t *st, const touched_t *ops,
+                            size_t num) {
+    for (size_t i = 0; i < num; i++) {
+        for (size_t j = i + 1u; j < num; j++) {
+            if (ops[i].dy && ops[j].write && inPlacePair(c, ops[i].wire, ops[j].wire)) {
                 continue;
             }
-            requireApart(c, st, ids[i], roles[i], ids[j], roles[j]);
+            requireApart(c, st, ops[i].wire, ops[i].role, ops[j].wire, ops[j].role);
         }
     }
 }
 
 /* Rule 6: an output is produced under the binding it has now. */
-static void commit(rematCheck_t *c, const rematStep_t *st, const stepWires_t *w) {
+static void commit(rematCheck_t *c, const rematStep_t *st, const rematOperand_t *slice) {
+    const rematWireTable_t *t = c->sched->wires;
     switch (st->kind) {
     case REMAT_STEP_FORWARD:
         c->nextForward++;
@@ -362,15 +425,18 @@ static void commit(rematCheck_t *c, const rematStep_t *st, const stepWires_t *w)
         c->lossBackwardSeen = true;
         break;
     case REMAT_STEP_BACKWARD:
-        c->nextBackward--;
+        c->nextBackward = highestRunningBelow(t, c->nextBackward);
         break;
     case REMAT_STEP_REFORWARD:
         break; /* only its output's bind generation, below */
     default:
         break; /* unreachable: rule 1 exits on an unknown kind first */
     }
-    if (w->out != REMAT_NONE) {
-        c->producedGen[w->out] = c->sched->wires->wires[w->out].bindGen;
+    for (size_t i = st->numReads; i < (size_t)st->numReads + st->numWrites; i++) {
+        uint16_t w = slice[i].wire;
+        if (w != REMAT_NONE && slice[i].mode == OP_MODE_WRITE) {
+            c->producedGen[w] = t->wires[w].bindGen;
+        }
     }
     c->stepIndex++;
 }
@@ -378,13 +444,13 @@ static void commit(rematCheck_t *c, const rematStep_t *st, const stepWires_t *w)
 void rematCheckStep(rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops) {
     requireKindAndLayer(c, st);
     requireOrder(c, st);
-    const rematWireTable_t *t = c->sched->wires;
-    stepWires_t w = resolve(c, st);
-    *ops = (rematOperands_t){
-        .in = hdrOrNull(t, w.in), .gradIn = hdrOrNull(t, w.gradIn), .out = hdrOrNull(t, w.out)};
-    requireResident(c, st, &w);
-    requireDisjoint(c, st, &w);
-    commit(c, st, &w);
+    const rematOperand_t *slice = requireOperands(c, st);
+    fillOperands(c, st, slice, ops);
+    touched_t touched[REMAT_CHECK_MAX_TOUCHED];
+    size_t num = touchedOperands(st, slice, touched);
+    requireResident(c, st, touched, num);
+    requireDisjoint(c, st, touched, num);
+    commit(c, st, slice);
 }
 
 #define REMAT_FINISH_EXIT(c, violation, ...)                                                       \
@@ -395,8 +461,8 @@ void rematCheckStep(rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops
     } while (false)
 
 /* Stream completeness. Cursors, not bitsets: a stream the step rules admitted is
- * complete iff every cursor reached its end. Under CE with n = 1, top = -1 is
- * already below deepest = 0: LOSS_BACKWARD with no BACKWARD is complete. */
+ * complete iff every cursor reached its end. With no node running backward the
+ * backward cursor starts at -1: LOSS_BACKWARD with no BACKWARD is complete. */
 void rematCheckFinish(const rematCheck_t *c) {
     if (c->nextForward != c->m->numLayers) {
         REMAT_FINISH_EXIT(c, "'incomplete stream: missing FORWARD(%zu)'", c->nextForward);
@@ -410,7 +476,7 @@ void rematCheckFinish(const rematCheck_t *c) {
     if (c->hasBackward && !c->lossBackwardSeen) {
         REMAT_FINISH_EXIT(c, "'incomplete stream: missing LOSS_BACKWARD'");
     }
-    if (c->hasBackward && c->nextBackward >= (ptrdiff_t)c->deepest) {
+    if (c->hasBackward && c->nextBackward >= 0) {
         REMAT_FINISH_EXIT(c, "'incomplete stream: missing BACKWARD(%ld)'", (long)c->nextBackward);
     }
 }

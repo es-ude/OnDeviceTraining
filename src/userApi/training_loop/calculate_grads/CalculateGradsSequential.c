@@ -10,7 +10,6 @@
 #include "Common.h"
 #include "Dropout.h"
 #include "Layer.h"
-#include "LayerConfigAccess.h"
 #include "LayerExec.h"
 #include "LossFunction.h"
 #include "OdtHook.h"
@@ -60,7 +59,7 @@ const rematPlanSpec_t *calculateGradsDefaultPlanSpec(void) {
 }
 
 /* The validating interpreter: a row hands out each step, the checker
- * validates it and resolves its operands before anything runs, and only then
+ * validates it and looks up its operands before anything runs, and only then
  * does the driver execute it. Without a caller scheduler every call builds an
  * ephemeral HEAP one on the default plan, one block per wire range. */
 static trainingStats_t *calculateGradsImpl(const model_t *m, lossConfig_t lossConfig,
@@ -99,7 +98,7 @@ static trainingStats_t *calculateGradsImpl(const model_t *m, lossConfig_t lossCo
         const layerExec_t *ex = layerExecForLayer(callKey, st.layer, &exStorage);
         switch (st.kind) {
         case REMAT_STEP_FORWARD:
-            layerFunctions[layer->type].forward(layer, op.in, op.out, ex);
+            layerFunctions[layer->type].forward(layer, op.in[0], op.out, ex);
             if (sink != NULL) {
                 sink(sinkCtx, st.layer, layer->type, "fwd", op.out);
             }
@@ -107,15 +106,15 @@ static trainingStats_t *calculateGradsImpl(const model_t *m, lossConfig_t lossCo
         case REMAT_STEP_REFORWARD:
             /* FORWARD's arm under FORWARD's key (ex derives from the layer
              * index alone): the recomputed output is the first one's bytes. */
-            layerFunctions[layer->type].forward(layer, op.in, op.out, ex);
+            layerFunctions[layer->type].forward(layer, op.in[0], op.out, ex);
             if (sink != NULL) {
                 sink(sinkCtx, st.layer, layer->type, "refwd", op.out);
             }
             break;
         case REMAT_STEP_LOSS_FORWARD:
-            trainingStats = initTrainingStats(op.in);
-            copyTensor(trainingStats->output, op.in);
-            trainingStats->loss = lossFns.forward(op.in, label, forwardReduction, ex);
+            trainingStats = initTrainingStats(op.in[0]);
+            copyTensor(trainingStats->output, op.in[0]);
+            trainingStats->loss = lossFns.forward(op.in[0], label, forwardReduction, ex);
             odtHookFire(ODT_EVENT_FORWARD_END);
             /* BACKWARD fires unconditionally -- also around a truncated or
              * skipped backward (all-frozen model) -- so the per-call event
@@ -124,7 +123,7 @@ static trainingStats_t *calculateGradsImpl(const model_t *m, lossConfig_t lossCo
             odtHookFire(ODT_EVENT_BACKWARD_BEGIN);
             break;
         case REMAT_STEP_LOSS_BACKWARD:
-            lossFns.backward(op.in, label, op.out, ex);
+            lossFns.backward(op.in[0], label, op.out, ex);
             if (sink != NULL) {
                 sink(sinkCtx, m->numLayers, m->layers[m->numLayers - 1]->type, "lossgrad", op.out);
             }
@@ -134,23 +133,23 @@ static trainingStats_t *calculateGradsImpl(const model_t *m, lossConfig_t lossCo
              * entering its backward), matching the PyTorch forward-hook
              * activation.grad; so it fires before the backward. */
             if (sink != NULL) {
-                sink(sinkCtx, st.layer, layer->type, "agrad", op.gradIn);
+                sink(sinkCtx, st.layer, layer->type, "agrad", op.dy);
             }
-            tensor_t *x = op.in;
+            tensor_t *x = op.in[0];
 #ifdef ODT_REMAT_VERIFY
-            /* Strict W_dead: a backward that does not read its input gets a
-             * header without bytes on every plan, so a read the read-set table
-             * denies crashes here instead of passing on the NULL path and
-             * breaking under LIVENESS. */
+            /* Strict W_dead: an input the step marks META (its backward does
+             * not read it) gets a header without bytes on every plan, so a
+             * read the read-set table denies crashes here instead of passing
+             * on the NULL path and breaking under LIVENESS. */
             tensor_t dead;
-            if (!layerBackwardReadsInput(layer)) {
-                dead = *op.in;
+            if (op.inMeta[0]) {
+                dead = *op.in[0];
                 dead.data = NULL;
                 x = &dead;
             }
 #endif
-            /* op.out is NULL at deepest: grads only, nothing below consumes dx. */
-            layerFunctions[layer->type].backward(layer, x, op.gradIn, op.out, ex);
+            /* op.dx[0] is NULL where the input needs no gradient: grads only. */
+            layerFunctions[layer->type].backward(layer, x, op.dy, op.dx[0], ex);
             break;
         }
         default:

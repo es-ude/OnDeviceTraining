@@ -2910,15 +2910,6 @@ void testEveryStepsOperandsAreCoLiveOnRandomChains(void) {
     }
 }
 
-/* The positional backward range of a chain, kept here as an oracle independent of the
- * table's needs-grad flags: deepest = the first trainable layer (n: none), top = n - 1, or n - 2
- * under CROSS_ENTROPY, whose backward skips the Softmax. */
-static void positionalRange(layer_t **model, size_t n, lossFuncType_t lt, size_t *deepest,
-                            ptrdiff_t *top) {
-    *deepest = deepestTrainableIndex(model, n);
-    *top = (ptrdiff_t)n - 1 - (lt == CROSS_ENTROPY ? 1 : 0);
-}
-
 typedef struct positionalOperands {
     rematOperand_t reads[2];
     size_t numReads;

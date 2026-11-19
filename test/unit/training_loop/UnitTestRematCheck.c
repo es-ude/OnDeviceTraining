@@ -14,6 +14,7 @@
 #include "LayerQuant.h"
 #include "LinearApi.h"
 #include "LossFunction.h"
+#include "OpTable.h"
 #include "Pool1dApi.h"
 #include "QuantLayerApi.h"
 #include "Quantization.h"
@@ -70,28 +71,25 @@ void testNumWiresExitsOnASchedulerThatIsNotInitialised(void) {
     freeModel(f.model, f.n);
 }
 
-/* The cursors come from rematBackwardRange on the model passed in (the LIVE
- * one), not from the table's built facts: this table was built on
- * the trainable HAR (deepest 0), the live model freezes the convs (deepest 10,
- * the #380 cut). producedGen is a VLA, so it starts as garbage. */
-void testInitSetsTheCursorsFromTheLiveModelAndZeroesProducedGen(void) {
-    fixture_t built;
-    buildHarModel(&built);
-    rematScheduler_t s = initArena(&built, NULL);
-    fixture_t live;
-    buildHarFixture(&live, true);
+/* The cursors come from the keyed table the checker reads, built on the same
+ * HAR: BACKWARD runs on layers 10..0 (CE skips the Softmax), so the highest
+ * pending one is 10. A live model that differs from the built one is stopped
+ * at bind, before any checker runs. producedGen is a VLA, so it starts as
+ * garbage. */
+void testInitSetsTheCursorsFromTheKeyedTableAndZeroesProducedGen(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initArena(&f, NULL);
     size_t numWires = rematCheckNumWires(&s);
     uint32_t producedGen[numWires];
     memset(producedGen, 0xA5, sizeof producedGen);
     rematCheck_t c;
-    const model_t liveModel = MODEL_CHAIN(live.model, live.n);
-    rematCheckInit(&c, &s, &liveModel, live.lt, REMAT_MODE_TRAIN, producedGen);
+    const model_t model = MODEL_CHAIN(f.model, f.n);
+    rematCheckInit(&c, &s, &model, f.lt, REMAT_MODE_TRAIN, producedGen);
     TEST_ASSERT_EQUAL_PTR(&s, c.sched);
-    TEST_ASSERT_EQUAL_PTR(&liveModel, c.m);
-    TEST_ASSERT_EQUAL_PTR(live.model, c.m->layers);
+    TEST_ASSERT_EQUAL_PTR(&model, c.m);
+    TEST_ASSERT_EQUAL_PTR(f.model, c.m->layers);
     TEST_ASSERT_EQUAL_size_t(HAR_N, c.m->numLayers);
-    TEST_ASSERT_EQUAL_size_t(10, c.deepest);
-    TEST_ASSERT_EQUAL_INT(10, (int)c.backwardTop); /* n - 2 under CE */
     TEST_ASSERT_TRUE(c.hasBackward);
     TEST_ASSERT_EQUAL_size_t(0, c.nextForward);
     TEST_ASSERT_EQUAL_INT(10, (int)c.nextBackward);
@@ -102,48 +100,46 @@ void testInitSetsTheCursorsFromTheLiveModelAndZeroesProducedGen(void) {
     for (size_t w = 0; w < numWires; w++) {
         TEST_ASSERT_EQUAL_UINT32(0, producedGen[w]);
     }
-    freeModel(live.model, live.n);
-    freeFixture(&built, &s);
+    freeFixture(&f, &s);
 }
 
-/* ---- rematCheckStep: positional resolution and commit ---- */
+/* ---- rematCheckStep: operands and commit ---- */
 
-/* The positional rule restated from the step: what the driver must
- * be handed. BACKWARD(top) reads the seed (the CE skip), and the grads-only
- * BACKWARD(deepest) writes nothing. */
-static void assertResolved(const rematCheck_t *c, const rematStep_t *st,
-                           const rematOperands_t *op) {
+/* The positional rule restated from the step, independent of the plan's
+ * operand slices: what the driver must be handed. BACKWARD(top) reads the
+ * seed (the CE skip), and the grads-only BACKWARD(deepest) writes no dx. */
+static void assertResolved(const rematCheck_t *c, const rematStep_t *st, size_t deepest,
+                           ptrdiff_t top, const rematOperands_t *op) {
     const rematWireTable_t *t = c->sched->wires;
     size_t n = c->m->numLayers;
     size_t l = st->layer;
     switch (st->kind) {
     case REMAT_STEP_FORWARD:
     case REMAT_STEP_REFORWARD:
-        TEST_ASSERT_EQUAL_PTR(rematActHdr(t, l), op->in);
-        TEST_ASSERT_NULL(op->gradIn);
+        TEST_ASSERT_EQUAL_PTR(rematActHdr(t, l), op->in[0]);
+        TEST_ASSERT_NULL(op->dy);
         TEST_ASSERT_EQUAL_PTR(rematActHdr(t, l + 1u), op->out);
         break;
     case REMAT_STEP_LOSS_FORWARD:
-        TEST_ASSERT_EQUAL_PTR(rematActHdr(t, n), op->in);
-        TEST_ASSERT_NULL(op->gradIn);
+        TEST_ASSERT_EQUAL_PTR(rematActHdr(t, n), op->in[0]);
+        TEST_ASSERT_NULL(op->dy);
         TEST_ASSERT_NULL(op->out);
         break;
     case REMAT_STEP_LOSS_BACKWARD:
-        TEST_ASSERT_EQUAL_PTR(rematActHdr(t, n), op->in);
-        TEST_ASSERT_NULL(op->gradIn);
+        TEST_ASSERT_EQUAL_PTR(rematActHdr(t, n), op->in[0]);
+        TEST_ASSERT_NULL(op->dy);
         TEST_ASSERT_NOT_NULL(op->out);
         TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, n), op->out);
         break;
     case REMAT_STEP_BACKWARD:
-        TEST_ASSERT_EQUAL_PTR(rematActHdr(t, l), op->in);
-        TEST_ASSERT_NOT_NULL(op->gradIn);
-        TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, (ptrdiff_t)l == c->backwardTop ? n : l + 1u),
-                              op->gradIn);
-        if (l == c->deepest) {
-            TEST_ASSERT_NULL(op->out);
+        TEST_ASSERT_EQUAL_PTR(rematActHdr(t, l), op->in[0]);
+        TEST_ASSERT_NOT_NULL(op->dy);
+        TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, (ptrdiff_t)l == top ? n : l + 1u), op->dy);
+        if (l == deepest) {
+            TEST_ASSERT_NULL(op->dx[0]);
         } else {
-            TEST_ASSERT_NOT_NULL(op->out);
-            TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, l), op->out);
+            TEST_ASSERT_NOT_NULL(op->dx[0]);
+            TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, l), op->dx[0]);
         }
         break;
     default:
@@ -160,22 +156,23 @@ static void checkedCall(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
     const model_t chain = MODEL_CHAIN(f->model, f->n);
+    size_t deepest;
+    ptrdiff_t top;
+    positionalRange(f->model, f->n, f->lt, &deepest, &top);
     rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_TRAIN, producedGen);
     rematBegin(s, &chain, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     while (rematNext(s, &st)) {
         rematOperands_t op;
         rematCheckStep(&c, &st, &op);
-        assertResolved(&c, &st, &op);
+        assertResolved(&c, &st, deepest, top, &op);
         rematDone(s, &st);
     }
     TEST_ASSERT_EQUAL_size_t(s->plan->train.numSteps, c.stepIndex);
     TEST_ASSERT_EQUAL_size_t(f->n, c.nextForward);
     TEST_ASSERT_TRUE(c.lossForwardSeen);
     TEST_ASSERT_EQUAL(c.hasBackward, c.lossBackwardSeen);
-    ptrdiff_t belowDeepest = (ptrdiff_t)c.deepest - 1;
-    TEST_ASSERT_EQUAL_INT((int)(c.backwardTop < belowDeepest ? c.backwardTop : belowDeepest),
-                          (int)c.nextBackward);
+    TEST_ASSERT_EQUAL_INT(-1, (int)c.nextBackward); /* no node left to run backward */
     TEST_ASSERT_EQUAL_UINT32(0, producedGen[0]);
     for (uint16_t w = 1; w < t->numWires; w++) {
         TEST_ASSERT_NOT_EQUAL_UINT32(0, producedGen[w]);
@@ -228,7 +225,7 @@ static void checkedEvalCall(fixture_t *f, rematScheduler_t *s) {
     while (rematNext(s, &st)) {
         rematOperands_t op;
         rematCheckStep(&c, &st, &op);
-        assertResolved(&c, &st, &op);
+        assertResolved(&c, &st, f->n, -1, &op); /* no BACKWARD in EVAL: no range */
         rematDone(s, &st);
     }
     TEST_ASSERT_EQUAL_size_t(f->n + 1u, c.stepIndex);
@@ -329,8 +326,9 @@ void testEvalFinishExitsOnAMissingLossForward(void) {
  * LOSS_BACKWARD 13, BACKWARD(l) = 24 - l): the CE skip hands BACKWARD(10) the
  * seed GRAD 12, BACKWARD(9) gets GRAD 10, and BACKWARD(0) is grads-only.
  * Under LIVENESS, Flatten's input ACT 9 is dead at BACKWARD(9) and is handed
- * over anyway: its data is NULL (W_dead). */
-void testOperandsAreResolvedPositionallyOnHar(void) {
+ * over anyway, marked META: its data is NULL (W_dead). The CE seed is the
+ * gradient of both ACT 12 and ACT 11, the Softmax's input. */
+void testOperandsAreReadFromTheStepOnHar(void) {
     fixture_t f;
     buildHarModel(&f);
     rematScheduler_t s = initArena(&f, &g_liveness);
@@ -347,23 +345,30 @@ void testOperandsAreResolvedPositionallyOnHar(void) {
         TEST_ASSERT_TRUE(i < 25u);
         rematCheckStep(&c, &st, &at[i]);
         if (i == 15u) {
-            TEST_ASSERT_NULL(at[i].in->data);
+            TEST_ASSERT_NULL(at[i].in[0]->data);
         }
         rematDone(&s, &st);
         i++;
     }
-    TEST_ASSERT_EQUAL_PTR(f.x, at[0].in);
+    TEST_ASSERT_EQUAL_PTR(f.x, at[0].in[0]);
     TEST_ASSERT_EQUAL_PTR(rematActHdr(t, 4), at[3].out);
-    TEST_ASSERT_EQUAL_PTR(rematActHdr(t, 12), at[12].in);
+    TEST_ASSERT_EQUAL_PTR(rematActHdr(t, 12), at[12].in[0]);
     TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 12), at[13].out);
-    TEST_ASSERT_EQUAL_PTR(rematActHdr(t, 10), at[14].in);
-    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 12), at[14].gradIn);
-    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 10), at[14].out);
-    TEST_ASSERT_EQUAL_PTR(rematActHdr(t, 9), at[15].in);
-    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 10), at[15].gradIn);
-    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 9), at[15].out);
-    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 1), at[24].gradIn);
-    TEST_ASSERT_NULL(at[24].out);
+    TEST_ASSERT_EQUAL_PTR(rematActHdr(t, 10), at[14].in[0]);
+    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 12), at[14].dy);
+    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 10), at[14].dx[0]);
+    TEST_ASSERT_EQUAL_PTR(rematActHdr(t, 9), at[15].in[0]);
+    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 10), at[15].dy);
+    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 9), at[15].dx[0]);
+    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 1), at[24].dy);
+    TEST_ASSERT_EQUAL_UINT8(1, at[14].k);
+    TEST_ASSERT_FALSE(at[14].inMeta[0]);
+    TEST_ASSERT_TRUE(at[15].inMeta[0]); /* Flatten: META, its header dead under LIVENESS */
+    TEST_ASSERT_NULL(at[15].in[0]->data);
+    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 12), at[14].dy);
+    TEST_ASSERT_EQUAL_PTR(rematGradHdr(t, 11), at[14].dy);
+    TEST_ASSERT_NULL(at[24].dx[0]);
+    TEST_ASSERT_EQUAL_UINT8(OP_MODE_WRITE, at[23].dxMode[0]);
     rematEnd(&s);
     freeFixture(&f, &s);
 }
@@ -441,6 +446,56 @@ void testStepExitsOnALossStepWhoseLayerIsNotN(void) {
     rematStep_t lossAtLayer1 = {.kind = REMAT_STEP_LOSS_FORWARD, .layer = 1u};
     ASSERT_EXITS_WITH_OUTPUT(1, "LOSS_FORWARD(layer 1) violates 'layer out of range' (n = 2)",
                              offerStep(&f, &s, 2, &lossAtLayer1, NULL));
+    freeFixture(&f, &s);
+}
+
+/* ---- violations: the step's operand slice ---- */
+
+/* A step record as the plan stores it, for forging one field at a time. */
+static rematStep_t harStep(const rematScheduler_t *s, size_t i) {
+    return s->plan->train.steps[i];
+}
+
+/* HAR's BACKWARD(10) (#14) pointed at BACKWARD(9)'s slice: in the pool, of
+ * the right counts, but not its node's. */
+void testStepExitsOnAStepOffItsNodesSlice(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    rematStep_t forged = harStep(&s, 14);
+    forged.operands = harStep(&s, 15).operands;
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[heap]: step #14 BACKWARD(layer 10) violates 'operand slice is "
+                             "not the node's' (operands 30, canonical 27)",
+                             offerStep(&f, &s, 14, &forged, NULL));
+    freeFixture(&f, &s);
+}
+
+/* The bound is checked before the slice is compared or read. */
+void testStepExitsOnAnOperandSliceOutOfThePool(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    rematStep_t forged = harStep(&s, 14);
+    forged.operands = 60u;
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[heap]: step #14 BACKWARD(layer 10) violates 'operand slice out "
+                             "of the pool' (operands 60 + 2 + 1 > 60)",
+                             offerStep(&f, &s, 14, &forged, NULL));
+    freeFixture(&f, &s);
+}
+
+/* A BACKWARD of a unary node reads dy and its input and writes one dx. */
+void testStepExitsOnOperandCountsThatDifferFromTheKind(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    rematStep_t forged = harStep(&s, 14);
+    forged.numReads = 1u;
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[heap]: step #14 BACKWARD(layer 10) violates 'operand counts "
+                             "differ from the kind' (numReads 1, numWrites 1, expected 2, 1)",
+                             offerStep(&f, &s, 14, &forged, NULL));
     freeFixture(&f, &s);
 }
 
@@ -592,16 +647,15 @@ void testStepExitsOnABackwardOutOfOrder(void) {
     freeFixture(&f, &s);
 }
 
-/* After HAR's last BACKWARD (deepest 0) the cursor is -1: it must stay
- * signed, or it reads as SIZE_MAX, which is not below deepest. */
+/* After HAR's last BACKWARD(0) no node is left to run backward: the cursor
+ * is -1, compared signed, so it never reads as SIZE_MAX. */
 void testStepExitsOnABackwardAfterTheLastOne(void) {
     fixture_t f;
     buildHarModel(&f);
     rematScheduler_t s = initArena(&f, NULL);
     rematStep_t againAtZero = {.kind = REMAT_STEP_BACKWARD, .layer = 0u};
-    ASSERT_EXITS_WITH_OUTPUT(
-        1, "violates 'backward order: expected no further BACKWARD' (deepest = 0)",
-        offerStep(&f, &s, 25, &againAtZero, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "violates 'backward order: expected no further BACKWARD'",
+                             offerStep(&f, &s, 25, &againAtZero, NULL));
     freeFixture(&f, &s);
 }
 
@@ -665,8 +719,9 @@ void testInitSetsTheStepBudgetFromTheModelSize(void) {
     freeFixture(&f, &s);
 }
 
-/* n(n + 1) overflows size_t at n = SIZE_MAX / 2. HAR's layer 0 trains, so
- * the deepest-layer scan stops there and never reads past the model. */
+/* n(n + 1) overflows size_t at n = SIZE_MAX / 2. The budget exits before the
+ * checker reads anything sized by n: the backward cursor comes from the
+ * table, never from the model passed in. */
 static void initWithAnOverflowingBudget(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
     rematCheck_t c;
@@ -774,7 +829,8 @@ static void reforwardUntilTheBudgetStops(fixture_t *f, rematScheduler_t *s) {
         rematCheckStep(&c, &st, &op);
         rematDone(s, &st);
     }
-    const rematStep_t again = {.kind = REMAT_STEP_REFORWARD, .layer = 0u};
+    rematStep_t again = s->plan->train.steps[0];
+    again.kind = REMAT_STEP_REFORWARD;
     for (size_t i = 0; i < 2u * c.maxSteps; i++) {
         rematCheckStep(&c, &again, &op);
     }
@@ -1394,7 +1450,7 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testNumWiresIsTheTablesWireCount);
     RUN_TEST(testNumWiresExitsOnASchedulerThatIsNotInitialised);
-    RUN_TEST(testInitSetsTheCursorsFromTheLiveModelAndZeroesProducedGen);
+    RUN_TEST(testInitSetsTheCursorsFromTheKeyedTableAndZeroesProducedGen);
     RUN_TEST(testCheckAcceptsEveryStepOnArenaHar);
     RUN_TEST(testCheckAcceptsEveryStepOnArenaF1);
     RUN_TEST(testCheckAcceptsEveryStepOnHeapHar);
@@ -1404,10 +1460,13 @@ int main(void) {
     RUN_TEST(testEvalRejectsABackwardBeforeItsLayerIsChecked);
     RUN_TEST(testEvalStillNamesAnUnknownStepKind);
     RUN_TEST(testEvalFinishExitsOnAMissingLossForward);
-    RUN_TEST(testOperandsAreResolvedPositionallyOnHar);
+    RUN_TEST(testOperandsAreReadFromTheStepOnHar);
     RUN_TEST(testStepExitsOnAnUnknownStepKind);
     RUN_TEST(testStepExitsOnALayerOutOfRangeBeforeResolvingIt);
     RUN_TEST(testStepExitsOnALossStepWhoseLayerIsNotN);
+    RUN_TEST(testStepExitsOnAStepOffItsNodesSlice);
+    RUN_TEST(testStepExitsOnAnOperandSliceOutOfThePool);
+    RUN_TEST(testStepExitsOnOperandCountsThatDifferFromTheKind);
     RUN_TEST(testStepExitsOnAForwardAfterTheLossForward);
     RUN_TEST(testStepExitsOnAForwardOutOfOrder);
     RUN_TEST(testStepExitsOnARowThatSkipsAStep);

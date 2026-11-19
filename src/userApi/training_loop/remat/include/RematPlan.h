@@ -135,7 +135,7 @@ rematBfpGroups_t rematBfpWireGrouping(const bfpQConfig_t *tmpl, size_t elements,
  * must be the Softmax (CE's backward is the combined p - y) and declare one
  * of the two model heads (requireCrossEntropyHead): anything else fails
  * fast; an empty model fails fast too.
- * One shared function: the plan uses it on the built model, the checker on
+ * One shared function: the table init uses it on the built model, the bind on
  * the live one. */
 void rematBackwardRange(layer_t **model, size_t n, lossFuncType_t lt, size_t *deepest,
                         ptrdiff_t *top);

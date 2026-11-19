@@ -209,6 +209,8 @@ target_link_libraries(Layer PRIVATE
 add_library(Model Model.c)
 target_include_directories(Model PUBLIC include)
 target_link_libraries(Model PRIVATE
+        OpTable
+        Layer
         Common
         Tensor
         Rounding

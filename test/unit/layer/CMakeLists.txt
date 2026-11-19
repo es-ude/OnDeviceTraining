@@ -592,6 +592,8 @@ add_elastic_ai_unit_test(
         Model
         MORE_LIBS
         CommonLayerLibs
+        OpTable
+        Layer
         StorageApi
         odt_test_death
 )

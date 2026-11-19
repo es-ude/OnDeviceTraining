@@ -618,13 +618,10 @@ static size_t activationElements(const shape_t *shape) {
 }
 
 /* The TRAIN program's recompute numbers. The element counts come from the
- * table's input key through the calcOutputShape chain the table derived its
- * wires from, on stack scratch of maxRank dims (the table keeps bytes, which
- * do not give BFP element counts). Grammar rule 1 runs every layer's FORWARD
- * once, so forwardCost is the sum over the layers. A layer's REFORWARDs are
- * counted by a scan of the steps, only in a program that recomputes: a
- * SEQUENCE or RETAIN_LIST plan, whose range cap keeps n at most
- * ODT_REMAT_MAX_RANGES (ACT 1..n each have a range; only GRAD wires share
+ * table's ACT shapes (its wire bytes do not give BFP element counts). Grammar rule 1 runs every
+ * layer's FORWARD once, so forwardCost is the sum over the layers. A layer's REFORWARDs are counted
+ * by a scan of the steps, only in a program that recomputes: a SEQUENCE or RETAIN_LIST plan, whose
+ * range cap keeps n at most ODT_REMAT_MAX_RANGES (ACT 1..n each have a range; only GRAD wires share
  * one), so the scans read at most n * numSteps steps. */
 static void recordRecomputeNumbers(rematPlan_t *p, const rematWireTable_t *t, const model_t *m) {
     const rematProgram_t *train = &p->train;
@@ -632,22 +629,11 @@ static void recordRecomputeNumbers(rematPlan_t *p, const rematWireTable_t *t, co
     for (size_t s = 0; s < train->numSteps; s++) {
         refwdSteps += (train->steps[s].kind == REMAT_STEP_REFORWARD) ? 1u : 0u;
     }
-    size_t maxRank = t->maxRank;
-    size_t dimsA[maxRank], orderA[maxRank], dimsB[maxRank], orderB[maxRank];
-    shape_t scratch[2] = {{.dimensions = dimsA, .orderOfDimensions = orderA},
-                          {.dimensions = dimsB, .orderOfDimensions = orderB}};
-    shape_t input = {.numberOfDimensions = t->inputRank,
-                     .dimensions = t->inputDims,
-                     .orderOfDimensions = t->inputOrder};
-    shape_t *prev = &input;
     size_t forwardCost = 0;
     size_t recomputeCost = 0;
     for (size_t l = 0; l < t->modelSize; l++) {
-        layer_t *layer = m->layers[l];
-        shape_t *out = &scratch[l % 2u];
-        out->numberOfDimensions = (layer->type == FLATTEN) ? 2u : prev->numberOfDimensions;
-        layerFunctions[layer->type].calcOutputShape(layer, prev, out);
-        size_t cost = layerForwardCost(layer, activationElements(prev), activationElements(out));
+        size_t cost = layerForwardCost(m->layers[l], activationElements(&t->actShapes[l]),
+                                       activationElements(&t->actShapes[l + 1u]));
         forwardCost = planAdd(forwardCost, cost, "forwardCost");
         if (refwdSteps > 0u) {
             size_t recomputes = 0;
@@ -659,7 +645,6 @@ static void recordRecomputeNumbers(rematPlan_t *p, const rematWireTable_t *t, co
             recomputeCost =
                 planAdd(recomputeCost, planMul(cost, recomputes, "recomputeCost"), "recomputeCost");
         }
-        prev = out;
     }
     p->refwdSteps = refwdSteps;
     p->forwardCost = forwardCost;

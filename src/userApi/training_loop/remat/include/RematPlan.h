@@ -97,7 +97,7 @@ typedef struct rematWireTable {
     size_t *inputDims;
     size_t *inputOrder;
     uint8_t inputType;
-    uint8_t maxRank;    /* max(inputRank, 2): bounds every wire rank, sizes the bind scratch */
+    uint8_t maxRank;    /* max(inputRank, 2): bounds every wire rank, sizes actShapes */
     shape_t *actShapes; /* [n + 1]: the shape pass on the bound input; dims, order in-block */
     rematWireFact_t *bindScratch; /* [numWires], inside this block: every bind's phase-1 facts */
     size_t liveBytes;             /* rises in rematWireBind, falls in rematWireRelease */

@@ -78,6 +78,49 @@ void modelGradFlags(const model_t *m, lossFuncType_t lt, uint8_t *needsGrad,
     }
 }
 
+typedef struct nodeLayer {
+    uintptr_t layer;
+    size_t node;
+} nodeLayer_t;
+
+static int compareNodeLayers(const void *a, const void *b) {
+    const nodeLayer_t *x = a;
+    const nodeLayer_t *y = b;
+    if (x->layer != y->layer) {
+        return x->layer < y->layer ? -1 : 1;
+    }
+    return x->node < y->node ? -1 : (x->node > y->node);
+}
+
+/* For non-chain models only: a layer's state (parameter grads, saved masks or indices) lives on
+ * the object, so two nodes sharing one would share it. Chains keep accepting a shared stateless
+ * layer, as they always have. Sorting finds a repeat in O(n log n). */
+static void requireOneLayerPerNode(const model_t *m, const char *caller) {
+    size_t n = m->numLayers;
+    nodeLayer_t *pairs = reserveMemory(n * sizeof(nodeLayer_t));
+    if (pairs == NULL) {
+        PRINT_ERROR("%s: wiring: no memory for the %zu-byte layer map", caller,
+                    n * sizeof(nodeLayer_t));
+        exit(1);
+    }
+    for (size_t j = 0; j < n; j++) {
+        pairs[j] = (nodeLayer_t){(uintptr_t)m->layers[j], j};
+    }
+    qsort(pairs, n, sizeof(nodeLayer_t), compareNodeLayers);
+    for (size_t i = 0; i + 1 < n; i++) {
+        if (pairs[i].layer == pairs[i + 1].layer) {
+            size_t later = pairs[i + 1].node;
+            size_t earlier = pairs[i].node;
+            freeReservedMemory(pairs);
+            PRINT_ERROR("%s: wiring: node %zu reuses the layer object of node %zu (a non-chain "
+                        "model needs one layer_t per node)",
+                        caller, later, earlier);
+            exit(1);
+        }
+    }
+    freeReservedMemory(pairs);
+}
+
 void modelRequireValid(const model_t *m, const char *caller) {
     size_t n = m->numLayers;
     if (n == 0) {
@@ -90,6 +133,15 @@ void modelRequireValid(const model_t *m, const char *caller) {
         exit(1);
     }
     if (m->inputStart == NULL) {
+        for (size_t j = 0; j < n; j++) {
+            layerType_t type = m->layers[j]->type;
+            if (opFunctions[type].arity != 1) {
+                PRINT_ERROR("%s: wiring: node %zu has layer type %d of arity %u; a chain encoding "
+                            "takes arity 1 only",
+                            caller, j, (int)type, (unsigned)opFunctions[type].arity);
+                exit(1);
+            }
+        }
         return;
     }
 
@@ -141,4 +193,6 @@ void modelRequireValid(const model_t *m, const char *caller) {
         }
     }
     freeReservedMemory(consumed);
+
+    requireOneLayerPerNode(m, caller);
 }

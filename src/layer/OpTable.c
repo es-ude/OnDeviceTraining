@@ -1,6 +1,7 @@
 #define SOURCE_FILE "OP_TABLE"
 
 #include "OpTable.h"
+#include "AddLayer.h"
 
 /* The one forward rank rule: every layer keeps its input rank except Flatten,
  * which yields rank 2. Dispatches through layerFunctions[] at call time, never
@@ -59,6 +60,14 @@ const opFunctions_t opFunctions[] = {
     [FLATTEN] = UNARY(OP_READS_NEVER),
     [QUANTIZATION] = UNARY(OP_READS_NEVER),
     [DROPOUT] = UNARY(OP_READS_NEVER),
+    /* dx = dy on both slots: no input and no output is read. */
+    [ADD] = {.forward = addForward,
+             .backward = addBackward,
+             .shape = addShape,
+             .arity = 2u,
+             .readsInputs = OP_READS_NEVER,
+             .readsOutput = false,
+             .accumulatesDx = true},
 };
 
 _Static_assert(sizeof opFunctions / sizeof opFunctions[0] == OP_TABLE_ROWS,

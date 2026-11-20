@@ -9,7 +9,7 @@
 #include "Tensor.h"
 
 /* One row per layerType_t member: the last member + 1. */
-#define OP_TABLE_ROWS ((size_t)BATCHNORM1D + 1u)
+#define OP_TABLE_ROWS ((size_t)ADD + 1u)
 
 /* in[0..k) are the input shapes; out arrives with caller-owned dimension
  * storage and receives the output shape. */

@@ -615,10 +615,21 @@ add_elastic_ai_unit_test(
         MORE_LIBS
         CommonLayerLibs
         OpTable
+        AddApi
+        AddLayer
+        LinearApi
+        ReluApi
+        ModelGraphApi
+        LayerQuant
+        LayerCommon
+        RNG
+        Quantization
+        Tensor
         LossType
         Layer
         StorageApi
         odt_test_death
+        odt_test_dag_fixtures
 )
 
 add_elastic_ai_unit_test(

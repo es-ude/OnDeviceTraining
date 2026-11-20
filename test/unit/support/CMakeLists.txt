@@ -54,3 +54,9 @@ set_tests_properties(UnitTestDeathTest PROPERTIES TIMEOUT 60)
 # Header-only.
 add_library(odt_test_bfp_scatter_ref INTERFACE)
 target_include_directories(odt_test_bfp_scatter_ref INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# The shared DAG models (DagFixtures.h). Header-only; a consumer also links
+# AddApi, LinearApi, ReluApi, ModelGraphApi, LayerQuant, LayerCommon, RNG and
+# the layer/tensor libraries every layer test already lists.
+add_library(odt_test_dag_fixtures INTERFACE)
+target_include_directories(odt_test_dag_fixtures INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)

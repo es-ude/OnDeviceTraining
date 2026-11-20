@@ -5,14 +5,19 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "AddApi.h"
 #include "BatchNorm1d.h"
+#include "DagFixtures.h"
 #include "DeathTest.h"
 #include "GroupNorm.h"
 #include "Layer.h"
 #include "LayerNorm.h"
 #include "Linear.h"
+#include "LinearApi.h"
 #include "LossType.h"
 #include "Model.h"
+#include "ModelGraphApi.h"
+#include "OpTable.h"
 #include "unity.h"
 
 void setUp(void) {}
@@ -109,6 +114,72 @@ void testValidChainsPass(void) {
     modelRequireValid(&MODEL_CHAIN(g_three, 3), "t");
     modelRequireValid(&(model_t){g_three, 3, start, in}, "t");
     modelRequireValid(&MODEL_CHAIN(reused, 3), "t");
+    modelRequireValid(&(model_t){reused, 3, start, in}, "t");
+}
+
+void testAddRowIsTheNativeAccumulatingMerge(void) {
+    TEST_ASSERT_EQUAL_UINT8(2, opFunctions[ADD].arity);
+    TEST_ASSERT_TRUE(opFunctions[ADD].accumulatesDx);
+    TEST_ASSERT_EQUAL_UINT8(OP_READS_NEVER, opFunctions[ADD].readsInputs);
+    TEST_ASSERT_FALSE(opFunctions[ADD].readsOutput);
+}
+
+void testGraphFinishAcceptsF3(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    TEST_ASSERT_FALSE(modelIsChain(&f.m));
+    TEST_ASSERT_EQUAL_UINT16_ARRAY(((uint16_t[]){0, 1, 2, 4, 6}), f.m.inputStart, 5);
+    TEST_ASSERT_EQUAL_UINT16_ARRAY(((uint16_t[]){0, 1, 2, 1, 3, 1}), f.m.inputIds, 6);
+    uint16_t ids[MODEL_MAX_ARITY];
+    TEST_ASSERT_EQUAL_UINT8(2, modelNodeInputs(&f.m, 3, ids));
+    TEST_ASSERT_EQUAL_UINT16(3, ids[0]);
+    TEST_ASSERT_EQUAL_UINT16(1, ids[1]);
+    dagFree(&f);
+}
+
+void testShapePassCarriesTheMergeShape(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    dagTensor_t xs;
+    tensor_t *x = dagInput(&xs, 1, 2);
+    size_t d[5][MAX_RANK], o[5][MAX_RANK];
+    shape_t shapes[5];
+    bindShapes(shapes, d, o, 5);
+    modelShapePass(&f.m, x->shape, shapes, 2);
+    for (size_t j = 0; j < 5; j++) {
+        TEST_ASSERT_EQUAL_size_t(2, shapes[j].numberOfDimensions);
+        TEST_ASSERT_EQUAL_size_t(1, shapes[j].dimensions[0]);
+        TEST_ASSERT_EQUAL_size_t(2, shapes[j].dimensions[1]);
+    }
+    dagFree(&f);
+}
+
+void testAnAddInsideAChainEncodingExits(void) {
+    layer_t *a = addLayerInit(NULL);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "t: wiring: node 0 has layer type 14 of arity 2; a chain encoding takes arity 1 only",
+        modelRequireValid(&MODEL_CHAIN((layer_t *[]){a}, 1), "t"));
+    freeAddLayer(a);
+}
+
+/* F3 wired by hand, with n3 the same ADD object as n2. */
+void testAReusedLayerObjectInADagExits(void) {
+    layer_t *n0 = dagLinear(0, 1.0f, 1.0f, false);
+    layer_t *n1 = dagLinear(1, 2.0f, 3.0f, false);
+    layer_t *add = addLayerInit(NULL);
+    layer_t *layers[4];
+    uint16_t start[5], in[6];
+    graphBuilder_t g;
+    graphBegin(&g, layers, start, in, 4, 6);
+    uint16_t b1 = graphNode(&g, n0, GRAPH_INPUT);
+    uint16_t b2 = graphNode(&g, n1, b1);
+    uint16_t b3 = graphMerge(&g, add, b2, b1);
+    (void)graphMerge(&g, add, b3, b1);
+    ASSERT_EXITS_WITH_OUTPUT(1, "graphFinish: wiring: node 3 reuses the layer object of node 2",
+                             (void)graphFinish(&g));
+    freeLinearLayer(n0);
+    freeLinearLayer(n1);
+    freeAddLayer(add);
 }
 
 void testAnEmptyModelExitsNamingTheCaller(void) {
@@ -267,6 +338,11 @@ int main(void) {
     RUN_TEST(testShapePassWritesEveryBufferShape);
     RUN_TEST(testShapePassReadsTheWiredInput);
     RUN_TEST(testValidChainsPass);
+    RUN_TEST(testAddRowIsTheNativeAccumulatingMerge);
+    RUN_TEST(testGraphFinishAcceptsF3);
+    RUN_TEST(testShapePassCarriesTheMergeShape);
+    RUN_TEST(testAnAddInsideAChainEncodingExits);
+    RUN_TEST(testAReusedLayerObjectInADagExits);
     RUN_TEST(testAnEmptyModelExitsNamingTheCaller);
     RUN_TEST(testAModelAtTheBufferIdLimitExits);
     RUN_TEST(testTheCsrStartsAtZero);

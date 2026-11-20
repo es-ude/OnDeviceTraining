@@ -8,7 +8,7 @@
 #include "Layer.h"
 #include "LossType.h"
 
-/* Widest op today is ADD; bump deliberately with the first wider op. */
+/* The widest op, ADD, reads two buffers; bump deliberately with the first wider op. */
 #define MODEL_MAX_ARITY 2u
 
 typedef struct model {
@@ -39,10 +39,11 @@ void modelShapePass(const model_t *m, const shape_t *input, shape_t *shapes, siz
  * sink node never runs (the combined p - y gradient covers the Softmax). The caller sizes
  * needsGrad to n + 1 and runsBackward to n entries. */
 void modelGradFlags(const model_t *m, lossFuncType_t lt, uint8_t *needsGrad, uint8_t *runsBackward);
-/* Exits with an error naming caller unless m is a schedulable model: 1 <= numLayers < 0xFFFF and,
- * for an explicit CSR, well-formed offsets, exactly each op's arity of inputs per node, inputs
- * only from earlier buffers, and a consumer for every buffer but the last. Call it once at a public
- * entry; lower layers trust it and never re-check. The rules on merge inputs join with ADD. */
+/* Exits with an error naming caller unless m is a schedulable model: 1 <= numLayers < 0xFFFF;
+ * for the chain encoding (inputStart == NULL), only arity-1 ops; for an explicit CSR, well-formed
+ * offsets, exactly each op's arity of inputs per node, inputs only from earlier buffers, a
+ * consumer for every buffer but the last and, unless the CSR wires a chain, a distinct layer_t
+ * per node. Call it once at a public entry; lower layers trust it and never re-check. */
 void modelRequireValid(const model_t *m, const char *caller);
 
 #endif // ODT_MODEL_H

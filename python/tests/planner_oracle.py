@@ -40,6 +40,24 @@ def chain_doc(input_shape: list[int], layers: list[tuple]) -> dict:
     return doc
 
 
+RESIDUAL_INPUTS = ([0], [1], [2, 0], [3], [4], [5])
+
+
+def residual_doc() -> dict:
+    """x -> CONV1D -> RELU -> ADD(relu, x) -> FLATTEN -> LINEAR -> SOFTMAX, as build_problem
+    writes it for providers/test_problem.py's residual model: 'inputs' is every layer's last
+    key."""
+    doc = chain_doc([1, 2, 8], [("CONV1D", [1, 2, 8], False, {"macPerElement": 6}),
+                                ("RELU", [1, 2, 8], False, None),
+                                ("ADD", [1, 2, 8], False, None),
+                                ("FLATTEN", [1, 16], False, None),
+                                ("LINEAR", [1, 3], False, {"macPerElement": 16}),
+                                ("SOFTMAX", [1, 3], False, None)])
+    for layer, inputs in zip(doc["layers"], RESIDUAL_INPUTS):
+        layer["inputs"] = list(inputs)
+    return doc
+
+
 def chain_problem(input_shape: list[int], layers: list[tuple]) -> Problem:
     """A problem through the loader."""
     return parse_problem(json.dumps(chain_doc(input_shape, layers)).encode())

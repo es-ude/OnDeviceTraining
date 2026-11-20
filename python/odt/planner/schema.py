@@ -7,15 +7,18 @@ and the C harness (DUMP_PROBLEM=1). One JSON object, one line:
      "input": {"shape": [1, ...], "dtype": {"kind": ...}},
      "loss": "CROSS_ENTROPY" | "MSE",
      "layers": [{"type", "frozen", "trackRunningStats", "outShape", "outputDtype",
-                 "propLossDtype", "cost"?}, ...]}
+                 "propLossDtype", "cost"?, "inputs"?}, ...]}
 
 Shapes carry the leading batch dimension, which is 1: the micro-batch is a planner input.
 Dtype widths are checked against C's ranges (WIDTH_RANGE), not just for being integers.
 `layers` is positional, one entry per C layer (Softmax included under CROSS_ENTROPY).
 `cost` holds the operand C's forward-cost count needs beyond element counts: CONV1D and
 LINEAR `{"macPerElement"}` per output element, CONV1D_TRANSPOSED per input element,
-MAXPOOL1D and AVGPOOL1D `{"kernel"}`; every other type has none. The schema is wider than
-what the planner accepts (see accept.py), so widening the planner needs no schema change.
+MAXPOOL1D and AVGPOOL1D `{"kernel"}`; every other type has none. `inputs` lists the buffer
+ids a layer reads (0 = the model input, j + 1 = layer j's output); a non-chain model carries
+it on every layer and a chain on none, last in each layer object. ADD reads two buffers and
+carries no `cost`. The schema is wider than what the planner accepts (see accept.py), so
+widening the planner needs no schema change.
 """
 import functools
 import json
@@ -34,7 +37,9 @@ WIDTH_RANGE = {("SYM", "qBits"): (2, 31), ("ASYM", "qBits"): (1, 16),
 LOSSES = ("CROSS_ENTROPY", "MSE")
 LAYER_TYPES = ("LINEAR", "RELU", "CONV1D", "CONV1D_TRANSPOSED", "MAXPOOL1D", "AVGPOOL1D",
                "SOFTMAX", "FLATTEN", "QUANTIZATION", "ADAPTIVE_AVGPOOL1D", "DROPOUT",
-               "LAYERNORM", "GROUPNORM", "BATCHNORM1D")
+               "LAYERNORM", "GROUPNORM", "BATCHNORM1D", "ADD")
+# Buffers a layer reads; every type not listed reads one.
+ARITY = {"ADD": 2}
 COST_KEY = {"LINEAR": "macPerElement", "CONV1D": "macPerElement",
             "CONV1D_TRANSPOSED": "macPerElement", "MAXPOOL1D": "kernel", "AVGPOOL1D": "kernel"}
 TOP_KEYS = ("schema_version", "input", "loss", "layers")
@@ -71,6 +76,7 @@ class LayerSpec:
     prop_loss_dtype: Dtype
     mac_per_element: int | None = None
     kernel: int | None = None
+    inputs: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -119,8 +125,9 @@ def parse_problem(data: bytes) -> Problem:
     layers = doc["layers"]
     if not isinstance(layers, list) or not layers:
         raise ProblemError("layers: expected a non-empty list")
-    return Problem(version, spec, loss, tuple(_layer(x, f"layers[{j}]")
-                                              for j, x in enumerate(layers)), problem_hash(data))
+    specs = tuple(_layer(x, f"layers[{j}]") for j, x in enumerate(layers))
+    _wiring(specs)
+    return Problem(version, spec, loss, specs, problem_hash(data))
 
 
 def is_int(v) -> bool:
@@ -172,7 +179,7 @@ def _flag(v, where: str) -> bool:
 
 
 def _layer(v, where: str) -> LayerSpec:
-    _keys(v, where, LAYER_KEYS, ("cost",))
+    _keys(v, where, LAYER_KEYS, ("cost", "inputs"))
     kind = v["type"]
     if kind not in LAYER_TYPES:
         raise ProblemError(f"{where}.type: {kind!r} is not a layer type this schema knows")
@@ -184,10 +191,49 @@ def _layer(v, where: str) -> LayerSpec:
                                 or not is_int(cost[operand]) or cost[operand] < 1):
         raise ProblemError(f'{where}.cost: {kind} needs {{"{operand}": <positive integer>}}')
     value = None if operand is None else cost[operand]
+    ids = v.get("inputs")
+    if "inputs" in v and (not isinstance(ids, list) or not ids
+                          or not all(is_int(b) and b >= 0 for b in ids)):
+        raise ProblemError(f"{where}.inputs: expected a non-empty list of buffer ids")
     return LayerSpec(kind, _flag(v["frozen"], f"{where}.frozen"),
                      _flag(v["trackRunningStats"], f"{where}.trackRunningStats"),
                      _shape(v["outShape"], f"{where}.outShape"),
                      _dtype(v["outputDtype"], f"{where}.outputDtype"),
                      _dtype(v["propLossDtype"], f"{where}.propLossDtype"),
                      mac_per_element=value if operand == "macPerElement" else None,
-                     kernel=value if operand == "kernel" else None)
+                     kernel=value if operand == "kernel" else None,
+                     inputs=None if ids is None else tuple(ids))
+
+
+def _wiring(layers: tuple[LayerSpec, ...]) -> None:
+    """The model-level rules C's modelRequireValid applies to a wired model. A chain has one
+    form only, no `inputs` anywhere: C also accepts a wiring of every layer j to buffer j, but
+    two spellings of one model would give it two byte forms and two hashes, so that one is
+    refused here."""
+    if all(layer.inputs is None for layer in layers):
+        for j, layer in enumerate(layers):
+            if layer.type in ARITY:
+                raise ProblemError(f"layers[{j}]: {layer.type} needs the key 'inputs' (a merge "
+                                   f"is never a chain layer)")
+        return
+    for j, layer in enumerate(layers):
+        if layer.inputs is None:
+            raise ProblemError(f"layers[{j}]: missing key 'inputs' (a model with 'inputs' "
+                               f"carries it on every layer)")
+    for j, layer in enumerate(layers):
+        arity = ARITY.get(layer.type, 1)
+        if len(layer.inputs) != arity:
+            raise ProblemError(f"layers[{j}].inputs: {layer.type} reads {arity} buffer(s), "
+                               f"got {len(layer.inputs)}")
+    for j, layer in enumerate(layers):
+        for b in layer.inputs:
+            if b > j:
+                raise ProblemError(f"layers[{j}].inputs: buffer {b} is not produced before "
+                                   f"layer {j} (buffers 0 to {j})")
+    read = {b for layer in layers for b in layer.inputs}
+    for b in range(len(layers)):
+        if b not in read:
+            raise ProblemError(f"layers: buffer {b} is never read (only the last layer's "
+                               f"output may be)")
+    if all(layer.inputs == (j,) for j, layer in enumerate(layers)):
+        raise ProblemError("layers: the inputs describe a chain; a chain carries no 'inputs' key")

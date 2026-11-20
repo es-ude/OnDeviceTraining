@@ -81,7 +81,7 @@ into it.
  "input": {"shape": [1, ...], "dtype": {"kind": ...}},
  "loss": "CROSS_ENTROPY" | "MSE",
  "layers": [{"type", "frozen", "trackRunningStats", "outShape", "outputDtype",
-             "propLossDtype", "cost"?}, ...]}
+             "propLossDtype", "cost"?, "inputs"?}, ...]}
 ```
 
 - Shapes carry the leading batch dimension, which is 1; `m` is a planner input, so a wire
@@ -95,6 +95,12 @@ into it.
   beyond element counts: `{"macPerElement"}` for CONV1D and LINEAR per output element
   (Cin/groups · K, inF) and for CONV1D_TRANSPOSED per input element (Cout/groups · K);
   `{"kernel"}` for MAXPOOL1D and AVGPOOL1D; no `cost` on any other type.
+- `inputs` lists the buffer ids a layer reads: 0 is the model input, j + 1 is layer j's
+  output. A non-chain model carries it on every layer, a chain on none (a chain has one
+  byte form, so one hash); it is the last key of each layer object. The loader checks
+  C's wiring rules: each layer reads its type's count of buffers (ADD two, every other
+  type one), only buffers produced before it, and every buffer but the last layer's
+  output is read. `ADD` appears only with `inputs` and carries no `cost`.
 - The hash is FNV-1a 64 over the file's bytes, the final newline included (C prints it
   as `PROBLEM_HASH fnv1a64=<16 hex digits>`). It only makes a plan made for another model
   visible; nothing checks it.
@@ -106,11 +112,13 @@ into it.
 The schema is wider than the planner on purpose. The planner accepts only what a C
 reference run covers — the three example trainers: every dtype FLOAT32, `m` = 1, loss
 CROSS_ENTROPY, layer types CONV1D, RELU, MAXPOOL1D, AVGPOOL1D, FLATTEN, LINEAR, SOFTMAX,
-frozen or not, at most 64 layers (the harness's `REMAT_SELECT_MAX_LAYERS`), an input of
-rank at most 8 with the batch axis counted (C can neither dump nor train a higher one;
-`accept.py`), an ACT wire of at most `SIZE_MAX` elements and at most `SIZE_MAX` bytes and
-wires that total at most `SIZE_MAX` bytes, as C's wire table does, and a layer forward cost
-of at most `SIZE_MAX`, as C's `layerForwardCost` does, with the layers' forward costs
+frozen or not, chain models only (a problem with `inputs` is refused naming its first
+non-chain layer; `ADD` is refused by type), at most 64 layers (the harness's
+`REMAT_SELECT_MAX_LAYERS`), an input of rank at most 8 with the batch axis counted (C
+can neither dump nor train a higher one; `accept.py`), an ACT wire of at most `SIZE_MAX`
+elements and at most `SIZE_MAX` bytes and wires that total at most `SIZE_MAX` bytes, as
+C's wire table does, and a layer forward cost of at most `SIZE_MAX`, as C's
+`layerForwardCost` does, with the layers' forward costs
 totalling at most `SIZE_MAX`, as C's plan build does (these four limits are in
 `cmodel/table.py`). Everything else raises `UnsupportedProblem` naming the field, before
 any plan is built. Widening it is one rule in `accept.py`, the matching rule in the

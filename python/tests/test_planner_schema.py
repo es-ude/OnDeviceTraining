@@ -7,6 +7,7 @@ import pytest
 
 from odt.planner import (Dtype, Problem, ProblemError, load_problem, parse_problem, problem_bytes,
                          problem_hash)
+from tests.planner_oracle import residual_doc
 
 GOLDENS = Path(__file__).resolve().parent / "planner_goldens"
 MODELS = ("har", "har_finetune", "mnist_cnn")
@@ -70,8 +71,8 @@ def base() -> dict:
     return json.loads((GOLDENS / "har.problem.json").read_bytes())
 
 
-def with_change(path, value):
-    data = base()
+def with_change(path, value, start=base):
+    data = start()
     node = data
     for key in path[:-1]:
         node = node[key]
@@ -153,6 +154,60 @@ BAD = [
 
 @pytest.mark.parametrize("data, message", [(d, m) for _, d, m in BAD], ids=[i for i, _, _ in BAD])
 def test_a_malformed_problem_is_refused_naming_its_field(data, message):
+    with pytest.raises(ProblemError, match=f"^{re.escape(message)}$"):
+        parse_problem(data)
+
+
+def test_a_dag_problem_reads_its_inputs():
+    p = parse_problem(json.dumps(residual_doc()).encode())
+    assert [layer.type for layer in p.layers] == ["CONV1D", "RELU", "ADD", "FLATTEN", "LINEAR",
+                                                  "SOFTMAX"]
+    assert [layer.inputs for layer in p.layers] == [(0,), (1,), (2, 0), (3,), (4,), (5,)]
+    assert (p.layers[2].mac_per_element, p.layers[2].kernel) == (None, None)
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_a_chain_problem_has_no_inputs(model):
+    layers = load_problem(GOLDENS / f"{model}.problem.json").layers
+    assert all(layer.inputs is None for layer in layers)
+
+
+def chain_spelled_out() -> bytes:
+    data = base()
+    for j, layer in enumerate(data["layers"]):
+        layer["inputs"] = [j]
+    return json.dumps(data).encode()
+
+
+WIRING_BAD = [
+    ("inputs not a list", with_change(("layers", 1, "inputs"), 1, residual_doc),
+     "layers[1].inputs: expected a non-empty list of buffer ids"),
+    ("inputs empty", with_change(("layers", 1, "inputs"), [], residual_doc),
+     "layers[1].inputs: expected a non-empty list of buffer ids"),
+    ("inputs bool", with_change(("layers", 1, "inputs"), [True], residual_doc),
+     "layers[1].inputs: expected a non-empty list of buffer ids"),
+    ("inputs negative", with_change(("layers", 1, "inputs"), [-1], residual_doc),
+     "layers[1].inputs: expected a non-empty list of buffer ids"),
+    ("one layer without inputs", with_change(("layers", 4, "inputs"), DELETE, residual_doc),
+     "layers[4]: missing key 'inputs' (a model with 'inputs' carries it on every layer)"),
+    ("add reads one", with_change(("layers", 2, "inputs"), [2], residual_doc),
+     "layers[2].inputs: ADD reads 2 buffer(s), got 1"),
+    ("relu reads two", with_change(("layers", 1, "inputs"), [1, 0], residual_doc),
+     "layers[1].inputs: RELU reads 1 buffer(s), got 2"),
+    ("forward reference", with_change(("layers", 2, "inputs"), [2, 3], residual_doc),
+     "layers[2].inputs: buffer 3 is not produced before layer 2 (buffers 0 to 2)"),
+    ("unread buffer", with_change(("layers", 1, "inputs"), [0], residual_doc),
+     "layers: buffer 1 is never read (only the last layer's output may be)"),
+    ("add in a chain", with_change(("layers", 1, "type"), "ADD"),
+     "layers[1]: ADD needs the key 'inputs' (a merge is never a chain layer)"),
+    ("chain spelled out", chain_spelled_out(),
+     "layers: the inputs describe a chain; a chain carries no 'inputs' key"),
+]
+
+
+@pytest.mark.parametrize("data, message", [(d, m) for _, d, m in WIRING_BAD],
+                         ids=[i for i, _, _ in WIRING_BAD])
+def test_a_malformed_wiring_is_refused_naming_its_field(data, message):
     with pytest.raises(ProblemError, match=f"^{re.escape(message)}$"):
         parse_problem(data)
 

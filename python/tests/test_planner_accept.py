@@ -1,11 +1,13 @@
 """The planner accepts only what the three C trainers exercise, and refuses the rest by name."""
 import dataclasses
+import json
 import re
 from pathlib import Path
 
 import pytest
 
-from odt.planner import Dtype, UnsupportedProblem, load_problem, require_supported
+from odt.planner import Dtype, UnsupportedProblem, load_problem, parse_problem, require_supported
+from tests.planner_oracle import residual_doc
 
 GOLDENS = Path(__file__).resolve().parent / "planner_goldens"
 HAR = load_problem(GOLDENS / "har.problem.json")
@@ -58,12 +60,20 @@ def test_a_non_float32_layer_dtype_is_refused_naming_the_layer(field, attr):
 
 
 @pytest.mark.parametrize("kind", ("BATCHNORM1D", "LAYERNORM", "GROUPNORM", "DROPOUT",
-                                  "CONV1D_TRANSPOSED", "ADAPTIVE_AVGPOOL1D", "QUANTIZATION"))
+                                  "CONV1D_TRANSPOSED", "ADAPTIVE_AVGPOOL1D", "QUANTIZATION",
+                                  "ADD"))
 def test_a_layer_type_without_a_c_reference_run_is_refused_naming_the_layer(kind):
     layers = list(HAR.layers)
     layers[1] = dataclasses.replace(layers[1], type=kind)
     refused(dataclasses.replace(HAR, layers=tuple(layers)), 1,
             f"layers[1].type: {kind} has no C reference run; the planner accepts {TYPES}")
+
+
+def test_a_dag_problem_is_refused_naming_its_first_non_chain_layer_before_its_types():
+    # layers[2] is also an ADD: the wiring rule comes before the type rule
+    p = parse_problem(json.dumps(residual_doc()).encode())
+    refused(p, 1, "layers[2].inputs: [2, 0] has no C reference run; the planner accepts chain "
+                  "models only (no 'inputs' key)")
 
 
 def test_a_problem_of_more_than_64_layers_is_refused_before_its_layers_are_checked():

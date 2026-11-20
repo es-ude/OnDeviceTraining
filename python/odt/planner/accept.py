@@ -42,6 +42,10 @@ def require_supported(problem: Problem, m: int) -> None:
         _refuse("layers", len(problem.layers),
                 f"at most {MAX_LAYERS} layers (the example harness's REMAT_SELECT_MAX_LAYERS)")
     for j, layer in enumerate(problem.layers):
+        if layer.inputs is not None and layer.inputs != (j,):
+            _refuse(f"layers[{j}].inputs", list(layer.inputs),
+                    "chain models only (no 'inputs' key)")
+    for j, layer in enumerate(problem.layers):
         if layer.type not in ACCEPTED_TYPES:
             _refuse(f"layers[{j}].type", layer.type, ", ".join(ACCEPTED_TYPES))
         for field, dtype in (("outputDtype", layer.output_dtype),

@@ -112,6 +112,7 @@ target_link_libraries(LayerConfigAccess PRIVATE
         ArithmeticType
         Common
         CommonLayerLibs
+        OpTable
 )
 
 add_library(ModelValidationApi ModelValidationApi.c)

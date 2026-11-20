@@ -16,6 +16,7 @@
 #include "LayerNorm.h"
 #include "Linear.h"
 #include "MaxPool1d.h"
+#include "OpTable.h"
 #include "QuantizationLayer.h"
 #include "Relu.h"
 #include "Softmax.h"
@@ -388,27 +389,17 @@ bool layerIsFloat32Only(layer_t *layer) {
  * unknown type exits rather than defaulting: a wrong `false` lets the remat
  * plan free an input the backward still reads. */
 bool layerBackwardReadsInput(const layer_t *layer) {
-    switch (layer->type) {
-    case LINEAR:
-    case CONV1D:
-    case CONV1D_TRANSPOSED:
-        return !layerIsFrozen(layer);
-    case LAYERNORM:
-    case GROUPNORM:
-    case BATCHNORM1D:
-    case RELU:
-    case SOFTMAX:
-        return true;
-    case MAXPOOL1D:
-    case AVGPOOL1D:
-    case ADAPTIVE_AVGPOOL1D:
-    case FLATTEN:
-    case QUANTIZATION:
-    case DROPOUT:
-        return false;
-    default:
+    if ((size_t)layer->type >= OP_TABLE_ROWS) {
         PRINT_ERROR("layerBackwardReadsInput: unknown layerType_t %d", (int)layer->type);
         exit(1);
+    }
+    switch ((opReads_t)opFunctions[layer->type].readsInputs) {
+    case OP_READS_ALWAYS:
+        return true;
+    case OP_READS_IF_TRAINABLE:
+        return !layerIsFrozen(layer);
+    default:
+        return false;
     }
 }
 

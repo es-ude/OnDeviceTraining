@@ -1,7 +1,7 @@
 add_library(OptimizerApi OptimizerApi.c)
 target_include_directories(OptimizerApi PUBLIC include)
 target_link_libraries(OptimizerApi PRIVATE
-        LossFunction
+        LossType
         Sgd
         Optimizer
         OptimizerKeys
@@ -23,7 +23,7 @@ target_link_libraries(OptimizerApi PRIVATE
 add_library(SgdApi SgdApi.c)
 target_include_directories(SgdApi PUBLIC include)
 target_link_libraries(SgdApi PRIVATE
-        LossFunction
+        LossType
         TensorApi
         Tensor
         Rounding
@@ -41,7 +41,7 @@ target_link_libraries(SgdApi PRIVATE
 add_library(AdamWApi AdamWApi.c)
 target_include_directories(AdamWApi PUBLIC include)
 target_link_libraries(AdamWApi PRIVATE
-        LossFunction
+        LossType
         TensorApi
         Tensor
         Rounding

@@ -76,7 +76,7 @@ __register_target_as_unit_test(UnitTestRematSelect)
 # ODTA tensor-array file and the exact one-hot check.
 add_executable(UnitTestBfpDataset UnitTestBfpDataset.c)
 target_link_libraries(UnitTestBfpDataset PRIVATE
-        LossFunction
+        LossType
         unity
         examples_shared
         QuantizationLayer

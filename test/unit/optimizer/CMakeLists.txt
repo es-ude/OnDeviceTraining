@@ -2,7 +2,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Sgd
         MORE_LIBS
-        LossFunction
+        LossType
         CommonLayerLibs
         OptimizerApi
         SgdApi
@@ -35,7 +35,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         LrScheduler
         MORE_LIBS
-        LossFunction
+        LossType
         Optimizer
         Sgd
         ArithmeticType
@@ -55,7 +55,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         BsScheduler
         MORE_LIBS
-        LossFunction
+        LossType
         Optimizer
         Sgd
         DataLoader
@@ -85,7 +85,7 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         AdamW
         MORE_LIBS
-        LossFunction
+        LossType
         Optimizer
         Sgd
         LrScheduler

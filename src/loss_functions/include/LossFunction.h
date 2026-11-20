@@ -1,13 +1,12 @@
 #ifndef LOSSFUNCTION_H
 #define LOSSFUNCTION_H
 
+#include "LossType.h"
 #include "Tensor.h"
 
 /* Pointer-only use: the identical typedef lives in LayerExec.h (C11 allows the
  * repetition), so this header needs no RNG include path. */
 typedef struct layerExec layerExec_t;
-
-typedef enum lossFuncType { MSE, CROSS_ENTROPY } lossFuncType_t;
 
 typedef enum reduction { REDUCTION_SUM, REDUCTION_MEAN } reduction_t;
 

@@ -210,7 +210,7 @@ add_library(Model Model.c)
 target_include_directories(Model PUBLIC include)
 target_link_libraries(Model PRIVATE
         OpTable
-        LossFunction
+        LossType
         Layer
         Common
         Tensor

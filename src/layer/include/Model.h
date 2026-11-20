@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #include "Layer.h"
-#include "LossFunction.h"
+#include "LossType.h"
 
 /* Widest op today is ADD; bump deliberately with the first wider op. */
 #define MODEL_MAX_ARITY 2u

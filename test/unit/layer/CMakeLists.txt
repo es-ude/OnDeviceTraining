@@ -593,7 +593,7 @@ add_elastic_ai_unit_test(
         MORE_LIBS
         CommonLayerLibs
         OpTable
-        LossFunction
+        LossType
         Layer
         StorageApi
         odt_test_death

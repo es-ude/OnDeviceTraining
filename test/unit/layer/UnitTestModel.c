@@ -11,7 +11,7 @@
 #include "Layer.h"
 #include "LayerNorm.h"
 #include "Linear.h"
-#include "LossFunction.h"
+#include "LossType.h"
 #include "Model.h"
 #include "unity.h"
 

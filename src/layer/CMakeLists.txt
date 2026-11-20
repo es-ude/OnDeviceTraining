@@ -222,9 +222,10 @@ add_library(OpTable OpTable.c)
 target_include_directories(OpTable PUBLIC include)
 target_link_libraries(OpTable PRIVATE
         Layer
-        Common
         Tensor
+        Quantization
         Rounding
+        Common
 )
 
 add_library(Linear Linear.c)

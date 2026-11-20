@@ -14,16 +14,51 @@ static void opUnaryShape(layer_t *layer, const shape_t *const *in, uint8_t k, sh
     layerFunctions[layer->type].calcOutputShape(layer, (shape_t *)in[0], out);
 }
 
-#define UNARY {.shape = opUnaryShape, .arity = 1u}
+/* Like opUnaryShape, index layerFunctions[] per call so a patched slot is reached. */
+static void opUnaryForward(layer_t *layer, tensor_t *const *in, uint8_t k, tensor_t *out,
+                           const layerExec_t *exec) {
+    (void)k;
+    layerFunctions[layer->type].forward(layer, in[0], out, exec);
+}
+
+/* k and dxMode are ignored: arity is validated at the entry and a unary row is never asked
+ * for ACC. dx[0] == NULL passes through as propLoss NULL (a grads-only call). */
+static void opUnaryBackward(layer_t *layer, tensor_t *const *in, uint8_t k, tensor_t *dy,
+                            tensor_t *const *dx, const uint8_t *dxMode, const layerExec_t *exec) {
+    (void)k;
+    (void)dxMode;
+    layerFunctions[layer->type].backward(layer, in[0], dy, dx[0], exec);
+}
+
+#define UNARY(reads)                                                                               \
+    {.forward = opUnaryForward,                                                                    \
+     .backward = opUnaryBackward,                                                                  \
+     .shape = opUnaryShape,                                                                        \
+     .arity = 1u,                                                                                  \
+     .readsInputs = (reads),                                                                       \
+     .readsOutput = false,                                                                         \
+     .accumulatesDx = false}
 
 const opFunctions_t opFunctions[] = {
-    [LINEAR] = UNARY,       [RELU] = UNARY,
-    [CONV1D] = UNARY,       [CONV1D_TRANSPOSED] = UNARY,
-    [MAXPOOL1D] = UNARY,    [AVGPOOL1D] = UNARY,
-    [SOFTMAX] = UNARY,      [FLATTEN] = UNARY,
-    [QUANTIZATION] = UNARY, [ADAPTIVE_AVGPOOL1D] = UNARY,
-    [DROPOUT] = UNARY,      [LAYERNORM] = UNARY,
-    [GROUPNORM] = UNARY,    [BATCHNORM1D] = UNARY,
+    /* x feeds only the weight grad (dW from dy and x); a frozen layer skips it. */
+    [LINEAR] = UNARY(OP_READS_IF_TRAINABLE),
+    [CONV1D] = UNARY(OP_READS_IF_TRAINABLE),
+    [CONV1D_TRANSPOSED] = UNARY(OP_READS_IF_TRAINABLE),
+    /* Norms (LayerNorm/GroupNorm/BatchNorm1d) recompute x-hat from x, frozen or not; ReLU
+     * masks dy by the sign of x; Softmax recomputes softmax(x) for its Jacobian. */
+    [LAYERNORM] = UNARY(OP_READS_ALWAYS),
+    [GROUPNORM] = UNARY(OP_READS_ALWAYS),
+    [BATCHNORM1D] = UNARY(OP_READS_ALWAYS),
+    [RELU] = UNARY(OP_READS_ALWAYS),
+    [SOFTMAX] = UNARY(OP_READS_ALWAYS),
+    /* Pools route dy by argmax indices or window geometry; Flatten reshapes; Quantization is
+     * straight-through; Dropout uses its stored mask and p. */
+    [MAXPOOL1D] = UNARY(OP_READS_NEVER),
+    [AVGPOOL1D] = UNARY(OP_READS_NEVER),
+    [ADAPTIVE_AVGPOOL1D] = UNARY(OP_READS_NEVER),
+    [FLATTEN] = UNARY(OP_READS_NEVER),
+    [QUANTIZATION] = UNARY(OP_READS_NEVER),
+    [DROPOUT] = UNARY(OP_READS_NEVER),
 };
 
 _Static_assert(sizeof opFunctions / sizeof opFunctions[0] == OP_TABLE_ROWS,

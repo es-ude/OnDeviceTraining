@@ -604,4 +604,7 @@ add_elastic_ai_unit_test(
         OpTable
         MORE_LIBS
         CommonLayerLibs
+        ArithmeticType
+        ExecuteOp
+        Kernel
 )

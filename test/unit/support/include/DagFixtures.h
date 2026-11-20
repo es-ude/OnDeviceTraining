@@ -75,8 +75,8 @@ static inline quantization_t *dagFloatQ(void) {
     return &q;
 }
 
-/* position picks the init key, so no two Linears of one model share one; the
- * drawn weights are overwritten anyway. A diagonal weight is its own
+/* The drawn weights and bias are overwritten below, so position only has to give a valid init
+ * key. A diagonal weight is its own
  * transpose, so the [out, in] layout cannot flip a hand-derived value. */
 static inline layer_t *dagLinear(size_t position, float d0, float d1, bool frozen) {
     layerQuant_t lq;

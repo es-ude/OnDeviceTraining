@@ -234,6 +234,46 @@ static void assertFlags(layer_t **layers, size_t n, lossFuncType_t lt, const uin
     TEST_ASSERT_EQUAL_UINT8_ARRAY(runs, r, n);
 }
 
+static void assertModelFlags(const model_t *m, lossFuncType_t lt, const uint8_t *needs,
+                             const uint8_t *runs) {
+    uint8_t g[8], r[8];
+    memset(g, 0xA5, sizeof g);
+    memset(r, 0xA5, sizeof r);
+    modelGradFlags(m, lt, g, r);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(needs, g, m->numLayers + 1);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(runs, r, m->numLayers);
+}
+
+void testGradFlagsOnF3(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    assertModelFlags(&f.m, MSE, (uint8_t[]){0, 1, 1, 1, 1}, (uint8_t[]){1, 1, 1, 1});
+    dagFree(&f);
+}
+
+/* n0 frozen: ADD3's last input b1 needs nothing, but its first input b3 does. */
+void testGradFlagsFrozenPrefixAcrossASkip(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, true);
+    assertModelFlags(&f.m, MSE, (uint8_t[]){0, 0, 1, 1, 1}, (uint8_t[]){0, 1, 1, 1});
+    dagFree(&f);
+}
+
+/* A frozen node between trainable ones leaves a non-contiguous backward set. */
+void testGradFlagsFrozenNodeOnTheSkipPath(void) {
+    dagFixture_t f;
+    dagBuildS(&f);
+    assertModelFlags(&f.m, MSE, (uint8_t[]){0, 1, 0, 1}, (uint8_t[]){1, 0, 1});
+    dagFree(&f);
+}
+
+void testGradFlagsSkipFromTheInput(void) {
+    dagFixture_t f;
+    dagBuildK(&f);
+    assertModelFlags(&f.m, MSE, (uint8_t[]){0, 1, 1}, (uint8_t[]){1, 1});
+    dagFree(&f);
+}
+
 static parameter_t g_p[8];
 static linearConfig_t g_linear = {.weights = &g_p[0], .bias = &g_p[1]};
 static linearConfig_t g_frozenLinear = {.weights = &g_p[2], .bias = &g_p[3], .frozen = true};
@@ -355,5 +395,9 @@ int main(void) {
     RUN_TEST(testGradFlagsSkipANonAffineBatchNorm);
     RUN_TEST(testGradFlagsNeverRunTheSinkSoftmaxUnderCrossEntropy);
     RUN_TEST(testGradFlagsOfAChainAreTheDeepestToTopRange);
+    RUN_TEST(testGradFlagsOnF3);
+    RUN_TEST(testGradFlagsFrozenPrefixAcrossASkip);
+    RUN_TEST(testGradFlagsFrozenNodeOnTheSkipPath);
+    RUN_TEST(testGradFlagsSkipFromTheInput);
     return UNITY_END();
 }

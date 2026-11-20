@@ -82,8 +82,9 @@ static trainingStats_t *calculateGradsImpl(const model_t *m, lossConfig_t lossCo
         s = &ephemeral;
     }
     uint32_t producedGen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
     rematCheck_t chk;
-    rematCheckInit(&chk, s, m, lossConfig.funcType, REMAT_MODE_TRAIN, producedGen);
+    rematCheckInit(&chk, s, m, REMAT_MODE_TRAIN, producedGen, pending);
 
     rematBegin(s, m, lossConfig, input);
     lossFunctions_t lossFns = lossFunctions[lossConfig.funcType];
@@ -158,6 +159,10 @@ static trainingStats_t *calculateGradsImpl(const model_t *m, lossConfig_t lossCo
             opFunctions[layer->type].backward(layer, x, op.k, op.dy, op.dx, op.dxMode, ex);
             break;
         }
+        case REMAT_STEP_SUM:
+            /* Skipping it would drop the PART's contribution from the gradient. */
+            PRINT_ERROR("calculateGrads: SUM steps are not executed yet");
+            exit(1);
         default:
             break; /* unreachable: rematCheckStep exits on an unknown kind */
         }

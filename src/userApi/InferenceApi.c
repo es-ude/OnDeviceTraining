@@ -253,8 +253,9 @@ static inferenceStats_t *inferenceOnScheduler(const model_t *m, tensor_t *input,
                                               lossFuncType_t funcType, reduction_t forwardReduction,
                                               rematScheduler_t *s, const rngKey_t *callKey) {
     uint32_t producedGen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
     rematCheck_t chk;
-    rematCheckInit(&chk, s, m, funcType, REMAT_MODE_EVAL, producedGen);
+    rematCheckInit(&chk, s, m, REMAT_MODE_EVAL, producedGen, pending);
     rematBeginEval(s, m, funcType, input);
     inferenceStats_t *inferenceStats = NULL;
     for (;;) {

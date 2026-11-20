@@ -10,6 +10,8 @@
 #include "BorrowedLayer.h"
 #include "CalculateGradsSequential.h"
 #include "Common.h"
+#include "DagFixtures.h"
+#include "DeathTest.h"
 #include "Layer.h"
 #include "LayerCommon.h"
 #include "LayerExec.h"
@@ -1427,8 +1429,27 @@ void testCalculateGradsIsIndependentOfDrawsAroundItsSteps(void) {
     freeOrderModel(&m);
 }
 
+/* A DAG whose b1 gets a PART (F3: the Linear n1 is a later contributor) needs
+ * the SUM step, which the driver does not execute yet: it must stop rather than
+ * drop that contribution. */
+static void trainF3(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    dagTensor_t xs;
+    dagTensor_t ts;
+    freeTrainingStats(calculateGradsSequential(&f.m, defaultLossConfig(MSE), REDUCTION_MEAN,
+                                               dagInput(&xs, 1.0f, 2.0f), dagInput(&ts, 3.0f, 8.0f),
+                                               NULL));
+    dagFree(&f);
+}
+
+void testADagWithASumStepExitsUntilSumsExecute(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "calculateGrads: SUM steps are not executed yet", trainF3());
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testADagWithASumStepExitsUntilSumsExecute);
     RUN_TEST(testCalculateGradsSequentialClosedForm);
     RUN_TEST(testCrossEntropyFloatHeadIgnoresAnUnusedSymPropLossQ);
     RUN_TEST(testTracedGradsFiresInOrder);

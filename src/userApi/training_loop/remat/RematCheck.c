@@ -9,11 +9,11 @@
 #include "Common.h"
 #include "Layer.h"
 #include "LayerConfigAccess.h"
-#include "LossFunction.h"
 #include "Model.h"
 #include "OpTable.h"
 #include "RematCheck.h"
 #include "RematPlan.h"
+#include "RematPlanPolicy.h"
 #include "RematScheduler.h"
 
 size_t rematCheckNumWires(const rematScheduler_t *s) {
@@ -36,9 +36,34 @@ static ptrdiff_t highestRunningBelow(const rematWireTable_t *t, ptrdiff_t below)
     return -1;
 }
 
-void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, const model_t *m, lossFuncType_t lt,
-                    rematMode_t mode, uint32_t *producedGen) {
-    (void)lt; /* keyed in the table: the bind compares it with the call's */
+/* The contributions each wire expects, counted from the keyed table's flags and
+ * wiring copy, not from its dx decisions, so the checker does not inherit the
+ * deriver's errors: a GRAD expects one per consumer edge whose node runs
+ * backward, plus the loss seed's; a PART expects its one BACKWARD. The CE
+ * sink's own edge does not count: the Softmax does not run backward. */
+static void countContributions(const rematWireTable_t *t, uint16_t *pending) {
+    for (size_t w = 0; w < t->numWires; w++) {
+        pending[w] = (t->wires[w].kind == REMAT_WIRE_PART) ? 1u : 0u;
+    }
+    if (t->hasBackward) {
+        pending[t->gradIdOf[t->modelSize]]++;
+    }
+    for (size_t j = 0; j < t->modelSize; j++) {
+        if (t->runsBackward[j] == 0u) {
+            continue;
+        }
+        uint16_t ids[MODEL_MAX_ARITY];
+        uint8_t k = rematNodeInputs(t, j, ids);
+        for (uint8_t i = 0; i < k; i++) {
+            if (t->needsGrad[ids[i]] != 0u) {
+                pending[t->gradIdOf[ids[i]]]++;
+            }
+        }
+    }
+}
+
+void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, const model_t *m, rematMode_t mode,
+                    uint32_t *producedGen, uint16_t *pending) {
     size_t numWires = rematCheckNumWires(s);
     size_t n = m->numLayers;
     /* REFORWARD's step budget, 2n + 2 + n(n+1)/2: the minimum-memory
@@ -64,9 +89,15 @@ void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, const model_t *m, loss
                         .hasBackward = t->hasBackward,
                         .nextBackward = highestRunningBelow(t, (ptrdiff_t)t->modelSize),
                         .maxSteps = maxSteps,
-                        .producedGen = producedGen};
+                        .producedGen = producedGen,
+                        .pending = pending,
+                        .lastBackward = REMAT_NONE};
     for (size_t w = 0; w < numWires; w++) {
         producedGen[w] = 0u;
+        pending[w] = 0u;
+    }
+    if (mode == REMAT_MODE_TRAIN) {
+        countContributions(t, pending);
     }
 }
 
@@ -82,6 +113,8 @@ static const char *kindName(uint8_t kind) {
         return "BACKWARD";
     case REMAT_STEP_REFORWARD:
         return "REFORWARD";
+    case REMAT_STEP_SUM:
+        return "SUM";
     default:
         return "UNKNOWN";
     }
@@ -104,13 +137,14 @@ static const char *kindName(uint8_t kind) {
 static void requireKindAndLayer(const rematCheck_t *c, const rematStep_t *st) {
     if (c->mode == REMAT_MODE_EVAL &&
         (st->kind == REMAT_STEP_LOSS_BACKWARD || st->kind == REMAT_STEP_BACKWARD ||
-         st->kind == REMAT_STEP_REFORWARD)) {
+         st->kind == REMAT_STEP_REFORWARD || st->kind == REMAT_STEP_SUM)) {
         REMAT_CHECK_EXIT(c, st, "'step not allowed in eval'");
     }
     switch (st->kind) {
     case REMAT_STEP_FORWARD:
     case REMAT_STEP_REFORWARD:
     case REMAT_STEP_BACKWARD:
+    case REMAT_STEP_SUM:
         if (st->layer >= c->m->numLayers) {
             REMAT_CHECK_EXIT(c, st, "'layer out of range' (n = %zu)", c->m->numLayers);
         }
@@ -196,6 +230,14 @@ static void requireOrder(const rematCheck_t *c, const rematStep_t *st) {
                              (long)c->nextBackward);
         }
         break;
+    case REMAT_STEP_SUM:
+        /* The PART it adds lives from that BACKWARD to this step only. */
+        if (c->lastBackward != st->layer ||
+            rematPlanProgram(c->sched->plan, c->mode)->nodeOps[st->layer].sum == REMAT_NONE) {
+            REMAT_CHECK_EXIT(c, st,
+                             "'sum order: not right after its node's BACKWARD writing a PART'");
+        }
+        break;
     default:
         break; /* unreachable: rule 1 exits on an unknown kind first */
     }
@@ -213,14 +255,20 @@ static const rematOperand_t *requireOperands(const rematCheck_t *c, const rematS
                          (unsigned)st->operands, (unsigned)st->numReads, (unsigned)st->numWrites,
                          p->numOperands);
     }
-    bool backward = st->kind == REMAT_STEP_BACKWARD || st->kind == REMAT_STEP_LOSS_BACKWARD;
-    uint16_t canonical = backward ? p->nodeOps[st->layer].backward : p->nodeOps[st->layer].forward;
+    const rematNodeOps_t *node = &p->nodeOps[st->layer];
+    uint16_t canonical = node->forward;
+    if (st->kind == REMAT_STEP_BACKWARD || st->kind == REMAT_STEP_LOSS_BACKWARD) {
+        canonical = node->backward;
+    } else if (st->kind == REMAT_STEP_SUM) {
+        canonical = node->sum;
+    }
     if (st->operands != canonical) {
         REMAT_CHECK_EXIT(c, st, "'operand slice is not the node's' (operands %u, canonical %u)",
                          (unsigned)st->operands, (unsigned)canonical);
     }
     unsigned k = 1u;
-    if (st->kind != REMAT_STEP_LOSS_FORWARD && st->kind != REMAT_STEP_LOSS_BACKWARD) {
+    if (st->kind != REMAT_STEP_LOSS_FORWARD && st->kind != REMAT_STEP_LOSS_BACKWARD &&
+        st->kind != REMAT_STEP_SUM) {
         uint16_t ids[MODEL_MAX_ARITY];
         k = modelNodeInputs(c->m, st->layer, ids);
     }
@@ -235,7 +283,7 @@ static const rematOperand_t *requireOperands(const rematCheck_t *c, const rematS
         writes = k;     /* one dx slot per input */
         break;
     default:
-        break; /* FORWARD, REFORWARD, LOSS_BACKWARD: k reads, one write */
+        break; /* FORWARD, REFORWARD, LOSS_BACKWARD: k reads, one write; SUM: PART in, GRAD out */
     }
     if (st->numReads != reads || st->numWrites != writes) {
         REMAT_CHECK_EXIT(c, st,
@@ -315,22 +363,15 @@ static size_t touchedOperands(const rematStep_t *st, const rematOperand_t *slice
 }
 
 static const char *wireKindName(const rematWire_t *rec) {
-    return rec->kind == REMAT_WIRE_ACT ? "ACT" : "GRAD";
+    return rematWireKindName(rec->kind);
 }
 
-/* Rule 4: resident, and, unless borrowed, produced under the
- * binding it has now. The bind generation is the only O(1) catch for a row
- * that re-binds a wire without its producer running again. */
-static void requireReadable(const rematCheck_t *c, const rematStep_t *st, uint16_t w,
-                            const char *role) {
+/* Produced under the binding it has now: the bind generation is the only O(1)
+ * catch for a row that re-binds a wire without its producer running again. An
+ * ACC needs it too: it adds into the bytes its opening WRITE left. */
+static void requireProducedUnderItsBinding(const rematCheck_t *c, const rematStep_t *st,
+                                           uint16_t w) {
     const rematWire_t *rec = &c->sched->wires->wires[w];
-    if (rematWireHdr(c->sched->wires, w)->data == NULL) {
-        REMAT_CHECK_EXIT(c, st, "'operand not resident: %s %s %u'", role, wireKindName(rec),
-                         (unsigned)rec->index);
-    }
-    if (rec->borrowed) {
-        return;
-    }
     if (c->producedGen[w] == 0u) {
         REMAT_CHECK_EXIT(c, st, "'operand never produced: %s %u'", wireKindName(rec),
                          (unsigned)rec->index);
@@ -341,6 +382,28 @@ static void requireReadable(const rematCheck_t *c, const rematStep_t *st, uint16
                          "bound now at bindGen %u)",
                          wireKindName(rec), (unsigned)rec->index, (unsigned)c->producedGen[w],
                          (unsigned)rec->bindGen);
+    }
+}
+
+/* Rule 4: resident, and, unless borrowed, produced under the binding it has
+ * now; a GRAD or PART also complete: every contribution it expects arrived.
+ * A GRAD or PART text names the buffer, then the wire id in brackets: a buffer
+ * has several wires, a PART and its GRAD among them. */
+static void requireReadable(const rematCheck_t *c, const rematStep_t *st, uint16_t w,
+                            const char *role) {
+    const rematWire_t *rec = &c->sched->wires->wires[w];
+    if (rematWireHdr(c->sched->wires, w)->data == NULL) {
+        REMAT_CHECK_EXIT(c, st, "'operand not resident: %s %s %u'", role, wireKindName(rec),
+                         (unsigned)rec->index);
+    }
+    if (rec->borrowed) {
+        return;
+    }
+    requireProducedUnderItsBinding(c, st, w);
+    if (c->pending[w] != 0u) {
+        REMAT_CHECK_EXIT(c, st, "'operand incomplete: %s %u (wire %u), %u contributions pending'",
+                         wireKindName(rec), (unsigned)rec->index, (unsigned)w,
+                         (unsigned)c->pending[w]);
     }
 }
 
@@ -398,17 +461,46 @@ static bool inPlacePair(const rematCheck_t *c, uint16_t dy, uint16_t dx) {
 
 /* Pairwise over every operand the step touches, not only dy and dx: a
  * LayerNorm-style backward writes dx while it still reads x. A dead input
- * (W_dead) is not touched, so it is not compared. */
+ * (W_dead) is not touched, so it is not compared. One wire twice on the same
+ * side is ADD(y, y): its forward reads y twice, and its backward writes the
+ * dx slots one after the other, so neither pair is a hazard. */
 static void requireDisjoint(const rematCheck_t *c, const rematStep_t *st, const touched_t *ops,
                             size_t num) {
     for (size_t i = 0; i < num; i++) {
         for (size_t j = i + 1u; j < num; j++) {
+            if (ops[i].wire == ops[j].wire && ops[i].write == ops[j].write) {
+                continue;
+            }
             if (ops[i].dy && ops[j].write && inPlacePair(c, ops[i].wire, ops[j].wire)) {
                 continue;
             }
             requireApart(c, st, ops[i].wire, ops[i].role, ops[j].wire, ops[j].role);
         }
     }
+}
+
+/* A contribution into a GRAD or PART, taken in slot order so that ADD(y, y)'s
+ * WRITE opens the wire before its ACC adds in: a WRITE opens a wire nothing
+ * has reached yet, an ACC adds into the bytes an opening WRITE left under the
+ * current binding, and neither exceeds the contributions the wire expects. */
+static void contribute(rematCheck_t *c, const rematStep_t *st, uint16_t w, uint8_t mode) {
+    const rematWire_t *rec = &c->sched->wires->wires[w];
+    if (mode == OP_MODE_WRITE) {
+        if (c->producedGen[w] != 0u) {
+            REMAT_CHECK_EXIT(c, st,
+                             "'operand reopened: %s %u (wire %u) already holds a contribution'",
+                             wireKindName(rec), (unsigned)rec->index, (unsigned)w);
+        }
+        c->producedGen[w] = rec->bindGen;
+    } else {
+        requireProducedUnderItsBinding(c, st, w);
+    }
+    if (c->pending[w] == 0u) {
+        REMAT_CHECK_EXIT(c, st,
+                         "'operand overfilled: %s %u (wire %u) expects no further contribution'",
+                         wireKindName(rec), (unsigned)rec->index, (unsigned)w);
+    }
+    c->pending[w]--;
 }
 
 /* Rule 6: an output is produced under the binding it has now. */
@@ -428,16 +520,23 @@ static void commit(rematCheck_t *c, const rematStep_t *st, const rematOperand_t 
         c->nextBackward = highestRunningBelow(t, c->nextBackward);
         break;
     case REMAT_STEP_REFORWARD:
-        break; /* only its output's bind generation, below */
+    case REMAT_STEP_SUM:
+        break; /* only its output, below */
     default:
         break; /* unreachable: rule 1 exits on an unknown kind first */
     }
     for (size_t i = st->numReads; i < (size_t)st->numReads + st->numWrites; i++) {
         uint16_t w = slice[i].wire;
-        if (w != REMAT_NONE && slice[i].mode == OP_MODE_WRITE) {
-            c->producedGen[w] = t->wires[w].bindGen;
+        if (w == REMAT_NONE) {
+            continue;
+        }
+        if (t->wires[w].kind != REMAT_WIRE_ACT) {
+            contribute(c, st, w, slice[i].mode);
+        } else if (slice[i].mode == OP_MODE_WRITE) {
+            c->producedGen[w] = t->wires[w].bindGen; /* a REFORWARD writes an ACT again */
         }
     }
+    c->lastBackward = (st->kind == REMAT_STEP_BACKWARD) ? st->layer : REMAT_NONE;
     c->stepIndex++;
 }
 
@@ -478,6 +577,15 @@ void rematCheckFinish(const rematCheck_t *c) {
     }
     if (c->hasBackward && c->nextBackward >= 0) {
         REMAT_FINISH_EXIT(c, "'incomplete stream: missing BACKWARD(%ld)'", (long)c->nextBackward);
+    }
+    /* Every SUM too: a missing one leaves its GRAD a contribution short. */
+    const rematWireTable_t *t = c->sched->wires;
+    for (uint16_t w = 0; w < t->numWires; w++) {
+        if (c->pending[w] != 0u) {
+            REMAT_FINISH_EXIT(c, "'incomplete stream: %s %u (wire %u), %u contributions pending'",
+                              wireKindName(&t->wires[w]), (unsigned)t->wires[w].index, (unsigned)w,
+                              (unsigned)c->pending[w]);
+        }
     }
 }
 

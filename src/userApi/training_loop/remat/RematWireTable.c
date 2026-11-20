@@ -18,7 +18,7 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 
-static const char *wireKindName(uint8_t kind) {
+const char *rematWireKindName(uint8_t kind) {
     return kind == REMAT_WIRE_ACT ? "ACT" : kind == REMAT_WIRE_GRAD ? "GRAD" : "PART";
 }
 
@@ -35,7 +35,7 @@ static void exitSizeOverflow(const rematWireFact_t *f, const char *quantity) {
         PRINT_ERROR("remat: size overflow computing %s of the table arrays", quantity);
     } else {
         PRINT_ERROR("remat: size overflow computing %s of wire %s %u", quantity,
-                    wireKindName(f->kind), (unsigned)f->index);
+                    rematWireKindName(f->kind), (unsigned)f->index);
     }
     exit(1);
 }
@@ -90,7 +90,7 @@ static size_t wireBytes(const quantization_t *q, size_t elements, const rematWir
         bits = ((const bfpQConfig_t *)q->qConfig)->mantissaBits;
         break;
     default:
-        PRINT_ERROR("remat: wire %s %u has unknown qtype %d", wireKindName(f->kind),
+        PRINT_ERROR("remat: wire %s %u has unknown qtype %d", rematWireKindName(f->kind),
                     (unsigned)f->index, (int)q->type);
         exit(1);
     }
@@ -105,7 +105,7 @@ rematBfpGroups_t rematBfpWireGrouping(const bfpQConfig_t *tmpl, size_t elements,
     if (elements % tmpl->groupSize != 0) {
         PRINT_ERROR("remat: BFP groupSize %zu does not divide the %zu elements of wire %s %zu -- "
                     "pick a divisor or a per-tensor {1,0} template",
-                    tmpl->groupSize, elements, wireKindName(kind), index);
+                    tmpl->groupSize, elements, rematWireKindName(kind), index);
         exit(1);
     }
     return (rematBfpGroups_t){.numGroups = elements / tmpl->groupSize,
@@ -422,12 +422,12 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
         if (f->dtype != FLOAT32 && f->dtype != SYM_INT32 && f->dtype != BFP) {
             PRINT_ERROR("rematWireTableInit: wire %s %u has dtype %u; remat wires are FLOAT32, "
                         "SYM_INT32 or BFP",
-                        wireKindName(f->kind), (unsigned)f->index, (unsigned)f->dtype);
+                        rematWireKindName(f->kind), (unsigned)f->index, (unsigned)f->dtype);
             exit(1);
         }
         if (f->bytes == 0) {
             PRINT_ERROR("rematWireTableInit: wire %s %u has zero bytes (#160)",
-                        wireKindName(f->kind), (unsigned)f->index);
+                        rematWireKindName(f->kind), (unsigned)f->index);
             exit(1);
         }
         /* Makes every later sum over wires (liveBytes, peakLiveBytes) provably in range. */
@@ -512,7 +512,7 @@ static void bindBfpInto(rematWireTable_t *t, uint16_t id, const bfpQConfig_t *tm
     rematBfpGroups_t g = rematBfpWireGrouping(tmpl, elements, w->kind, w->index);
     if (g.numGroups > w->expCapacity) {
         PRINT_ERROR("remat: wire %s %u needs %zu BFP exponent groups, above its expCapacity %zu",
-                    wireKindName(w->kind), (unsigned)w->index, g.numGroups, w->expCapacity);
+                    rematWireKindName(w->kind), (unsigned)w->index, g.numGroups, w->expCapacity);
         exit(1);
     }
     quantization_t *q = w->hdr->quantization;
@@ -592,7 +592,7 @@ static void exitModelKeyAt(const char *fact, size_t i, size_t built, size_t live
 static void exitWireKey(const rematWire_t *w, const char *field, size_t built, size_t live) {
     PRINT_ERROR("rematWireTableBind: key mismatch on wire %s %u, field '%s': built %zu, live %zu "
                 "(a key change needs a fresh init)",
-                wireKindName(w->kind), (unsigned)w->index, field, built, live);
+                rematWireKindName(w->kind), (unsigned)w->index, field, built, live);
     exit(1);
 }
 
@@ -676,7 +676,8 @@ static void requireWireKey(const rematWireTable_t *t, const rematWireFact_t *fac
         if (f->numGroups > w->expCapacity) {
             PRINT_ERROR("rematWireTableBind: key mismatch on wire %s %u, field 'numGroups': %zu "
                         "groups exceed expCapacity %zu (a key change needs a fresh init)",
-                        wireKindName(w->kind), (unsigned)w->index, f->numGroups, w->expCapacity);
+                        rematWireKindName(w->kind), (unsigned)w->index, f->numGroups,
+                        w->expCapacity);
             exit(1);
         }
     }
@@ -724,14 +725,14 @@ static void deriveInheritedHeader(rematWireTable_t *t, uint16_t id) {
     if ((uint8_t)src->quantization->type != w->dtype) {
         PRINT_ERROR("rematWireBind: wire %s %u field 'dtype': its source ACT %u is live as dtype "
                     "%d, the slab reserved dtype %u",
-                    wireKindName(w->kind), (unsigned)w->index, (unsigned)w->inheritFrom,
+                    rematWireKindName(w->kind), (unsigned)w->index, (unsigned)w->inheritFrom,
                     (int)src->quantization->type, (unsigned)w->dtype);
         exit(1);
     }
     if (src->shape->numberOfDimensions != w->rank) {
         PRINT_ERROR("rematWireBind: wire %s %u field 'rank': its source ACT %u is live at rank "
                     "%zu, the slab reserved rank %u",
-                    wireKindName(w->kind), (unsigned)w->index, (unsigned)w->inheritFrom,
+                    rematWireKindName(w->kind), (unsigned)w->index, (unsigned)w->inheritFrom,
                     src->shape->numberOfDimensions, (unsigned)w->rank);
         exit(1);
     }
@@ -741,8 +742,8 @@ static void deriveInheritedHeader(rematWireTable_t *t, uint16_t id) {
     if (liveBytes != w->bytes) {
         PRINT_ERROR("rematWireBind: wire %s %u field 'bytes': its source ACT %u is live at %zu "
                     "bytes, the slab reserved %zu",
-                    wireKindName(w->kind), (unsigned)w->index, (unsigned)w->inheritFrom, liveBytes,
-                    w->bytes);
+                    rematWireKindName(w->kind), (unsigned)w->index, (unsigned)w->inheritFrom,
+                    liveBytes, w->bytes);
         exit(1);
     }
     writeWireConfig(t, id, src->quantization, elements);
@@ -786,8 +787,8 @@ static void requireNotAMember(const rematWireTable_t *t, uint16_t w, const char 
         root--;
     }
     PRINT_ERROR("%s: wire %s %u is an in-place member of %s %u; %s the chain's root", call,
-                wireKindName(t->wires[w].kind), (unsigned)t->wires[w].index,
-                wireKindName(t->wires[root].kind), (unsigned)t->wires[root].index, verb);
+                rematWireKindName(t->wires[w].kind), (unsigned)t->wires[w].index,
+                rematWireKindName(t->wires[root].kind), (unsigned)t->wires[root].index, verb);
     exit(1);
 }
 
@@ -801,8 +802,8 @@ static void bindMembers(rematWireTable_t *t, uint16_t root, uint8_t *bytes) {
         rematWire_t *rec = &t->wires[m];
         if (rec->hdr->data != NULL) {
             PRINT_ERROR("rematWireBind: wire %s %u, an in-place member of %s %u, is already bound",
-                        wireKindName(rec->kind), (unsigned)rec->index,
-                        wireKindName(t->wires[root].kind), (unsigned)t->wires[root].index);
+                        rematWireKindName(rec->kind), (unsigned)rec->index,
+                        rematWireKindName(t->wires[root].kind), (unsigned)t->wires[root].index);
             exit(1);
         }
         if (rec->inheritFrom != REMAT_NONE) {
@@ -820,8 +821,8 @@ static void releaseMembers(rematWireTable_t *t, uint16_t root) {
         if (rec->hdr->data != bytes) {
             PRINT_ERROR("rematWireRelease: wire %s %u, an in-place member of %s %u, does not hold "
                         "its root's bytes",
-                        wireKindName(rec->kind), (unsigned)rec->index,
-                        wireKindName(t->wires[root].kind), (unsigned)t->wires[root].index);
+                        rematWireKindName(rec->kind), (unsigned)rec->index,
+                        rematWireKindName(t->wires[root].kind), (unsigned)t->wires[root].index);
             exit(1);
         }
         rec->hdr->data = NULL;
@@ -845,7 +846,7 @@ void rematWireBind(rematWireTable_t *t, uint16_t w, uint8_t *bytes) {
     }
     requireNotAMember(t, w, "rematWireBind", "bind");
     if (rec->hdr->data != NULL) {
-        PRINT_ERROR("rematWireBind: wire %s %u is already bound", wireKindName(rec->kind),
+        PRINT_ERROR("rematWireBind: wire %s %u is already bound", rematWireKindName(rec->kind),
                     (unsigned)rec->index);
         exit(1);
     }
@@ -882,14 +883,14 @@ void rematWireRelease(rematWireTable_t *t, uint16_t w) {
     }
     requireNotAMember(t, w, "rematWireRelease", "release");
     if (rec->hdr->data == NULL) {
-        PRINT_ERROR("rematWireRelease: wire %s %u is not bound", wireKindName(rec->kind),
+        PRINT_ERROR("rematWireRelease: wire %s %u is not bound", rematWireKindName(rec->kind),
                     (unsigned)rec->index);
         exit(1);
     }
     if (rec->bytes > t->liveBytes) {
         PRINT_ERROR("rematWireRelease: wire %s %u live bytes would underflow (released more than "
                     "bound since the last table bind)",
-                    wireKindName(rec->kind), (unsigned)rec->index);
+                    rematWireKindName(rec->kind), (unsigned)rec->index);
         exit(1);
     }
     releaseMembers(t, w);

@@ -19,10 +19,6 @@
 
 #define ARENA_UNPLACED SIZE_MAX
 
-static const char *arenaWireKind(uint8_t kind) {
-    return kind == REMAT_WIRE_ACT ? "ACT" : "GRAD";
-}
-
 /* Every size sum of the placement is overflow-checked and names the wire it
  * was computing. */
 static size_t arenaAdd(const rematWireTable_t *t, uint16_t w, size_t a, size_t b,
@@ -30,7 +26,7 @@ static size_t arenaAdd(const rematWireTable_t *t, uint16_t w, size_t a, size_t b
     size_t out;
     if (!checkedAddSize(a, b, &out)) {
         PRINT_ERROR("remat[arena]: size overflow computing %s at wire %s %u", quantity,
-                    arenaWireKind(t->wires[w].kind), (unsigned)t->wires[w].index);
+                    rematWireKindName(t->wires[w].kind), (unsigned)t->wires[w].index);
         exit(1);
     }
     return out;
@@ -558,7 +554,7 @@ void arenaVerifyPlacement(const rematWireTable_t *t, const rematProgram_t *p, co
         if (offsets[r] % ODT_WIRE_ALIGN != 0u) {
             PRINT_ERROR("remat[arena]: placement verifier: wire %s %u at offset %zu is not a "
                         "multiple of ODT_WIRE_ALIGN (%u)",
-                        arenaWireKind(w->kind), (unsigned)w->index, offsets[r],
+                        rematWireKindName(w->kind), (unsigned)w->index, offsets[r],
                         (unsigned)ODT_WIRE_ALIGN);
             exit(1);
         }
@@ -566,7 +562,7 @@ void arenaVerifyPlacement(const rematWireTable_t *t, const rematProgram_t *p, co
         if (offsets[r] > bytes || size > bytes - offsets[r]) {
             PRINT_ERROR("remat[arena]: placement verifier: wire %s %u at offset %zu (%zu placed "
                         "bytes) ends past the arena's %zu bytes",
-                        arenaWireKind(w->kind), (unsigned)w->index, offsets[r], size, bytes);
+                        rematWireKindName(w->kind), (unsigned)w->index, offsets[r], size, bytes);
             exit(1);
         }
     }
@@ -583,8 +579,9 @@ void arenaVerifyPlacement(const rematWireTable_t *t, const rematProgram_t *p, co
                 const rematWire_t *wb = &t->wires[p->ranges[b].wire];
                 PRINT_ERROR("remat[arena]: placement verifier: wires %s %u and %s %u are co-live "
                             "but share bytes (offsets %zu and %zu)",
-                            arenaWireKind(wa->kind), (unsigned)wa->index, arenaWireKind(wb->kind),
-                            (unsigned)wb->index, offsets[a], offsets[b]);
+                            rematWireKindName(wa->kind), (unsigned)wa->index,
+                            rematWireKindName(wb->kind), (unsigned)wb->index, offsets[a],
+                            offsets[b]);
                 exit(1);
             }
         }

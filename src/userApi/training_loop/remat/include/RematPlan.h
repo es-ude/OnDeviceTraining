@@ -181,6 +181,8 @@ tensor_t *rematGradHdr(const rematWireTable_t *t, size_t j); /* j == n: the seed
 uint16_t rematActId(const rematWireTable_t *t, size_t j);
 uint16_t rematGradId(const rematWireTable_t *t, size_t j); /* REMAT_NONE if absent */
 size_t rematWireBytes(const rematWireTable_t *t, uint16_t w);
+/* "ACT", "GRAD" or "PART": the one wire-kind name every remat message prints. */
+const char *rematWireKindName(uint8_t kind);
 
 /* One inclusive lifetime of a wire: begin = the step that writes it, end = its
  * last reader (policy-dependent). STORE_ALL and LIVENESS give each slab wire

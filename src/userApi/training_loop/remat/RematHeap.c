@@ -49,8 +49,7 @@ bool rematHeapNext(rematScheduler_t *s, rematStep_t *st) {
              * recoverable. */
             const rematWire_t *rec = &s->wires->wires[w];
             PRINT_ERROR("remat[heap]: reserveMemory(%zu) failed at step #%zu for wire %s %u", bytes,
-                        s->walk.step, rec->kind == REMAT_WIRE_ACT ? "ACT" : "GRAD",
-                        (unsigned)rec->index);
+                        s->walk.step, rematWireKindName(rec->kind), (unsigned)rec->index);
             exit(1);
         }
         rematWireBind(s->wires, w, b); /* bindGen++, accounting, VERIFY poison-at-bind */

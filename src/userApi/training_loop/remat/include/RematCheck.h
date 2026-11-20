@@ -6,7 +6,6 @@
 #include <stdint.h>
 
 #include "Layer.h"
-#include "LossFunction.h"
 #include "Model.h"
 #include "RematScheduler.h"
 #include "Tensor.h"
@@ -21,11 +20,11 @@
  * no such operand: dy outside BACKWARD, out for LOSS_FORWARD and BACKWARD, and
  * dx[i] outside BACKWARD or where input i gets no gradient. */
 typedef struct rematOperands {
-    uint8_t k;                       /* node arity; 0 for LOSS_* */
-    tensor_t *in[MODEL_MAX_ARITY];   /* forward inputs; LOSS_*: in[0] = ACT n */
-    bool inMeta[MODEL_MAX_ARITY];    /* a BACKWARD input it does not read: its header may be dead */
-    tensor_t *dy;                    /* BACKWARD only */
-    tensor_t *out;                   /* FORWARD/REFORWARD: ACT j+1; LOSS_BACKWARD: the seed */
+    uint8_t k;                     /* node arity; 0 for LOSS_* and SUM */
+    tensor_t *in[MODEL_MAX_ARITY]; /* forward inputs; LOSS_*: in[0] = ACT n; SUM: in[0] = PART */
+    bool inMeta[MODEL_MAX_ARITY];  /* a BACKWARD input it does not read: its header may be dead */
+    tensor_t *dy;                  /* BACKWARD only */
+    tensor_t *out; /* FORWARD/REFORWARD: ACT j+1; LOSS_BACKWARD: the seed; SUM: the GRAD */
     tensor_t *dx[MODEL_MAX_ARITY];   /* BACKWARD: one per input, NULL = no dx */
     uint8_t dxMode[MODEL_MAX_ARITY]; /* opMode_t of dx[i] */
 } rematOperands_t;
@@ -44,24 +43,33 @@ typedef struct rematCheck {
     size_t stepIndex;
     size_t maxSteps;       /* 2n + 2 + n(n+1)/2: no REFORWARD at or past this step index */
     uint32_t *producedGen; /* [rematCheckNumWires(sched)], the caller's; 0 = not produced */
+    /* [rematCheckNumWires(sched)], the caller's: the contributions each GRAD and PART still
+     * awaits; a GRAD or PART is read only at 0 */
+    uint16_t *pending;
+    uint16_t lastBackward; /* the layer of the step just checked if it was a BACKWARD, else
+                              REMAT_NONE: a SUM must follow its own node's */
 } rematCheck_t;
 
-/* Sizes the caller's producedGen VLA. Exits first if the table and plan were
+/* Sizes the caller's producedGen and pending VLAs. Exits first if the table and plan were
  * never built (never initialised, or init failed before the plan), so the
  * VLA is never sized from a NULL table and never empty. A row whose own
  * block failed after that -- e.g. ARENA's data block -- is caught by
  * rematBegin instead. */
 size_t rematCheckNumWires(const rematScheduler_t *s);
 /* Before rematBegin / rematBeginEval, in the same mode. Zeroes
- * producedGen[0..numWires) (a VLA has no initialiser). */
-void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, const model_t *m, lossFuncType_t lt,
-                    rematMode_t mode, uint32_t *producedGen);
+ * producedGen[0..numWires) (a VLA has no initialiser) and, in TRAIN, sets
+ * pending[0..numWires) from the keyed table: one per consumer edge whose node
+ * runs backward into a buffer that needs a gradient, one for the loss seed,
+ * one per PART; zero elsewhere and in EVAL. */
+void rematCheckInit(rematCheck_t *c, rematScheduler_t *s, const model_t *m, rematMode_t mode,
+                    uint32_t *producedGen, uint16_t *pending);
 /* Checks one step and looks its operands up into *ops; exits on a violation,
  * before the driver runs anything. */
 void rematCheckStep(rematCheck_t *c, const rematStep_t *st, rematOperands_t *ops);
 /* After the last step, before rematEnd: every FORWARD, LOSS_FORWARD, and in
  * TRAIN when something trains LOSS_BACKWARD and the BACKWARD of every node
- * that runs backward ran; else exits naming the first missing step. */
+ * that runs backward ran, and no GRAD or PART awaits a contribution; else exits
+ * naming the first missing step or wire. */
 void rematCheckFinish(const rematCheck_t *c);
 /* After rematEnd: no non-borrowed wire is bound and ACT 0 is unbound. */
 void rematCheckReleased(const rematCheck_t *c);

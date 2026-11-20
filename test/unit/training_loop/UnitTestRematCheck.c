@@ -7,6 +7,7 @@
 
 #include "Common.h"
 #include "Conv1dApi.h"
+#include "DagFixtures.h"
 #include "DeathTest.h"
 #include "FlattenApi.h"
 #include "Layer.h"
@@ -82,10 +83,11 @@ void testInitSetsTheCursorsFromTheKeyedTableAndZeroesProducedGen(void) {
     rematScheduler_t s = initArena(&f, NULL);
     size_t numWires = rematCheckNumWires(&s);
     uint32_t producedGen[numWires];
+    uint16_t pending[numWires];
     memset(producedGen, 0xA5, sizeof producedGen);
     rematCheck_t c;
     const model_t model = MODEL_CHAIN(f.model, f.n);
-    rematCheckInit(&c, &s, &model, f.lt, REMAT_MODE_TRAIN, producedGen);
+    rematCheckInit(&c, &s, &model, REMAT_MODE_TRAIN, producedGen, pending);
     TEST_ASSERT_EQUAL_PTR(&s, c.sched);
     TEST_ASSERT_EQUAL_PTR(&model, c.m);
     TEST_ASSERT_EQUAL_PTR(f.model, c.m->layers);
@@ -154,12 +156,13 @@ static void assertResolved(const rematCheck_t *c, const rematStep_t *st, size_t 
 static void checkedCall(fixture_t *f, rematScheduler_t *s) {
     const rematWireTable_t *t = s->wires;
     uint32_t producedGen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
     rematCheck_t c;
     const model_t chain = MODEL_CHAIN(f->model, f->n);
     size_t deepest;
     ptrdiff_t top;
     positionalRange(f->model, f->n, f->lt, &deepest, &top);
-    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_TRAIN, producedGen);
+    rematCheckInit(&c, s, &chain, REMAT_MODE_TRAIN, producedGen, pending);
     rematBegin(s, &chain, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     while (rematNext(s, &st)) {
@@ -217,9 +220,10 @@ void testCheckAcceptsEveryStepOnHeapF1(void) {
 static void checkedEvalCall(fixture_t *f, rematScheduler_t *s) {
     const rematWireTable_t *t = s->wires;
     uint32_t producedGen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
     rematCheck_t c;
     const model_t chain = MODEL_CHAIN(f->model, f->n);
-    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_EVAL, producedGen);
+    rematCheckInit(&c, s, &chain, REMAT_MODE_EVAL, producedGen, pending);
     rematBeginEval(s, &chain, f->lt, f->x);
     rematStep_t st;
     while (rematNext(s, &st)) {
@@ -256,9 +260,10 @@ void testCheckAcceptsAnEvalCallOnEitherRow(void) {
  * the layer, so a BACKWARD with an out-of-range layer names the eval rule. */
 static void evalCheckerGets(fixture_t *f, rematScheduler_t *s, rematStep_t st) {
     uint32_t producedGen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
     rematCheck_t c;
     const model_t chain = MODEL_CHAIN(f->model, f->n);
-    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_EVAL, producedGen);
+    rematCheckInit(&c, s, &chain, REMAT_MODE_EVAL, producedGen, pending);
     rematOperands_t op;
     rematCheckStep(&c, &st, &op);
 }
@@ -298,9 +303,10 @@ void testEvalStillNamesAnUnknownStepKind(void) {
 /* An eval stream that stops after FORWARD(n-1) misses its LOSS_FORWARD. */
 static void evalStreamWithoutLossForward(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
     rematCheck_t c;
     const model_t chain = MODEL_CHAIN(f->model, f->n);
-    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_EVAL, producedGen);
+    rematCheckInit(&c, s, &chain, REMAT_MODE_EVAL, producedGen, pending);
     rematBeginEval(s, &chain, f->lt, f->x);
     rematStep_t st;
     for (size_t k = 0; k < f->n; k++) {
@@ -334,9 +340,10 @@ void testOperandsAreReadFromTheStepOnHar(void) {
     rematScheduler_t s = initArena(&f, &g_liveness);
     const rematWireTable_t *t = s.wires;
     uint32_t producedGen[rematCheckNumWires(&s)];
+    uint16_t pending[rematCheckNumWires(&s)];
     rematCheck_t c;
     const model_t chain = MODEL_CHAIN(f.model, f.n);
-    rematCheckInit(&c, &s, &chain, f.lt, REMAT_MODE_TRAIN, producedGen);
+    rematCheckInit(&c, &s, &chain, REMAT_MODE_TRAIN, producedGen, pending);
     rematBegin(&s, &chain, defaultLossConfig(f.lt), f.x);
     rematOperands_t at[25];
     rematStep_t st;
@@ -385,9 +392,10 @@ typedef void (*tamperFn_t)(rematCheck_t *c, rematScheduler_t *s);
 static void offerStep(fixture_t *f, rematScheduler_t *s, size_t k, const rematStep_t *forged,
                       tamperFn_t tamper) {
     uint32_t producedGen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
     rematCheck_t c;
     const model_t chain = MODEL_CHAIN(f->model, f->n);
-    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_TRAIN, producedGen);
+    rematCheckInit(&c, s, &chain, REMAT_MODE_TRAIN, producedGen, pending);
     rematBegin(s, &chain, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     rematOperands_t op;
@@ -505,9 +513,10 @@ void testStepExitsOnOperandCountsThatDifferFromTheKind(void) {
  * checker that accepts every step simply returns and the child exits 0. */
 static void driveCall(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
     rematCheck_t c;
     const model_t chain = MODEL_CHAIN(f->model, f->n);
-    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_TRAIN, producedGen);
+    rematCheckInit(&c, s, &chain, REMAT_MODE_TRAIN, producedGen, pending);
     rematBegin(s, &chain, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     rematOperands_t op;
@@ -705,16 +714,18 @@ void testInitSetsTheStepBudgetFromTheModelSize(void) {
     buildHarModel(&f);
     rematScheduler_t s = initHeap(&f, NULL);
     uint32_t producedGen[rematCheckNumWires(&s)];
+    uint16_t pending[rematCheckNumWires(&s)];
     rematCheck_t c;
     const model_t har = MODEL_CHAIN(f.model, f.n);
-    rematCheckInit(&c, &s, &har, f.lt, REMAT_MODE_TRAIN, producedGen);
+    rematCheckInit(&c, &s, &har, REMAT_MODE_TRAIN, producedGen, pending);
     TEST_ASSERT_EQUAL_size_t(104, c.maxSteps);
     freeFixture(&f, &s);
     buildMlp3Model(&f);
     s = initHeap(&f, NULL);
     uint32_t producedGenMlp3[rematCheckNumWires(&s)];
+    uint16_t pendingMlp3[rematCheckNumWires(&s)];
     const model_t mlp3 = MODEL_CHAIN(f.model, f.n);
-    rematCheckInit(&c, &s, &mlp3, f.lt, REMAT_MODE_TRAIN, producedGenMlp3);
+    rematCheckInit(&c, &s, &mlp3, REMAT_MODE_TRAIN, producedGenMlp3, pendingMlp3);
     TEST_ASSERT_EQUAL_size_t(14, c.maxSteps);
     freeFixture(&f, &s);
 }
@@ -724,9 +735,10 @@ void testInitSetsTheStepBudgetFromTheModelSize(void) {
  * table, never from the model passed in. */
 static void initWithAnOverflowingBudget(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
     rematCheck_t c;
     const model_t chain = MODEL_CHAIN(f->model, SIZE_MAX / 2u);
-    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_TRAIN, producedGen);
+    rematCheckInit(&c, s, &chain, REMAT_MODE_TRAIN, producedGen, pending);
 }
 
 void testInitExitsOnAStepBudgetThatOverflows(void) {
@@ -819,9 +831,10 @@ void testStepExitsOnAReforwardPastTheModel(void) {
  * end, so only the step budget stops it. */
 static void reforwardUntilTheBudgetStops(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
     rematCheck_t c;
     const model_t chain = MODEL_CHAIN(f->model, f->n);
-    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_TRAIN, producedGen);
+    rematCheckInit(&c, s, &chain, REMAT_MODE_TRAIN, producedGen, pending);
     rematBegin(s, &chain, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     rematOperands_t op;
@@ -850,9 +863,10 @@ void testStepExitsOnAReforwardBeyondTheStepBudget(void) {
 /* An EVAL call handed `forged` at step k. */
 static void evalOfferStep(fixture_t *f, rematScheduler_t *s, size_t k, const rematStep_t *forged) {
     uint32_t producedGen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
     rematCheck_t c;
     const model_t chain = MODEL_CHAIN(f->model, f->n);
-    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_EVAL, producedGen);
+    rematCheckInit(&c, s, &chain, REMAT_MODE_EVAL, producedGen, pending);
     rematBeginEval(s, &chain, f->lt, f->x);
     rematStep_t st;
     rematOperands_t op;
@@ -880,9 +894,10 @@ void testEvalRejectsAReforwardAfterTheLossForward(void) {
  * FORWARD as a forward after the loss. */
 static void twoCallsOnOneChecker(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
     rematCheck_t c;
     const model_t chain = MODEL_CHAIN(f->model, f->n);
-    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_TRAIN, producedGen);
+    rematCheckInit(&c, s, &chain, REMAT_MODE_TRAIN, producedGen, pending);
     for (int call = 0; call < 2; call++) {
         rematBegin(s, &chain, defaultLossConfig(f->lt), f->x);
         rematStep_t st;
@@ -1232,9 +1247,10 @@ void testStepReadsTheMarksFromThePlan(void) {
  * finished. */
 static void finishAfter(fixture_t *f, rematScheduler_t *s, size_t k) {
     uint32_t producedGen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
     rematCheck_t c;
     const model_t chain = MODEL_CHAIN(f->model, f->n);
-    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_TRAIN, producedGen);
+    rematCheckInit(&c, s, &chain, REMAT_MODE_TRAIN, producedGen, pending);
     rematBegin(s, &chain, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     rematOperands_t op;
@@ -1391,9 +1407,10 @@ void testReleasedExitsWhenARowLeavesAWireResident(void) {
 /* A driver that checks the release before rematEnd. */
 static void releasedBeforeEnd(fixture_t *f, rematScheduler_t *s) {
     uint32_t producedGen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
     rematCheck_t c;
     const model_t chain = MODEL_CHAIN(f->model, f->n);
-    rematCheckInit(&c, s, &chain, f->lt, REMAT_MODE_TRAIN, producedGen);
+    rematCheckInit(&c, s, &chain, REMAT_MODE_TRAIN, producedGen, pending);
     rematBegin(s, &chain, defaultLossConfig(f->lt), f->x);
     rematStep_t st;
     rematOperands_t op;
@@ -1416,6 +1433,241 @@ void testReleasedExitsWhileTheInputIsStillBound(void) {
     freeFixture(&f, &s);
 }
 
+/* ---- DAGs: gradient contributions, SUM and ADD(y, y) ---- */
+
+/* A HEAP STORE_ALL scheduler on a DAG fixture, all in one struct: the model
+ * points into the fixture, so build it in place and never copy it. */
+typedef struct dagRun {
+    dagFixture_t f;
+    dagTensor_t xs;
+    tensor_t *x;
+    rematScheduler_t s;
+} dagRun_t;
+
+static void dagRunInit(dagRun_t *r, void (*build)(dagFixture_t *)) {
+    build(&r->f);
+    r->x = dagInput(&r->xs, 1.0f, 2.0f);
+    TEST_ASSERT_TRUE(rematHeapInit(&r->s, &r->f.m, defaultLossConfig(MSE), r->x, NULL));
+}
+
+static void dagRunFree(dagRun_t *r) {
+    rematSchedulerDeinit(&r->s);
+    dagFree(&r->f);
+}
+
+static void buildF3(dagFixture_t *f) {
+    dagBuildF3(f, false);
+}
+
+/* F3: step 7 is BACKWARD(2); its slice reads dy and two inputs, then writes
+ * {8, WRITE} and {7, ACC}. */
+static rematOperand_t *f3Step7Write(dagRun_t *r, size_t i) {
+    const rematProgram_t *p = &r->s.plan->train;
+    return &p->operands[p->nodeOps[2].backward + 3u + i];
+}
+
+/* The driver loop with nothing executed; `leftOver` != REMAT_NONE puts one
+ * contribution back on that wire before the finish. Exits 0 on an accepted call. */
+static void walkTrain(dagRun_t *r, uint16_t leftOver) {
+    rematScheduler_t *s = &r->s;
+    uint32_t gen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
+    rematCheck_t c;
+    rematCheckInit(&c, s, &r->f.m, REMAT_MODE_TRAIN, gen, pending);
+    rematBegin(s, &r->f.m, defaultLossConfig(MSE), r->x);
+    for (rematStep_t st; rematNext(s, &st);) {
+        rematOperands_t op;
+        rematCheckStep(&c, &st, &op);
+        rematDone(s, &st);
+    }
+    if (leftOver != REMAT_NONE) {
+        pending[leftOver] = 1u;
+    }
+    rematCheckFinish(&c);
+    rematEnd(s);
+    rematCheckReleased(&c);
+}
+
+/* F3 accumulates natively (ADD) and through a PART and its SUM; Y's ADD(b1, b1)
+ * reads ACT 1 twice and writes {4, WRITE} then {4, ACC} in one step. */
+void testCheckWalksF3AndY(void) {
+    void (*builds[2])(dagFixture_t *) = {buildF3, dagBuildY};
+    for (size_t k = 0; k < 2u; k++) {
+        dagRun_t r;
+        dagRunInit(&r, builds[k]);
+        walkTrain(&r, REMAT_NONE);
+        walkTrain(&r, REMAT_NONE);
+        dagRunFree(&r);
+    }
+}
+
+/* P2: b1 receives B4's opening WRITE and two PARTs (from the Linear B2 and the
+ * ReLU B1), each summed in by the step after it. */
+void testCheckWalksTwoPartsIntoOneGrad(void) {
+    dagRun_t r;
+    dagRunInit(&r, dagBuildP2);
+    const rematWireTable_t *t = r.s.wires;
+    uint32_t gen[rematCheckNumWires(&r.s)];
+    uint16_t pending[rematCheckNumWires(&r.s)];
+    rematCheck_t c;
+    rematCheckInit(&c, &r.s, &r.f.m, REMAT_MODE_TRAIN, gen, pending);
+    TEST_ASSERT_EQUAL_UINT16(3, pending[t->gradIdOf[1]]);
+    size_t parts = 0;
+    for (size_t w = 0; w < t->numWires; w++) {
+        if (t->wires[w].kind == REMAT_WIRE_PART) {
+            TEST_ASSERT_EQUAL_UINT16(1, pending[w]);
+            parts++;
+        }
+    }
+    TEST_ASSERT_EQUAL_size_t(2, parts);
+    walkTrain(&r, REMAT_NONE);
+    dagRunFree(&r);
+}
+
+void testCheckRejectsAGradReadWithAContributionMissing(void) {
+    dagRun_t r;
+    dagRunInit(&r, buildF3);
+    f3Step7Write(&r, 1)->wire = REMAT_NONE;
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "step #10 BACKWARD(layer 0) violates 'operand incomplete: GRAD 1 "
+                             "(wire 7), 1 contributions pending'",
+                             walkTrain(&r, REMAT_NONE));
+    dagRunFree(&r);
+}
+
+void testCheckRejectsASecondWriteIntoAnOpenGrad(void) {
+    dagRun_t r;
+    dagRunInit(&r, buildF3);
+    f3Step7Write(&r, 1)->mode = OP_MODE_WRITE;
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "step #7 BACKWARD(layer 2) violates 'operand reopened: GRAD 1 (wire "
+                             "7) already holds a contribution'",
+                             walkTrain(&r, REMAT_NONE));
+    dagRunFree(&r);
+}
+
+/* An ACC adds into bytes a WRITE must already hold under the current binding:
+ * BACKWARD(2)'s slots turned into {8, ACC} then {8, WRITE}, so the ACC comes
+ * before the WRITE that opens GRAD 8 (buffer 2). */
+void testCheckRejectsAnAccBeforeItsGradIsOpened(void) {
+    dagRun_t r;
+    dagRunInit(&r, buildF3);
+    rematOperand_t *w = f3Step7Write(&r, 0);
+    w[0] = (rematOperand_t){.wire = 8, .mode = OP_MODE_ACC};
+    w[1] = (rematOperand_t){.wire = 8, .mode = OP_MODE_WRITE};
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "step #7 BACKWARD(layer 2) violates 'operand never produced: GRAD 2'",
+                             walkTrain(&r, REMAT_NONE));
+    dagRunFree(&r);
+}
+
+/* BACKWARD(2)'s ACC retargeted from GRAD 7 to GRAD 8, which the slot before
+ * it just opened with the one contribution GRAD 8 expects. */
+void testCheckRejectsAContributionBeyondTheExpected(void) {
+    dagRun_t r;
+    dagRunInit(&r, buildF3);
+    f3Step7Write(&r, 1)->wire = 8;
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "step #7 BACKWARD(layer 2) violates 'operand overfilled: GRAD 2 "
+                             "(wire 8) expects no further contribution'",
+                             walkTrain(&r, REMAT_NONE));
+    dagRunFree(&r);
+}
+
+/* Every GRAD is read by a BACKWARD, which stops a missing contribution first;
+ * the finish is the backstop for one that no step reads. */
+void testFinishExitsOnAContributionStillPending(void) {
+    dagRun_t r;
+    dagRunInit(&r, buildF3);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "remat[heap]: stream of 11 steps violates 'incomplete stream: "
+                             "GRAD 1 (wire 7), 1 contributions pending'",
+                             walkTrain(&r, 7));
+    dagRunFree(&r);
+}
+
+/* Walks F3's first k steps, then offers `forged`. */
+static void offerDagStep(dagRun_t *r, size_t k, rematStep_t forged) {
+    rematScheduler_t *s = &r->s;
+    uint32_t gen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
+    rematCheck_t c;
+    rematCheckInit(&c, s, &r->f.m, REMAT_MODE_TRAIN, gen, pending);
+    rematBegin(s, &r->f.m, defaultLossConfig(MSE), r->x);
+    rematStep_t st;
+    rematOperands_t op;
+    for (size_t i = 0; i < k; i++) {
+        TEST_ASSERT_TRUE(rematNext(s, &st));
+        rematCheckStep(&c, &st, &op);
+        rematDone(s, &st);
+    }
+    rematCheckStep(&c, &forged, &op);
+}
+
+/* A SUM runs only right after its own node's BACKWARD, and only for a node
+ * whose BACKWARD wrote a PART: after BACKWARD(2) (step 7), neither SUM(1) nor
+ * SUM(2) -- ADD accumulates natively -- is admitted. */
+void testSumRunsOnlyRightAfterItsNodesPartWritingBackward(void) {
+    dagRun_t r;
+    dagRunInit(&r, buildF3);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1,
+        "step #8 SUM(layer 1) violates 'sum order: not right after its node's "
+        "BACKWARD writing a PART'",
+        offerDagStep(&r, 8, (rematStep_t){.kind = REMAT_STEP_SUM, .layer = 1}));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1,
+        "step #8 SUM(layer 2) violates 'sum order: not right after its node's "
+        "BACKWARD writing a PART'",
+        offerDagStep(&r, 8, (rematStep_t){.kind = REMAT_STEP_SUM, .layer = 2}));
+    dagRunFree(&r);
+}
+
+/* The driver adds op.in[0] into op.out: F3's SUM(1) (step 9) hands over PART 9
+ * and GRAD 7, with no node arity. */
+void testSumHandsThePartInAndTheGradOut(void) {
+    dagRun_t r;
+    dagRunInit(&r, buildF3);
+    rematScheduler_t *s = &r.s;
+    uint32_t gen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
+    rematCheck_t c;
+    rematCheckInit(&c, s, &r.f.m, REMAT_MODE_TRAIN, gen, pending);
+    rematBegin(s, &r.f.m, defaultLossConfig(MSE), r.x);
+    rematStep_t st;
+    rematOperands_t op;
+    for (size_t i = 0; i < 10u; i++) {
+        TEST_ASSERT_TRUE(rematNext(s, &st));
+        rematCheckStep(&c, &st, &op);
+        if (i < 9u) {
+            rematDone(s, &st);
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_SUM, st.kind);
+    TEST_ASSERT_EQUAL_UINT8(0, op.k);
+    TEST_ASSERT_EQUAL_PTR(rematWireHdr(s->wires, 9), op.in[0]);
+    TEST_ASSERT_EQUAL_PTR(rematWireHdr(s->wires, 7), op.out);
+    TEST_ASSERT_NULL(op.dy);
+    rematDone(s, &st);
+    TEST_ASSERT_TRUE(rematNext(s, &st));
+    rematCheckStep(&c, &st, &op);
+    rematDone(s, &st);
+    TEST_ASSERT_FALSE(rematNext(s, &st));
+    rematCheckFinish(&c);
+    rematEnd(s);
+    dagRunFree(&r);
+}
+
+void testEvalRejectsASum(void) {
+    fixture_t f;
+    buildHarModel(&f);
+    rematScheduler_t s = initHeap(&f, NULL);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "remat[heap]: step #0 SUM(layer 1) violates 'step not allowed in eval'",
+        evalCheckerGets(&f, &s, (rematStep_t){.kind = REMAT_STEP_SUM, .layer = 1}));
+    freeFixture(&f, &s);
+}
+
 #ifdef ODT_MEM_PROFILE
 /* Hard rule: the checker reserves nothing; its state is the caller's.
  * Measured around every checker call on HEAP, whose rows do reserve. */
@@ -1425,9 +1677,10 @@ void testCheckReservesNothing(void) {
     rematScheduler_t s = initHeap(&f, &g_liveness);
     size_t before = memProfileCurrentBytes();
     uint32_t producedGen[rematCheckNumWires(&s)];
+    uint16_t pending[rematCheckNumWires(&s)];
     rematCheck_t c;
     const model_t chain = MODEL_CHAIN(f.model, f.n);
-    rematCheckInit(&c, &s, &chain, f.lt, REMAT_MODE_TRAIN, producedGen);
+    rematCheckInit(&c, &s, &chain, REMAT_MODE_TRAIN, producedGen, pending);
     TEST_ASSERT_EQUAL_size_t(before, memProfileCurrentBytes());
     rematBegin(&s, &chain, defaultLossConfig(f.lt), f.x);
     rematStep_t st;
@@ -1521,6 +1774,16 @@ int main(void) {
     RUN_TEST(testFinishAcceptsAnAllFrozenStream);
     RUN_TEST(testReleasedExitsWhenARowLeavesAWireResident);
     RUN_TEST(testReleasedExitsWhileTheInputIsStillBound);
+    RUN_TEST(testCheckWalksF3AndY);
+    RUN_TEST(testCheckWalksTwoPartsIntoOneGrad);
+    RUN_TEST(testCheckRejectsAGradReadWithAContributionMissing);
+    RUN_TEST(testCheckRejectsASecondWriteIntoAnOpenGrad);
+    RUN_TEST(testCheckRejectsAnAccBeforeItsGradIsOpened);
+    RUN_TEST(testCheckRejectsAContributionBeyondTheExpected);
+    RUN_TEST(testFinishExitsOnAContributionStillPending);
+    RUN_TEST(testSumRunsOnlyRightAfterItsNodesPartWritingBackward);
+    RUN_TEST(testSumHandsThePartInAndTheGradOut);
+    RUN_TEST(testEvalRejectsASum);
 #ifdef ODT_MEM_PROFILE
     RUN_TEST(testCheckReservesNothing);
 #endif

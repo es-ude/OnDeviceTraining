@@ -32,7 +32,14 @@ add_elastic_ai_unit_test(
         Distributions
         RNG
         LayerExec
+        AddApi
+        AddLayer
+        ModelGraphApi
+        Model
+        OpTable
         odt_test_layer_builders
+        odt_test_death
+        odt_test_dag_fixtures
 )
 
 # Remat PR1a (#4): the RematPlan library (buffer table + static plan). Fixture
@@ -129,6 +136,11 @@ add_elastic_ai_unit_test(
         CommonLayerLibs
         Conv1dApi
         LinearApi
+        AddApi
+        AddLayer
+        ModelGraphApi
+        Model
+        OpTable
         ReluApi
         SoftmaxApi
         FlattenApi
@@ -151,6 +163,7 @@ add_elastic_ai_unit_test(
         Distributions
         RNG
         odt_test_death
+        odt_test_dag_fixtures
 )
 
 # Remat PR2 (#4): every scheduler row and plan against an explicit HEAP +

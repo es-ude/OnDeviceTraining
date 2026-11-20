@@ -13,6 +13,7 @@
 #include "Conv1d.h"
 #include "Conv1dApi.h"
 #include "Conv1dTransposed.h"
+#include "DagFixtures.h"
 #include "DeathTest.h"
 #include "Deserialize.h"
 #include "FlattenApi.h"
@@ -1516,24 +1517,77 @@ void testBindRunsSampleBOnATableBuiltOnSampleA(void) {
 
 /* The bind's per-wire derivation scratch and the n + 1 ACT shapes live inside
  * the table block. LP64 layout arithmetic (not a scan-model pin): table struct
- * 176 (hasBackward packs beside the 4-byte lossType) + 24 records x 40 = 1136;
- * gradIdOf 26, layerType/frozen 24, runsBackward 12, needsGrad 13, readsInput
- * 12 = 1223, rounded to 2 for dxWire 24 x 2 = 1272, dxMode 24 = 1296 (already
- * a multiple of 8), + the input key 48 = 1344; the 13 ACT shapes 13 x (24 +
- * 2 x 3 x 8) = 936; the bind scratch 960; the headers 2680. Total 5920 =
- * 1344 + 936 + 960 + 2680. Every host preset is LP64. */
+ * 200 (hasBackward and isChain pack beside the 4-byte lossType; the wiring's
+ * two pointers and numEdges add 24) + 24 records x 40 = 1160; gradIdOf 26,
+ * layerType/frozen 24, runsBackward 12, needsGrad 13, readsInput 12 = 1247,
+ * rounded to 2 for dxWire 24 x 2 = 1296, dxMode 24 = 1320 (already a multiple
+ * of 8); a chain places no wiring copy; + the input key 48 = 1368; the 13 ACT
+ * shapes 13 x (24 + 2 x 3 x 8) = 936; the bind scratch 960; the headers 2680.
+ * Total 5944 = 1368 + 936 + 960 + 2680. Every host preset is LP64. */
 void testHarSlabHoldsTheBindScratch(void) {
     layer_t *model[HAR_N];
     buildHar(model, false);
     inputLike_t in;
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
-    TEST_ASSERT_EQUAL_size_t(5920, t->slabBytes);
+    TEST_ASSERT_EQUAL_size_t(5944, t->slabBytes);
     const uint8_t *scratch = (const uint8_t *)t->bindScratch;
     TEST_ASSERT_TRUE(scratch >= (const uint8_t *)(t->inputOrder + t->inputRank));
     TEST_ASSERT_TRUE(scratch + t->numWires * sizeof(rematWireFact_t) <=
                      (const uint8_t *)t->wires[1].hdr);
     ASSERT_ALIGNED(t->bindScratch, rematWireFact_t);
     rematWireTableFree(t);
+    freeModel(model, HAR_N);
+}
+
+/* F3's CSR: n0 reads b0, n1 b1, n2 (b2, b1), n3 (b3, b1). The model's arrays belong to its
+ * builder (or a MODEL_CHAIN temporary), so the table must own a copy. */
+void testTableCopiesTheWiringOfADag(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    dagTensor_t xs;
+    rematWireTable_t *t;
+    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2)));
+    TEST_ASSERT_EQUAL_UINT8(0, t->isChain);
+    TEST_ASSERT_EQUAL_size_t(6, t->numEdges);
+    TEST_ASSERT_TRUE(t->inputStart != f.m.inputStart);
+    TEST_ASSERT_EQUAL_UINT16_ARRAY(((uint16_t[]){0, 1, 2, 4, 6}), t->inputStart, 5);
+    TEST_ASSERT_EQUAL_UINT16_ARRAY(((uint16_t[]){0, 1, 2, 1, 3, 1}), t->inputIds, 6);
+    rematWireTableFree(t);
+    dagFree(&f);
+}
+
+/* A chain keeps no wiring, whether it comes as MODEL_CHAIN or as an explicit CSR that wires
+ * every node to the buffer before it: same flags, same slab bytes. */
+void testTableOfAChainKeepsNoWiring(void) {
+    layer_t *model[HAR_N];
+    buildHar(model, false);
+    inputLike_t in;
+    tensor_t *x = makeHarInput(&in);
+    rematWireTable_t *chain = initTable(model, HAR_N, CROSS_ENTROPY, x);
+
+    layer_t *nodes[HAR_N];
+    uint16_t start[HAR_N + 1];
+    uint16_t ids[HAR_N];
+    graphBuilder_t g;
+    graphBegin(&g, nodes, start, ids, HAR_N, HAR_N);
+    uint16_t b = GRAPH_INPUT;
+    for (size_t j = 0; j < HAR_N; j++) {
+        b = graphNode(&g, model[j], b);
+    }
+    model_t built = graphFinish(&g);
+    rematWireTable_t *csr = NULL;
+    TEST_ASSERT_TRUE(rematWireTableInit(&csr, &built, defaultLossConfig(CROSS_ENTROPY), x));
+
+    const rematWireTable_t *tables[2] = {chain, csr};
+    for (size_t k = 0; k < 2u; k++) {
+        TEST_ASSERT_EQUAL_UINT8(1, tables[k]->isChain);
+        TEST_ASSERT_NULL(tables[k]->inputStart);
+        TEST_ASSERT_NULL(tables[k]->inputIds);
+        TEST_ASSERT_EQUAL_size_t(0, tables[k]->numEdges);
+    }
+    TEST_ASSERT_EQUAL_size_t(chain->slabBytes, csr->slabBytes);
+    rematWireTableFree(csr);
+    rematWireTableFree(chain);
     freeModel(model, HAR_N);
 }
 
@@ -2429,6 +2483,36 @@ void testEvalProgramIsTheTrainPrefixOperandsIncluded(void) {
         rematWireTableFree(t);
         freeModel(model, HAR_N);
     }
+}
+
+/* F3 EVAL: a merge node's FORWARD reads each of its input buffers in CSR order, and the shared
+ * b1 is read by three FORWARDs. Derived directly: the chain-form grammar of a plan build
+ * rejects a DAG. */
+void testEvalSlicesOfADagReadTheWiring(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    dagTensor_t xs;
+    rematWireTable_t *t;
+    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2)));
+    rematDeriveSize_t size = rematDeriveEvalSize(t);
+    TEST_ASSERT_EQUAL_size_t(5, size.numSteps);
+    TEST_ASSERT_EQUAL_size_t(11, size.numOperands);
+    rematStep_t steps[5];
+    rematOperand_t operands[11];
+    rematNodeOps_t nodeOps[5];
+    rematProgram_t p = {
+        .numSteps = 5, .steps = steps, .numOperands = 11, .operands = operands, .nodeOps = nodeOps};
+    rematDeriveEval(t, &p);
+    TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_FORWARD, steps[2].kind);
+    TEST_ASSERT_EQUAL_UINT16(2, steps[2].layer);
+    assertSlice(&p, &steps[2], 2, 1,
+                (const rematOperand_t[]){{2, OP_MODE_READ}, {1, OP_MODE_READ}, {3, OP_MODE_WRITE}});
+    TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_FORWARD, steps[3].kind);
+    TEST_ASSERT_EQUAL_UINT16(3, steps[3].layer);
+    assertSlice(&p, &steps[3], 2, 1,
+                (const rematOperand_t[]){{3, OP_MODE_READ}, {1, OP_MODE_READ}, {4, OP_MODE_WRITE}});
+    rematWireTableFree(t);
+    dagFree(&f);
 }
 
 /* A REFORWARD shares its FORWARD's slice; the pool does not depend on the policy. */
@@ -5130,6 +5214,8 @@ int main(void) {
     RUN_TEST(testBindFollowsTheLivePackedInputBytes);
     RUN_TEST(testBindRunsSampleBOnATableBuiltOnSampleA);
     RUN_TEST(testHarSlabHoldsTheBindScratch);
+    RUN_TEST(testTableCopiesTheWiringOfADag);
+    RUN_TEST(testTableOfAChainKeepsNoWiring);
     RUN_TEST(testUnbindClearsTheBorrowedInputOnly);
 #ifdef ODT_TEST_ASAN
     RUN_TEST(testAsanDeathCallbackExitsWithADistinctCode);
@@ -5179,6 +5265,7 @@ int main(void) {
     RUN_TEST(testPlanBlockHoldsStepsRangesAndEndOrder);
     RUN_TEST(testHarTrainOperandsAreTheDerivedSlices);
     RUN_TEST(testEvalProgramIsTheTrainPrefixOperandsIncluded);
+    RUN_TEST(testEvalSlicesOfADagReadTheWiring);
     RUN_TEST(testAReforwardCarriesItsForwardsSlice);
     RUN_TEST(testTheDeriverGivesARejectedSequenceStepAnEmptySlice);
     RUN_TEST(testPlanProgramOfTrainIsTheTrainProgram);

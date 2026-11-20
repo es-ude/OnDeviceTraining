@@ -45,6 +45,11 @@ add_elastic_ai_unit_test(
         CommonLayerLibs
         Conv1dApi
         LinearApi
+        AddApi
+        AddLayer
+        ModelGraphApi
+        Model
+        OpTable
         ReluApi
         SoftmaxApi
         FlattenApi
@@ -69,6 +74,7 @@ add_elastic_ai_unit_test(
         Serialize
         Deserialize
         odt_test_death
+        odt_test_dag_fixtures
 )
 target_include_directories(UnitTestRematPlan PRIVATE
         ${PROJECT_SOURCE_DIR}/src/userApi/training_loop/remat)

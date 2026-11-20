@@ -416,7 +416,8 @@ decisions and those with nothing in force yet are left out.
 - **remat D61** Each step carries an explicit operand slice: its reads, then
   its writes, each a wire id and a mode (READ, META, WRITE). One deriver
   (`RematDerive.c`) writes every slice from the table's flags
-  (`runsBackward`, `needsGrad`, `readsInput`, the dx wires); the grammar
+  (`runsBackward`, `needsGrad`, `readsInput`, the dx wires) and its own copy
+  of the model wiring (none for a chain); the grammar
   re-derives each step's slice from the model on its own and compares; the
   runtime validator looks each step's slice up and the driver executes it.
   Ranges come from one scan over the slices, for every policy; nothing

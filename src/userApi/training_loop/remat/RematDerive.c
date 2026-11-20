@@ -21,6 +21,10 @@ static void setSlot(uint16_t *dxWire, uint8_t *dxMode, size_t slot, uint16_t wir
     }
 }
 
+bool rematHasBackward(size_t n, lossFuncType_t lt, const uint8_t *needsGrad) {
+    return needsGrad[lt == CROSS_ENTROPY ? n - 1u : n] != 0;
+}
+
 /* The seed GRAD n: under CrossEntropy with a BFP-declaring head
  * (crossEntropyHeadDeclaresBfp) it IS the last Softmax's dx wire (the combined gradient replaces
  * its backward), so its template is the Softmax's propLossQ, type-derived. Every other seed -- MSE,
@@ -32,8 +36,7 @@ size_t rematDeriveGradWires(const model_t *m, lossFuncType_t lt, const uint8_t *
                             uint8_t *dxMode) {
     size_t n = m->numLayers;
     size_t count = 0;
-    bool hasBackward = needsGrad[lt == CROSS_ENTROPY ? n - 1u : n] != 0;
-    if (hasBackward) {
+    if (rematHasBackward(n, lt, needsGrad)) {
         if (facts != NULL) {
             bool seedTakesPropLossQ =
                 lt == CROSS_ENTROPY && crossEntropyHeadDeclaresBfp(m->layers[n - 1u]);
@@ -71,12 +74,16 @@ size_t rematDeriveGradWires(const model_t *m, lossFuncType_t lt, const uint8_t *
     return count;
 }
 
-/* Node j's input buffers, which are its input ACT wires. The table holds no wiring yet, so every
- * node of a model it accepts is a chain node that reads buffer j. */
-static uint8_t nodeInputs(const rematWireTable_t *t, size_t j, uint16_t ids[MODEL_MAX_ARITY]) {
-    (void)t;
-    ids[0] = (uint16_t)j;
-    return 1u;
+uint8_t rematNodeInputs(const rematWireTable_t *t, size_t j, uint16_t ids[MODEL_MAX_ARITY]) {
+    if (t->isChain) {
+        ids[0] = (uint16_t)j;
+        return 1u;
+    }
+    uint8_t k = (uint8_t)(t->inputStart[j + 1u] - t->inputStart[j]);
+    for (uint8_t i = 0; i < k; i++) {
+        ids[i] = t->inputIds[t->inputStart[j] + i];
+    }
+    return k;
 }
 
 /* The pool writer's cursor; with ops == NULL it only counts. It also counts what the slices it
@@ -132,7 +139,7 @@ static void writeForwardSlice(poolCursor_t *c, size_t j) {
         return;
     }
     uint16_t ids[MODEL_MAX_ARITY];
-    uint8_t k = nodeInputs(t, j, ids);
+    uint8_t k = rematNodeInputs(t, j, ids);
     for (uint8_t i = 0; i < k; i++) {
         putRead(c, ids[i], OP_MODE_READ);
     }
@@ -153,7 +160,7 @@ static void writeBackwardSlice(poolCursor_t *c, size_t j) {
         return;
     }
     uint16_t ids[MODEL_MAX_ARITY];
-    uint8_t k = nodeInputs(t, j, ids);
+    uint8_t k = rematNodeInputs(t, j, ids);
     putRead(c, t->gradIdOf[j + 1u], OP_MODE_READ);
     for (uint8_t i = 0; i < k; i++) {
         putRead(c, ids[i], t->readsInput[j] ? OP_MODE_READ : OP_MODE_META);

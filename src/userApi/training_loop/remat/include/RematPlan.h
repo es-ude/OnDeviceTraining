@@ -86,6 +86,7 @@ typedef struct rematWireTable {
     size_t modelSize;
     lossFuncType_t lossType;
     bool hasBackward;
+    uint8_t isChain; /* modelIsChain of the built model: then the wiring below is NULL and 0 */
     size_t numWires;
     rematWire_t *wires;    /* ACT j at id j (0..n), then the GRAD wires in production order */
     uint16_t *gradIdOf;    /* [n+1]: the GRAD holding buffer b's gradient, else REMAT_NONE; under
@@ -98,6 +99,11 @@ typedef struct rematWireTable {
     uint16_t *dxWire; /* [n * MODEL_MAX_ARITY]: the wire node j's BACKWARD writes for input slot i,
                          REMAT_NONE = no dx (rematDeriveGradWires) */
     uint8_t *dxMode;  /* [n * MODEL_MAX_ARITY]: opMode_t of that slot; READ when nothing runs */
+    /* The table's own copy of the model's CSR (the model's arrays may be a temporary): node j
+     * reads inputIds[inputStart[j] .. inputStart[j+1]) */
+    uint16_t *inputStart; /* [n + 1] */
+    uint16_t *inputIds;   /* [numEdges] */
+    size_t numEdges;
     size_t inputRank; /* ACT 0 key: rank, dims, order, dtype */
     size_t *inputDims;
     size_t *inputOrder;

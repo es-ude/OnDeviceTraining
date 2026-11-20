@@ -8,6 +8,15 @@
 
 /* The program generators, private to the RematPlan library. */
 
+/* Does a backward run at all: the loss input's gradient (under CROSS_ENTROPY, the Softmax input's)
+ * is needed. needsGrad is modelGradFlags' [n + 1] output. The derivation's rule only; the grammar
+ * keeps its own. */
+bool rematHasBackward(size_t n, lossFuncType_t lt, const uint8_t *needsGrad);
+
+/* Node j's input buffers, which are its input ACT wires, read from the table's own wiring:
+ * writes ids[0..k) and returns k (a chain: k = 1, ids[0] = j). */
+uint8_t rematNodeInputs(const rematWireTable_t *t, size_t j, uint16_t ids[MODEL_MAX_ARITY]);
+
 /* The one owner of the gradient-wire decision, made once at table init (and repeated at every
  * bind from the same key, so it gives the same values). Numbers the seed (only when a backward
  * runs), then, walking the runsBackward nodes in descending order and each node's inputs in input

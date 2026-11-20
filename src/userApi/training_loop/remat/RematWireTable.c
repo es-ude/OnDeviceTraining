@@ -171,13 +171,14 @@ static void deriveFacts(rematWireFact_t *facts, size_t numWires, const model_t *
 /* Once per init, on the templates, after gradIdOf is filled: a scale-transparent layer copies the
  * codes of the wire it reads into the wire it writes. Forward, node j reads ACT in_0(j) and writes
  * ACT j+1. Backward, a running node reads its output's gradient GRAD gradIdOf[j+1] (the seed under
- * CROSS_ENTROPY too) and writes its slot-0 dx wire. */
+ * CROSS_ENTROPY too) and writes its slot-0 dx wire. Reads the wiring from the table's copy, so
+ * that copy must be filled first. */
 static void requireTransparentCopyWidths(const rematWireFact_t *facts, const model_t *m,
                                          const rematWireTable_t *t) {
     size_t n = m->numLayers;
     for (size_t j = 0; j < n; j++) {
         uint16_t ids[MODEL_MAX_ARITY];
-        (void)modelNodeInputs(m, j, ids);
+        (void)rematNodeInputs(t, j, ids);
         requireTransparentCopyWidth(m->layers[j], j, "forward", facts[ids[0]].tmpl,
                                     facts[j + 1u].tmpl);
     }
@@ -238,8 +239,10 @@ static shape_t *placeShapes(slabLayout_t *layout, size_t count, size_t maxRank) 
     return shapes;
 }
 
+/* isChain: no wiring copy, zero bytes. */
 static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t *facts,
-                                     size_t numWires, size_t n, size_t inputRank, size_t maxRank) {
+                                     size_t numWires, size_t n, bool isChain, size_t numEdges,
+                                     size_t inputRank, size_t maxRank) {
     rematWireTable_t *t = SLAB_PLACE(layout, rematWireTable_t, 1u, NULL);
     rematWire_t *wires = SLAB_PLACE(layout, rematWire_t, numWires, NULL);
     uint16_t *gradIdOf = SLAB_PLACE(layout, uint16_t, n + 1u, NULL);
@@ -251,6 +254,12 @@ static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t
     uint8_t *readsInput = SLAB_PLACE(layout, uint8_t, n, NULL);
     uint16_t *dxWire = SLAB_PLACE(layout, uint16_t, slots, NULL);
     uint8_t *dxMode = SLAB_PLACE(layout, uint8_t, slots, NULL);
+    uint16_t *inputStart = NULL;
+    uint16_t *inputIds = NULL;
+    if (!isChain) {
+        inputStart = SLAB_PLACE(layout, uint16_t, n + 1u, NULL);
+        inputIds = SLAB_PLACE(layout, uint16_t, numEdges, NULL);
+    }
     size_t *inputDims = SLAB_PLACE(layout, size_t, inputRank, NULL);
     size_t *inputOrder = SLAB_PLACE(layout, size_t, inputRank, NULL);
     /* The ACT shapes and the bind's derivation scratch: after the fixed-size key,
@@ -268,6 +277,8 @@ static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t
         t->readsInput = readsInput;
         t->dxWire = dxWire;
         t->dxMode = dxMode;
+        t->inputStart = inputStart;
+        t->inputIds = inputIds;
         t->inputDims = inputDims;
         t->inputOrder = inputOrder;
         t->actShapes = actShapes;
@@ -339,7 +350,9 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
     if (loss.funcType == CROSS_ENTROPY && needsGrad[n]) {
         requireCrossEntropyHead(m->layers[n - 1u], "rematWireTableInit");
     }
-    bool hasBackward = needsGrad[loss.funcType == CROSS_ENTROPY ? n - 1u : n] != 0;
+    bool hasBackward = rematHasBackward(n, loss.funcType, needsGrad);
+    bool isChain = modelIsChain(m);
+    size_t numEdges = isChain ? 0u : m->inputStart[n];
     size_t numWires =
         addSize(addSize(n, 1u, NULL, "numWires"),
                 rematDeriveGradWires(m, loss.funcType, needsGrad, runsBackward, NULL, NULL, NULL),
@@ -402,7 +415,7 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
     }
 
     slabLayout_t sizing = {.base = NULL, .cursor = 0};
-    (void)layoutTable(&sizing, facts, numWires, n, inputRank, maxRank);
+    (void)layoutTable(&sizing, facts, numWires, n, isChain, numEdges, inputRank, maxRank);
     uint8_t *block = reserveMemory(sizing.cursor);
     if (block == NULL) {
         freeReservedMemory(shapeBlock);
@@ -411,7 +424,8 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
         return false;
     }
     slabLayout_t placing = {.base = block, .cursor = 0};
-    rematWireTable_t *t = layoutTable(&placing, facts, numWires, n, inputRank, maxRank);
+    rematWireTable_t *t =
+        layoutTable(&placing, facts, numWires, n, isChain, numEdges, inputRank, maxRank);
     modelShapePass(m, inputLike->shape, t->actShapes, maxRank);
 
     t->modelSize = n;
@@ -436,6 +450,12 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
     memcpy(t->runsBackward, runsBackward, n);
     memcpy(t->dxWire, dxWire, slots * sizeof(uint16_t));
     memcpy(t->dxMode, dxMode, slots);
+    t->isChain = isChain ? 1u : 0u;
+    t->numEdges = numEdges;
+    if (!isChain) {
+        memcpy(t->inputStart, m->inputStart, (n + 1u) * sizeof(uint16_t));
+        memcpy(t->inputIds, m->inputIds, numEdges * sizeof(uint16_t));
+    }
     requireTransparentCopyWidths(facts, m, t);
     t->inputRank = inputRank;
     size_t inputKeyBytes = mulSize(inputRank, sizeof(size_t), NULL, "input key bytes");

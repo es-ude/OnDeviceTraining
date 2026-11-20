@@ -228,6 +228,11 @@ target_link_libraries(UnitTestCalculateGradsDeaths PRIVATE
         CommonLayerLibs
         Conv1dApi
         LinearApi
+        AddApi
+        AddLayer
+        ModelGraphApi
+        Model
+        OpTable
         ReluApi
         SoftmaxApi
         FlattenApi
@@ -254,5 +259,6 @@ target_link_libraries(UnitTestCalculateGradsDeaths PRIVATE
         Distributions
         RNG
         odt_test_death
+        odt_test_dag_fixtures
 )
 __register_target_as_unit_test(UnitTestCalculateGradsDeaths)

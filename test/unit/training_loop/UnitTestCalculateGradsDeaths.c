@@ -7,6 +7,7 @@
 
 #include "AsanDeath.h"
 #include "CalculateGradsSequential.h"
+#include "DagFixtures.h"
 #include "DeathTest.h"
 #include "InferenceApi.h"
 #include "Layer.h"
@@ -600,6 +601,63 @@ void testAGroupingPastTheCapacityExitsIdenticallyOnBothRows(void) {
                                    "'numGroups': 4 groups exceed expCapacity 1");
 }
 
+/* ---- the DAG key: both rows built on F3 (DagFixtures.h), each call on a live model ---- */
+
+static void initDagRows(dagFixture_t *f, rematScheduler_t rows[2]) {
+    dagTensor_t xs;
+    TEST_ASSERT_TRUE(
+        rematArenaInit(&rows[0], &f->m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), NULL));
+    TEST_ASSERT_TRUE(
+        rematHeapInit(&rows[1], &f->m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), NULL));
+}
+
+/* Under the ASan callback, so a bind that writes from the live wiring before the key exits
+ * is an ASan report or a later death, never the named exit. */
+static void callWith(const model_t *live, rematScheduler_t *s) {
+    odtInstallAsanDeathExit();
+    dagTensor_t xs;
+    dagTensor_t ts;
+    freeTrainingStats(calculateGradsSequential(live, defaultLossConfig(MSE), REDUCTION_MEAN,
+                                               dagInput(&xs, 1.0f, 2.0f), dagInput(&ts, 3.0f, 8.0f),
+                                               &(trainingCall_t){.remat = s}));
+}
+
+static void assertDagCallExitsOnBothRows(rematScheduler_t rows[2], const model_t *live,
+                                         const char *violation) {
+    ASSERT_EXITS_WITH_OUTPUT(1, violation, callWith(live, &rows[0]));
+    ASSERT_EXITS_WITH_OUTPUT(1, violation, callWith(live, &rows[1]));
+}
+
+/* F3r has F3's layer types and edge count; only n3's second input moves from b1 to b2. */
+void testRewiringADagExitsAtBindOnBothRows(void) {
+    dagFixture_t f3;
+    dagFixture_t f3r;
+    dagBuildF3(&f3, false);
+    dagBuildF3r(&f3r);
+    rematScheduler_t rows[2];
+    initDagRows(&f3, rows);
+    assertDagCallExitsOnBothRows(
+        rows, &f3r.m, "rematWireTableBind: key mismatch on 'inputIds[5]': built 1, live 2");
+    rematSchedulerDeinit(&rows[0]);
+    rematSchedulerDeinit(&rows[1]);
+    dagFree(&f3r);
+    dagFree(&f3);
+}
+
+void testFreezingTheDagRootExitsOnRunsBackward(void) {
+    dagFixture_t f3;
+    dagBuildF3(&f3, false);
+    rematScheduler_t rows[2];
+    initDagRows(&f3, rows);
+    f3.layers[0]->config->linear->frozen = true;
+    assertDagCallExitsOnBothRows(
+        rows, &f3.m, "rematWireTableBind: key mismatch on 'runsBackward[0]': built 1, live 0");
+    f3.layers[0]->config->linear->frozen = false;
+    rematSchedulerDeinit(&rows[0]);
+    rematSchedulerDeinit(&rows[1]);
+    dagFree(&f3);
+}
+
 /* rematSchedulerDeinit zeroes the struct, so a zeroed and a deinitialised
  * scheduler are one defined state. The driver's rematCheckNumWires guard runs
  * before rematBegin, so its text is the one a caller sees. An automatic
@@ -732,6 +790,8 @@ int main(void) {
     RUN_TEST(testFreezingALayerAboveDeepestExitsIdenticallyOnBothRows);
     RUN_TEST(testALayerTypeSwapExitsIdenticallyOnBothRows);
     RUN_TEST(testAGroupingPastTheCapacityExitsIdenticallyOnBothRows);
+    RUN_TEST(testRewiringADagExitsAtBindOnBothRows);
+    RUN_TEST(testFreezingTheDagRootExitsOnRunsBackward);
     RUN_TEST(testAZeroedOrDeinitialisedSchedulerExitsNamingIt);
     RUN_TEST(testARowThatHandsOutABackwardInEvalExitsOnBothRows);
     RUN_TEST(testARowThatEatsTheLossForwardOfAnEvalCallExitsOnBothRows);

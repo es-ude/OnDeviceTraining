@@ -203,10 +203,10 @@ static void requireFloat32MergeWire(const rematWireFact_t *f) {
 
 /* Merge numerics are FLOAT32 only (addAccumulate exits on any other dtype at run time), so a
  * non-chain model is refused at init, before any block holds its wires, when a merge-touched wire
- * is not FLOAT32: every ACT an ADD reads or writes, every GRAD an ADD's backward reads as dy,
- * every GRAD something accumulates into (an ADD's ACC slot or a SUM step) and every PART. Needs
- * the facts and the dx slots numbered. Never called on a chain, which has no merge, so a chain's
- * SYM_INT32 / BFP wires stay admitted. */
+ * is not FLOAT32: every ACT an ADD reads (addLayerInit already makes its output FLOAT32), every
+ * GRAD an ADD's backward reads as dy, every GRAD something accumulates into (an ADD's ACC slot or
+ * a SUM step) and every PART. Needs the facts and the dx slots numbered. Never called on a chain,
+ * which has no merge, so a chain's SYM_INT32 / BFP wires stay admitted. */
 static void requireFloat32MergeWires(const rematWireFact_t *facts, size_t numWires,
                                      const model_t *m, lossFuncType_t lt, const uint16_t *dxWire,
                                      const uint8_t *dxMode) {
@@ -220,7 +220,6 @@ static void requireFloat32MergeWires(const rematWireFact_t *facts, size_t numWir
         for (uint8_t i = 0; i < k; i++) {
             requireFloat32MergeWire(&facts[ids[i]]);
         }
-        requireFloat32MergeWire(&facts[j + 1u]);
     }
     for (size_t id = n + 1u; id < numWires; id++) {
         const rematWireFact_t *f = &facts[id];
@@ -670,7 +669,10 @@ static void exitInputKeyAt(const char *field, size_t k, size_t built, size_t liv
  * derived. With ACT 0's rank and every layer type unchanged, each derived rank
  * is a pure function of them, so the built maxRank bounds the scratch.
  * needsGrad, hasBackward and the dx slots follow from the compared facts, and so do
- * the per-wire kind and rank. */
+ * the per-wire kind and rank. The wiring is compared before the first read of the live
+ * wiring (the live flags here, the shapes and dx slots in phase 1), so a rewired model exits
+ * before the table's dx slots are re-derived from it. The live side goes through modelIsChain,
+ * so a builder-made chain keys as the MODEL_CHAIN it encodes. */
 static void requireModelKey(const rematWireTable_t *t, const model_t *m, lossFuncType_t lt,
                             const tensor_t *input) {
     size_t n = m->numLayers;
@@ -683,6 +685,22 @@ static void requireModelKey(const rematWireTable_t *t, const model_t *m, lossFun
     for (size_t i = 0; i < n; i++) {
         if ((uint8_t)m->layers[i]->type != t->layerType[i]) {
             exitModelKeyAt("layerType", i, t->layerType[i], (size_t)m->layers[i]->type);
+        }
+    }
+    size_t liveIsChain = modelIsChain(m) ? 1u : 0u;
+    if (liveIsChain != t->isChain) {
+        exitModelKey("isChain", t->isChain, liveIsChain);
+    }
+    if (!t->isChain) {
+        for (size_t i = 0; i <= n; i++) {
+            if (m->inputStart[i] != t->inputStart[i]) {
+                exitModelKeyAt("inputStart", i, t->inputStart[i], m->inputStart[i]);
+            }
+        }
+        for (size_t e = 0; e < t->numEdges; e++) {
+            if (m->inputIds[e] != t->inputIds[e]) {
+                exitModelKeyAt("inputIds", e, t->inputIds[e], m->inputIds[e]);
+            }
         }
     }
     /* The live flags go into the bind scratch, unused until phase 1 derives into it; it holds

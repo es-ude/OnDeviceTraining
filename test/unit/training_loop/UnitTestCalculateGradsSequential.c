@@ -22,8 +22,8 @@
 #include "QuantizationApi.h"
 #include "QuantizationLayer.h"
 #include "RNG.h"
-#include "RematScheduler.h"
 #include "ReluApi.h"
+#include "RematScheduler.h"
 #include "SgdApi.h"
 #include "SoftmaxApi.h"
 #include "StateDictApi.h"
@@ -1536,8 +1536,71 @@ void testAllFrozenDagRunsForwardAndLossOnly(void) {
     dagFree(&f);
 }
 
+static layer_t *keyedLinear(size_t in, size_t out, uint32_t position) {
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, dagFloatQ());
+    const rngKey_t key = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, position);
+    return linearLayerInit(
+        &(linearInit_t){.inFeatures = in, .outFeatures = out, .weightInit.key = &key}, &lq);
+}
+
+/* Layers 0 and 2 are the Linears: W 4->3 (12 + 3 grads), then 3->2 (6 + 2). */
+#define CHAIN_GRADS 23u
+static void takeChainGrads(const model_t *m, rematScheduler_t *s, tensor_t *x, tensor_t *label,
+                           float grads[CHAIN_GRADS]) {
+    layer_t *l0 = m->layers[0];
+    layer_t *l2 = m->layers[2];
+    memset(gradW(l0), 0, 12 * sizeof(float));
+    memset(gradB(l0), 0, 3 * sizeof(float));
+    memset(gradW(l2), 0, 6 * sizeof(float));
+    memset(gradB(l2), 0, 2 * sizeof(float));
+    freeTrainingStats(calculateGradsSequential(m, defaultLossConfig(MSE), REDUCTION_MEAN, x, label,
+                                               &(trainingCall_t){.remat = s}));
+    memcpy(grads, gradW(l0), 12 * sizeof(float));
+    memcpy(grads + 12, gradB(l0), 3 * sizeof(float));
+    memcpy(grads + 15, gradW(l2), 6 * sizeof(float));
+    memcpy(grads + 21, gradB(l2), 2 * sizeof(float));
+}
+
+/* The canonical chain encoding is normative: a chain the graph builder wrote (an explicit CSR
+ * wiring node j to buffer j) keys and trains exactly like MODEL_CHAIN of the same layers. */
+void testABuilderMadeChainBindsOnAModelChainScheduler(void) {
+    layer_t *model[3] = {keyedLinear(4, 3, 0), dagRelu(), keyedLinear(3, 2, 2)};
+    layer_t *nodes[3];
+    uint16_t inputStart[4];
+    uint16_t inputIds[3];
+    graphBuilder_t g;
+    graphBegin(&g, nodes, inputStart, inputIds, 3, 3);
+    uint16_t b = GRAPH_INPUT;
+    for (size_t j = 0; j < 3; j++) {
+        b = graphNode(&g, model[j], b);
+    }
+    model_t built = graphFinish(&g);
+    TEST_ASSERT_NOT_NULL(built.inputStart);
+    tensor_t *x = makeRowVecN((const float[]){1.0f, -2.0f, 3.0f, 0.5f}, 4);
+    tensor_t *label = makeRowVecN((const float[]){0.5f, -1.0f}, 2);
+    rematScheduler_t s;
+    TEST_ASSERT_TRUE(rematHeapInit(&s, &MODEL_CHAIN(model, 3), defaultLossConfig(MSE), x, NULL));
+
+    float chainGrads[CHAIN_GRADS];
+    float builtGrads[CHAIN_GRADS];
+    takeChainGrads(&MODEL_CHAIN(model, 3), &s, x, label, chainGrads);
+    takeChainGrads(&built, &s, x, label, builtGrads);
+    TEST_ASSERT_EQUAL_MEMORY(chainGrads, builtGrads, sizeof chainGrads);
+    float zeros[CHAIN_GRADS] = {0};
+    TEST_ASSERT_TRUE(memcmp(chainGrads, zeros, sizeof zeros) != 0);
+
+    rematSchedulerDeinit(&s);
+    freeTensor(x);
+    freeTensor(label);
+    freeLinearLayer(model[0]);
+    freeReluLayer(model[1]);
+    freeLinearLayer(model[2]);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(testABuilderMadeChainBindsOnAModelChainScheduler);
     RUN_TEST(testAddOfTheSameBufferGrads);
     RUN_TEST(testSkipFromTheInputGrads);
     RUN_TEST(testFrozenSkipNodeGrads);

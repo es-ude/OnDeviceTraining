@@ -279,10 +279,11 @@ jobs:
           ARM_HOOK='odtHook(Fire|Set)'
           ARM_LAYER='layerFunctions'
           ARM_LOSS='lossFunctions'
+          ARM_OP='opFunctions'
           ARM_RNG='(^|[^A-Za-z0-9_])rng[A-Z][A-Za-z0-9_]*[[:space:]]*\('
           ARM_DATA_WRITE='(->|\.)data[[:space:]]*(([-+*/%&|^]|<<|>>)?=([^=]|$)|\+\+|--)'
           ARM_DATA_PREINC='(\+\+|--)[[:space:]]*[A-Za-z_(*][][A-Za-z0-9_.>()*-]*(->|\.)data([^A-Za-z0-9_]|$)'
-          PATTERN="$ARM_HOOK|$ARM_LAYER|$ARM_LOSS|$ARM_RNG|$ARM_DATA_WRITE|$ARM_DATA_PREINC"
+          PATTERN="$ARM_HOOK|$ARM_LAYER|$ARM_LOSS|$ARM_OP|$ARM_RNG|$ARM_DATA_WRITE|$ARM_DATA_PREINC"
           # Fail-closed file set: every .c/.h under remat/ is a row file unless excluded
           # here as shared code; include/ is scanned too. Each exclusion is shared,
           # never a row, because:
@@ -386,6 +387,7 @@ jobs:
             probe fire 'odtHookFire(0);'
             probe fire 'odtHookSet(0, 0);'
             probe fire 'layerFunctions[0].forward(0);'
+            probe fire 'opFunctions[0].forward(0);'
             probe fire 'lossFunctions[0].forward(0);'
             probe fire 'rngSetSeed (1u);'
             probe fire '/* bind */ h->data = 0;'
@@ -414,7 +416,7 @@ jobs:
             echo "remat-row-contract: the self-test failed; the gate no longer catches what it must."
             exit 1
           fi
-          echo "remat-row-contract: clean; self-test passed (11 plants and a new row file fire, 6 controls stay silent)."
+          echo "remat-row-contract: clean; self-test passed (12 plants and a new row file fire, 6 controls stay silent)."
           set -e
 
   no-global-rng:

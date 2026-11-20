@@ -166,8 +166,8 @@ and it is not a row-private header.
 
 **Pattern** (`git grep -nE`; an explicit character class stands in for `\b`,
 which macOS ERE ignores):
-- `odtHook(Fire|Set)`, `layerFunctions`, `lossFunctions`: hooks, layer and
-  loss execution;
+- `odtHook(Fire|Set)`, `layerFunctions`, `lossFunctions`, `opFunctions`: hooks,
+  layer and loss execution;
 - `rng[A-Z]…(` after a non-identifier character: every call of the RNG API,
   which names its functions `rng` plus an upper-case letter (`rngOpen`,
   `rngFold`, `rngNextU32`); a lower-case `rngseed(` would not match, and the

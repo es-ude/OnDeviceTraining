@@ -8,6 +8,7 @@ target_compile_definitions(CalculateGradsSequential
 target_link_libraries(CalculateGradsSequential PRIVATE
         RematScheduler
         RematCheck
+        AddLayer
         TrainingLoopApi
         LayerExec
         RNG

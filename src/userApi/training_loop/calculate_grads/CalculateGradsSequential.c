@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "AddLayer.h"
 #include "BatchNorm1d.h"
 #include "CalculateGradsSequential.h"
 #include "Common.h"
@@ -160,9 +161,8 @@ static trainingStats_t *calculateGradsImpl(const model_t *m, lossConfig_t lossCo
             break;
         }
         case REMAT_STEP_SUM:
-            /* Skipping it would drop the PART's contribution from the gradient. */
-            PRINT_ERROR("calculateGrads: SUM steps are not executed yet");
-            exit(1);
+            addAccumulate(op.in[0], op.out);
+            break;
         default:
             break; /* unreachable: rematCheckStep exits on an unknown kind */
         }

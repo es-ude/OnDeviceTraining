@@ -11,7 +11,6 @@
 #include "CalculateGradsSequential.h"
 #include "Common.h"
 #include "DagFixtures.h"
-#include "DeathTest.h"
 #include "Layer.h"
 #include "LayerCommon.h"
 #include "LayerExec.h"
@@ -23,6 +22,7 @@
 #include "QuantizationApi.h"
 #include "QuantizationLayer.h"
 #include "RNG.h"
+#include "RematScheduler.h"
 #include "ReluApi.h"
 #include "SgdApi.h"
 #include "SoftmaxApi.h"
@@ -1429,27 +1429,121 @@ void testCalculateGradsIsIndependentOfDrawsAroundItsSteps(void) {
     freeOrderModel(&m);
 }
 
-/* A DAG whose b1 gets a PART (F3: the Linear n1 is a later contributor) needs
- * the SUM step, which the driver does not execute yet: it must stop rather than
- * drop that contribution. */
-static void trainF3(void) {
-    dagFixture_t f;
-    dagBuildF3(&f, false);
+static float *gradW(const layer_t *l) {
+    return (float *)l->config->linear->weights->grad->data;
+}
+
+static float *gradB(const layer_t *l) {
+    return (float *)l->config->linear->bias->grad->data;
+}
+
+/* The hand-derived values of the shared fixtures (DagFixtures.h), on x = [1, 2] under MSE. */
+static trainingStats_t *dagGrads(dagFixture_t *f, float t0, float t1, const trainingCall_t *call) {
     dagTensor_t xs;
     dagTensor_t ts;
-    freeTrainingStats(calculateGradsSequential(&f.m, defaultLossConfig(MSE), REDUCTION_MEAN,
-                                               dagInput(&xs, 1.0f, 2.0f), dagInput(&ts, 3.0f, 8.0f),
-                                               NULL));
+    return calculateGradsSequential(&f->m, defaultLossConfig(MSE), REDUCTION_MEAN,
+                                    dagInput(&xs, 1.0f, 2.0f), dagInput(&ts, t0, t1), call);
+}
+
+/* F3: b1 gets two native ACCs from the merges and a PART from the Linear n1. */
+static void assertF3Grads(dagFixture_t *f, const trainingCall_t *call) {
+    trainingStats_t *st = dagGrads(f, 3.0f, 8.0f, call);
+    TEST_ASSERT_EQUAL_FLOAT(2.5f, st->loss);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){4, 10}), (float *)st->output->data, 2);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){8, 16, 20, 40}), gradW(f->layers[0]), 4);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){8, 20}), gradB(f->layers[0]), 2);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){2, 4, 4, 8}), gradW(f->layers[1]), 4);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){2, 4}), gradB(f->layers[1]), 2);
+    freeTrainingStats(st);
+}
+
+void testF3GradsOnTheDefaultCall(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    assertF3Grads(&f, NULL);
     dagFree(&f);
 }
 
-void testADagWithASumStepExitsUntilSumsExecute(void) {
-    ASSERT_EXITS_WITH_OUTPUT(1, "calculateGrads: SUM steps are not executed yet", trainF3());
+void testF3GradsOnAHeapStoreAllScheduler(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    dagTensor_t xs;
+    rematScheduler_t s;
+    TEST_ASSERT_TRUE(
+        rematHeapInit(&s, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), NULL));
+    assertF3Grads(&f, &(trainingCall_t){.remat = &s});
+    rematSchedulerDeinit(&s);
+    dagFree(&f);
+}
+
+/* ADD(y, y): one step writes then accumulates the same gradient. */
+void testAddOfTheSameBufferGrads(void) {
+    dagFixture_t f;
+    dagBuildY(&f);
+    freeTrainingStats(dagGrads(&f, 1.0f, 1.0f, NULL));
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){4, 8, 12, 24}), gradW(f.layers[0]), 4);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){4, 12}), gradB(f.layers[0]), 2);
+    dagFree(&f);
+}
+
+/* The merge's input-buffer slot wants no gradient. */
+void testSkipFromTheInputGrads(void) {
+    dagFixture_t f;
+    dagBuildK(&f);
+    freeTrainingStats(dagGrads(&f, 2.0f, 6.0f, NULL));
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){2, 4, 4, 8}), gradW(f.layers[0]), 4);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){2, 4}), gradB(f.layers[0]), 2);
+    dagFree(&f);
+}
+
+/* The frozen node n1 sits between the two that run backward, so its BACKWARD never runs. */
+void testFrozenSkipNodeGrads(void) {
+    dagFixture_t f;
+    dagBuildS(&f);
+    freeTrainingStats(dagGrads(&f, 2.0f, 6.0f, NULL));
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){2, 4, 4, 8}), gradW(f.layers[0]), 4);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){2, 4}), gradB(f.layers[0]), 2);
+    TEST_ASSERT_NULL(f.layers[1]->config->linear->weights->grad);
+    dagFree(&f);
+}
+
+/* Nothing trains, so neither LOSS_BACKWARD nor any BACKWARD runs; the merges still run forward. */
+void testAllFrozenDagRunsForwardAndLossOnly(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    for (size_t j = 0; j < 2; j++) {
+        f.layers[j]->config->linear->frozen = true;
+        memset(gradW(f.layers[j]), 0, 4 * sizeof(float));
+        memset(gradB(f.layers[j]), 0, 2 * sizeof(float));
+    }
+    dagTensor_t xs;
+    rematScheduler_t s;
+    TEST_ASSERT_TRUE(
+        rematHeapInit(&s, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), NULL));
+    rematReport_t r;
+    rematSchedulerReport(&s, &r);
+    TEST_ASSERT_EQUAL_size_t(5, r.numSteps);
+    trainingStats_t *st = dagGrads(&f, 3.0f, 8.0f, &(trainingCall_t){.remat = &s});
+    TEST_ASSERT_EQUAL_FLOAT(2.5f, st->loss);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){4, 10}), (float *)st->output->data, 2);
+    const float zeros[4] = {0};
+    for (size_t j = 0; j < 2; j++) {
+        TEST_ASSERT_EQUAL_FLOAT_ARRAY(zeros, gradW(f.layers[j]), 4);
+        TEST_ASSERT_EQUAL_FLOAT_ARRAY(zeros, gradB(f.layers[j]), 2);
+    }
+    freeTrainingStats(st);
+    rematSchedulerDeinit(&s);
+    dagFree(&f);
 }
 
 int main(void) {
     UNITY_BEGIN();
-    RUN_TEST(testADagWithASumStepExitsUntilSumsExecute);
+    RUN_TEST(testAddOfTheSameBufferGrads);
+    RUN_TEST(testSkipFromTheInputGrads);
+    RUN_TEST(testFrozenSkipNodeGrads);
+    RUN_TEST(testAllFrozenDagRunsForwardAndLossOnly);
+    RUN_TEST(testF3GradsOnTheDefaultCall);
+    RUN_TEST(testF3GradsOnAHeapStoreAllScheduler);
     RUN_TEST(testCalculateGradsSequentialClosedForm);
     RUN_TEST(testCrossEntropyFloatHeadIgnoresAnUnusedSymPropLossQ);
     RUN_TEST(testTracedGradsFiresInOrder);

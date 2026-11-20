@@ -37,8 +37,8 @@ add_elastic_ai_unit_test(
         ModelGraphApi
         Model
         OpTable
+        RematScheduler
         odt_test_layer_builders
-        odt_test_death
         odt_test_dag_fixtures
 )
 

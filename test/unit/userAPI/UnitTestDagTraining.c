@@ -84,11 +84,17 @@ static layer_t *goldSoftmax(void) {
 
 #define MAX_PARAMS 16
 
+static size_t trainableSlots(const model_t *m, parameter_t **slots) {
+    size_t n = calcTotalNumberOfStates(m);
+    TEST_ASSERT_TRUE_MESSAGE(n <= MAX_PARAMS, "raise MAX_PARAMS");
+    collectTrainableParameters(m, slots);
+    return n;
+}
+
 /* The factories hand out zeroed grads, but every call accumulates: clear before each one. */
 static void zeroGrads(const model_t *m) {
     parameter_t *slots[MAX_PARAMS];
-    size_t n = calcTotalNumberOfStates(m);
-    collectTrainableParameters(m, slots);
+    size_t n = trainableSlots(m, slots);
     for (size_t p = 0; p < n; p++) {
         memset(slots[p]->grad->data, 0, calcBytesPerTensor(slots[p]->grad));
     }
@@ -98,17 +104,14 @@ static void zeroGrads(const model_t *m) {
  * callers assert after teardown. */
 static size_t snapshotGrads(const model_t *m, float scale, float *out, size_t cap) {
     parameter_t *slots[MAX_PARAMS];
-    size_t n = calcTotalNumberOfStates(m);
-    collectTrainableParameters(m, slots);
+    size_t n = trainableSlots(m, slots);
     size_t k = 0;
     for (size_t p = 0; p < n; p++) {
         const float *g = (const float *)slots[p]->grad->data;
         size_t count = calcNumberOfElementsByTensor(slots[p]->grad);
+        TEST_ASSERT_TRUE_MESSAGE(k + count <= cap, "raise the grad cap");
         for (size_t i = 0; i < count; i++) {
-            if (k < cap) {
-                out[k] = g[i] * scale;
-            }
-            k++;
+            out[k++] = g[i] * scale;
         }
     }
     return k;
@@ -171,7 +174,7 @@ static const struct {
     {true, REMAT_PLAN_LIVENESS, "ARENA/LIVENESS"},
 };
 
-#define DAG_MAX_GRADS 64
+#define DAG_MAX_GRADS 128
 #define DAG_MAX_OUT 8
 
 /* One parity run: the NULL-call reference (loss, output, grads), then the same call on each
@@ -188,6 +191,7 @@ typedef struct parityRun {
 
 static void runParity(const model_t *m, lossConfig_t loss, tensor_t *x, tensor_t *y, size_t numOut,
                       parityRun_t *r) {
+    TEST_ASSERT_TRUE_MESSAGE(numOut <= DAG_MAX_OUT, "raise DAG_MAX_OUT");
     zeroGrads(m);
     trainingStats_t *st = calculateGradsSequential(m, loss, REDUCTION_MEAN, x, y, NULL);
     r->loss = st->loss;
@@ -292,9 +296,97 @@ void testResidualIntoSoftmaxMatchesPyTorchUnderCrossEntropy(void) {
     }
 }
 
+/* ---- fan-out mechanics: 4 -> 2 MSE fixtures -------------------------------------------------- */
+
+/* Finishes the wiring, runs the parity on x[4] / y[2], copies the caller's input bytes out after
+ * the run into xAfter, and frees everything. */
+static void runMseParity(dagGraph_t *f, const float *xData, const float *yData, float *xAfter,
+                         parityRun_t *r) {
+    f->m = graphFinish(&f->g);
+    tensor_t *x = buildFloatTensor((size_t[]){4}, 1, xData);
+    tensor_t *y = buildFloatTensor((size_t[]){2}, 1, yData);
+    batchView_t xv;
+    batchView_t yv;
+    runParity(&f->m, defaultLossConfig(MSE), batchViewOf(&xv, x), batchViewOf(&yv, y), 2, r);
+    memcpy(xAfter, x->data, 4 * sizeof(float));
+    freeTensor(y);
+    freeTensor(x);
+    dagGraphFree(f);
+}
+
+static void assertMseParity(const parityRun_t *r, size_t count, const float *grads, float loss,
+                            const float *out) {
+    TEST_ASSERT_EQUAL_size_t(count, r->count);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(SIZE_MAX, firstMismatch(grads, r->ref, count, 1e-6f, 1e-4f),
+                                     "grads diverge from PyTorch");
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f, loss, r->loss);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, firstMismatch(out, r->out, 2, 1e-6f, 1e-5f));
+    TEST_ASSERT_EQUAL_MEMORY(r->out, r->outInf, 2 * sizeof(float));
+    for (size_t c = 0; c < 4; c++) {
+        TEST_ASSERT_EQUAL_INT_MESSAGE(0, r->cellDiff[c], kCells[c].name);
+    }
+}
+
+/* Both ADD slots read b1: the first writes g(b1), the second accumulates onto it. */
+void testAddOfOneBufferWithItselfDoublesItsGradient(void) {
+    dagGraph_t f;
+    dagGraphBegin(&f);
+    uint16_t h1 =
+        graphNode(&f.g, goldLinear(4, 4, TRAINABLE_DEFAULT, dagSelfW0, dagSelfB0, 0), GRAPH_INPUT);
+    uint16_t h2 = graphMerge(&f.g, addLayerInit(NULL), h1, h1);
+    (void)graphNode(&f.g, goldLinear(4, 2, TRAINABLE_DEFAULT, dagSelfW2, dagSelfB2, 2), h2);
+
+    parityRun_t r;
+    float xAfter[4];
+    runMseParity(&f, dagSelfX, dagSelfY, xAfter, &r);
+
+    assertMseParity(&r, 30, dagSelfGrads, dagSelfLoss, dagSelfOut);
+}
+
+/* The model input needs no gradient, so the ADD's second slot has no dx; the input bytes the
+ * caller owns stay untouched. */
+void testSkipFromTheModelInputGetsNoGradient(void) {
+    dagGraph_t f;
+    dagGraphBegin(&f);
+    uint16_t h1 =
+        graphNode(&f.g, goldLinear(4, 4, TRAINABLE_DEFAULT, dagIn0W0, dagIn0B0, 0), GRAPH_INPUT);
+    uint16_t h2 = graphNode(&f.g, dagRelu(), h1);
+    uint16_t h3 = graphMerge(&f.g, addLayerInit(NULL), h2, GRAPH_INPUT);
+    (void)graphNode(&f.g, goldLinear(4, 2, TRAINABLE_DEFAULT, dagIn0W3, dagIn0B3, 3), h3);
+
+    parityRun_t r;
+    float xAfter[4];
+    runMseParity(&f, dagIn0X, dagIn0Y, xAfter, &r);
+
+    TEST_ASSERT_EQUAL_MEMORY(dagIn0X, xAfter, 4 * sizeof(float));
+    assertMseParity(&r, 30, dagIn0Grads, dagIn0Loss, dagIn0Out);
+}
+
+/* b1 has three consumers: the second ADD writes g(b1), the first ADD accumulates onto it, and
+ * L1's dx arrives as a partial that is summed in. */
+void testFanOutThreeWritesAccumulatesAndSums(void) {
+    dagGraph_t f;
+    dagGraphBegin(&f);
+    uint16_t h1 =
+        graphNode(&f.g, goldLinear(4, 4, TRAINABLE_DEFAULT, dagFan3W0, dagFan3B0, 0), GRAPH_INPUT);
+    uint16_t h2 = graphNode(&f.g, goldLinear(4, 4, TRAINABLE_DEFAULT, dagFan3W1, dagFan3B1, 1), h1);
+    uint16_t h3 = graphMerge(&f.g, addLayerInit(NULL), h1, h2);
+    uint16_t h4 = graphMerge(&f.g, addLayerInit(NULL), h3, h1);
+    (void)graphNode(&f.g, goldLinear(4, 2, TRAINABLE_DEFAULT, dagFan3W4, dagFan3B4, 4), h4);
+
+    parityRun_t r;
+    float xAfter[4];
+    runMseParity(&f, dagFan3X, dagFan3Y, xAfter, &r);
+
+    assertMseParity(&r, 50, dagFan3Grads, dagFan3Loss, dagFan3Out);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testResidualBlockMatchesPyTorchOnEveryAdmittedPlan);
     RUN_TEST(testResidualIntoSoftmaxMatchesPyTorchUnderCrossEntropy);
+    RUN_TEST(testAddOfOneBufferWithItselfDoublesItsGradient);
+    RUN_TEST(testSkipFromTheModelInputGetsNoGradient);
+    RUN_TEST(testFanOutThreeWritesAccumulatesAndSums);
     return UNITY_END();
 }

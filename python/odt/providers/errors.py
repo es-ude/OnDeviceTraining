@@ -4,8 +4,9 @@
 class UnsupportedLayerError(ValueError):
     """A module type outside the supported set was found."""
 
-    def __init__(self, layer_type: str, where: str) -> None:
-        super().__init__(f"unsupported layer type {layer_type!r} at {where!r}")
+    def __init__(self, layer_type: str, where: str, reason: str = "") -> None:
+        message = f"unsupported layer type {layer_type!r} at {where!r}"
+        super().__init__(f"{message}: {reason}" if reason else message)
         self.layer_type = layer_type
         self.where = where
 

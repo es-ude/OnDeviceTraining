@@ -844,7 +844,8 @@ checkpointing, limitations, literature).
   reads a problem file from either source: `odt.providers.build_problem` on the
   PyTorch model, written with `problem_bytes` (the primary source; rank-3 input,
   one uniform profile, FLOAT32 by default), or that dump, which stays as C's check (a test pins the IR-built
-  problems to the dumped goldens byte for byte). It prints the retain plan of least
+  problems to the dumped goldens byte for byte). Chain models only: `build_problem`
+  on a residual model writes `inputs`, which the planner refuses by name. It prints the retain plan of least
   recompute whose arena fits
   (`uv run -m odt.planner solve <problem> --m 1 --budget <bytes>` → `REMAT_PLAN` and
   `REMAT_BUDGET_B`) or every budget breakpoint (`frontier`); it is exact over all

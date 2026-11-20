@@ -1,10 +1,14 @@
 import json
+import re
 from collections import OrderedDict
 
 import pytest
+import torch
 from torch import nn
 
-from odt.providers import build_problem
+from odt.planner import UnsupportedProblem, parse_problem, require_supported
+from odt.providers import build_problem, problem_bytes
+from tests.planner_oracle import residual_doc
 
 SHAPE = (1, 2, 16)
 F32 = {"kind": "FLOAT32"}
@@ -93,3 +97,40 @@ def test_softmax_does_not_alias_last_layer() -> None:
     assert last["outShape"] == [1, 3]
     assert last["outputDtype"] == F32
     assert last["propLossDtype"] == F32
+
+
+class _ResidualHead(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = nn.Conv1d(2, 2, 3, padding=1)
+        self.relu = nn.ReLU()
+        self.flatten = nn.Flatten()
+        self.fc = nn.Linear(16, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc(self.flatten(self.relu(self.conv(x)) + x))
+
+
+def test_a_residual_problem_carries_inputs_as_every_layers_last_key() -> None:
+    p = build_problem(_ResidualHead(), (1, 2, 8), "CROSS_ENTROPY")
+    # byte equality pins the key order the C dump must write too
+    assert problem_bytes(p) == problem_bytes(residual_doc())
+
+
+def test_a_residual_problem_loads_and_the_planner_refuses_it() -> None:
+    problem = parse_problem(
+        problem_bytes(build_problem(_ResidualHead(), (1, 2, 8), "CROSS_ENTROPY"))
+    )
+    assert [layer.inputs for layer in problem.layers] == [
+        (0,),
+        (1,),
+        (2, 0),
+        (3,),
+        (4,),
+        (5,),
+    ]
+    with pytest.raises(
+        UnsupportedProblem,
+        match=re.escape("layers[2].inputs: [2, 0] has no C reference run"),
+    ):
+        require_supported(problem, 1)

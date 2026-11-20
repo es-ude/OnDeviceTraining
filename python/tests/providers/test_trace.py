@@ -108,3 +108,21 @@ def test_to_shaped_ir_rejects_unsupported_module_by_target() -> None:
     with pytest.raises(UnsupportedLayerError) as info:
         to_shaped_ir(model, (1, 2, 16))
     assert (info.value.layer_type, info.value.where) == ("Softmax", "1")
+
+
+def test_a_module_called_by_keyword_is_refused_naming_its_node() -> None:
+    # a keyword call leaves the fx node without args, so its block would read no input
+    class Net(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.conv = nn.Conv1d(2, 2, 3, padding=1)
+            self.relu = nn.ReLU()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.relu(self.conv(input=x))
+
+    with pytest.raises(
+        UnsupportedLayerError, match="positional tensor arguments"
+    ) as info:
+        to_shaped_ir(Net(), (1, 2, 16))
+    assert (info.value.layer_type, info.value.where) == ("Conv1d", "conv")

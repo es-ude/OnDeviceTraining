@@ -18,7 +18,9 @@ def _plain(value: object) -> object:
     return value
 
 
-def _layer(block: Mapping[str, object]) -> dict[str, object]:
+def _layer(
+    block: Mapping[str, object], inputs: tuple[int, ...] | None
+) -> dict[str, object]:
     layer: dict[str, object] = {
         "type": block["odt_type"],
         "frozen": bool(block["frozen"]),
@@ -29,11 +31,18 @@ def _layer(block: Mapping[str, object]) -> dict[str, object]:
     }
     if "cost" in block:
         layer["cost"] = _plain(block["cost"])
+    if inputs is not None:
+        layer["inputs"] = _plain(inputs)
     return layer
 
 
 def problem_from_annotated(annotated: Annotated, loss: str) -> dict:
-    """Emit the plain-JSON problem for a chain-shaped annotated IR."""
+    """Emit the plain-JSON problem for an annotated IR.
+
+    Layers carry ``inputs`` only when the model is not a chain (C's test: every
+    node j reads exactly buffer j), so a chain problem stays byte-identical to the
+    C dump, which writes no wiring for a chain.
+    """
     if loss not in LOSSES:
         raise ValueError(f"loss must be one of {LOSSES}, got {loss!r}")
 
@@ -41,7 +50,9 @@ def problem_from_annotated(annotated: Annotated, loss: str) -> dict:
     (input_node,) = [n for n in nodes.values() if n.type == "input"]
     input_block = input_node.attributes["training"]
 
-    layers = [_layer(nodes[name].attributes["training"]) for name in annotated.order]
+    blocks = [nodes[name].attributes["training"] for name in annotated.order]
+    chain = all(tuple(b["inputs"]) == (j,) for j, b in enumerate(blocks))
+    layers = [_layer(b, None if chain else b["inputs"]) for b in blocks]
     if loss == "CROSS_ENTROPY":
         last = layers[-1]
         layers.append(
@@ -55,6 +66,8 @@ def problem_from_annotated(annotated: Annotated, loss: str) -> dict:
                 "propLossDtype": copy.deepcopy(last["propLossDtype"]),
             }
         )
+        if not chain:
+            layers[-1]["inputs"] = [len(blocks)]
 
     return {
         "schema_version": SCHEMA_VERSION,

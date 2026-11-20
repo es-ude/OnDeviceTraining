@@ -183,9 +183,8 @@ class _LongSkip(nn.Module):  # the reducer reaches the output before c2
 )
 def test_a_dag_annotates_in_fx_order_with_its_inputs(model, order, inputs) -> None:
     result = _run(model(), (1, 2, 8))
-    assert (
-        result.order == order
-    )  # fx program order = C node order, not the reducer's BFS order
+    # fx program order = C node order, not the reducer's BFS order
+    assert result.order == order
     assert [_block(result, n)["inputs"] for n in order] == inputs
     for name in order:
         if name.startswith("add"):

@@ -336,8 +336,10 @@ decisions and those with nothing in force yet are left out.
   `fns` pointer that the row's init sets. Tests inject faults with
   decorator rows on their own instance, never by patching the vtable.
 - **remat D25** Evaluation inside the training arena adds no byte to it:
-  ARENA places the EVAL program two-ended (an even ACT at offset 0, an odd
-  ACT top-aligned), which the verified training layout proves fits, and HEAP
+  ARENA places a chain's EVAL program two-ended (an even ACT at offset 0, an
+  odd ACT top-aligned), which the verified training layout proves fits; a
+  DAG's EVAL program reuses the training offsets, since each EVAL range lies
+  inside its training range (the init verifies it for every model). HEAP
   reserves one block per EVAL range. An eval bind runs the full key check
   and writes no GRAD header. `inference()`, `inferenceBatched()` and the
   public `evaluation*` functions keep their signatures and their per-call

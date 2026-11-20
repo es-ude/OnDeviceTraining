@@ -8,10 +8,13 @@
 #include <string.h>
 
 #include "AsanDeath.h"
+#include "CalculateGradsSequential.h"
 #include "Common.h"
 #include "Conv1dApi.h"
+#include "DagFixtures.h"
 #include "DeathTest.h"
 #include "FlattenApi.h"
+#include "InferenceApi.h"
 #include "Layer.h"
 #include "LayerConfigAccess.h"
 #include "LayerQuant.h"
@@ -1981,6 +1984,75 @@ void testArenaEvalPlacesEvenActsAtTheBottomAndOddActsAtTheTop(void) {
     assertEvalOffsetsAreTwoEnded(buildF1Model);
 }
 
+static float *dagGradW(const layer_t *l) {
+    return (float *)l->config->linear->weights->grad->data;
+}
+
+static float *dagGradB(const layer_t *l) {
+    return (float *)l->config->linear->bias->grad->data;
+}
+
+/* The hand-derived F3 gradients (DagFixtures.h) under MSE, label [3, 8]. */
+static void assertF3GradsOn(dagFixture_t *f, rematScheduler_t *s) {
+    dagTensor_t xs;
+    dagTensor_t ts;
+    trainingStats_t *st = calculateGradsSequential(
+        &f->m, defaultLossConfig(MSE), REDUCTION_MEAN, dagInput(&xs, 1.0f, 2.0f),
+        dagInput(&ts, 3.0f, 8.0f), &(trainingCall_t){.remat = s});
+    TEST_ASSERT_EQUAL_FLOAT(2.5f, st->loss);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){8, 16, 20, 40}), dagGradW(f->layers[0]), 4);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){8, 20}), dagGradB(f->layers[0]), 2);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){2, 4, 4, 8}), dagGradW(f->layers[1]), 4);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){2, 4}), dagGradB(f->layers[1]), 2);
+    freeTrainingStats(st);
+}
+
+/* ACT 1 is read by both merges, so it is co-live with ACT 2 and ACT 3: an
+ * EVAL placement by parity alone would overlap ACT 1 and ACT 3. */
+void testArenaEvaluatesF3OnItsTrainOffsets(void) {
+    const rematPlanSpec_t *specs[] = {NULL, &g_liveness};
+    for (size_t k = 0; k < 2; k++) {
+        dagFixture_t f;
+        dagBuildF3(&f, false);
+        dagTensor_t xs;
+        dagTensor_t ts;
+        rematScheduler_t s;
+        TEST_ASSERT_TRUE(
+            rematArenaInit(&s, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), specs[k]));
+        inferenceStats_t *r =
+            inferenceWithLoss(&f.m, dagInput(&xs, 1.0f, 2.0f), dagInput(&ts, 3.0f, 8.0f), MSE,
+                              REDUCTION_MEAN, &(trainingCall_t){.remat = &s});
+        TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){4, 10}), (float *)r->output->data, 2);
+        TEST_ASSERT_EQUAL_FLOAT(2.5f, r->loss);
+        freeInferenceStats(r);
+        assertF3GradsOn(&f, &s);
+        rematSchedulerDeinit(&s);
+        dagFree(&f);
+    }
+}
+
+/* LIVENESS keeps ACT 1 to step 8 in TRAIN; an EVAL copy that keeps it to step 9 leaves it. */
+void testEvalOutsideItsTrainRangeExits(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    dagTensor_t xs;
+    rematScheduler_t s;
+    TEST_ASSERT_TRUE(
+        rematArenaInit(&s, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1.0f, 2.0f), &g_liveness));
+    const rematProgram_t *train = &s.plan->train;
+    rematRange_t ranges[4];
+    TEST_ASSERT_EQUAL_size_t(4, s.plan->eval.numRanges);
+    memcpy(ranges, s.plan->eval.ranges, sizeof ranges);
+    rematProgram_t tampered = s.plan->eval;
+    tampered.ranges = ranges;
+    TEST_ASSERT_EQUAL_UINT16(8, train->ranges[0].end);
+    ranges[0].end = 9;
+    ASSERT_EXITS_WITH_OUTPUT(1, "EVAL range of ACT 1 lies outside its TRAIN range",
+                             arenaVerifyEvalInsideTrain(s.wires, train, &tampered));
+    rematSchedulerDeinit(&s);
+    dagFree(&f);
+}
+
 void testRowContractArenaHarStoreAll(void) {
     assertRowContract(initArena, buildHarModel, NULL);
 }
@@ -3304,6 +3376,8 @@ int main(void) {
     RUN_TEST(testRowContractArenaHarAcrossModes);
     RUN_TEST(testRowContractArenaF1AcrossModesLiveness);
     RUN_TEST(testArenaEvalPlacesEvenActsAtTheBottomAndOddActsAtTheTop);
+    RUN_TEST(testArenaEvaluatesF3OnItsTrainOffsets);
+    RUN_TEST(testEvalOutsideItsTrainRangeExits);
     RUN_TEST(testArenaHarLivenessBindsFlattenDxAfterItsSourceDied);
     RUN_TEST(testReportObservedPeakEqualsThePlannedPeak);
     RUN_TEST(testRowContractArenaHarLivenessInPlaceAcrossModes);

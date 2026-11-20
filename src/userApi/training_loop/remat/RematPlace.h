@@ -96,7 +96,8 @@ bool arenaPlaceBreadthArea(const rematWireTable_t *t, const rematProgram_t *p, s
 bool arenaPlaceTwoEnded(const rematWireTable_t *t, const rematProgram_t *p, size_t placedPeak,
                         size_t *offsets, size_t *bytes);
 
-/* False for a plan without a backward (no GRAD wire has a range). */
+/* False for a plan without a backward (no GRAD wire has a range). A PART
+ * range needs no test of its own: it adds into a GRAD opened before it. */
 bool arenaPlanHasGradRange(const rematWireTable_t *t, const rematProgram_t *p);
 
 /* ARENA's placement: runs first-fit-decreasing, breadth/area, ping-pong,
@@ -115,5 +116,13 @@ bool arenaPlacePortfolio(const rematWireTable_t *t, const rematProgram_t *p, siz
  * bytes), co-live (inclusive) ranges byte-disjoint. Exits naming the wire(s). */
 void arenaVerifyPlacement(const rematWireTable_t *t, const rematProgram_t *p, const size_t *offsets,
                           size_t bytes);
+
+/* Always runs, chains included. EVAL range r and TRAIN range r are both the
+ * range of ACT r + 1 (FORWARD(j) at step j opens ACT j + 1, every other range
+ * begins later), so a DAG may evaluate on TRAIN's verified offsets
+ * when each EVAL range lies inside its TRAIN range: then every EVAL co-live
+ * pair is a TRAIN co-live pair. Exits naming the ACT otherwise. */
+void arenaVerifyEvalInsideTrain(const rematWireTable_t *t, const rematProgram_t *train,
+                                const rematProgram_t *eval);
 
 #endif // ODT_REMAT_PLACE_H

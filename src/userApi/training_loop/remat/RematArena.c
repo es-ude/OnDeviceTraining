@@ -458,6 +458,7 @@ bool arenaPlaceTwoEnded(const rematWireTable_t *t, const rematProgram_t *p, size
         exit(1);
     }
     arenaOrder_t o = {.t = t, .p = p, .boundary = UINT16_MAX};
+    /* GRAD ranges alone suffice: the seed is a GRAD, and it opens before any PART. */
     for (size_t r = 0; r < p->numRanges; r++) {
         if (t->wires[p->ranges[r].wire].kind == REMAT_WIRE_GRAD &&
             p->ranges[r].begin < o.boundary) {
@@ -588,6 +589,20 @@ void arenaVerifyPlacement(const rematWireTable_t *t, const rematProgram_t *p, co
     }
 }
 
+void arenaVerifyEvalInsideTrain(const rematWireTable_t *t, const rematProgram_t *train,
+                                const rematProgram_t *eval) {
+    for (size_t r = 0; r < eval->numRanges; r++) {
+        const rematRange_t *e = &eval->ranges[r];
+        const rematRange_t *tr = &train->ranges[r];
+        if (e->wire != tr->wire || e->begin < tr->begin || e->end > tr->end) {
+            PRINT_ERROR("remat[arena]: placement verifier: EVAL range of ACT %u lies outside its "
+                        "TRAIN range",
+                        (unsigned)t->wires[e->wire].index);
+            exit(1);
+        }
+    }
+}
+
 bool rematArenaInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
                     const tensor_t *inputLike, const rematPlanSpec_t *spec) {
 #ifdef ODT_MEM_PROFILE
@@ -640,6 +655,7 @@ bool rematArenaInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
         return false; /* the placement's scratch: planned, !placed */
     }
     arenaVerifyPlacement(s->wires, p, s->row.arena.offsets, bytes);
+    arenaVerifyEvalInsideTrain(s->wires, p, &s->plan->eval);
     s->row.arena.bytes = bytes; /* placed: every arena field of the report is valid */
     s->row.arena.base = reserveMemory(bytes);
     if (s->row.arena.base == NULL) {
@@ -661,13 +677,16 @@ void rematArenaBegin(rematScheduler_t *s) {
     s->walk = (rematWalk_t){0};
 }
 
-/* TRAIN: the verified placement. EVAL, two-ended inside the same arena: ACT j
- * even at offset 0, odd top-aligned. ACT j and ACT j+1 are co-live at TRAIN's
- * FORWARD(j), so the verified layout proves placed(j) + placed(j+1) <= bytes;
- * bytes is a multiple of ODT_WIRE_ALIGN, so a top offset is aligned; ACT 0 is
- * borrowed. Eval therefore adds no byte to the arena. */
+/* TRAIN, and EVAL on a DAG: the verified placement; EVAL range r is TRAIN
+ * range r and lies inside it (arenaVerifyEvalInsideTrain). A merge keeps a
+ * non-adjacent ACT co-live, which parity cannot separate. EVAL on a chain,
+ * two-ended inside the same arena: ACT j even at offset 0, odd top-aligned.
+ * Only ACT j and ACT j+1 are co-live there, at TRAIN's FORWARD(j), so the
+ * verified layout proves placed(j) + placed(j+1) <= bytes; bytes is a multiple
+ * of ODT_WIRE_ALIGN, so a top offset is aligned; ACT 0 is borrowed. Eval
+ * therefore adds no byte to the arena. */
 static size_t arenaOffset(const rematScheduler_t *s, const rematProgram_t *p, size_t r) {
-    if (s->mode == REMAT_MODE_TRAIN) {
+    if (s->mode == REMAT_MODE_TRAIN || !s->wires->isChain) {
         return s->row.arena.offsets[r];
     }
     uint16_t w = p->ranges[r].wire;

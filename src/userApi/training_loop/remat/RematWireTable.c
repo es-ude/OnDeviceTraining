@@ -669,9 +669,10 @@ static void exitInputKeyAt(const char *field, size_t k, size_t built, size_t liv
  * derived. With ACT 0's rank and every layer type unchanged, each derived rank
  * is a pure function of them, so the built maxRank bounds the scratch.
  * needsGrad, hasBackward and the dx slots follow from the compared facts, and so do
- * the per-wire kind and rank. The wiring is compared before the first read of the live
- * wiring (the live flags here, the shapes and dx slots in phase 1), so a rewired model exits
- * before the table's dx slots are re-derived from it. The live side goes through modelIsChain,
+ * the per-wire kind and rank. The wiring compares come first because on a caller-scheduler
+ * path nothing validates the live model: only its match with the built wiring, which the init
+ * validated, makes the live CSR safe for the readers after it (modelGradFlags here,
+ * modelShapePass and rematDeriveGradWires in phase 1). The live side goes through modelIsChain,
  * so a builder-made chain keys as the MODEL_CHAIN it encodes. */
 static void requireModelKey(const rematWireTable_t *t, const model_t *m, lossFuncType_t lt,
                             const tensor_t *input) {

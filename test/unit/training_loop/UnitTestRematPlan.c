@@ -1773,6 +1773,8 @@ void testEvalOnlyTableInitRefusesASymInt32WireIntoAnAdd(void) {
     rematWireTable_t *t = NULL;
     ASSERT_EXITS_WITH_OUTPUT(1, "non-FLOAT32 merge or accumulate: wire ACT 1 has dtype 2",
                              (void)rematWireTableInitEval(&t, &f.m, x));
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematWireTableInitEval: non-FLOAT32",
+                             (void)rematWireTableInitEval(&t, &f.m, x));
     freeQuantLayer(f.layers[0]);
     freeAddLayer(f.layers[1]);
 }

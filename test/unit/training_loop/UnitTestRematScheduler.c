@@ -2094,6 +2094,30 @@ void testRematBeginOnAnEvalOnlySchedulerExits(void) {
     dagFree(&f);
 }
 
+static void walkEvalAfterFreezingN0(dagFixture_t *f) {
+    dagTensor_t xs;
+    tensor_t *x = dagInput(&xs, 1.0f, 2.0f);
+    rematScheduler_t s;
+    if (!rematHeapInitEval(&s, &f->m, x)) {
+        exit(2);
+    }
+    f->layers[0]->config->linear->frozen = true;
+    rematBeginEval(&s, &f->m, CROSS_ENTROPY, x);
+    for (rematStep_t st; rematNext(&s, &st);) {
+        rematDone(&s, &st);
+    }
+    rematEnd(&s);
+    rematSchedulerDeinit(&s);
+}
+
+/* Freezing changes no EVAL program: an eval-only scheduler built before the freeze keeps serving. */
+void testEvalOnlySchedulerSurvivesAFreezeBetweenCalls(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    ASSERT_EXITS_WITH(0, walkEvalAfterFreezingN0(&f));
+    dagFree(&f);
+}
+
 void testRowContractArenaHarStoreAll(void) {
     assertRowContract(initArena, buildHarModel, NULL);
 }
@@ -3421,6 +3445,7 @@ int main(void) {
     RUN_TEST(testEvalOutsideItsTrainRangeExits);
     RUN_TEST(testEvalOnlyHeapWalksF3sEvalProgram);
     RUN_TEST(testRematBeginOnAnEvalOnlySchedulerExits);
+    RUN_TEST(testEvalOnlySchedulerSurvivesAFreezeBetweenCalls);
     RUN_TEST(testArenaHarLivenessBindsFlattenDxAfterItsSourceDied);
     RUN_TEST(testReportObservedPeakEqualsThePlannedPeak);
     RUN_TEST(testRowContractArenaHarLivenessInPlaceAcrossModes);

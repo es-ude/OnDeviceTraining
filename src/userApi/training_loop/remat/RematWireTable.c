@@ -193,9 +193,9 @@ static bool isMerge(const model_t *m, size_t j) {
     return opFunctions[m->layers[j]->type].arity > 1u;
 }
 
-static void requireFloat32MergeWire(const rematWireFact_t *f) {
+static void requireFloat32MergeWire(const rematWireFact_t *f, const char *caller) {
     if (f->dtype != FLOAT32) {
-        PRINT_ERROR("rematWireTableInit: non-FLOAT32 merge or accumulate: wire %s %u has dtype %u",
+        PRINT_ERROR("%s: non-FLOAT32 merge or accumulate: wire %s %u has dtype %u", caller,
                     rematWireKindName(f->kind), (unsigned)f->index, (unsigned)f->dtype);
         exit(1);
     }
@@ -209,7 +209,8 @@ static void requireFloat32MergeWire(const rematWireFact_t *f) {
  * which has no merge, so a chain's SYM_INT32 / BFP wires stay admitted. */
 static void requireFloat32MergeWires(const rematWireFact_t *facts, size_t numWires,
                                      const model_t *m, lossFuncType_t lt, const uint16_t *dxWire,
-                                     const uint8_t *dxMode) {
+                                     const uint8_t *dxMode,
+                                     const char *caller) {
     size_t n = m->numLayers;
     for (size_t j = 0; j < n; j++) {
         if (!isMerge(m, j)) {
@@ -218,31 +219,31 @@ static void requireFloat32MergeWires(const rematWireFact_t *facts, size_t numWir
         uint16_t ids[MODEL_MAX_ARITY];
         uint8_t k = modelNodeInputs(m, j, ids);
         for (uint8_t i = 0; i < k; i++) {
-            requireFloat32MergeWire(&facts[ids[i]]);
+            requireFloat32MergeWire(&facts[ids[i]], caller);
         }
     }
     for (size_t id = n + 1u; id < numWires; id++) {
         const rematWireFact_t *f = &facts[id];
         if (f->kind == REMAT_WIRE_PART) {
-            requireFloat32MergeWire(f);
+            requireFloat32MergeWire(f, caller);
             /* Its SUM target: the GRAD an earlier contribution opened, so numbered before it. */
             size_t open = id - 1u;
             while (facts[open].kind != REMAT_WIRE_GRAD || facts[open].index != f->index) {
                 open--;
             }
-            requireFloat32MergeWire(&facts[open]);
+            requireFloat32MergeWire(&facts[open], caller);
             continue;
         }
         /* GRAD b is node b - 1's dy; under CROSS_ENTROPY the seed GRAD n is the Softmax input's
          * gradient, so node n - 2's dy. */
         size_t b = (lt == CROSS_ENTROPY && f->index == n) ? n - 1u : f->index;
         if (b > 0u && isMerge(m, b - 1u)) {
-            requireFloat32MergeWire(f);
+            requireFloat32MergeWire(f, caller);
         }
     }
     for (size_t slot = 0; slot < n * MODEL_MAX_ARITY; slot++) {
         if (dxMode[slot] == OP_MODE_ACC) {
-            requireFloat32MergeWire(&facts[dxWire[slot]]);
+            requireFloat32MergeWire(&facts[dxWire[slot]], caller);
         }
     }
 }
@@ -442,15 +443,13 @@ static bool tableInit(rematWireTable_t **out, const model_t *m, lossFuncType_t l
                 rematDeriveGradWires(m, lt, needsGrad, runsBackward, NULL, dxWire, dxMode), NULL,
                 "numWires");
     if (numWires >= REMAT_NONE) {
-        PRINT_ERROR("rematWireTableInit: %zu wires reach REMAT_NONE (0xFFFF): wire ids are "
-                    "uint16_t",
+        PRINT_ERROR("%s: %zu wires reach REMAT_NONE (0xFFFF): wire ids are uint16_t", caller,
                     numWires);
         exit(1);
     }
     size_t inputRank = inputLike->shape->numberOfDimensions;
     if (inputRank > UINT8_MAX) {
-        PRINT_ERROR("rematWireTableInit: wire ACT 0 has rank %zu, above the uint8_t rank field "
-                    "(255)",
+        PRINT_ERROR("%s: wire ACT 0 has rank %zu, above the uint8_t rank field (255)", caller,
                     inputRank);
         exit(1);
     }
@@ -484,13 +483,12 @@ static bool tableInit(rematWireTable_t **out, const model_t *m, lossFuncType_t l
     for (size_t id = 1; id < numWires; id++) {
         const rematWireFact_t *f = &facts[id];
         if (f->dtype != FLOAT32 && f->dtype != SYM_INT32 && f->dtype != BFP) {
-            PRINT_ERROR("rematWireTableInit: wire %s %u has dtype %u; remat wires are FLOAT32, "
-                        "SYM_INT32 or BFP",
-                        rematWireKindName(f->kind), (unsigned)f->index, (unsigned)f->dtype);
+            PRINT_ERROR("%s: wire %s %u has dtype %u; remat wires are FLOAT32, SYM_INT32 or BFP",
+                        caller, rematWireKindName(f->kind), (unsigned)f->index, (unsigned)f->dtype);
             exit(1);
         }
         if (f->bytes == 0) {
-            PRINT_ERROR("rematWireTableInit: wire %s %u has zero bytes (#160)",
+            PRINT_ERROR("%s: wire %s %u has zero bytes (#160)", caller,
                         rematWireKindName(f->kind), (unsigned)f->index);
             exit(1);
         }
@@ -498,7 +496,7 @@ static bool tableInit(rematWireTable_t **out, const model_t *m, lossFuncType_t l
         totalBytes = addSize(totalBytes, f->bytes, f, "total wire bytes");
     }
     if (!isChain) {
-        requireFloat32MergeWires(facts, numWires, m, lt, dxWire, dxMode);
+        requireFloat32MergeWires(facts, numWires, m, lt, dxWire, dxMode, caller);
     }
 
     slabLayout_t sizing = {.base = NULL, .cursor = 0};
@@ -743,7 +741,7 @@ static void requireModelKey(const rematWireTable_t *t, const model_t *m, lossFun
     if (!t->evalOnly) {
         requireBackwardKey(t, m, lt);
     }
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = 0; i < n && !t->evalOnly; i++) {
         size_t frozen = layerIsFrozen(m->layers[i]) ? 1u : 0u;
         if (frozen != t->frozen[i]) {
             exitModelKeyAt("frozen", i, t->frozen[i], frozen);

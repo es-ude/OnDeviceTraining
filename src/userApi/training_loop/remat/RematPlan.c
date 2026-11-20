@@ -1028,11 +1028,12 @@ static void requireASequenceWithinTheBound(const rematPlanSpec_t *spec, size_t n
  * operands could start a real slice there. The pool does not depend on the
  * policy: five operands per node that runs its BACKWARD on a chain, so this
  * stops long chains of about 13107 nodes. */
-static void requireAnOperandPoolWithinTheOffsets(size_t numOperands) {
+static void requireAnOperandPoolWithinTheOffsets(size_t numOperands, const char *caller,
+                                                 const char *program) {
     if (numOperands > (size_t)UINT16_MAX) {
-        PRINT_ERROR("rematPlanBuild: the TRAIN program needs %zu operands, above UINT16_MAX "
+        PRINT_ERROR("%s: the %s program needs %zu operands, above UINT16_MAX "
                     "(operand offsets are uint16_t, and UINT16_MAX is REMAT_NONE)",
-                    numOperands);
+                    caller, program, numOperands);
         exit(1);
     }
 }
@@ -1132,7 +1133,7 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t 
     if (policy == REMAT_PLAN_SEQUENCE || policy == REMAT_PLAN_RETAIN_LIST) {
         requireRangesWithinTheCap(trainSize.numRanges);
     }
-    requireAnOperandPoolWithinTheOffsets(trainSize.numOperands);
+    requireAnOperandPoolWithinTheOffsets(trainSize.numOperands, "rematPlanBuild", "TRAIN");
     rematDeriveSize_t evalSize = rematDeriveEvalSize(t);
     size_t numNodeOps = t->modelSize + 1u;
     programLayout_t trainAt = layoutProgram(sizeof(rematPlan_t), trainSize, numNodeOps);
@@ -1168,6 +1169,7 @@ bool rematPlanBuildEval(rematPlan_t **out, const rematWireTable_t *t, const mode
     *out = NULL;
     requireTheTablesModel(t, m);
     rematDeriveSize_t evalSize = rematDeriveEvalSize(t);
+    requireAnOperandPoolWithinTheOffsets(evalSize.numOperands, "rematPlanBuildEval", "EVAL");
     programLayout_t evalAt = layoutProgram(sizeof(rematPlan_t), evalSize, t->modelSize + 1u);
     uint8_t *block = reserveMemory(evalAt.end);
     if (block == NULL) {

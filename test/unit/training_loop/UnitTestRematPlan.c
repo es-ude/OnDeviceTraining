@@ -1695,6 +1695,35 @@ void testFlattenActTakesTheTemplateOfItsWiredInput(void) {
     freeAddLayer(f.layers[2]);
 }
 
+/* n0 = Linear(b0); n1 = Flatten(b1); n2 = ADD(b2, b1). The merge opens GRAD 2 = 5 and GRAD 1 = 6,
+ * so the Flatten is b1's later, non-accumulating contributor: it writes PART 1 = 7, which passes
+ * its dx through and so inherits ACT 1's template like a GRAD it would open. */
+void testAPartAFlattenWritesInheritsItsInputsTemplate(void) {
+    dagFixture_t f;
+    dagBegin(&f);
+    uint16_t b1 = graphNode(&f.g, dagLinear(0, 1.0f, 1.0f, false), GRAPH_INPUT);
+    uint16_t b2 = graphNode(&f.g, flattenLayerInit(), b1);
+    (void)graphMerge(&f.g, addLayerInit(NULL), b2, b1);
+    f.m = graphFinish(&f.g);
+    dagTensor_t xs;
+    tensor_t *x = dagInput(&xs, 1, 2);
+    rematWireTable_t *t;
+    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
+    TEST_ASSERT_EQUAL_size_t(8u, t->numWires);
+    TEST_ASSERT_EQUAL_UINT8(REMAT_WIRE_GRAD, t->wires[6].kind);
+    TEST_ASSERT_EQUAL_UINT16(1, t->wires[6].index);
+    TEST_ASSERT_EQUAL_UINT8(REMAT_WIRE_PART, t->wires[7].kind);
+    TEST_ASSERT_EQUAL_UINT16(1, t->wires[7].index);
+    TEST_ASSERT_EQUAL_UINT16(1, t->wires[7].inheritFrom);
+    rematWireTableBind(t, &f.m, MSE, REMAT_MODE_TRAIN, x);
+    TEST_ASSERT_TRUE(t->bindScratch[7].tmpl == t->bindScratch[1].tmpl);
+    rematWireTableUnbind(t);
+    rematWireTableFree(t);
+    freeLinearLayer(f.layers[0]);
+    freeFlattenLayer(f.layers[1]);
+    freeAddLayer(f.layers[2]);
+}
+
 void testUnbindClearsTheBorrowedInputOnly(void) {
     layer_t *model[1] = {makeRelu(&g_floatQ)};
     inputLike_t in;
@@ -2619,6 +2648,200 @@ void testEvalSlicesOfADagReadTheWiring(void) {
     dagFree(&f);
 }
 
+/* Room for the DAG fixtures' programs, derived directly: the chain-form grammar of a plan build
+ * rejects a DAG. Zeroed, so the pool's padding bytes compare. */
+static const rematPlanSpec_t g_storeAllSpec = {.policy = REMAT_PLAN_STORE_ALL};
+
+typedef struct dagProgram {
+    rematStep_t steps[16];
+    rematOperand_t operands[48];
+    rematNodeOps_t nodeOps[6];
+    rematProgram_t p;
+} dagProgram_t;
+
+static void deriveDagTrain(const rematWireTable_t *t, const rematPlanSpec_t *spec,
+                           rematDeriveSize_t z, dagProgram_t *d) {
+    TEST_ASSERT_TRUE(z.numSteps <= 16u && z.numOperands <= 48u && t->modelSize < 6u);
+    memset(d, 0, sizeof *d);
+    d->p = (rematProgram_t){.numSteps = z.numSteps,
+                            .steps = d->steps,
+                            .numOperands = z.numOperands,
+                            .operands = d->operands,
+                            .nodeOps = d->nodeOps};
+    rematDeriveTrain(t, spec, &d->p);
+}
+
+static void assertStepSlice(const rematProgram_t *p, size_t s, rematStepKind_t kind, uint16_t layer,
+                            const rematOperand_t *reads, uint8_t numReads,
+                            const rematOperand_t *writes, uint8_t numWrites) {
+    const rematStep_t *st = &p->steps[s];
+    TEST_ASSERT_EQUAL_UINT8(kind, st->kind);
+    TEST_ASSERT_EQUAL_UINT16(layer, st->layer);
+    TEST_ASSERT_EQUAL_UINT8(numReads, st->numReads);
+    TEST_ASSERT_EQUAL_UINT8(numWrites, st->numWrites);
+    TEST_ASSERT_TRUE(st->operands + numReads + numWrites <= p->numOperands);
+    const rematOperand_t *ops = &p->operands[st->operands];
+    for (size_t k = 0; k < numReads; k++) {
+        TEST_ASSERT_EQUAL_UINT16(reads[k].wire, ops[k].wire);
+        TEST_ASSERT_EQUAL_UINT8(reads[k].mode, ops[k].mode);
+    }
+    for (size_t k = 0; k < numWrites; k++) {
+        TEST_ASSERT_EQUAL_UINT16(writes[k].wire, ops[numReads + k].wire);
+        TEST_ASSERT_EQUAL_UINT8(writes[k].mode, ops[numReads + k].mode);
+    }
+}
+
+#define R(w) {(w), OP_MODE_READ}
+#define M(w) {(w), OP_MODE_META}
+#define W(w) {(w), OP_MODE_WRITE}
+#define A(w) {(w), OP_MODE_ACC}
+#define OPS(...) ((const rematOperand_t[]){__VA_ARGS__})
+
+/* F3 under MSE: ACT 0..4, the seed 5, GRAD 3 = 6, GRAD 1 = 7, GRAD 2 = 8, PART 1 = 9. b1 has three
+ * contributors: B3 opens GRAD 1, the ADD B2 accumulates natively, and the Linear B1 writes the PART
+ * that the SUM right after it adds in. Pool: 11 forward operands, LOSS_BACKWARD 2, B3 and B2 5
+ * each, B1 3, SUM 2, B0 3. */
+void testDeriveF3TrainProgram(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    dagTensor_t xs;
+    rematWireTable_t *t;
+    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2)));
+    const rematPlanSpec_t spec = {.policy = REMAT_PLAN_STORE_ALL};
+    rematDeriveSize_t z = rematDeriveTrainSize(t, &spec);
+    TEST_ASSERT_EQUAL_size_t(11u, z.numSteps);
+    TEST_ASSERT_EQUAL_size_t(31u, z.numOperands);
+    TEST_ASSERT_EQUAL_size_t(9u, z.numRanges);
+    dagProgram_t d;
+    deriveDagTrain(t, &g_storeAllSpec, z, &d);
+    const rematProgram_t *p = &d.p;
+    assertStepSlice(p, 0, REMAT_STEP_FORWARD, 0, OPS(R(0)), 1, OPS(W(1)), 1);
+    assertStepSlice(p, 1, REMAT_STEP_FORWARD, 1, OPS(R(1)), 1, OPS(W(2)), 1);
+    assertStepSlice(p, 2, REMAT_STEP_FORWARD, 2, OPS(R(2), R(1)), 2, OPS(W(3)), 1);
+    assertStepSlice(p, 3, REMAT_STEP_FORWARD, 3, OPS(R(3), R(1)), 2, OPS(W(4)), 1);
+    assertStepSlice(p, 4, REMAT_STEP_LOSS_FORWARD, 4, OPS(R(4)), 1, NULL, 0);
+    assertStepSlice(p, 5, REMAT_STEP_LOSS_BACKWARD, 4, OPS(R(4)), 1, OPS(W(5)), 1);
+    assertStepSlice(p, 6, REMAT_STEP_BACKWARD, 3, OPS(R(5), M(3), M(1)), 3, OPS(W(6), W(7)), 2);
+    assertStepSlice(p, 7, REMAT_STEP_BACKWARD, 2, OPS(R(6), M(2), M(1)), 3, OPS(W(8), A(7)), 2);
+    assertStepSlice(p, 8, REMAT_STEP_BACKWARD, 1, OPS(R(8), R(1)), 2, OPS(W(9)), 1);
+    assertStepSlice(p, 9, REMAT_STEP_SUM, 1, OPS(R(9)), 1, OPS(A(7)), 1);
+    assertStepSlice(p, 10, REMAT_STEP_BACKWARD, 0, OPS(R(7), R(0)), 2, OPS(W(REMAT_NONE)), 1);
+    TEST_ASSERT_EQUAL_UINT16(p->steps[9].operands, p->nodeOps[1].sum);
+    for (size_t j = 0; j <= 4u; j++) {
+        if (j != 1u) {
+            TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, p->nodeOps[j].sum);
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT16(p->steps[6].operands, p->nodeOps[3].backward);
+    TEST_ASSERT_EQUAL_UINT16(p->steps[2].operands, p->nodeOps[2].forward);
+    rematWireTableFree(t);
+    dagFree(&f);
+}
+
+/* The first n + 1 TRAIN steps of F3, operands included, are its EVAL program. */
+void testDeriveF3EvalIsTheTrainPrefix(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    dagTensor_t xs;
+    rematWireTable_t *t;
+    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2)));
+    dagProgram_t train;
+    deriveDagTrain(t, &g_storeAllSpec, rematDeriveTrainSize(t, &g_storeAllSpec), &train);
+    rematDeriveSize_t z = rematDeriveEvalSize(t);
+    TEST_ASSERT_EQUAL_size_t(5u, z.numSteps);
+    TEST_ASSERT_EQUAL_size_t(11u, z.numOperands);
+    dagProgram_t eval;
+    memset(&eval, 0, sizeof eval);
+    eval.p = (rematProgram_t){.numSteps = z.numSteps,
+                              .steps = eval.steps,
+                              .numOperands = z.numOperands,
+                              .operands = eval.operands,
+                              .nodeOps = eval.nodeOps};
+    rematDeriveEval(t, &eval.p);
+    TEST_ASSERT_EQUAL_MEMORY(train.steps, eval.steps, 5u * sizeof(rematStep_t));
+    TEST_ASSERT_EQUAL_MEMORY(train.operands, eval.operands, 11u * sizeof(rematOperand_t));
+    for (size_t j = 0; j <= 4u; j++) {
+        TEST_ASSERT_EQUAL_UINT16(train.nodeOps[j].forward, eval.nodeOps[j].forward);
+        TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, eval.nodeOps[j].backward);
+        TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, eval.nodeOps[j].sum);
+    }
+    rematWireTableFree(t);
+    dagFree(&f);
+}
+
+/* S: n1 is frozen and reads only the input, so it runs no BACKWARD and b2 gets no dx; the backward
+ * phase skips it (B2, then B0). ACT 0..3, the seed 4, GRAD 1 = 5. No PART, so no SUM. */
+void testDeriveSkipsTheFrozenSkipNode(void) {
+    dagFixture_t f;
+    dagBuildS(&f);
+    dagTensor_t xs;
+    rematWireTable_t *t;
+    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2)));
+    TEST_ASSERT_EQUAL_UINT16(5, t->gradIdOf[1]);
+    rematDeriveSize_t z =
+        rematDeriveTrainSize(t, &(rematPlanSpec_t){.policy = REMAT_PLAN_STORE_ALL});
+    TEST_ASSERT_EQUAL_size_t(7u, z.numSteps);
+    dagProgram_t d;
+    deriveDagTrain(t, &g_storeAllSpec, z, &d);
+    const rematProgram_t *p = &d.p;
+    assertStepSlice(p, 0, REMAT_STEP_FORWARD, 0, OPS(R(0)), 1, OPS(W(1)), 1);
+    assertStepSlice(p, 1, REMAT_STEP_FORWARD, 1, OPS(R(0)), 1, OPS(W(2)), 1);
+    assertStepSlice(p, 2, REMAT_STEP_FORWARD, 2, OPS(R(1), R(2)), 2, OPS(W(3)), 1);
+    assertStepSlice(p, 3, REMAT_STEP_LOSS_FORWARD, 3, OPS(R(3)), 1, NULL, 0);
+    assertStepSlice(p, 4, REMAT_STEP_LOSS_BACKWARD, 3, OPS(R(3)), 1, OPS(W(4)), 1);
+    assertStepSlice(p, 5, REMAT_STEP_BACKWARD, 2, OPS(R(4), M(1), M(2)), 3,
+                    OPS(W(5), W(REMAT_NONE)), 2);
+    assertStepSlice(p, 6, REMAT_STEP_BACKWARD, 0, OPS(R(5), R(0)), 2, OPS(W(REMAT_NONE)), 1);
+    for (size_t j = 0; j <= 3u; j++) {
+        TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, p->nodeOps[j].sum);
+    }
+    TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, p->nodeOps[1].backward);
+    rematWireTableFree(t);
+    dagFree(&f);
+}
+
+/* F3 under RETAIN_LIST dropping ACT 4: REFORWARD(3) recomputes it before LOSS_BACKWARD, and the
+ * SUM still follows BACKWARD(1). The sizes are those of the program the generator writes: 12
+ * steps, and 10 ranges (ACT 1..4, ACT 4 again, wires 5..9), which is what the scan opens. */
+void testDeriveF3RetainListProgramKeepsTheSum(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    dagTensor_t xs;
+    rematWireTable_t *t;
+    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2)));
+    const bool retain[5] = {true, true, true, true, false};
+    const rematPlanSpec_t spec = {.policy = REMAT_PLAN_RETAIN_LIST, .retain = retain};
+    rematDeriveSize_t z = rematDeriveTrainSize(t, &spec);
+    TEST_ASSERT_EQUAL_size_t(12u, z.numSteps);
+    TEST_ASSERT_EQUAL_size_t(10u, z.numRanges);
+    dagProgram_t d;
+    deriveDagTrain(t, &spec, z, &d);
+    const rematProgram_t *p = &d.p;
+    TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_REFORWARD, p->steps[5].kind);
+    TEST_ASSERT_EQUAL_UINT16(3, p->steps[5].layer);
+    assertStepSlice(p, 9, REMAT_STEP_BACKWARD, 1, OPS(R(8), R(1)), 2, OPS(W(9)), 1);
+    assertStepSlice(p, 10, REMAT_STEP_SUM, 1, OPS(R(9)), 1, OPS(A(7)), 1);
+    assertStepSlice(p, 11, REMAT_STEP_BACKWARD, 0, OPS(R(7), R(0)), 2, OPS(W(REMAT_NONE)), 1);
+    rematRange_t ranges[16];
+    for (size_t r = 0; r < 16u; r++) {
+        ranges[r] = (rematRange_t){.wire = REMAT_NONE};
+    }
+    rematScanRanges(t, p, REMAT_PLAN_RETAIN_LIST, NULL, ranges);
+    size_t opened = 0;
+    while (opened < 16u && ranges[opened].wire != REMAT_NONE) {
+        opened++;
+    }
+    TEST_ASSERT_EQUAL_size_t(z.numRanges, opened);
+    rematWireTableFree(t);
+    dagFree(&f);
+}
+
+#undef R
+#undef M
+#undef W
+#undef A
+#undef OPS
+
 /* A REFORWARD shares its FORWARD's slice; the pool does not depend on the policy. */
 void testAReforwardCarriesItsForwardsSlice(void) {
     bool retain[HAR_N + 1] = {false};
@@ -2663,18 +2886,25 @@ void testAReforwardCarriesItsForwardsSlice(void) {
 /* A caller's step list the grammar will reject still derives safely: the
  * Softmax's BACKWARD (CE skips it), an unknown kind, and a FORWARD and a
  * BACKWARD at layer n (whose nodeOps entry holds the loss slices) each get the
- * empty slice. */
+ * empty slice; so does a SUM after a BACKWARD that writes no PART (layer 10),
+ * after the skipped Softmax (11), and at layer n. */
 void testTheDeriverGivesARejectedSequenceStepAnEmptySlice(void) {
     layer_t *model[HAR_N];
     buildHar(model, false);
     inputLike_t in;
     rematWireTable_t *t = initTable(model, HAR_N, CROSS_ENTROPY, makeHarInput(&in));
-    const rematStep_t sequence[4] = {STEP_B(11), {.kind = 9, .layer = 0}, STEP_F(12), STEP_B(12)};
-    rematPlanSpec_t spec = {.policy = REMAT_PLAN_SEQUENCE, .sequence = sequence, .sequenceLen = 4};
+    const rematStep_t sequence[7] = {STEP_B(11),
+                                     {.kind = 9, .layer = 0},
+                                     STEP_F(12),
+                                     STEP_B(12),
+                                     {.kind = REMAT_STEP_SUM, .layer = 10},
+                                     {.kind = REMAT_STEP_SUM, .layer = 11},
+                                     {.kind = REMAT_STEP_SUM, .layer = 12}};
+    rematPlanSpec_t spec = {.policy = REMAT_PLAN_SEQUENCE, .sequence = sequence, .sequenceLen = 7};
     rematDeriveSize_t size = rematDeriveTrainSize(t, &spec);
-    TEST_ASSERT_EQUAL_size_t(4, size.numSteps);
+    TEST_ASSERT_EQUAL_size_t(7, size.numSteps);
     TEST_ASSERT_EQUAL_size_t(60, size.numOperands);
-    rematStep_t steps[4];
+    rematStep_t steps[7];
     rematOperand_t operands[60];
     rematNodeOps_t nodeOps[HAR_N + 1];
     memset(steps, 0xA5, sizeof steps);
@@ -2686,7 +2916,7 @@ void testTheDeriverGivesARejectedSequenceStepAnEmptySlice(void) {
                         .operands = operands,
                         .nodeOps = nodeOps};
     rematDeriveTrain(t, &spec, &p);
-    for (size_t s = 0; s < 4u; s++) {
+    for (size_t s = 0; s < 7u; s++) {
         TEST_ASSERT_EQUAL_UINT8(sequence[s].kind, steps[s].kind);
         TEST_ASSERT_EQUAL_UINT16(sequence[s].layer, steps[s].layer);
         TEST_ASSERT_EQUAL_UINT8(0, steps[s].numReads);
@@ -5324,6 +5554,7 @@ int main(void) {
     RUN_TEST(testAddOfTheSameBufferWritesThenAccumulates);
     RUN_TEST(testSkipFromTheInputGetsNoDx);
     RUN_TEST(testFlattenActTakesTheTemplateOfItsWiredInput);
+    RUN_TEST(testAPartAFlattenWritesInheritsItsInputsTemplate);
     RUN_TEST(testUnbindClearsTheBorrowedInputOnly);
 #ifdef ODT_TEST_ASAN
     RUN_TEST(testAsanDeathCallbackExitsWithADistinctCode);
@@ -5374,6 +5605,10 @@ int main(void) {
     RUN_TEST(testHarTrainOperandsAreTheDerivedSlices);
     RUN_TEST(testEvalProgramIsTheTrainPrefixOperandsIncluded);
     RUN_TEST(testEvalSlicesOfADagReadTheWiring);
+    RUN_TEST(testDeriveF3TrainProgram);
+    RUN_TEST(testDeriveF3EvalIsTheTrainPrefix);
+    RUN_TEST(testDeriveSkipsTheFrozenSkipNode);
+    RUN_TEST(testDeriveF3RetainListProgramKeepsTheSum);
     RUN_TEST(testAReforwardCarriesItsForwardsSlice);
     RUN_TEST(testTheDeriverGivesARejectedSequenceStepAnEmptySlice);
     RUN_TEST(testPlanProgramOfTrainIsTheTrainProgram);

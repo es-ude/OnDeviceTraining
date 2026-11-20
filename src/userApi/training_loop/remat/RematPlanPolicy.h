@@ -17,6 +17,10 @@ bool rematHasBackward(size_t n, lossFuncType_t lt, const uint8_t *needsGrad);
  * writes ids[0..k) and returns k (a chain: k = 1, ids[0] = j). */
 uint8_t rematNodeInputs(const rematWireTable_t *t, size_t j, uint16_t ids[MODEL_MAX_ARITY]);
 
+/* Does node j's BACKWARD write a PART (its input slot 0, the only one a PART can take: only a
+ * unary row writes one), so that a SUM follows it? For a node that runs backward. */
+bool rematWritesPart(const rematWireTable_t *t, size_t j);
+
 /* The one owner of the gradient-wire decision (the fan-out contributor rule), made once at table
  * init (and repeated at every bind from the same key, so it gives the same values). Numbers the
  * seed (only when a backward runs), then walks the runsBackward nodes in descending order and each
@@ -40,20 +44,20 @@ typedef struct rematDeriveSize {
 
 /* The TRAIN program's sizes for this spec. The operand pool does not depend on the policy:
  * every node's FORWARD slice, the LOSS_FORWARD slice, then, when a backward runs, the
- * LOSS_BACKWARD slice and the BACKWARD slice of every runsBackward node, descending. numRanges
- * counts the writes rematScanRanges opens a range for, with spec->inPlaceDx deciding the
- * members. Reads the caller's sequence or retain mask, so the spec's own checks must have run
- * first. */
+ * LOSS_BACKWARD slice and the BACKWARD slice of every runsBackward node, descending, each followed
+ * by its SUM slice if it writes a PART. numRanges counts the writes rematScanRanges opens a range
+ * for, with spec->inPlaceDx deciding the members. Reads the caller's sequence or retain mask, so
+ * the spec's own checks must have run first. */
 rematDeriveSize_t rematDeriveTrainSize(const rematWireTable_t *t, const rematPlanSpec_t *spec);
 /* The EVAL program's sizes: n + 1 steps, the pool's FORWARD and LOSS_FORWARD slices, and the n
  * ranges of ACT 1..n. */
 rematDeriveSize_t rematDeriveEvalSize(const rematWireTable_t *t);
 /* The one operand writer. Fills the steps (kind and layer from the policy generator, or the
  * caller's sequence), the pool and nodeOps, and points each step at its node's slice by kind;
- * a REFORWARD shares its FORWARD's slice. The caller places p's arrays and counts from
- * rematDeriveTrainSize. A step the grammar will reject (an unknown kind, a layer outside its
- * kind's range, a node whose slice is REMAT_NONE) gets the empty slice, so the deriver is safe
- * on any caller's step list. Reads the table only, never a layer. */
+ * a REFORWARD shares its FORWARD's slice, a SUM has its own. The caller places p's arrays and
+ * counts from rematDeriveTrainSize. A step the grammar will reject (an unknown kind, a layer
+ * outside its kind's range, a node whose slice is REMAT_NONE) gets the empty slice, so the deriver
+ * is safe on any caller's step list. Reads the table only, never a layer. */
 void rematDeriveTrain(const rematWireTable_t *t, const rematPlanSpec_t *spec, rematProgram_t *p);
 /* The EVAL program: the TRAIN program's first n + 1 steps and their slices, operands included.
  * The caller places p's arrays and counts from rematDeriveEvalSize. */
@@ -71,7 +75,7 @@ void rematScanRanges(const rematWireTable_t *t, const rematProgram_t *p, rematPl
                      const uint8_t *inPlace, rematRange_t *ranges);
 
 /* FORWARD 0..n-1, LOSS_FORWARD; then, when a backward runs, LOSS_BACKWARD and a BACKWARD for
- * every runsBackward node, descending. */
+ * every runsBackward node, descending, each followed by a SUM if it writes a PART. */
 void rematFillTrainSteps(const rematWireTable_t *t, rematStep_t *steps);
 /* Is wire w an in-place member: the dx GRAD l of a ReLU, Dropout or Flatten whose wire and wire
  * w - 1, the gradient its BACKWARD reads, have one dtype, FLOAT32 or SYM_INT32, and equal bytes?
@@ -88,8 +92,9 @@ uint16_t rematChainRoot(const uint8_t *inPlace, uint16_t wire);
  * REFORWARD run k..j-1 that recomputes a dropped ACT j (j = n, or l) from the
  * nearest present ACT k < j: ACT 0, a kept one, or one an earlier run
  * recomputed. The needs only descend, so each ACT is recomputed at most once
- * and a program holds at most 3n + 2 steps. So the program is the default
- * TRAIN program plus REFORWARD steps. With steps == NULL it only counts (the
+ * and a program holds at most 3n + 2 steps plus its SUMs. So the program is
+ * the default TRAIN program, a SUM after every BACKWARD that writes a PART
+ * included, plus REFORWARD steps. With steps == NULL it only counts (the
  * plan sizes its block first). Returns the step count. */
 size_t rematFillRetainSteps(const rematWireTable_t *t, const bool *retain, rematStep_t *steps);
 

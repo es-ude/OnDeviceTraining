@@ -112,6 +112,11 @@ uint8_t rematNodeInputs(const rematWireTable_t *t, size_t j, uint16_t ids[MODEL_
     return k;
 }
 
+bool rematWritesPart(const rematWireTable_t *t, size_t j) {
+    uint16_t w = t->dxWire[j * MODEL_MAX_ARITY];
+    return w != REMAT_NONE && t->wires[w].kind == REMAT_WIRE_PART;
+}
+
 /* The pool writer's cursor; with ops == NULL it only counts. It also counts what the slices it
  * wrote hold: reads, writes, and the writes rematScanRanges opens a range for (members decided by
  * inPlaceDx), so the sizing pass and pointAtSlice read the slice shape from the one writer. */
@@ -197,11 +202,23 @@ static void writeBackwardSlice(poolCursor_t *c, size_t j) {
     }
 }
 
+/* Node j's SUM slice; only for a node that writes a PART. */
+static void writeSumSlice(poolCursor_t *c, size_t j) {
+    const rematWireTable_t *t = c->t;
+    uint16_t part = t->dxWire[j * MODEL_MAX_ARITY];
+    if (c->nodeOps != NULL) {
+        c->nodeOps[j].sum = (uint16_t)c->at;
+    }
+    putRead(c, part, OP_MODE_READ);
+    putWrite(c, t->gradIdOf[t->wires[part].index], OP_MODE_ACC);
+}
+
 /* The canonical pool, in pool order: the FORWARD slice of every node, the LOSS_FORWARD slice;
  * then, for a TRAIN program with a backward, the LOSS_BACKWARD slice and the BACKWARD slice of
- * every runsBackward node, descending. Each slice appears once, so the cursor's counts are those
- * of the default TRAIN (or the EVAL) program. The offsets are cast to uint16_t only while writing,
- * after the build checked the count against UINT16_MAX. */
+ * every runsBackward node, descending, each followed by its SUM slice if it writes a PART. Each
+ * slice appears once, so the cursor's counts are those of the default TRAIN (or the EVAL) program.
+ * The offsets are cast to uint16_t only while writing, after the build checked the count against
+ * UINT16_MAX. */
 static void writePool(poolCursor_t *c, bool train) {
     const rematWireTable_t *t = c->t;
     size_t n = t->modelSize;
@@ -220,35 +237,39 @@ static void writePool(poolCursor_t *c, bool train) {
     for (size_t j = n; j-- > 0;) {
         if (t->runsBackward[j]) {
             writeBackwardSlice(c, j);
+            if (rematWritesPart(t, j)) {
+                writeSumSlice(c, j);
+            }
         }
     }
 }
 
-/* The slice a step points at: node *node's FORWARD slice (backward false) or BACKWARD slice. False
- * for every step the grammar rejects later (an unknown kind, a layer outside its kind's range, a
- * node without that slice), so nothing reads past the pool before the grammar exits. Entry n of
- * nodeOps holds the loss slices, so a FORWARD or BACKWARD must check its layer before it looks. */
-static bool sliceOf(const rematWireTable_t *t, const rematStep_t *st, size_t *node,
-                    bool *backward) {
+/* Which of its node's slices a step points at. */
+typedef enum sliceKind { SLICE_NONE = 0, SLICE_FORWARD, SLICE_BACKWARD, SLICE_SUM } sliceKind_t;
+
+/* The slice a step points at, of node *node. SLICE_NONE for every step the grammar rejects later
+ * (an unknown kind, a layer outside its kind's range, a node without that slice), so nothing reads
+ * past the pool before the grammar exits. Entry n of nodeOps holds the loss slices, so a FORWARD,
+ * BACKWARD or SUM must check its layer before it looks. */
+static sliceKind_t sliceOf(const rematWireTable_t *t, const rematStep_t *st, size_t *node) {
     size_t n = t->modelSize;
     size_t l = st->layer;
     *node = l;
+    bool runs = l < n && t->hasBackward && t->runsBackward[l];
     switch (st->kind) {
     case REMAT_STEP_FORWARD:
     case REMAT_STEP_REFORWARD:
-        *backward = false;
-        return l < n;
+        return l < n ? SLICE_FORWARD : SLICE_NONE;
     case REMAT_STEP_LOSS_FORWARD:
-        *backward = false;
-        return l == n;
+        return l == n ? SLICE_FORWARD : SLICE_NONE;
     case REMAT_STEP_LOSS_BACKWARD:
-        *backward = true;
-        return l == n && t->hasBackward;
+        return (l == n && t->hasBackward) ? SLICE_BACKWARD : SLICE_NONE;
     case REMAT_STEP_BACKWARD:
-        *backward = true;
-        return l < n && t->hasBackward && t->runsBackward[l];
+        return runs ? SLICE_BACKWARD : SLICE_NONE;
+    case REMAT_STEP_SUM:
+        return (runs && rematWritesPart(t, l)) ? SLICE_SUM : SLICE_NONE;
     default:
-        return false;
+        return SLICE_NONE;
     }
 }
 
@@ -256,13 +277,18 @@ static bool sliceOf(const rematWireTable_t *t, const rematStep_t *st, size_t *no
 static poolCursor_t sliceCounts(const rematWireTable_t *t, bool inPlaceDx, const rematStep_t *st) {
     poolCursor_t c = countingCursor(t, inPlaceDx);
     size_t node;
-    bool backward;
-    if (sliceOf(t, st, &node, &backward)) {
-        if (backward) {
-            writeBackwardSlice(&c, node);
-        } else {
-            writeForwardSlice(&c, node);
-        }
+    switch (sliceOf(t, st, &node)) {
+    case SLICE_FORWARD:
+        writeForwardSlice(&c, node);
+        break;
+    case SLICE_BACKWARD:
+        writeBackwardSlice(&c, node);
+        break;
+    case SLICE_SUM:
+        writeSumSlice(&c, node);
+        break;
+    default:
+        break;
     }
     return c;
 }
@@ -271,17 +297,24 @@ static poolCursor_t sliceCounts(const rematWireTable_t *t, bool inPlaceDx, const
 static void pointAtSlice(const rematWireTable_t *t, const rematNodeOps_t *nodeOps,
                          rematStep_t *st) {
     size_t node;
-    bool backward;
-    if (!sliceOf(t, st, &node, &backward)) {
-        st->numReads = 0;
-        st->numWrites = 0;
-        st->operands = 0;
-        return;
-    }
+    sliceKind_t slice = sliceOf(t, st, &node);
     poolCursor_t c = sliceCounts(t, false, st);
     st->numReads = (uint8_t)c.numReads;
     st->numWrites = (uint8_t)c.numWrites;
-    st->operands = backward ? nodeOps[node].backward : nodeOps[node].forward;
+    switch (slice) {
+    case SLICE_FORWARD:
+        st->operands = nodeOps[node].forward;
+        break;
+    case SLICE_BACKWARD:
+        st->operands = nodeOps[node].backward;
+        break;
+    case SLICE_SUM:
+        st->operands = nodeOps[node].sum;
+        break;
+    default:
+        st->operands = 0;
+        break;
+    }
 }
 
 static size_t trainStepCount(const rematWireTable_t *t) {
@@ -291,7 +324,9 @@ static size_t trainStepCount(const rematWireTable_t *t) {
     }
     size_t backward = 0;
     for (size_t j = 0; j < n; j++) {
-        backward += t->runsBackward[j] ? 1u : 0u;
+        if (t->runsBackward[j]) {
+            backward += rematWritesPart(t, j) ? 2u : 1u;
+        }
     }
     return n + 2u + backward;
 }

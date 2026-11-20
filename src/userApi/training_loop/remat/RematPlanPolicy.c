@@ -28,6 +28,9 @@ void rematFillTrainSteps(const rematWireTable_t *t, rematStep_t *steps) {
     for (size_t l = n; l-- > 0;) {
         if (t->runsBackward[l]) {
             steps[s++] = (rematStep_t){.kind = REMAT_STEP_BACKWARD, .layer = (uint16_t)l};
+            if (rematWritesPart(t, l)) {
+                steps[s++] = (rematStep_t){.kind = REMAT_STEP_SUM, .layer = (uint16_t)l};
+            }
         }
     }
 }
@@ -119,6 +122,9 @@ size_t rematFillRetainSteps(const rematWireTable_t *t, const bool *retain, remat
                 recomputeIfDropped(retain, &e, l, &recomputedFrom);
             }
             emitStep(&e, REMAT_STEP_BACKWARD, l);
+            if (rematWritesPart(t, l)) {
+                emitStep(&e, REMAT_STEP_SUM, l);
+            }
         }
     }
     return e.numSteps;

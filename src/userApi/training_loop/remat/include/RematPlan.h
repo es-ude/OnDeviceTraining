@@ -56,10 +56,10 @@ typedef struct rematWire {
     uint8_t rank;         /* key */
     uint8_t borrowed;     /* ACT 0 only: the caller's tensor; never bound, released or poisoned */
     uint16_t index;       /* the buffer b of ACT, GRAD or PART b */
-    uint16_t inheritFrom; /* GRAD whose config comes from a LIVE ACT header when it is bound (the
-                             loss seed, Flatten's dx): that ACT's index; REMAT_NONE otherwise (the
-                             CrossEntropy seed of a BFP-declaring head is the last Softmax's dx:
-                             its propLossQ) */
+    uint16_t inheritFrom; /* GRAD or PART whose config comes from a LIVE ACT header when it
+                             is bound (the loss seed, a Flatten's dx): that ACT's index;
+                             REMAT_NONE otherwise (the CrossEntropy seed of a BFP-declaring head
+                             is the last Softmax's dx: its propLossQ) */
     size_t bytes;         /* exact dtype-aware payload bytes, dims[0] = B (key); never padded */
     size_t expCapacity; /* BFP exponent slots reserved in the slab; a bind needs numGroups <= it */
     uint32_t bindGen;   /* ++ on every rematWireBind; 0 after every rematWireTableBind */

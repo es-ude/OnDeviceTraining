@@ -153,9 +153,8 @@ static void setGradWireFacts(rematWireFact_t *facts, size_t id, layer_t *writer)
  * Flatten on buffer 0 the caller's live input config): config fields only, never a scale or
  * exponents. The seed's writer is the last node (its template matters only for a BFP-declaring
  * CE head: the last Softmax's dx wire); every other gradient wire's writer is the node whose dx
- * slot WRITEs it, so dxWire/dxMode must be numbered first. The slots are visited in walk order,
- * which is wire-id order. shapes[0..n] is modelShapePass's output for this input; ACT j's rank
- * and elements come from shapes[j]. */
+ * slot WRITEs it, so dxWire/dxMode must be numbered first. shapes[0..n] is modelShapePass's output
+ * for this input; ACT j's rank and elements come from shapes[j]. */
 static void deriveFacts(rematWireFact_t *facts, size_t numWires, const model_t *m,
                         const shape_t *shapes, const tensor_t *input, const uint16_t *dxWire,
                         const uint8_t *dxMode) {

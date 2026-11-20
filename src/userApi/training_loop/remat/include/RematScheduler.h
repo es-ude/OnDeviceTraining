@@ -24,6 +24,9 @@ typedef enum rematStepKind {
                                  no dx where its input needs no gradient (grads only) */
     REMAT_STEP_REFORWARD,     /* layer l, during the backward phase: ACT l -> ACT l+1 again, with
                                  FORWARD(l)'s key, for a pending backward step that reads it */
+    REMAT_STEP_SUM,           /* layer l: right after BACKWARD(l) wrote its input's gradient to a
+                                 PART (l is a later, non-accumulating contributor), adds the PART
+                                 into that buffer's GRAD */
 } rematStepKind_t;
 
 /* One record, three roles: plan-table entry, the value a row's next() fills

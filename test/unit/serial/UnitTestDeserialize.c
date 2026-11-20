@@ -6,6 +6,7 @@
 #include "ArithmeticType.h"
 #include "BatchNorm1d.h"
 #include "BatchNorm1dApi.h"
+#include "DagFixtures.h"
 #include "DeathTest.h"
 #include "Deserialize.h"
 #include "Flatten.h"
@@ -2928,6 +2929,104 @@ static void testDeserializeModelValidatesTheWiring(void) {
     freeQuantization(floatQ);
 }
 
+static size_t serializeToBuffer(const model_t *m, uint8_t *buffer, size_t capacity) {
+    FILE *f = tmpfile();
+    TEST_ASSERT_NOT_NULL(f);
+    serializeModel(m, f);
+    rewind(f);
+    size_t length = fread(buffer, 1, capacity, f);
+    fclose(f);
+    TEST_ASSERT_TRUE(length < capacity);
+    return length;
+}
+
+static FILE *streamOf(const uint8_t *bytes, size_t length) {
+    FILE *f = tmpfile();
+    TEST_ASSERT_NOT_NULL(f);
+    fwrite(bytes, 1, length, f);
+    rewind(f);
+    return f;
+}
+
+static void testDeserializeRejectsADifferentlyWiredSkeleton(void) {
+    dagFixture_t f3, f3r;
+    dagBuildF3(&f3, false);
+    dagBuildF3r(&f3r);
+    FILE *f = tmpfile();
+    TEST_ASSERT_NOT_NULL(f);
+    serializeModel(&f3.m, f);
+    rewind(f);
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "deserializeModel: wiring mismatch on 'inputIds[5]' (file 1, skeleton 2)",
+        deserializeModel(&f3r.m, f));
+
+    fclose(f);
+    dagFree(&f3r);
+    dagFree(&f3);
+}
+
+/* R's file (inputStart {0, 1, 3}) into ADD(b0, b0) -> ReLU(b1) (inputStart {0, 2, 3}). */
+static void testDeserializeRejectsADifferentInputStart(void) {
+    dagFixture_t r, swapped;
+    dagBuildR(&r);
+    uint8_t bytes[64];
+    size_t length = serializeToBuffer(&r.m, bytes, sizeof(bytes));
+    dagBegin(&swapped);
+    uint16_t b1 = graphMerge(&swapped.g, addLayerInit(NULL), GRAPH_INPUT, GRAPH_INPUT);
+    (void)graphNode(&swapped.g, dagRelu(), b1);
+    swapped.m = graphFinish(&swapped.g);
+    FILE *f = streamOf(bytes, length);
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "deserializeModel: wiring mismatch on 'inputStart[1]' (file 1, skeleton 2)",
+        deserializeModel(&swapped.m, f));
+
+    fclose(f);
+    dagFree(&swapped);
+    dagFree(&r);
+}
+
+/* Cut after magic, version, count, kind and one and a half inputStart entries. */
+static void testDeserializeRejectsATruncatedWiringRecord(void) {
+    dagFixture_t r;
+    dagBuildR(&r);
+    uint8_t bytes[64];
+    (void)serializeToBuffer(&r.m, bytes, sizeof(bytes));
+    FILE *cut = streamOf(bytes, 4 + 4 + 4 + 1 + 3);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "short read (2 bytes): truncated or corrupt stream",
+                             deserializeModel(&r.m, cut));
+
+    fclose(cut);
+    dagFree(&r);
+}
+
+/* The FLOAT32 merge gate trusts addLayerInit, so a file must not install what the factory refuses.
+ * R's ADD record starts at byte 32: tag, forwardMath type, rounding, propLossMath type. */
+static void testDeserializeAddRejectsNonFloat32Math(void) {
+    dagFixture_t r;
+    dagBuildR(&r);
+    uint8_t bytes[64];
+    size_t length = serializeToBuffer(&r.m, bytes, sizeof(bytes));
+    TEST_ASSERT_EQUAL_HEX8((uint8_t)ADD, bytes[32]);
+
+    bytes[33] = (uint8_t)ARITH_SYM_INT32;
+    FILE *f = streamOf(bytes, length);
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: ADD forwardMath must be ARITH_FLOAT32 (got 1)",
+                             deserializeModel(&r.m, f));
+    fclose(f);
+
+    bytes[33] = (uint8_t)ARITH_FLOAT32;
+    bytes[35] = (uint8_t)ARITH_BFP;
+    f = streamOf(bytes, length);
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: ADD propLossMath must be ARITH_FLOAT32 (got 2)",
+                             deserializeModel(&r.m, f));
+    fclose(f);
+
+    dagFree(&r);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -3015,5 +3114,9 @@ int main(void) {
     RUN_TEST(testReadTensorRecordHeaderGroupedBfp);
     RUN_TEST(testReadTensorRecordHeaderRejectsRankAboveCap);
     RUN_TEST(testDeserializeModelValidatesTheWiring);
+    RUN_TEST(testDeserializeRejectsADifferentlyWiredSkeleton);
+    RUN_TEST(testDeserializeRejectsADifferentInputStart);
+    RUN_TEST(testDeserializeRejectsATruncatedWiringRecord);
+    RUN_TEST(testDeserializeAddRejectsNonFloat32Math);
     return UNITY_END();
 }

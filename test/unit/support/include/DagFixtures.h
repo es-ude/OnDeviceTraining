@@ -14,6 +14,7 @@
  *   S   n0 = Linear I (b0); n1 = Linear D (b0), frozen; n2 = ADD(b1, b2)
  *   P2  n0 = Linear I (b0); n1 = ReLU(b1); n2 = Linear D (b1); n3 = ADD(b2, b3);
  *       n4 = ADD(b4, b1)
+ *   R   n0 = ReLU (b0); n1 = ADD(b1, b0)
  *
  * with I = identity and D = diag(2, 3). The model of a dagFixture_t points
  * into the fixture's own arrays: build it in place and never copy it.
@@ -154,6 +155,13 @@ static inline void dagBuildP2(dagFixture_t *f) {
     uint16_t b3 = graphNode(&f->g, dagLinear(2, 2.0f, 3.0f, false), b1);
     uint16_t b4 = graphMerge(&f->g, addLayerInit(NULL), b2, b3);
     (void)graphMerge(&f->g, addLayerInit(NULL), b4, b1);
+    f->m = graphFinish(&f->g);
+}
+
+static inline void dagBuildR(dagFixture_t *f) {
+    dagBegin(f);
+    uint16_t b1 = graphNode(&f->g, dagRelu(), GRAPH_INPUT);
+    (void)graphMerge(&f->g, addLayerInit(NULL), b1, GRAPH_INPUT);
     f->m = graphFinish(&f->g);
 }
 

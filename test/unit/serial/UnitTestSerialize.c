@@ -14,6 +14,7 @@
 #include "Conv1dApi.h"
 #include "Conv1dTransposed.h"
 #include "Conv1dTransposedApi.h"
+#include "DagFixtures.h"
 #include "DeathTest.h"
 #include "Deserialize.h"
 #include "Dropout.h"
@@ -22,6 +23,7 @@
 #include "FlattenApi.h"
 #include "GroupNorm.h"
 #include "GroupNormApi.h"
+#include "InferenceApi.h"
 #include "Kernel.h"
 #include "Layer.h"
 #include "LayerNorm.h"
@@ -3080,6 +3082,88 @@ void testSerializeWritesKindZeroForABuilderMadeChain(void) {
     TEST_ASSERT_EQUAL_HEX8(0x00, fromBuilder[12]); /* the byte after magic, version, layerCount */
 }
 
+void testGoldenBytesModelReluAddCsrV8(void) {
+    dagFixture_t g;
+    dagBuildR(&g);
+    uint8_t got[64];
+    size_t length = serializeModelToBuffer(&g.m, got, sizeof(got));
+    dagFree(&g);
+
+    static const uint8_t expected[] = {/* magic */ 'O',
+                                       'D',
+                                       'T',
+                                       'S',
+                                       /* version u32 LE */ 0x08,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       /* layerCount u32 LE */ 0x02,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       /* wiring: CSR */ 0x01,
+                                       /* inputStart u16 LE */ 0x00,
+                                       0x00,
+                                       0x01,
+                                       0x00,
+                                       0x03,
+                                       0x00,
+                                       /* inputIds u16 LE */ 0x00,
+                                       0x00,
+                                       0x01,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       /* tag RELU, forwardMath, propLossMath */ 0x01,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       /* outputQ FLOAT32, propLossQ FLOAT32 */ 0x01,
+                                       0x01,
+                                       /* tag ADD, forwardMath, propLossMath */ 0x0E,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       0x00,
+                                       /* outputQ FLOAT32, propLossQ FLOAT32 */ 0x01,
+                                       0x01};
+    TEST_ASSERT_EQUAL_size_t(sizeof(expected), length);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
+}
+
+void testRoundTripF3(void) {
+    dagFixture_t source, skeleton;
+    dagBuildF3(&source, false);
+    dagBuildF3(&skeleton, false);
+    for (size_t j = 0; j < 2; j++) {
+        memset(skeleton.layers[j]->config->linear->weights->param->data, 0, 4 * sizeof(float));
+    }
+    FILE *f = tmpfile();
+    TEST_ASSERT_NOT_NULL(f);
+    serializeModel(&source.m, f);
+    rewind(f);
+    deserializeModel(&skeleton.m, f);
+    fclose(f);
+
+    float weights[2][4];
+    for (size_t j = 0; j < 2; j++) {
+        memcpy(weights[j], skeleton.layers[j]->config->linear->weights->param->data,
+               sizeof weights[j]);
+    }
+    dagTensor_t xs;
+    tensor_t *y = inference(&skeleton.m, dagInput(&xs, 1.0f, 2.0f));
+    float got[2];
+    memcpy(got, y->data, sizeof got);
+    freeTensor(y);
+    dagFree(&skeleton);
+    dagFree(&source);
+
+    TEST_ASSERT_EQUAL_MEMORY(((float[]){1.f, 0.f, 0.f, 1.f}), weights[0], sizeof weights[0]);
+    TEST_ASSERT_EQUAL_MEMORY(((float[]){2.f, 0.f, 0.f, 3.f}), weights[1], sizeof weights[1]);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){4.f, 10.f}), got, 2);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testRoundTripLinear);
@@ -3123,5 +3207,7 @@ int main(void) {
     RUN_TEST(testDeserializeRejectsLinearHasBiasByteOutOfRange);
     RUN_TEST(testSerializeModelValidatesTheWiring);
     RUN_TEST(testSerializeWritesKindZeroForABuilderMadeChain);
+    RUN_TEST(testGoldenBytesModelReluAddCsrV8);
+    RUN_TEST(testRoundTripF3);
     return UNITY_END();
 }

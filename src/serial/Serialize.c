@@ -3,6 +3,7 @@
 #include <stdlib.h>
 
 #include "AdaptiveAvgPool1d.h"
+#include "AddLayer.h"
 #include "ArithmeticType.h"
 #include "AvgPool1d.h"
 #include "BatchNorm1d.h"
@@ -30,10 +31,13 @@
 /* v8: a `u8 wiringKind` follows `u32 layerCount`, ahead of the first layer
  * record. 0 = chain: node j reads the output of node j - 1, for every model
  * modelIsChain accepts, so a chain the graph builder spelled as an explicit
- * CSR writes the same bytes as a MODEL_CHAIN. 1 = graph wiring; no layer
- * record can serialize a merge node yet, so no file carries it. The reader
- * requires the file's kind to equal the skeleton's. Every layer record is
- * unchanged; v7 files fail at the version check.
+ * CSR writes the same bytes as a MODEL_CHAIN. 1 = graph wiring: the model's
+ * CSR follows, `u16 inputStart[layerCount + 1]` then `u16
+ * inputIds[inputStart[layerCount]]` (LE). The reader requires the file's
+ * kind and CSR to equal the skeleton's. New ADD record (tag 14), laid out
+ * like RELU: `arithmetic forwardMath, arithmetic propLossMath, quantization
+ * outputQ, quantization propLossQ`. Every other layer record is unchanged;
+ * v7 files fail at the version check.
  * v7 (#391): the LINEAR record gains `u8 hasBias` between the weights and
  * bias parameter records (bias record omitted when 0) -- the same presence
  * byte CONV1D/CONV1D_TRANSPOSED already carried -- so a BIAS_FALSE Linear
@@ -127,7 +131,17 @@ void serializeModel(const model_t *m, FILE *f) {
     serialWriteBytes(SERIALIZE_MAGIC, 4, f);
     serialWriteU32LE(SERIALIZE_FORMAT_VERSION, f);
     serialWriteSizeAsU32LE(m->numLayers, f);
-    serialWriteU8(modelIsChain(m) ? 0u : 1u, f);
+    if (modelIsChain(m)) {
+        serialWriteU8(0u, f);
+    } else {
+        serialWriteU8(1u, f);
+        for (size_t j = 0; j <= m->numLayers; j++) {
+            serialWriteU16LE(m->inputStart[j], f);
+        }
+        for (size_t e = 0; e < m->inputStart[m->numLayers]; e++) {
+            serialWriteU16LE(m->inputIds[e], f);
+        }
+    }
 
     for (size_t i = 0; i < m->numLayers; i++) {
         /* The tag byte is the layerType_t enum position -- append-only wire
@@ -275,6 +289,14 @@ static void serializeLayer(layer_t *layer, FILE *f) {
         serializeArithmetic(&reluConfig->propLossMath, f);
         serializeQuantization(reluConfig->outputQ, f);
         serializeQuantization(reluConfig->propLossQ, f);
+        break;
+    }
+    case ADD: {
+        addConfig_t *addConfig = layer->config->add;
+        serializeArithmetic(&addConfig->forwardMath, f);
+        serializeArithmetic(&addConfig->propLossMath, f);
+        serializeQuantization(addConfig->outputQ, f);
+        serializeQuantization(addConfig->propLossQ, f);
         break;
     }
     case CONV1D: {

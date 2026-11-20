@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "AdaptiveAvgPool1d.h"
+#include "AddLayer.h"
 #include "ArithmeticType.h"
 #include "AvgPool1d.h"
 #include "BatchNorm1d.h"
@@ -30,9 +31,11 @@
 #include "Tensor.h"
 #include "TensorRecord.h"
 
-/* v8: the `u8 wiringKind` after the layer count (0 = chain, see Serialize.c)
- * must equal the skeleton's, so a file never loads into a model whose layers
- * read different buffers. No migration path from v7.
+/* v8: the `u8 wiringKind` after the layer count (0 = chain, 1 = CSR, see
+ * Serialize.c) and a kind-1 file's CSR must equal the skeleton's, so a file
+ * never loads into a model whose layers read different buffers. The CSR is
+ * compared as it streams in, nothing is allocated. The ADD record must carry
+ * FLOAT32 arithmetic, as addLayerInit requires. No migration path from v7.
  * v7 (#391): the LINEAR record gains the `u8 hasBias` presence byte the
  * CONV1D/CONV1D_TRANSPOSED records already carried (bias record skipped when
  * 0), so a BIAS_FALSE Linear round-trips. All three arms now fail fast when
@@ -142,6 +145,14 @@ void deserializeParameter(parameter_t *parameter, FILE *f) {
      * optimizerZeroGrad re-zeros before every batch anyway. */
 }
 
+static void requireWiringEntry(const char *field, size_t index, uint16_t file, uint16_t skeleton) {
+    if (file != skeleton) {
+        PRINT_ERROR("deserializeModel: wiring mismatch on '%s[%zu]' (file %u, skeleton %u)", field,
+                    index, (unsigned)file, (unsigned)skeleton);
+        exit(1);
+    }
+}
+
 void deserializeModel(const model_t *m, FILE *f) {
     modelRequireValid(m, "deserializeModel");
     char magic[4];
@@ -172,6 +183,16 @@ void deserializeModel(const model_t *m, FILE *f) {
         PRINT_ERROR("deserializeModel: wiring mismatch on 'kind' (file %u, skeleton %u)",
                     (unsigned)wiringKind, (unsigned)skeletonKind);
         exit(1);
+    }
+    if (skeletonKind == 1u) {
+        /* The skeleton passed modelRequireValid, so equality validates the file's CSR; the bounds
+         * come from the skeleton, never from the file. */
+        for (size_t j = 0; j <= m->numLayers; j++) {
+            requireWiringEntry("inputStart", j, serialReadU16LE(f), m->inputStart[j]);
+        }
+        for (size_t e = 0; e < m->inputStart[m->numLayers]; e++) {
+            requireWiringEntry("inputIds", e, serialReadU16LE(f), m->inputIds[e]);
+        }
     }
 
     for (size_t i = 0; i < m->numLayers; i++) {
@@ -745,6 +766,14 @@ static void deserializeOptionalBias(parameter_t *skeletonBias, const char *layer
     }
 }
 
+/* The FLOAT32 merge gate trusts addLayerInit, so the reader refuses what the factory refuses. */
+static void requireAddFloat32Math(arithmetic_t a, const char *field) {
+    if (a.type != ARITH_FLOAT32) {
+        PRINT_ERROR("deserializeModel: ADD %s must be ARITH_FLOAT32 (got %d)", field, (int)a.type);
+        exit(1);
+    }
+}
+
 static void deserializeLayer(layer_t *layer, FILE *f) {
     switch (layer->type) {
     case LINEAR: {
@@ -765,6 +794,18 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeArithmetic(&reluConfig->propLossMath, f);
         deserializeQuantization(reluConfig->outputQ, f, 0);
         deserializeQuantization(reluConfig->propLossQ, f, 0);
+        break;
+    }
+    case ADD: {
+        addConfig_t *addConfig = layer->config->add;
+        deserializeArithmetic(&addConfig->forwardMath, f);
+        deserializeArithmetic(&addConfig->propLossMath, f);
+        /* outputQ/propLossQ need no check: deserializeQuantization refuses a dtype that differs
+         * from the FLOAT32 skeleton's. */
+        requireAddFloat32Math(addConfig->forwardMath, "forwardMath");
+        requireAddFloat32Math(addConfig->propLossMath, "propLossMath");
+        deserializeQuantization(addConfig->outputQ, f, 0);
+        deserializeQuantization(addConfig->propLossQ, f, 0);
         break;
     }
     case CONV1D: {

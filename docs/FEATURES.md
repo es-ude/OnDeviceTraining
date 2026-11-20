@@ -404,9 +404,15 @@ Notes on the qualified cells:
   `exponentBits` + rounding (v5) — see Model format below). Packed tensor data
   (SYM/ASYM sub-byte, BFP sub-byte mantissas, BOOL 1-bit) is byte-tight via
   `calcNumberOfBytesForData` and round-trips exactly.
-- **Model format** — `"ODTS"` magic + `version` (=8) + `layerCount` + `u8` wiring kind (0 = chain)
-  + per-layer type tag. Deserialize fail-fasts on magic / version / count / wiring kind /
-  tag mismatch. Since v2
+- **Model format** — `"ODTS"` magic + `version` (=8) + `layerCount` + `u8` wiring kind (0 = chain,
+  also for a chain the graph builder spelled as a CSR; 1 = graph) + for kind 1 the CSR record
+  (`u16 inputStart[layerCount + 1]`, then `u16 inputIds[inputStart[layerCount]]`, LE) +
+  per-layer type tag. Deserialize fail-fasts on magic / version / count / wiring kind /
+  CSR entry (`wiring mismatch on 'inputIds[e]' (file …, skeleton …)`, compared against the
+  skeleton as it streams in, no allocation) / tag mismatch. The ADD record (tag 14) has
+  the RELU layout — `arithmetic forwardMath, arithmetic propLossMath, quantization outputQ,
+  quantization propLossQ` — and the reader refuses any non-FLOAT32 value, as `addLayerInit`
+  does. Since v2
   (#370) every count/dim/kernel field is `u32` little-endian via the checked
   `SerialWire` primitives, so a 64-bit host writes files a
   32-bit MCU loads bit-identically; all short reads/writes fail fast. Since v3 (#380)
@@ -454,7 +460,9 @@ Notes on the qualified cells:
   hasBias` presence byte as CONV1D/CONV1D_TRANSPOSED (bias parameter record
   omitted when 0), so a `BIAS_FALSE` Linear round-trips; for all three the
   reader fails fast when the byte is not 0/1 or disagrees with the skeleton's
-  bias presence; pre-v7 files fail at the version check.
+  bias presence; pre-v7 files fail at the version check. Since v8 the wiring kind
+  and, for graph models, the CSR record follow the layer count, and the ADD
+  record exists; pre-v8 files fail at the version check.
 - **Contract** — deserialize **fills a pre-constructed model in place** (no
   model/tensor allocation in the serial path — only a qconfig's group arrays,
   `scales[]`/`zeroPoints[]`/`exponents[]`, are freed and re-reserved on a

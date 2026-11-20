@@ -19,6 +19,7 @@ target_link_libraries(Serialize PRIVATE
         Layer
 
         AdaptiveAvgPool1d
+        AddLayer
         AvgPool1d
         BatchNorm1d
         Conv1d
@@ -47,6 +48,7 @@ target_link_libraries(Deserialize PRIVATE
         Layer
 
         AdaptiveAvgPool1d
+        AddLayer
         AvgPool1d
         BatchNorm1d
         Conv1d

@@ -2,6 +2,14 @@ add_elastic_ai_unit_test(
         LIB_UNDER_TEST
         Deserialize
         MORE_LIBS
+        AddApi
+        AddLayer
+        ModelGraphApi
+        Model
+        OpTable
+        Linear
+        LinearApi
+        RNG
         LossType
         Common
         TensorApi
@@ -24,6 +32,7 @@ add_elastic_ai_unit_test(
         StorageApi
         odt_test_death
         odt_test_assert
+        odt_test_dag_fixtures
         m
 )
 
@@ -40,6 +49,13 @@ add_elastic_ai_unit_test(
         LossType
         Model
         ModelGraphApi
+        AddApi
+        AddLayer
+        OpTable
+        InferenceApi
+        RematScheduler
+        LayerExec
+        DataLoader
         Common
         RNG
         Deserialize
@@ -86,6 +102,7 @@ add_elastic_ai_unit_test(
         StorageApi
         odt_test_death
         odt_test_layer_builders
+        odt_test_dag_fixtures
         odt_test_assert
         m
 )

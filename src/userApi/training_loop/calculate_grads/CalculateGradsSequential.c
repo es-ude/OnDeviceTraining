@@ -13,6 +13,7 @@
 #include "LayerExec.h"
 #include "LossFunction.h"
 #include "OdtHook.h"
+#include "OpTable.h"
 #include "RematCheck.h"
 #include "RematScheduler.h"
 #include "StorageApi.h"
@@ -98,7 +99,7 @@ static trainingStats_t *calculateGradsImpl(const model_t *m, lossConfig_t lossCo
         const layerExec_t *ex = layerExecForLayer(callKey, st.layer, &exStorage);
         switch (st.kind) {
         case REMAT_STEP_FORWARD:
-            layerFunctions[layer->type].forward(layer, op.in[0], op.out, ex);
+            opFunctions[layer->type].forward(layer, op.in, op.k, op.out, ex);
             if (sink != NULL) {
                 sink(sinkCtx, st.layer, layer->type, "fwd", op.out);
             }
@@ -106,7 +107,7 @@ static trainingStats_t *calculateGradsImpl(const model_t *m, lossConfig_t lossCo
         case REMAT_STEP_REFORWARD:
             /* FORWARD's arm under FORWARD's key (ex derives from the layer
              * index alone): the recomputed output is the first one's bytes. */
-            layerFunctions[layer->type].forward(layer, op.in[0], op.out, ex);
+            opFunctions[layer->type].forward(layer, op.in, op.k, op.out, ex);
             if (sink != NULL) {
                 sink(sinkCtx, st.layer, layer->type, "refwd", op.out);
             }
@@ -135,21 +136,26 @@ static trainingStats_t *calculateGradsImpl(const model_t *m, lossConfig_t lossCo
             if (sink != NULL) {
                 sink(sinkCtx, st.layer, layer->type, "agrad", op.dy);
             }
-            tensor_t *x = op.in[0];
+            tensor_t *x[MODEL_MAX_ARITY];
+            for (uint8_t i = 0; i < op.k; i++) {
+                x[i] = op.in[i];
+            }
 #ifdef ODT_REMAT_VERIFY
             /* Strict W_dead: an input the step marks META (its backward does
              * not read it) gets a header without bytes on every plan, so a
              * read the read-set table denies crashes here instead of passing
              * on the NULL path and breaking under LIVENESS. */
-            tensor_t dead;
-            if (op.inMeta[0]) {
-                dead = *op.in[0];
-                dead.data = NULL;
-                x = &dead;
+            tensor_t dead[MODEL_MAX_ARITY];
+            for (uint8_t i = 0; i < op.k; i++) {
+                if (op.inMeta[i]) {
+                    dead[i] = *op.in[i];
+                    dead[i].data = NULL;
+                    x[i] = &dead[i];
+                }
             }
 #endif
-            /* op.dx[0] is NULL where the input needs no gradient: grads only. */
-            layerFunctions[layer->type].backward(layer, x, op.dy, op.dx[0], ex);
+            /* op.dx[i] == NULL: no gradient wanted for input i (grads-only node). */
+            opFunctions[layer->type].backward(layer, x, op.k, op.dy, op.dx, op.dxMode, ex);
             break;
         }
         default:

@@ -88,8 +88,8 @@ static void spyBackward(layer_t *layer, tensor_t *in, tensor_t *dy, tensor_t *dx
 
 /* The 14 layer rows. A row left out of the designated initialiser reads as zeros: arity 0
  * makes modelRequireValid's wiring arity check reject every wired node of that type, and a
- * NULL slot crashes the driver. accumulatesDx on a unary row
- * would let the deriver ask a layer for an ACC it cannot do. */
+ * NULL slot crashes the driver. accumulatesDx on a unary row would let the deriver ask a
+ * layer for an ACC it cannot do. */
 void testEveryLayerRowIsAUnaryRowWithAllThreeFunctions(void) {
     for (size_t t = LINEAR; t <= BATCHNORM1D; t++) {
         TEST_ASSERT_NOT_NULL(opFunctions[t].forward);

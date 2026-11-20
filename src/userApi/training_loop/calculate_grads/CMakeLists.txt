@@ -24,4 +24,5 @@ target_link_libraries(CalculateGradsSequential PRIVATE
         Common
         StorageApi
         OdtHook
+        OpTable
 )

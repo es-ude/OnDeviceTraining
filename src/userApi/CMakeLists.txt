@@ -43,6 +43,7 @@ target_link_libraries(InferenceApi PRIVATE
         DataLoader
         RematScheduler
         RematCheck
+        OpTable
 )
 
 add_library(ModelGraphApi ModelGraphApi.c)

@@ -21,6 +21,7 @@
 #include "Linear.h"
 #include "MaxPool1d.h"
 #include "Model.h"
+#include "OpTable.h"
 #include "QuantizationLayer.h"
 #include "Relu.h"
 #include "RematCheck.h"
@@ -268,7 +269,7 @@ static inferenceStats_t *inferenceOnScheduler(const model_t *m, tensor_t *input,
         const layerExec_t *ex = layerExecForLayer(callKey, st.layer, &exStorage);
         if (st.kind == REMAT_STEP_FORWARD) {
             layer_t *layer = m->layers[st.layer];
-            layerFunctions[layer->type].forward(layer, op.in[0], op.out, ex);
+            opFunctions[layer->type].forward(layer, op.in, op.k, op.out, ex);
         } else { /* LOSS_FORWARD: the checker admits nothing else in EVAL */
             /* As on the NULL path: the loss first (a label whose shape differs
              * from the output exits before the stats exist, #153), and all of it

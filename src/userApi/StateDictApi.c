@@ -27,6 +27,7 @@ static bool layerHasParameters(layer_t *layer) {
     case ADAPTIVE_AVGPOOL1D:
     case DROPOUT:
     case QUANTIZATION:
+    case ADD:
         return false;
     default:
         PRINT_ERROR("layerHasParameters: unknown layer type %d", (int)layer->type);

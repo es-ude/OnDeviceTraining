@@ -34,6 +34,23 @@ target_link_libraries(LinearApi PRIVATE
         StorageApi
 )
 
+add_library(AddApi AddApi.c)
+target_include_directories(AddApi PUBLIC include)
+target_link_libraries(AddApi PRIVATE
+        AddLayer
+        Layer
+        LayerQuant
+        StorageApi
+        TensorApi
+        QuantizationApi
+        ArithmeticType
+        ExecuteOp
+        Quantization
+        Rounding
+        Tensor
+        Common
+)
+
 add_library(ReluApi ReluApi.c)
 target_include_directories(ReluApi PUBLIC include)
 target_link_libraries(ReluApi PRIVATE

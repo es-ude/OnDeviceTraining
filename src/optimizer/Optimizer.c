@@ -121,6 +121,7 @@ static size_t calcNumberOfStatesByLayer(const layer_t *layer) {
     case ADAPTIVE_AVGPOOL1D:
     case DROPOUT:
     case QUANTIZATION:
+    case ADD:
         return 0;
     case CONV1D:
         return layer->config->conv1d->bias != NULL ? 2 : 1;

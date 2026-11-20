@@ -4,6 +4,7 @@
 #include <stdlib.h>
 
 #include "AdaptiveAvgPool1d.h"
+#include "AddLayer.h"
 #include "AvgPool1d.h"
 #include "BatchNorm1d.h"
 #include "CheckedSize.h"
@@ -56,6 +57,8 @@ quantization_t *layerOutputQ(layer_t *layer) {
         return layer->config->batchNorm1d->outputQ;
     case QUANTIZATION:
         return layer->config->quantization->outputQ;
+    case ADD:
+        return layer->config->add->outputQ;
     default:
         PRINT_ERROR("Unknown Layer Type!");
         exit(1);
@@ -151,6 +154,8 @@ quantization_t *backwardWireQ(layer_t *layer) {
         return layer->config->batchNorm1d->propLossQ;
     case QUANTIZATION:
         return layer->config->quantization->propLossQ;
+    case ADD:
+        return layer->config->add->propLossQ;
     case FLATTEN:
         return NULL;
     default:
@@ -190,6 +195,8 @@ arithmetic_t layerForwardMath(layer_t *layer) {
     case QUANTIZATION:
         // Pure conversion node (arithmetic-type-split D4): no consumed arithmetic.
         return NO_ARITHMETIC;
+    case ADD:
+        return layer->config->add->forwardMath;
     default:
         PRINT_ERROR("Unknown Layer Type!");
         exit(1);
@@ -365,6 +372,11 @@ static const char *nonFloat32Field(layer_t *layer, bool forwardOnly) {
     }
     case FLATTEN:
         return NULL; /* no per-layer config: pure passthrough */
+    case ADD: {
+        const addConfig_t *c = layer->config->add;
+        return wireNonFloat32(c->forwardMath, c->propLossMath, c->outputQ, c->propLossQ,
+                              forwardOnly);
+    }
     case QUANTIZATION:
         return "layerType QUANTIZATION (a conversion node)";
     default:
@@ -424,6 +436,7 @@ bool layerForwardUpdatesState(const layer_t *layer) {
     case FLATTEN:
     case QUANTIZATION:
     case DROPOUT:
+    case ADD:
         return false;
     default:
         PRINT_ERROR("layerForwardUpdatesState: unknown layerType_t %d", (int)layer->type);
@@ -479,6 +492,7 @@ size_t layerForwardCost(const layer_t *layer, size_t inElements, size_t outEleme
     case RELU:
     case DROPOUT:
     case QUANTIZATION:
+    case ADD:
         return outElements;
     case FLATTEN:
         return 0u;

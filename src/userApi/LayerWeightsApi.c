@@ -141,6 +141,7 @@ void layerLoadWeights(layer_t *layer, float *weightData, float *biasData) {
     case ADAPTIVE_AVGPOOL1D:
     case DROPOUT:
     case QUANTIZATION:
+    case ADD:
         PRINT_ERROR("layerLoadWeights: layer type %d has no parameters to load", (int)layer->type);
         exit(1);
     case CONV1D_TRANSPOSED: {

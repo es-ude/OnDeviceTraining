@@ -8,7 +8,6 @@
 #include "ExecuteOp.h"
 #include "Layer.h"
 #include "LayerExec.h"
-#include "OpTable.h"
 #include "TensorConversion.h"
 
 /* OP(k) of each funnel op of this layer, for layerExecOpKey. Part of the
@@ -87,6 +86,7 @@ void addBackward(layer_t *layer, tensor_t *const *in, uint8_t k, tensor_t *dy, t
             addAccumulate(dy, dx[i]);
             continue;
         }
+        /* Not cfg->propLossMath: addLayerInit admits only ARITH_FLOAT32 there. */
         executeOp(
             &(opSpec_t){
                 .kernel = executeOpIdentityKernel,

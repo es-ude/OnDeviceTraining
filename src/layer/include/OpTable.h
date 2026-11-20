@@ -15,10 +15,6 @@
  * storage and receives the output shape. */
 typedef void (*opShapeFn_t)(layer_t *layer, const shape_t *const *in, uint8_t k, shape_t *out);
 
-/* How a step touches one operand wire. WRITE opens a wire (a node's dx at its buffer's first
- * contribution); ACC adds into an already open one. READ also marks a slot that writes nothing. */
-typedef enum opMode { OP_MODE_READ = 0, OP_MODE_META, OP_MODE_WRITE, OP_MODE_ACC } opMode_t;
-
 /* When a node's backward needs its forward inputs kept alive (or recomputed). */
 typedef enum opReads { OP_READS_NEVER = 0, OP_READS_ALWAYS, OP_READS_IF_TRAINABLE } opReads_t;
 

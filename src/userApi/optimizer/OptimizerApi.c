@@ -340,6 +340,7 @@ void collectTrainableParameters(const model_t *m, parameter_t **slots) {
         case ADAPTIVE_AVGPOOL1D:
         case DROPOUT:
         case QUANTIZATION:
+        case ADD:
             break;
         default:
             PRINT_ERROR("Unknown Layer Type");

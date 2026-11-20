@@ -752,3 +752,26 @@ add_elastic_ai_unit_test(
         StorageApi
         odt_test_death
 )
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        AddApi
+        MORE_LIBS
+        AddLayer
+        Layer
+        LayerQuant
+        LayerConfigAccess
+        Model
+        Optimizer
+        LossType
+        ArithmeticType
+        ExecuteOp
+        Quantization
+        QuantizationApi
+        Rounding
+        Tensor
+        TensorApi
+        StorageApi
+        Common
+        odt_test_death
+)

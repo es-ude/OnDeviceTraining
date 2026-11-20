@@ -46,6 +46,10 @@ typedef enum layerType {
 
 typedef enum layerQType { FLOAT_LAYER, ASYM_LAYER } layerQType_t;
 
+/* How a step touches one operand wire. WRITE opens a wire (a node's dx at its buffer's first
+ * contribution); ACC adds into an already open one. READ also marks a slot that writes nothing. */
+typedef enum opMode { OP_MODE_READ = 0, OP_MODE_META, OP_MODE_WRITE, OP_MODE_ACC } opMode_t;
+
 typedef union layerConfig {
     linearConfig_t *linear;
     reluConfig_t *relu;

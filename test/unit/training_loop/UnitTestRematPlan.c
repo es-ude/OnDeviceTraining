@@ -4351,7 +4351,7 @@ void testSequencePlanRejectsAStepListOfAnotherFreezeState(void) {
     rematPlanSpec_t spec = namedSequenceSpec(&f.p->train, names);
     ASSERT_EXITS_WITH_OUTPUT(1,
                              "step #15 (kind 3, layer 9) violates grammar rule 3: BACKWARD "
-                             "top..deepest, descending, after LOSS_BACKWARD",
+                             "over the running nodes, descending, after LOSS_BACKWARD",
                              planBuildExpectingAnExit(t, frozen, &spec));
     rematWireTableFree(t);
     freeModel(frozen, HAR_N);
@@ -5728,6 +5728,119 @@ void testGrammarRejectsAMemberReadOutsideItsRootsRange(void) {
                            buildMlp3Hand, steps, ranges, validateHandMarkingGrad1);
 }
 
+/* ---- rematPlanBuild on DAGs ---- */
+
+/* A DAG fixture's table under MSE, the plan a policy builds from it, and the fixture both point
+ * into. Built in place. */
+typedef struct dagPlan {
+    dagFixture_t f;
+    dagTensor_t xs;
+    rematWireTable_t *t;
+    rematPlan_t *p;
+} dagPlan_t;
+
+static void dagTableOf(dagPlan_t *d, void (*build)(dagFixture_t *)) {
+    build(&d->f);
+    TEST_ASSERT_TRUE(
+        rematWireTableInit(&d->t, &d->f.m, defaultLossConfig(MSE), dagInput(&d->xs, 1, 2)));
+    d->p = NULL;
+}
+
+static void dagPlanOf(dagPlan_t *d, void (*build)(dagFixture_t *), const rematPlanSpec_t *spec) {
+    dagTableOf(d, build);
+    TEST_ASSERT_TRUE(rematPlanBuild(&d->p, d->t, &d->f.m, spec));
+}
+
+static void freeDagPlan(dagPlan_t *d) {
+    rematPlanFree(d->p);
+    rematWireTableFree(d->t);
+    dagFree(&d->f);
+}
+
+/* F3 steps: F0..F3 = 0..3, LOSS_FORWARD 4, LOSS_BACKWARD 5, B3 6, B2 7, B1 8, SUM(1) 9, B0 10.
+ * Wires: ACT 0..4, the seed 5, GRAD 3 = 6, GRAD 1 = 7, GRAD 2 = 8, PART 1 = 9. B3 and B2 read
+ * ACT 3, ACT 2 and ACT 1 as META only, so those reads keep nothing alive: ACT 2 and ACT 3 end at
+ * their FORWARD reader, ACT 1 at B1, which reads it as the Linear's input. */
+void testPlanBuildF3LivenessRanges(void) {
+    dagPlan_t d;
+    dagPlanOf(&d, buildF3, &g_liveness);
+    const rematRange_t want[] = {RANGE_OF(1, 0, 8),  RANGE_OF(2, 1, 2), RANGE_OF(3, 2, 3),
+                                 RANGE_OF(4, 3, 5),  RANGE_OF(5, 5, 6), RANGE_OF(6, 6, 7),
+                                 RANGE_OF(7, 6, 10), RANGE_OF(8, 7, 8), RANGE_OF(9, 8, 9)};
+    assertSameRanges(want, COUNT_OF(want), &d.p->train);
+    freeDagPlan(&d);
+}
+
+void testPlanBuildF3StoreAllExtendsEveryActToTheEnd(void) {
+    dagPlan_t d;
+    dagPlanOf(&d, buildF3, NULL);
+    const rematRange_t want[] = {RANGE_OF(1, 0, 10), RANGE_OF(2, 1, 10), RANGE_OF(3, 2, 10),
+                                 RANGE_OF(4, 3, 10), RANGE_OF(5, 5, 6),  RANGE_OF(6, 6, 7),
+                                 RANGE_OF(7, 6, 10), RANGE_OF(8, 7, 8),  RANGE_OF(9, 8, 9)};
+    assertSameRanges(want, COUNT_OF(want), &d.p->train);
+    freeDagPlan(&d);
+}
+
+static void dagPlanBuildExpectingAnExit(dagPlan_t *d, const rematPlanSpec_t *spec) {
+    (void)rematPlanBuild(&d->p, d->t, &d->f.m, spec);
+}
+
+/* Recompute and in-place read chain positions; on a DAG they exit, even for a mask or a step
+ * list that is otherwise well-formed. */
+void testPlanBuildRefusesRecomputeAndInPlaceOnADag(void) {
+    dagPlan_t d;
+    dagTableOf(&d, buildF3);
+    const bool retain[5] = {true, true, true, true, false};
+    const rematPlanSpec_t retainList = {.policy = REMAT_PLAN_RETAIN_LIST, .retain = retain};
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "rematPlanBuild: REMAT_PLAN_RETAIN_LIST on a DAG model is not "
+                             "supported yet (recompute / in-place on DAGs)",
+                             dagPlanBuildExpectingAnExit(&d, &retainList));
+    const rematStep_t steps[] = {
+        STEP_F(0),  STEP_F(1), STEP_F(2), STEP_F(3), STEP_LF(4),
+        STEP_LB(4), STEP_B(3), STEP_B(2), STEP_B(1), {.kind = REMAT_STEP_SUM, .layer = 1},
+        STEP_B(0)};
+    const rematPlanSpec_t sequence = sequenceSpec(steps, COUNT_OF(steps));
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "rematPlanBuild: REMAT_PLAN_SEQUENCE on a DAG model is not "
+                             "supported yet (recompute / in-place on DAGs)",
+                             dagPlanBuildExpectingAnExit(&d, &sequence));
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "rematPlanBuild: inPlaceDx on a DAG model is not supported yet "
+                             "(recompute / in-place on DAGs)",
+                             dagPlanBuildExpectingAnExit(&d, &g_livenessInPlace));
+    rematWireTableFree(d.t);
+    dagFree(&d.f);
+}
+
+/* P2 steps: F0..F4 = 0..4, LOSS_FORWARD 5, LOSS_BACKWARD 6, B4 7, B3 8, B2 9, SUM(2) 10, B1 11,
+ * SUM(1) 12, B0 13. b1's later contributors, the Linear B2 and the ReLU B1, each write a PART
+ * (wires 11 and 12) that lives from its BACKWARD to the SUM right after it, never until B0 reads
+ * GRAD 1, so the two never share a step. */
+void testTwoUnaryLaterContributorsGetTwoDisjointPartRanges(void) {
+    dagPlan_t d;
+    dagPlanOf(&d, dagBuildP2, &g_liveness);
+    const rematProgram_t *train = &d.p->train;
+    size_t parts = 0;
+    for (size_t w = 0; w < d.t->numWires; w++) {
+        parts += (d.t->wires[w].kind == REMAT_WIRE_PART) ? 1u : 0u;
+    }
+    TEST_ASSERT_EQUAL_size_t(2, parts);
+    TEST_ASSERT_EQUAL_UINT8(REMAT_WIRE_PART, d.t->wires[11].kind);
+    TEST_ASSERT_EQUAL_UINT8(REMAT_WIRE_PART, d.t->wires[12].kind);
+    TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_BACKWARD, train->steps[9].kind);
+    TEST_ASSERT_EQUAL_UINT16(2, train->steps[9].layer);
+    TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_SUM, train->steps[10].kind);
+    TEST_ASSERT_EQUAL_UINT16(2, train->steps[10].layer);
+    TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_BACKWARD, train->steps[11].kind);
+    TEST_ASSERT_EQUAL_UINT16(1, train->steps[11].layer);
+    TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_SUM, train->steps[12].kind);
+    TEST_ASSERT_EQUAL_UINT16(1, train->steps[12].layer);
+    assertOnlyRangeOf(train, 11, 9, 10);
+    assertOnlyRangeOf(train, 12, 11, 12);
+    freeDagPlan(&d);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testTableInitCrossEntropyRequiresALastSoftmax);
@@ -5985,5 +6098,9 @@ int main(void) {
     RUN_TEST(testGrammarRejectsARangeOnAnInPlaceMember);
     RUN_TEST(testGrammarRejectsARangeOnAWireOutsideTheTable);
     RUN_TEST(testGrammarRejectsAMemberReadOutsideItsRootsRange);
+    RUN_TEST(testPlanBuildF3LivenessRanges);
+    RUN_TEST(testPlanBuildF3StoreAllExtendsEveryActToTheEnd);
+    RUN_TEST(testPlanBuildRefusesRecomputeAndInPlaceOnADag);
+    RUN_TEST(testTwoUnaryLaterContributorsGetTwoDisjointPartRanges);
     return UNITY_END();
 }

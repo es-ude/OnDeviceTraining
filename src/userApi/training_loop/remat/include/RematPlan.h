@@ -246,7 +246,9 @@ typedef struct rematPlan {
 /* Generates the TRAIN and the EVAL program for the table's built model in ONE
  * reserveMemory block. `m` must be the model the table was built on: the
  * deriver reads only the table, `m` feeds the grammar and the costs, and a
- * layerType/frozen mismatch exits by name. Returns false only when
+ * layerType/frozen mismatch exits by name. A DAG model plans under STORE_ALL
+ * and LIVENESS only: SEQUENCE, RETAIN_LIST and inPlaceDx exit on it, since
+ * recompute and in-place read chain positions. Returns false only when
  * reserveMemory fails. */
 bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t *m,
                     const rematPlanSpec_t *spec);

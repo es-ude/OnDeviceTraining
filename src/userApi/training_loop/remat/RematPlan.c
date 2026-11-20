@@ -823,7 +823,8 @@ void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t
         case REMAT_STEP_BACKWARD:
             if (!lossBackward || nextBackward < 0 || (ptrdiff_t)st->layer != nextBackward) {
                 grammarExit(s, st,
-                            "rule 3: BACKWARD top..deepest, descending, after LOSS_BACKWARD");
+                            "rule 3: BACKWARD over the running nodes, descending, after "
+                            "LOSS_BACKWARD");
             }
             nextBackward = nextRunningBelow(&g, nextBackward);
             break;
@@ -919,6 +920,25 @@ static void requireTheFieldsOfThePolicy(const rematPlanSpec_t *spec) {
         PRINT_ERROR("rematPlanBuild: retain is set, but the policy %d is not "
                     "REMAT_PLAN_RETAIN_LIST",
                     (int)spec->policy);
+        exit(1);
+    }
+}
+
+/* The recompute window, the generators that fill it and the in-place marks read chain positions,
+ * so on a DAG the plan stops here, before anything is sized or marked. */
+static void requireAChainForRecomputeAndInPlace(const rematPlanSpec_t *spec,
+                                                const rematWireTable_t *t) {
+    if (t->isChain) {
+        return;
+    }
+    const char *what = (spec->policy == REMAT_PLAN_SEQUENCE)      ? "REMAT_PLAN_SEQUENCE"
+                       : (spec->policy == REMAT_PLAN_RETAIN_LIST) ? "REMAT_PLAN_RETAIN_LIST"
+                       : spec->inPlaceDx                          ? "inPlaceDx"
+                                                                  : NULL;
+    if (what != NULL) {
+        PRINT_ERROR("rematPlanBuild: %s on a DAG model is not supported yet (recompute / "
+                    "in-place on DAGs)",
+                    what);
         exit(1);
     }
 }
@@ -1086,6 +1106,7 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t 
     }
     requireTheFieldsOfThePolicy(spec);
     requireTheTablesModel(t, m);
+    requireAChainForRecomputeAndInPlace(spec, t);
     if (policy == REMAT_PLAN_SEQUENCE) {
         requireASequenceWithinTheBound(spec, t->modelSize);
     } else if (policy == REMAT_PLAN_RETAIN_LIST) {

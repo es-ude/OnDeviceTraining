@@ -38,6 +38,8 @@ add_elastic_ai_unit_test(
         Serialize
         MORE_LIBS
         LossType
+        Model
+        ModelGraphApi
         Common
         RNG
         Deserialize

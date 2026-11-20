@@ -33,7 +33,7 @@
 /* Current ODTS format version for hand-crafted fixtures. Bump together with
  * SERIALIZE_FORMAT_VERSION: a stale value makes every fixture below die at
  * the version check instead of at the guard it targets (a vacuous pass). */
-#define ODTS_VERSION 7u
+#define ODTS_VERSION 8u
 
 /* Fixture writer for hand-crafted v2 files: explicit little-endian bytes, so
  * the fixtures stay valid even on a big-endian test host. */
@@ -41,6 +41,10 @@ static void writeU32LE(FILE *f, uint32_t value) {
     uint8_t bytes[4] = {(uint8_t)value, (uint8_t)(value >> 8), (uint8_t)(value >> 16),
                         (uint8_t)(value >> 24)};
     fwrite(bytes, 1, 4, f);
+}
+
+static void writeU8(FILE *f, uint8_t value) {
+    fwrite(&value, 1, 1, f);
 }
 
 /* Companion to writeU32LE for fixtures that need to write more than a
@@ -137,6 +141,7 @@ static void testDeserializeRejectsBadMagic(void) {
     fwrite("XXXX", 1, 4, f);
     writeU32LE(f, ODTS_VERSION); /* version (dead value: bad magic short-circuits first) */
     writeU32LE(f, 1);            /* layerCount */
+    writeU8(f, 0);               /* wiring: chain */
     uint8_t tag = (uint8_t)FLATTEN;
     fwrite(&tag, sizeof(uint8_t), 1, f);
     fclose(f);
@@ -145,7 +150,8 @@ static void testDeserializeRejectsBadMagic(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: bad magic bytes",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -164,7 +170,8 @@ static void testDeserializeRejectsWrongVersion(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: unsupported format version 1 ",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -188,7 +195,8 @@ static void testDeserializeRejectsV3Version(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: unsupported format version 3 ",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -218,7 +226,8 @@ static void testDeserializeRejectsV4Version(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: unsupported format version 4 ",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -242,7 +251,8 @@ static void testDeserializeRejectsV5Version(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: unsupported format version 5 ",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -264,7 +274,51 @@ static void testDeserializeRejectsV6Version(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: unsupported format version 6 ",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
+    fclose(f);
+
+    freeFlattenLayer(layer);
+}
+
+/*! v7 = the pre-wiring format: no wiring-kind byte after the layer count, so
+ *  a v7 file would read its first tag as the wiring kind. */
+static void testDeserializeRejectsV7Version(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fwrite("ODTS", 1, 4, f);
+    writeU32LE(f, 7); /* v7: no wiring byte */
+    writeU32LE(f, 1); /* layerCount */
+    writeU8(f, (uint8_t)FLATTEN);
+    fclose(f);
+
+    layer_t *layer = flattenLayerInit();
+    layer_t *model[] = {layer};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "unsupported format version 7 (expected 8)",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
+    fclose(f);
+
+    freeFlattenLayer(layer);
+}
+
+/*! A file wired as a graph cannot load into a chain skeleton: the layers would
+ *  read the wrong buffers. */
+static void testDeserializeRejectsWiringKindMismatch(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fwrite("ODTS", 1, 4, f);
+    writeU32LE(f, ODTS_VERSION);
+    writeU32LE(f, 1); /* layerCount */
+    writeU8(f, 1);    /* wiring: CSR */
+    writeU8(f, (uint8_t)FLATTEN);
+    fclose(f);
+
+    layer_t *layer = flattenLayerInit();
+    layer_t *model[] = {layer};
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: wiring mismatch on 'kind' (file 1, skeleton 0)",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -275,6 +329,7 @@ static void testDeserializeRejectsLayerCountMismatch(void) {
     fwrite("ODTS", 1, 4, f);
     writeU32LE(f, ODTS_VERSION); /* version */
     writeU32LE(f, 2);            /* layerCount; caller below passes sizeModel = 1 */
+    writeU8(f, 0);               /* wiring: chain */
     uint8_t tag = (uint8_t)FLATTEN;
     fwrite(&tag, sizeof(uint8_t), 1, f);
     fclose(f);
@@ -283,7 +338,9 @@ static void testDeserializeRejectsLayerCountMismatch(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "deserializeModel: layerCount mismatch (file has 2, caller expects 1)",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -294,6 +351,7 @@ static void testDeserializeRejectsTagMismatch(void) {
     fwrite("ODTS", 1, 4, f);
     writeU32LE(f, ODTS_VERSION);   /* version */
     writeU32LE(f, 1);              /* layerCount */
+    writeU8(f, 0);                 /* wiring: chain */
     uint8_t tag = (uint8_t)LINEAR; /* pre-built mirror layer below is FLATTEN */
     fwrite(&tag, sizeof(uint8_t), 1, f);
     fclose(f);
@@ -302,7 +360,9 @@ static void testDeserializeRejectsTagMismatch(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "deserializeModel: record tag 0 does not match expected layer type 7 at index 0",
+        deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -436,7 +496,8 @@ static void testDeserializeModelFailsFastOnTruncatedHeader(void) {
     layer_t *layer = flattenLayerInit();
     layer_t *model[] = {layer};
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "short read (4 bytes)",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeFlattenLayer(layer);
@@ -1025,6 +1086,7 @@ static void testBfpDeserializeRejectsZeroNumGroupsInWireConfig(void) {
     fwrite("ODTS", 1, 4, f);
     writeU32LE(f, ODTS_VERSION); /* version */
     writeU32LE(f, 1);            /* layerCount */
+    writeU8(f, 0);               /* wiring: chain */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t arithByte = 0; /* ARITH_FLOAT32, HALF_AWAY -- forwardMath */
@@ -1055,7 +1117,8 @@ static void testBfpDeserializeRejectsZeroNumGroupsInWireConfig(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeQConfig: BFP file numGroups 0 is zero",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -1127,6 +1190,7 @@ static void testBfpDeserializeRejectsMantissaBitsOutOfRange(void) {
     fwrite("ODTS", 1, 4, f);
     writeU32LE(f, ODTS_VERSION); /* version */
     writeU32LE(f, 1);            /* layerCount */
+    writeU8(f, 0);               /* wiring: chain */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t arithByte = 0; /* ARITH_FLOAT32, HALF_AWAY -- forwardMath */
@@ -1159,7 +1223,8 @@ static void testBfpDeserializeRejectsMantissaBitsOutOfRange(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeQConfig: BFP file mantissaBits (1) outside [2, 16]",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -1184,6 +1249,7 @@ static void testBfpDeserializeRejectsExponentBitsOutOfRange(void) {
     fwrite("ODTS", 1, 4, f);
     writeU32LE(f, ODTS_VERSION); /* version */
     writeU32LE(f, 1);            /* layerCount */
+    writeU8(f, 0);               /* wiring: chain */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t arithByte = 0; /* ARITH_FLOAT32, HALF_AWAY -- forwardMath */
@@ -1216,7 +1282,8 @@ static void testBfpDeserializeRejectsExponentBitsOutOfRange(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeQConfig: BFP file exponentBits (9) outside [2, 8]",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -1239,6 +1306,7 @@ static void testBfpDeserializeRejectsNonFiniteScaleExponent(void) {
     fwrite("ODTS", 1, 4, f);
     writeU32LE(f, ODTS_VERSION); /* version */
     writeU32LE(f, 1);            /* layerCount */
+    writeU8(f, 0);               /* wiring: chain */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t arithByte = 0; /* ARITH_FLOAT32, HALF_AWAY -- forwardMath */
@@ -1271,7 +1339,8 @@ static void testBfpDeserializeRejectsNonFiniteScaleExponent(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeQConfig: BFP file exponent[0] (255) exceeds",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -1594,6 +1663,7 @@ static void testDeserializeSymRejectsOversizedNumGroupsInWireConfig(void) {
     fwrite("ODTS", 1, 4, f);
     writeU32LE(f, ODTS_VERSION); /* version */
     writeU32LE(f, 1);            /* layerCount */
+    writeU8(f, 0);               /* wiring: chain */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t arithByte = 0; /* ARITH_FLOAT32, HALF_AWAY -- forwardMath */
@@ -1625,7 +1695,8 @@ static void testDeserializeSymRejectsOversizedNumGroupsInWireConfig(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeQConfig: SYM file numGroups 65537 is zero or exceeds",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -1647,6 +1718,7 @@ static void testDeserializeAsymRejectsOversizedNumGroupsInWireConfig(void) {
     fwrite("ODTS", 1, 4, f);
     writeU32LE(f, ODTS_VERSION); /* version */
     writeU32LE(f, 1);            /* layerCount */
+    writeU8(f, 0);               /* wiring: chain */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t arithByte = 0; /* ARITH_FLOAT32, HALF_AWAY -- forwardMath */
@@ -1681,7 +1753,8 @@ static void testDeserializeAsymRejectsOversizedNumGroupsInWireConfig(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeQConfig: ASYM file numGroups 65537 is zero or exceeds",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -1704,6 +1777,7 @@ static void testDeserializeSymRejectsZeroNumGroupsInWireConfig(void) {
     fwrite("ODTS", 1, 4, f);
     writeU32LE(f, ODTS_VERSION); /* version */
     writeU32LE(f, 1);            /* layerCount */
+    writeU8(f, 0);               /* wiring: chain */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t arithByte = 0;
@@ -1733,7 +1807,8 @@ static void testDeserializeSymRejectsZeroNumGroupsInWireConfig(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeQConfig: SYM file numGroups 0 is zero",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -1752,6 +1827,7 @@ static void testDeserializeAsymRejectsZeroNumGroupsInWireConfig(void) {
     fwrite("ODTS", 1, 4, f);
     writeU32LE(f, ODTS_VERSION); /* version */
     writeU32LE(f, 1);            /* layerCount */
+    writeU8(f, 0);               /* wiring: chain */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t arithByte = 0;
@@ -1781,7 +1857,8 @@ static void testDeserializeAsymRejectsZeroNumGroupsInWireConfig(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeQConfig: ASYM file numGroups 0 is zero",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -1849,6 +1926,7 @@ static void writeReluSymOutputWireRecordWithQBits(uint8_t qBits) {
     fwrite("ODTS", 1, 4, f);
     writeU32LE(f, ODTS_VERSION);
     writeU32LE(f, 1); /* layerCount */
+    writeU8(f, 0);    /* wiring: chain */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t arithByte = 0;
@@ -2286,6 +2364,7 @@ static void testDeserializeArithmeticRejectsUnknownTypeTag(void) {
     fwrite("ODTS", 1, 4, f);
     writeU32LE(f, ODTS_VERSION); /* version */
     writeU32LE(f, 1);            /* layerCount */
+    writeU8(f, 0);               /* wiring: chain */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t badArithType = 3;       /* one past ARITH_BFP (2) -- unknown wire tag */
@@ -2307,7 +2386,8 @@ static void testDeserializeArithmeticRejectsUnknownTypeTag(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeArithmetic: unknown arithmetic wire tag 3",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -2327,6 +2407,7 @@ static void testDeserializeArithmeticRejectsUnknownRoundingModeTag(void) {
     fwrite("ODTS", 1, 4, f);
     writeU32LE(f, ODTS_VERSION); /* version */
     writeU32LE(f, 1);            /* layerCount */
+    writeU8(f, 0);               /* wiring: chain */
     uint8_t tag = (uint8_t)RELU;
     fwrite(&tag, 1, 1, f);
     uint8_t floatType = (uint8_t)ARITH_FLOAT32;
@@ -2348,7 +2429,8 @@ static void testDeserializeArithmeticRejectsUnknownRoundingModeTag(void) {
     layer_t *model[] = {layer};
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeArithmetic: unknown roundingMode wire tag 2",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeReluLayer(layer);
@@ -2361,27 +2443,28 @@ static void testDeserializeArithmeticRejectsUnknownRoundingModeTag(void) {
  * BATCHNORM1D record (see Serialize.c's BATCHNORM1D arm and
  * testGoldenBytesModelBatchNorm1dV6 in UnitTestSerialize.c for the same
  * layout pinned byte-for-byte):
- *   header (12) + tag (1) = 13        -> numChannels u32 LE
- *   13 + 4 = 17                       -> eps f32 LE
- *   17 + 4 = 21                       -> momentumMode u8
- *   21 + 1 = 22                       -> momentum f32 LE
- *   22 + 4 = 26                       -> affine u8
- *   26 + 1 = 27                       -> track u8
- *   28                                -> gamma parameter record (hasGrad=0,
+ *   header (13: magic, version, layerCount, wiring) + tag (1) = 14
+ *                                     -> numChannels u32 LE
+ *   14 + 4 = 18                       -> eps f32 LE
+ *   18 + 4 = 22                       -> momentumMode u8
+ *   22 + 1 = 23                       -> momentum f32 LE
+ *   23 + 4 = 27                       -> affine u8
+ *   27 + 1 = 28                       -> track u8
+ *   29                                -> gamma parameter record (hasGrad=0,
  *                                        rank u32=1, dims[0] u32=2,
  *                                        order[0] u32=0, qtype u8=FLOAT32,
  *                                        2 x f32 data = 1+4+4+4+1+8 = 22
  *                                        bytes for C=2)
- *   28 + 22 = 50                      -> beta parameter record (22 bytes)
- *   50 + 22 = 72                      -> runningMean[0] f32 LE
- *   72 + 8 = 80                       -> runningVar[0] f32 LE
+ *   29 + 22 = 51                      -> beta parameter record (22 bytes)
+ *   51 + 22 = 73                      -> runningMean[0] f32 LE
+ *   73 + 8 = 81                       -> runningVar[0] f32 LE
  * Frozen (no grad) keeps these fixed regardless of the seeded param values,
  * exactly as the golden byte test's own comment notes. */
-#define BN_OFFSET_EPS 17
-#define BN_OFFSET_MODE 21
-#define BN_OFFSET_MOMENTUM 22
-#define BN_OFFSET_RUNNING_MEAN 72
-#define BN_OFFSET_RUNNING_VAR 80
+#define BN_OFFSET_EPS 18
+#define BN_OFFSET_MODE 22
+#define BN_OFFSET_MOMENTUM 23
+#define BN_OFFSET_RUNNING_MEAN 73
+#define BN_OFFSET_RUNNING_VAR 81
 
 /*! Writes a otherwise-valid v6 BATCHNORM1D record to FILE_PATH: C = 2,
  *  frozen, affine, tracking, eps 0.5, VALUE momentum 0.25 -- the fixture the
@@ -2483,7 +2566,9 @@ static void testDeserializeBatchNormRejectsChannelMismatch(void) {
     layer_t *model[] = {skeleton};
 
     FILE *f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "BATCHNORM1D record (C 2, affine 0, track 0) does not match the skeleton (C 3",
+        deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeBatchNorm1dLayer(skeleton);
@@ -2495,7 +2580,9 @@ static void testDeserializeBatchNormRejectsAffineMismatch(void) {
     layer_t *model[] = {skeleton};
 
     FILE *f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "BATCHNORM1D record (C 2, affine 1, track 1) does not match the skeleton (C 2, affine 0",
+        deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeBatchNorm1dLayer(skeleton);
@@ -2508,7 +2595,8 @@ static void testDeserializeBatchNormRejectsNonFiniteEps(void) {
     layer_t *model[] = {skeleton};
 
     FILE *f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "BATCHNORM1D eps must be finite",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeBatchNorm1dLayer(skeleton);
@@ -2521,7 +2609,8 @@ static void testDeserializeBatchNormRejectsMomentumOutOfRange(void) {
     layer_t *model[] = {skeleton};
 
     FILE *f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "BATCHNORM1D momentum must be finite",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeBatchNorm1dLayer(skeleton);
@@ -2534,7 +2623,8 @@ static void testDeserializeBatchNormRejectsUnknownMomentumMode(void) {
     layer_t *model[] = {skeleton};
 
     FILE *f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "BATCHNORM1D momentumMode 0 unknown",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeBatchNorm1dLayer(skeleton);
@@ -2547,7 +2637,8 @@ static void testDeserializeBatchNormRejectsNaNRunningMean(void) {
     layer_t *model[] = {skeleton};
 
     FILE *f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "BATCHNORM1D runningMean[0] not finite",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeBatchNorm1dLayer(skeleton);
@@ -2560,7 +2651,8 @@ static void testDeserializeBatchNormRejectsNegativeRunningVar(void) {
     layer_t *model[] = {skeleton};
 
     FILE *f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "BATCHNORM1D runningVar[0] must be finite",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeBatchNorm1dLayer(skeleton);
@@ -2620,14 +2712,14 @@ static void testDeserializeBatchNormFileHyperparametersWin(void) {
  *
  * BN_OFFSET_FORWARD_MATH_TYPE derivation, continuing the layout comment
  * above (writeValidBatchNorm1dFile: C = 2, frozen, affine, tracking):
- *   BN_OFFSET_RUNNING_VAR (80) + runningVar[C=2] (2 x f32 = 8) -> 88
+ *   BN_OFFSET_RUNNING_VAR (81) + runningVar[C=2] (2 x f32 = 8) -> 89
  *                                              numBatchesTracked u64 (8)
- *   88 + 8                                  -> 96  forwardMath.type u8
- *   96 + 1                                  -> 97  forwardMath.roundingMode u8
- *   97 + 1                                  -> 98  propLossMath.type u8
+ *   89 + 8                                  -> 97  forwardMath.type u8
+ *   97 + 1                                  -> 98  forwardMath.roundingMode u8
+ *   98 + 1                                  -> 99  propLossMath.type u8
  * (serializeArithmetic/deserializeArithmetic: type u8 then roundingMode u8,
  * Serialize.c:143-146 / Deserialize.c:212-227). */
-#define BN_OFFSET_FORWARD_MATH_TYPE 96
+#define BN_OFFSET_FORWARD_MATH_TYPE 97
 
 static void testDeserializeBatchNormRejectsNonFloat32ForwardMath(void) {
     writeValidBatchNorm1dFile();
@@ -2636,7 +2728,8 @@ static void testDeserializeBatchNormRejectsNonFloat32ForwardMath(void) {
     layer_t *model[] = {skeleton};
 
     FILE *f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(model, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "BATCHNORM1D forwardMath must be ARITH_FLOAT32",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
     fclose(f);
 
     freeBatchNorm1dLayer(skeleton);
@@ -2847,6 +2940,8 @@ int main(void) {
     RUN_TEST(testDeserializeRejectsV4Version);
     RUN_TEST(testDeserializeRejectsV5Version);
     RUN_TEST(testDeserializeRejectsV6Version);
+    RUN_TEST(testDeserializeRejectsV7Version);
+    RUN_TEST(testDeserializeRejectsWiringKindMismatch);
     RUN_TEST(testDeserializeRejectsLayerCountMismatch);
     RUN_TEST(testDeserializeRejectsTagMismatch);
     RUN_TEST(testDeserializeTensorRejectsDtypeMismatch);

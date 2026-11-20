@@ -352,7 +352,7 @@ Wire format: `"ODTR"` magic, `u32 version(=3)`, `u32 tensorRecordVersion(=5)`,
 `eigvals`) via the existing tensor-tier `serializeTensor`/`deserializeTensor`.
 Since v2 (#370) every scalar is fixed-width little-endian via the checked
 `SerialWire` primitives. The embedded tensor records follow the CURRENT ODTS
-tensor-tier layout — ODTS v7, whose qconfig records last changed in v5
+tensor-tier layout — ODTS v8, whose qconfig records last changed in v5
 (numGroups/groupSize-prefixed SYM and ASYM records, ASYM `u16 zeroPoints[]`,
 the BFP record).
 

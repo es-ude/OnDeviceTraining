@@ -404,8 +404,9 @@ Notes on the qualified cells:
   `exponentBits` + rounding (v5) — see Model format below). Packed tensor data
   (SYM/ASYM sub-byte, BFP sub-byte mantissas, BOOL 1-bit) is byte-tight via
   `calcNumberOfBytesForData` and round-trips exactly.
-- **Model format** — `"ODTS"` magic + `version` (=7) + `layerCount` + per-layer type
-  tag. Deserialize fail-fasts on magic / version / count / tag mismatch. Since v2
+- **Model format** — `"ODTS"` magic + `version` (=8) + `layerCount` + `u8` wiring kind (0 = chain)
+  + per-layer type tag. Deserialize fail-fasts on magic / version / count / wiring kind /
+  tag mismatch. Since v2
   (#370) every count/dim/kernel field is `u32` little-endian via the checked
   `SerialWire` primitives, so a 64-bit host writes files a
   32-bit MCU loads bit-identically; all short reads/writes fail fast. Since v3 (#380)

@@ -27,7 +27,14 @@
 #include "Tensor.h"
 #include "TensorRecord.h"
 
-/* v7 (#391): the LINEAR record gains `u8 hasBias` between the weights and
+/* v8: a `u8 wiringKind` follows `u32 layerCount`, ahead of the first layer
+ * record. 0 = chain: node j reads the output of node j - 1, for every model
+ * modelIsChain accepts, so a chain the graph builder spelled as an explicit
+ * CSR writes the same bytes as a MODEL_CHAIN. 1 = graph wiring; no layer
+ * record can serialize a merge node yet, so no file carries it. The reader
+ * requires the file's kind to equal the skeleton's. Every layer record is
+ * unchanged; v7 files fail at the version check.
+ * v7 (#391): the LINEAR record gains `u8 hasBias` between the weights and
  * bias parameter records (bias record omitted when 0) -- the same presence
  * byte CONV1D/CONV1D_TRANSPOSED already carried -- so a BIAS_FALSE Linear
  * (bias == NULL) no longer NULL-derefs here. Every other record is
@@ -120,6 +127,7 @@ void serializeModel(const model_t *m, FILE *f) {
     serialWriteBytes(SERIALIZE_MAGIC, 4, f);
     serialWriteU32LE(SERIALIZE_FORMAT_VERSION, f);
     serialWriteSizeAsU32LE(m->numLayers, f);
+    serialWriteU8(modelIsChain(m) ? 0u : 1u, f);
 
     for (size_t i = 0; i < m->numLayers; i++) {
         /* The tag byte is the layerType_t enum position -- append-only wire

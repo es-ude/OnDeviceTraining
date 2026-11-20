@@ -30,7 +30,10 @@
 #include "Tensor.h"
 #include "TensorRecord.h"
 
-/* v7 (#391): the LINEAR record gains the `u8 hasBias` presence byte the
+/* v8: the `u8 wiringKind` after the layer count (0 = chain, see Serialize.c)
+ * must equal the skeleton's, so a file never loads into a model whose layers
+ * read different buffers. No migration path from v7.
+ * v7 (#391): the LINEAR record gains the `u8 hasBias` presence byte the
  * CONV1D/CONV1D_TRANSPOSED records already carried (bias record skipped when
  * 0), so a BIAS_FALSE Linear round-trips. All three arms now fail fast when
  * the byte is not 0/1 or disagrees with the skeleton's bias presence
@@ -159,6 +162,15 @@ void deserializeModel(const model_t *m, FILE *f) {
     if (layerCount != (uint32_t)m->numLayers) {
         PRINT_ERROR("deserializeModel: layerCount mismatch (file has %u, caller expects %zu)",
                     (unsigned)layerCount, m->numLayers);
+        exit(1);
+    }
+
+    /* Comparing with the skeleton's kind also rejects every unknown kind. */
+    uint8_t wiringKind = serialReadU8(f);
+    uint8_t skeletonKind = modelIsChain(m) ? 0u : 1u;
+    if (wiringKind != skeletonKind) {
+        PRINT_ERROR("deserializeModel: wiring mismatch on 'kind' (file %u, skeleton %u)",
+                    (unsigned)wiringKind, (unsigned)skeletonKind);
         exit(1);
     }
 

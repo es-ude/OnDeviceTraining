@@ -31,6 +31,7 @@
 #include "LinearApi.h"
 #include "MaxPool1d.h"
 #include "Model.h"
+#include "ModelGraphApi.h"
 #include "OdtAssert.h"
 #include "Pool1dApi.h"
 #include "QuantLayerApi.h"
@@ -498,10 +499,10 @@ static void testDeserializeRejectsConv1dTransposedBiasPresenceMismatch(void) {
 }
 
 /* Byte offset of the LINEAR hasBias byte in a 1-layer model of a frozen
- * FLOAT32 1x1 Linear: header 12 + tag 1 + weights record (hasGrad 1 + rank 4
- * + dims 8 + order 8 + qtype 1 + payload 4) = 39. Pinned by
+ * FLOAT32 1x1 Linear: header 13 + tag 1 + weights record (hasGrad 1 + rank 4
+ * + dims 8 + order 8 + qtype 1 + payload 4) = 40. Pinned by
  * testGoldenBytesModelLinearFrozenV7. */
-#define LINEAR_1X1_FROZEN_HAS_BIAS_OFFSET 39
+#define LINEAR_1X1_FROZEN_HAS_BIAS_OFFSET 40
 
 /*! #391: a hasBias byte other than 0/1 is corruption, not "absent". Without
  *  the range check, 2 would compare equal to a no-bias skeleton's "absent"
@@ -538,7 +539,8 @@ static void testDeserializeRejectsLinearHasBiasByteOutOfRange(void) {
     TEST_ASSERT_EQUAL_INT(0x00, originalByte);
 
     f = fopen(FILE_PATH, "rb");
-    ASSERT_EXITS_WITH_FAILURE(deserializeModel(&MODEL_CHAIN(skeletonModel, 1), f));
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeModel: LINEAR record hasBias 2 does not match",
+                             deserializeModel(&MODEL_CHAIN(skeletonModel, 1), f));
     fclose(f);
 
     freeLinearLayer(skeletonLayer);
@@ -2089,7 +2091,7 @@ static void testSerializeTensorBoolRoundTripsPackedData(void) {
     }
 }
 
-/* Ties the golden fixtures below to ODTS format version 7 and tensor-record
+/* Ties the golden fixtures below to ODTS format version 8 and tensor-record
  * version 5, in both directions:
  * - bumping either constant without updating its pin here is a compile error;
  *   regenerate the goldens and move the pin in the same change.
@@ -2098,8 +2100,8 @@ static void testSerializeTensorBoolRoundTripsPackedData(void) {
  *   regeneration under the old version. The literal version bytes inside the
  *   model goldens stay literals on purpose: spelling them via the macro would
  *   let the goldens follow a bump unseen. */
-_Static_assert(SERIALIZE_FORMAT_VERSION == 7u,
-               "these golden fixtures are tied to ODTS format version 7: regenerate them and "
+_Static_assert(SERIALIZE_FORMAT_VERSION == 8u,
+               "these golden fixtures are tied to ODTS format version 8: regenerate them and "
                "update this pin when bumping SERIALIZE_FORMAT_VERSION");
 _Static_assert(ODTS_TENSOR_RECORD_VERSION == 5u,
                "these golden fixtures are tied to tensor-record version 5: regenerate them and "
@@ -2223,8 +2225,9 @@ static void testGoldenBytesModelReluV5(void) {
 
     static const uint8_t expected[] = {
         /* magic */ 'O', 'D', 'T', 'S',
-        /* version u32 LE */ 0x07, 0x00, 0x00, 0x00,
+        /* version u32 LE */ 0x08, 0x00, 0x00, 0x00,
         /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
+        /* wiring: chain */ 0x00,
         /* tag RELU */ 0x01,
         /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
         /* propLossMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
@@ -2277,8 +2280,9 @@ static void testGoldenBytesModelReluAsymGroupedPropLossV5(void) {
     freeQuantization(floatQ);
 
     static const uint8_t expected[] = {/* magic */ 'O', 'D', 'T', 'S',
-                                       /* version u32 LE */ 0x07, 0x00, 0x00, 0x00,
+                                       /* version u32 LE */ 0x08, 0x00, 0x00, 0x00,
                                        /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
+                                       /* wiring: chain */ 0x00,
                                        /* tag RELU */ 0x01,
                                        /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
                                        /* propLossMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
@@ -2335,8 +2339,9 @@ static void testGoldenBytesModelReluSymOutputV5(void) {
     freeQuantization(floatQ);
 
     static const uint8_t expected[] = {/* magic */ 'O', 'D', 'T', 'S',
-                                       /* version u32 LE */ 0x07, 0x00, 0x00, 0x00,
+                                       /* version u32 LE */ 0x08, 0x00, 0x00, 0x00,
                                        /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
+                                       /* wiring: chain */ 0x00,
                                        /* tag RELU */ 0x01,
                                        /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
                                        /* propLossMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
@@ -2386,8 +2391,9 @@ static void testGoldenBytesModelReluSymGroupedOutputV5(void) {
     freeQuantization(floatQ);
 
     static const uint8_t expected[] = {/* magic */ 'O', 'D', 'T', 'S',
-                                       /* version u32 LE */ 0x07, 0x00, 0x00, 0x00,
+                                       /* version u32 LE */ 0x08, 0x00, 0x00, 0x00,
                                        /* layerCount u32 LE */ 0x01, 0x00, 0x00, 0x00,
+                                       /* wiring: chain */ 0x00,
                                        /* tag RELU */ 0x01,
                                        /* forwardMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
                                        /* propLossMath: ARITH_FLOAT32, HALF_AWAY */ 0x00, 0x00,
@@ -2432,7 +2438,7 @@ static void testGoldenBytesModelMaxPool1dV5(void) {
                                        'D',
                                        'T',
                                        'S',
-                                       /* version u32 LE */ 0x07,
+                                       /* version u32 LE */ 0x08,
                                        0x00,
                                        0x00,
                                        0x00,
@@ -2440,6 +2446,7 @@ static void testGoldenBytesModelMaxPool1dV5(void) {
                                        0x00,
                                        0x00,
                                        0x00,
+                                       /* wiring: chain */ 0x00,
                                        /* tag MAXPOOL1D */ 0x04,
                                        /* kernel size 3 u32 LE */ 0x03,
                                        0x00,
@@ -2512,7 +2519,7 @@ static void testGoldenBytesModelLinearFrozenV7(void) {
                                        'D',
                                        'T',
                                        'S',
-                                       /* version u32 LE */ 0x07,
+                                       /* version u32 LE */ 0x08,
                                        0x00,
                                        0x00,
                                        0x00,
@@ -2520,6 +2527,7 @@ static void testGoldenBytesModelLinearFrozenV7(void) {
                                        0x00,
                                        0x00,
                                        0x00,
+                                       /* wiring: chain */ 0x00,
                                        /* tag LINEAR */ 0x00,
                                        /* weights: hasGrad=0 (v3 grad-presence byte) */ 0x00,
                                        /* weights param shape: rank 2 u32 LE */ 0x02,
@@ -2618,8 +2626,9 @@ static void testGoldenBytesModelBatchNorm1dV6(void) {
     freeQuantization(floatQ);
 
     static const uint8_t expected[] = {
-        'O', 'D', 'T', 'S', /* version */ 0x07, 0x00, 0x00, 0x00,
+        'O', 'D', 'T', 'S', /* version */ 0x08, 0x00, 0x00, 0x00,
         /* layerCount */ 0x01, 0x00, 0x00, 0x00,
+        /* wiring: chain */ 0x00,
         /* tag BATCHNORM1D */ 0x0D,
         /* numChannels */ 0x02, 0x00, 0x00, 0x00,
         /* eps 0.5f */ 0x00, 0x00, 0x00, 0x3F,
@@ -3026,6 +3035,51 @@ void testSerializeModelValidatesTheWiring(void) {
     freeQuantization(floatQ);
 }
 
+static size_t serializeModelToBuffer(const model_t *m, uint8_t *buffer, size_t capacity) {
+    FILE *f = tmpfile();
+    TEST_ASSERT_NOT_NULL(f);
+    serializeModel(m, f);
+    rewind(f);
+    size_t length = fread(buffer, 1, capacity, f);
+    fclose(f);
+    TEST_ASSERT_TRUE(length < capacity);
+    return length;
+}
+
+/* A chain spelled as an explicit CSR by the graph builder is a chain on disk too. */
+void testSerializeWritesKindZeroForABuilderMadeChain(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *layers[2] = {reluLayerInit(&lq), reluLayerInit(&lq)};
+    layer_t *nodes[2];
+    uint16_t inputStart[3], inputIds[2];
+    graphBuilder_t g;
+    graphBegin(&g, nodes, inputStart, inputIds, 2, 2);
+    graphNode(&g, layers[1], graphNode(&g, layers[0], GRAPH_INPUT));
+    model_t built = graphFinish(&g);
+
+    uint8_t fromBuilder[64], fromChain[64];
+    size_t builderLength = serializeModelToBuffer(&built, fromBuilder, sizeof(fromBuilder));
+    size_t chainLength =
+        serializeModelToBuffer(&MODEL_CHAIN(layers, 2), fromChain, sizeof(fromChain));
+    /* ...and a MODEL_CHAIN file loads into the builder-made skeleton. */
+    FILE *f = tmpfile();
+    TEST_ASSERT_NOT_NULL(f);
+    fwrite(fromChain, 1, chainLength, f);
+    rewind(f);
+    deserializeModel(&built, f);
+    fclose(f);
+
+    freeReluLayer(layers[1]);
+    freeReluLayer(layers[0]);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL_size_t(chainLength, builderLength);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(fromChain, fromBuilder, chainLength);
+    TEST_ASSERT_EQUAL_HEX8(0x00, fromBuilder[12]); /* the byte after magic, version, layerCount */
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testRoundTripLinear);
@@ -3068,5 +3122,6 @@ int main(void) {
     RUN_TEST(testDeserializeRejectsConv1dTransposedBiasPresenceMismatch);
     RUN_TEST(testDeserializeRejectsLinearHasBiasByteOutOfRange);
     RUN_TEST(testSerializeModelValidatesTheWiring);
+    RUN_TEST(testSerializeWritesKindZeroForABuilderMadeChain);
     return UNITY_END();
 }

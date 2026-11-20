@@ -87,6 +87,9 @@ typedef struct rematWireTable {
     lossFuncType_t lossType;
     bool hasBackward;
     uint8_t isChain; /* modelIsChain of the built model: then the wiring below is NULL and 0 */
+    /* rematWireTableInitEval: ACT wires only, every gradient flag 0 and every dx slot NONE; the
+     * bind keys neither the loss type nor runsBackward */
+    bool evalOnly;
     size_t numWires;
     rematWire_t *wires;    /* ACT j at id j (0..n), then GRAD and PART wires in production order */
     uint16_t *gradIdOf;    /* [n+1]: the GRAD holding buffer b's gradient, else REMAT_NONE; under
@@ -142,6 +145,10 @@ rematBfpGroups_t rematBfpWireGrouping(const bfpQConfig_t *tmpl, size_t elements,
  * the same way. */
 bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t loss,
                         const tensor_t *inputLike);
+/* The loss-free table of an inference scheduler: the ACT wires alone, no loss head check.
+ * Validates the model like rematWireTableInit and refuses a non-FLOAT32 ACT that an ADD reads.
+ * Its bind keys no loss type, and its plan comes from rematPlanBuildEval only. */
+bool rematWireTableInitEval(rematWireTable_t **out, const model_t *m, const tensor_t *inputLike);
 /* NULL-safe. One freeReservedMemory; never freeTensor on a slab header. */
 void rematWireTableFree(rematWireTable_t *t);
 
@@ -150,7 +157,8 @@ void rematWireTableFree(rematWireTable_t *t);
  * scale 1, BFP exponents at the stored bias). ACT 0 = input, verbatim.
  * Inherited GRAD headers are derived later, by rematWireBind. Reserves
  * nothing. An EVAL bind runs the same key check and ACT derivation but writes
- * no GRAD header: eval binds no GRAD wire. */
+ * no GRAD header: eval binds no GRAD wire. On an eval-only table lt is ignored: the
+ * key holds no loss type and no runsBackward. */
 void rematWireTableBind(rematWireTable_t *t, const model_t *m, lossFuncType_t lt, rematMode_t mode,
                         tensor_t *input);
 void rematWireTableUnbind(rematWireTable_t *t); /* ACT 0 hdr = NULL, inPlace = NULL */
@@ -254,6 +262,10 @@ typedef struct rematPlan {
  * reserveMemory fails. */
 bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t *m,
                     const rematPlanSpec_t *spec);
+/* The plan of an eval-only table: the EVAL program alone, the same as rematPlanBuild's, and a
+ * zeroed TRAIN program (no steps, so every TRAIN number of the report is 0). Same `m` rule and
+ * return value as rematPlanBuild. */
+bool rematPlanBuildEval(rematPlan_t **out, const rematWireTable_t *t, const model_t *m);
 void rematPlanFree(rematPlan_t *p); /* NULL-safe */
 
 /* The program a call in `mode` walks. */

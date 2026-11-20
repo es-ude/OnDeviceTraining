@@ -30,6 +30,21 @@ bool rematHeapInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
     return true;
 }
 
+bool rematHeapInitEval(rematScheduler_t *s, const model_t *m, const tensor_t *inputLike) {
+#ifdef ODT_MEM_PROFILE
+    size_t mark = memProfileCurrentBytes();
+#endif
+    *s = (rematScheduler_t){.type = REMAT_HEAP, .fns = &rematSchedulerFunctions[REMAT_HEAP]};
+    if (!rematWireTableInitEval(&s->wires, m, inputLike) ||
+        !rematPlanBuildEval(&s->plan, s->wires, m)) {
+        return false;
+    }
+#ifdef ODT_MEM_PROFILE
+    rematRequireReservedMatchesReport(s, memProfileCurrentBytes() - mark);
+#endif
+    return true;
+}
+
 void rematHeapBegin(rematScheduler_t *s) {
     s->walk = (rematWalk_t){0};
 }

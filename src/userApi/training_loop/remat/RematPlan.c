@@ -1091,6 +1091,19 @@ static void recordRecomputeNumbers(rematPlan_t *p, const rematWireTable_t *t, co
     p->recomputeCost = recomputeCost;
 }
 
+/* Both builds: the EVAL program at evalAt, the same for every policy. */
+static void buildEvalProgram(rematPlan_t *p, uint8_t *block, const programLayout_t *evalAt,
+                             rematDeriveSize_t evalSize, const rematWireTable_t *t,
+                             const model_t *m) {
+    rematProgram_t *eval = &p->eval;
+    placeProgram(eval, block, evalAt, evalSize);
+    rematDeriveEval(t, eval);
+    rematScanRanges(t, eval, REMAT_PLAN_LIVENESS, NULL, eval->ranges);
+    sortEndOrder(eval);
+    rematPlanValidateGrammar(eval, t, m, REMAT_MODE_EVAL, NULL);
+    eval->peakLiveBytes = peakLiveBytesOf(eval, t);
+}
+
 bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t *m,
                     const rematPlanSpec_t *spec) {
     *out = NULL;
@@ -1146,13 +1159,24 @@ bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t 
     rematPlanValidateGrammar(train, t, m, REMAT_MODE_TRAIN, p->inPlace);
     train->peakLiveBytes = peakLiveBytesOf(train, t);
     recordRecomputeNumbers(p, t, m);
-    rematProgram_t *eval = &p->eval;
-    placeProgram(eval, block, &evalAt, evalSize);
-    rematDeriveEval(t, eval);
-    rematScanRanges(t, eval, REMAT_PLAN_LIVENESS, NULL, eval->ranges);
-    sortEndOrder(eval);
-    rematPlanValidateGrammar(eval, t, m, REMAT_MODE_EVAL, NULL);
-    eval->peakLiveBytes = peakLiveBytesOf(eval, t);
+    buildEvalProgram(p, block, &evalAt, evalSize, t, m);
+    *out = p;
+    return true;
+}
+
+bool rematPlanBuildEval(rematPlan_t **out, const rematWireTable_t *t, const model_t *m) {
+    *out = NULL;
+    requireTheTablesModel(t, m);
+    rematDeriveSize_t evalSize = rematDeriveEvalSize(t);
+    programLayout_t evalAt = layoutProgram(sizeof(rematPlan_t), evalSize, t->modelSize + 1u);
+    uint8_t *block = reserveMemory(evalAt.end);
+    if (block == NULL) {
+        return false;
+    }
+    /* reserveMemory zeroes the block: STORE_ALL, an empty TRAIN program, no in-place marks. */
+    rematPlan_t *p = (rematPlan_t *)block;
+    p->blockBytes = evalAt.end;
+    buildEvalProgram(p, block, &evalAt, evalSize, t, m);
     *out = p;
     return true;
 }

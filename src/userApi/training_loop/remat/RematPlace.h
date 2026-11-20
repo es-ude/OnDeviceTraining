@@ -118,7 +118,8 @@ void arenaVerifyPlacement(const rematWireTable_t *t, const rematProgram_t *p, co
                           size_t bytes);
 
 /* Always runs, chains included. EVAL range r and TRAIN range r are both the
- * range of ACT r + 1 (FORWARD(j) at step j opens ACT j + 1, every other range
+ * range of ACT r + 1 (the first n steps are the forwards in both the TRAIN and
+ * the EVAL program, FORWARD(j) at step j opens ACT j + 1, and every other range
  * begins later), so a DAG may evaluate on TRAIN's verified offsets
  * when each EVAL range lies inside its TRAIN range: then every EVAL co-live
  * pair is a TRAIN co-live pair. Exits naming the ACT otherwise. */

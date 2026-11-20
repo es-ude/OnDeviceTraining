@@ -1758,6 +1758,25 @@ void testTableInitRefusesASymInt32WireIntoAnAdd(void) {
     freeAddLayer(f.layers[1]);
 }
 
+/* The same model through the eval-only table: the merge reads ACT 1 at inference too. */
+void testEvalOnlyTableInitRefusesASymInt32WireIntoAnAdd(void) {
+    symInt32QConfig_t symQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &symQc, 12);
+    quantization_t symQ = {.type = SYM_INT32, .qConfig = &symQc};
+    dagFixture_t f;
+    dagBegin(&f);
+    uint16_t b1 = graphNode(&f.g, makeQuant(&symQ, &g_floatQ), GRAPH_INPUT);
+    (void)graphMerge(&f.g, addLayerInit(NULL), b1, GRAPH_INPUT);
+    f.m = graphFinish(&f.g);
+    dagTensor_t xs;
+    tensor_t *x = dagInput(&xs, 1, 2);
+    rematWireTable_t *t = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1, "non-FLOAT32 merge or accumulate: wire ACT 1 has dtype 2",
+                             (void)rematWireTableInitEval(&t, &f.m, x));
+    freeQuantLayer(f.layers[0]);
+    freeAddLayer(f.layers[1]);
+}
+
 /* F3 with n1's dx wire SYM_INT32: n1 is b1's third contributor, so that wire is PART 1, which
  * the SUM step adds into GRAD 1. */
 void testTableInitRefusesASymInt32Part(void) {
@@ -6049,6 +6068,7 @@ int main(void) {
     RUN_TEST(testFlattenActTakesTheTemplateOfItsWiredInput);
     RUN_TEST(testAPartAFlattenWritesInheritsItsInputsTemplate);
     RUN_TEST(testTableInitRefusesASymInt32WireIntoAnAdd);
+    RUN_TEST(testEvalOnlyTableInitRefusesASymInt32WireIntoAnAdd);
     RUN_TEST(testTableInitRefusesASymInt32Part);
     RUN_TEST(testTableInitRefusesASymInt32GradASumAddsInto);
     RUN_TEST(testTableInitRefusesASymInt32GradAnAddAccumulatesInto);

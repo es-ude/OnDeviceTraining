@@ -170,6 +170,12 @@ bool rematArenaInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
  * range, reserved when the range opens and freed when it closes. */
 bool rematHeapInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
                    const tensor_t *inputLike, const rematPlanSpec_t *spec);
+/* The inference scheduler: a HEAP row for a model without a loss or gradients (a DAG
+ * included), so it builds only the ACT wires and the EVAL program. Only rematBeginEval runs on
+ * it (rematBegin exits); the loss type it is given is not keyed. Validates the model, refuses a
+ * non-FLOAT32 ACT that an ADD reads, and returns and self-checks like rematHeapInit; its report
+ * has the TRAIN numbers 0 and metadataBytes as usual. */
+bool rematHeapInitEval(rematScheduler_t *s, const model_t *m, const tensor_t *inputLike);
 /* NULL-safe and idempotent: the row's blocks (fns->deinit), then the plan and
  * the table. Exits inside a call. */
 void rematSchedulerDeinit(rematScheduler_t *s);
@@ -211,12 +217,14 @@ void rematSchedulerReport(const rematScheduler_t *s, rematReport_t *out);
 /* THE entry points (the optimizerStep precedent): only drivers call them; raw
  * fns-> calls only in unit tests. rematBegin binds the table (key check,
  * per-bind derivation, ACT 0 = input) before the row's begin; rematEnd
- * unbinds it after the row's end. */
+ * unbinds it after the row's end. rematBegin exits on an eval-only
+ * scheduler (rematHeapInitEval). */
 void rematBegin(rematScheduler_t *s, const model_t *m, lossConfig_t loss, tensor_t *input);
 /* An evaluation call on the same instance: the same guards and key check, then
  * the plan's EVAL program (FORWARD and LOSS_FORWARD only); no GRAD header is
  * written. The eval caller has only the loss type, which is all the bind
- * keys. */
+ * keys. On an eval-only scheduler lossType is not keyed: an inference
+ * caller without a loss passes any value. */
 void rematBeginEval(rematScheduler_t *s, const model_t *m, lossFuncType_t lossType,
                     tensor_t *input);
 bool rematNext(rematScheduler_t *s, rematStep_t *step);

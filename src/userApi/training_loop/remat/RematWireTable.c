@@ -401,10 +401,13 @@ static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t
     return t;
 }
 
-bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t loss,
-                        const tensor_t *inputLike) {
+/* evalOnly: every gradient flag stays 0 (reserveMemory zeroes the flag block), so the derivation
+ * numbers no GRAD or PART wire and fills every dx slot with NONE, and the merge gate is left with
+ * the ACTs the ADDs read. */
+static bool tableInit(rematWireTable_t **out, const model_t *m, lossFuncType_t lt, bool evalOnly,
+                      const tensor_t *inputLike, const char *caller) {
     *out = NULL;
-    modelRequireValid(m, "rematWireTableInit");
+    modelRequireValid(m, caller);
     size_t n = m->numLayers;
 
     /* The gradient flags and the dx slots, derived once here and copied into the table: dxWire
@@ -422,20 +425,22 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
     uint8_t *needsGrad = flagBlock + slots * sizeof(uint16_t);
     uint8_t *runsBackward = needsGrad + n + 1u;
     uint8_t *dxMode = runsBackward + n;
-    modelGradFlags(m, loss.funcType, needsGrad, runsBackward);
+    if (!evalOnly) {
+        modelGradFlags(m, lt, needsGrad, runsBackward);
+    }
     /* CrossEntropy's backward IS the combined Softmax + CE gradient p - y, so the sink's own
      * backward never runs: it must be the Softmax, or a layer would silently go untrained, and
      * its config must declare one of the two heads. With nothing to train nothing is skipped. */
-    if (loss.funcType == CROSS_ENTROPY && needsGrad[n]) {
-        requireCrossEntropyHead(m->layers[n - 1u], "rematWireTableInit");
+    if (lt == CROSS_ENTROPY && needsGrad[n]) {
+        requireCrossEntropyHead(m->layers[n - 1u], caller);
     }
-    bool hasBackward = rematHasBackward(n, loss.funcType, needsGrad);
+    bool hasBackward = rematHasBackward(n, lt, needsGrad);
     bool isChain = modelIsChain(m);
     size_t numEdges = isChain ? 0u : m->inputStart[n];
-    size_t numWires = addSize(
-        addSize(n, 1u, NULL, "numWires"),
-        rematDeriveGradWires(m, loss.funcType, needsGrad, runsBackward, NULL, dxWire, dxMode), NULL,
-        "numWires");
+    size_t numWires =
+        addSize(addSize(n, 1u, NULL, "numWires"),
+                rematDeriveGradWires(m, lt, needsGrad, runsBackward, NULL, dxWire, dxMode), NULL,
+                "numWires");
     if (numWires >= REMAT_NONE) {
         PRINT_ERROR("rematWireTableInit: %zu wires reach REMAT_NONE (0xFFFF): wire ids are "
                     "uint16_t",
@@ -472,7 +477,7 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
     slabLayout_t shapePlacing = {.base = shapeBlock, .cursor = 0};
     shape_t *shapes = placeShapes(&shapePlacing, n + 1u, maxRank);
     modelShapePass(m, inputLike->shape, shapes, maxRank);
-    numberWires(facts, m, loss.funcType, needsGrad, runsBackward, dxWire, dxMode);
+    numberWires(facts, m, lt, needsGrad, runsBackward, dxWire, dxMode);
     deriveFacts(facts, numWires, m, shapes, inputLike, dxWire, dxMode);
 
     size_t totalBytes = 0;
@@ -493,7 +498,7 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
         totalBytes = addSize(totalBytes, f->bytes, f, "total wire bytes");
     }
     if (!isChain) {
-        requireFloat32MergeWires(facts, numWires, m, loss.funcType, dxWire, dxMode);
+        requireFloat32MergeWires(facts, numWires, m, lt, dxWire, dxMode);
     }
 
     slabLayout_t sizing = {.base = NULL, .cursor = 0};
@@ -511,7 +516,7 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
     modelShapePass(m, inputLike->shape, t->actShapes, maxRank);
 
     t->modelSize = n;
-    t->lossType = loss.funcType;
+    t->lossType = lt;
     t->hasBackward = hasBackward;
     t->numWires = numWires;
     for (size_t j = 0; j <= n; j++) {
@@ -522,7 +527,7 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
             t->gradIdOf[t->wires[id].index] = (uint16_t)id;
         }
     }
-    if (loss.funcType == CROSS_ENTROPY && hasBackward) {
+    if (lt == CROSS_ENTROPY && hasBackward) {
         t->gradIdOf[n - 1u] = t->gradIdOf[n]; /* the seed is the Softmax input's gradient */
     }
     for (size_t i = 0; i < n; i++) {
@@ -535,6 +540,7 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
     memcpy(t->dxWire, dxWire, slots * sizeof(uint16_t));
     memcpy(t->dxMode, dxMode, slots);
     t->isChain = isChain ? 1u : 0u;
+    t->evalOnly = evalOnly;
     t->numEdges = numEdges;
     if (!isChain) {
         memcpy(t->inputStart, m->inputStart, (n + 1u) * sizeof(uint16_t));
@@ -553,6 +559,16 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
     freeReservedMemory(flagBlock);
     *out = t;
     return true;
+}
+
+bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t loss,
+                        const tensor_t *inputLike) {
+    return tableInit(out, m, loss.funcType, false, inputLike, "rematWireTableInit");
+}
+
+/* MSE: with no gradient flag set, the loss type reaches nothing. */
+bool rematWireTableInitEval(rematWireTable_t **out, const model_t *m, const tensor_t *inputLike) {
+    return tableInit(out, m, MSE, true, inputLike, "rematWireTableInitEval");
 }
 
 void rematWireTableFree(rematWireTable_t *t) {
@@ -665,22 +681,42 @@ static void exitInputKeyAt(const char *field, size_t k, size_t built, size_t liv
     exit(1);
 }
 
+/* The gradient facts of a training table, from the live model under lt. The live flags go into
+ * the bind scratch, unused until phase 1 derives into it; it holds numWires facts, far more than
+ * the 2n + 1 bytes. */
+static void requireBackwardKey(const rematWireTable_t *t, const model_t *m, lossFuncType_t lt) {
+    size_t n = m->numLayers;
+    uint8_t *liveNeedsGrad = (uint8_t *)t->bindScratch;
+    uint8_t *liveRunsBackward = liveNeedsGrad + n + 1u;
+    modelGradFlags(m, lt, liveNeedsGrad, liveRunsBackward);
+    /* The head config is no key field, so the init's head check runs again on the live model. */
+    if (lt == CROSS_ENTROPY && liveNeedsGrad[n]) {
+        requireCrossEntropyHead(m->layers[n - 1u], "rematWireTableBind");
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (liveRunsBackward[i] != t->runsBackward[i]) {
+            exitModelKeyAt("runsBackward", i, t->runsBackward[i], liveRunsBackward[i]);
+        }
+    }
+}
+
 /* Phase 1 step 1 of the table bind: the model facts and ACT 0, before any shape is
  * derived. With ACT 0's rank and every layer type unchanged, each derived rank
  * is a pure function of them, so the built maxRank bounds the scratch.
- * needsGrad, hasBackward and the dx slots follow from the compared facts, and so do
- * the per-wire kind and rank. The wiring compares come first because on a caller-scheduler
- * path nothing validates the live model: only its match with the built wiring, which the init
- * validated, makes the live CSR safe for the readers after it (modelGradFlags here,
- * modelShapePass and rematDeriveGradWires in phase 1). The live side goes through modelIsChain,
- * so a builder-made chain keys as the MODEL_CHAIN it encodes. */
+ * needsGrad, hasBackward and the dx slots follow from the compared facts (on an eval-only
+ * table they are 0 and NONE by construction, so neither the loss type nor the gradient flags
+ * are compared), and so do the per-wire kind and rank. The wiring compares come first because on a
+ * caller-scheduler path nothing validates the live model: only its match with the built wiring,
+ * which the init validated, makes the live CSR safe for the readers after it (modelGradFlags in
+ * requireBackwardKey, modelShapePass and rematDeriveGradWires in phase 1). The live side goes
+ * through modelIsChain, so a builder-made chain keys as the MODEL_CHAIN it encodes. */
 static void requireModelKey(const rematWireTable_t *t, const model_t *m, lossFuncType_t lt,
                             const tensor_t *input) {
     size_t n = m->numLayers;
     if (n != t->modelSize) {
         exitModelKey("modelSize", t->modelSize, n);
     }
-    if (lt != t->lossType) {
+    if (!t->evalOnly && lt != t->lossType) {
         exitModelKey("lossType", (size_t)t->lossType, (size_t)lt);
     }
     for (size_t i = 0; i < n; i++) {
@@ -704,19 +740,8 @@ static void requireModelKey(const rematWireTable_t *t, const model_t *m, lossFun
             }
         }
     }
-    /* The live flags go into the bind scratch, unused until phase 1 derives into it; it holds
-     * numWires facts, far more than the 2n + 1 bytes. */
-    uint8_t *liveNeedsGrad = (uint8_t *)t->bindScratch;
-    uint8_t *liveRunsBackward = liveNeedsGrad + n + 1u;
-    modelGradFlags(m, lt, liveNeedsGrad, liveRunsBackward);
-    /* The head config is no key field, so the init's head check runs again on the live model. */
-    if (lt == CROSS_ENTROPY && liveNeedsGrad[n]) {
-        requireCrossEntropyHead(m->layers[n - 1u], "rematWireTableBind");
-    }
-    for (size_t i = 0; i < n; i++) {
-        if (liveRunsBackward[i] != t->runsBackward[i]) {
-            exitModelKeyAt("runsBackward", i, t->runsBackward[i], liveRunsBackward[i]);
-        }
+    if (!t->evalOnly) {
+        requireBackwardKey(t, m, lt);
     }
     for (size_t i = 0; i < n; i++) {
         size_t frozen = layerIsFrozen(m->layers[i]) ? 1u : 0u;

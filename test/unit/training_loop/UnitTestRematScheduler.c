@@ -2053,6 +2053,47 @@ void testEvalOutsideItsTrainRangeExits(void) {
     dagFree(&f);
 }
 
+/* Inference has no loss: the eval-only table holds ACT 0..4 and no gradient wire, and the
+ * bind keys no loss type, so a CROSS_ENTROPY call on F3's ADD head runs. */
+void testEvalOnlyHeapWalksF3sEvalProgram(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    dagTensor_t xs;
+    tensor_t *x = dagInput(&xs, 1.0f, 2.0f);
+    rematScheduler_t s;
+    TEST_ASSERT_TRUE(rematHeapInitEval(&s, &f.m, x));
+    TEST_ASSERT_EQUAL_size_t(5u, s.wires->numWires);
+    rematBeginEval(&s, &f.m, CROSS_ENTROPY, x);
+    const uint8_t kinds[] = {REMAT_STEP_FORWARD, REMAT_STEP_FORWARD, REMAT_STEP_FORWARD,
+                             REMAT_STEP_FORWARD, REMAT_STEP_LOSS_FORWARD};
+    size_t k = 0;
+    for (rematStep_t st; rematNext(&s, &st); k++) {
+        TEST_ASSERT_EQUAL_UINT8(kinds[k], st.kind);
+        rematDone(&s, &st);
+    }
+    TEST_ASSERT_EQUAL_size_t(5u, k);
+    rematEnd(&s);
+    rematSchedulerDeinit(&s);
+    dagFree(&f);
+}
+
+static void beginOnAnEvalOnlyScheduler(dagFixture_t *f) {
+    dagTensor_t xs;
+    tensor_t *x = dagInput(&xs, 1.0f, 2.0f);
+    rematScheduler_t s;
+    if (!rematHeapInitEval(&s, &f->m, x)) {
+        exit(2);
+    }
+    rematBegin(&s, &f->m, defaultLossConfig(MSE), x);
+}
+
+void testRematBeginOnAnEvalOnlySchedulerExits(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    ASSERT_EXITS_WITH_OUTPUT(1, "eval-only scheduler", beginOnAnEvalOnlyScheduler(&f));
+    dagFree(&f);
+}
+
 void testRowContractArenaHarStoreAll(void) {
     assertRowContract(initArena, buildHarModel, NULL);
 }
@@ -3378,6 +3419,8 @@ int main(void) {
     RUN_TEST(testArenaEvalPlacesEvenActsAtTheBottomAndOddActsAtTheTop);
     RUN_TEST(testArenaEvaluatesF3OnItsTrainOffsets);
     RUN_TEST(testEvalOutsideItsTrainRangeExits);
+    RUN_TEST(testEvalOnlyHeapWalksF3sEvalProgram);
+    RUN_TEST(testRematBeginOnAnEvalOnlySchedulerExits);
     RUN_TEST(testArenaHarLivenessBindsFlattenDxAfterItsSourceDied);
     RUN_TEST(testReportObservedPeakEqualsThePlannedPeak);
     RUN_TEST(testRowContractArenaHarLivenessInPlaceAcrossModes);

@@ -44,6 +44,12 @@ static void beginCall(rematScheduler_t *s, const char *verb, const model_t *m, l
         PRINT_ERROR("%s: scheduler '%s' re-entered", verb, s->fns->name);
         exit(1);
     }
+    if (mode == REMAT_MODE_TRAIN && s->wires->evalOnly) {
+        PRINT_ERROR("%s: eval-only scheduler '%s' (rematHeapInitEval) has no TRAIN program; "
+                    "init a training scheduler to train",
+                    verb, s->fns->name);
+        exit(1);
+    }
     rematWireTableBind(s->wires, m, lt, mode, input);
     /* After the table bind, for a training call only: an evaluation program
      * has no backward step, so no chain. */

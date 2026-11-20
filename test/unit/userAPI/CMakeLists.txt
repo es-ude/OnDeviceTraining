@@ -687,6 +687,73 @@ add_dependencies(UnitTestMicroBatchStacking generate_expected_microbatch)
 target_include_directories(UnitTestMicroBatchStacking PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 __register_target_as_unit_test(UnitTestMicroBatchStacking)
 
+# DAG models against PyTorch: every admitted remat plan trains a DAG to the
+# same gold grads, bit-equal to the NULL-call reference. Own binary: an
+# acceptance test has no library under test, and it needs the gold generator.
+set(GEN_DAG_HEADER ${CMAKE_CURRENT_BINARY_DIR}/expected_dag.h)
+add_custom_command(
+        OUTPUT ${GEN_DAG_HEADER}
+        COMMAND uv run ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_dag.py
+                --out ${GEN_DAG_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generate_expected_dag.py
+        COMMENT "Generating expected_dag.h via PyTorch"
+        VERBATIM
+)
+add_custom_target(generate_expected_dag DEPENDS ${GEN_DAG_HEADER})
+
+add_executable(UnitTestDagTraining UnitTestDagTraining.c)
+target_link_libraries(UnitTestDagTraining PRIVATE
+        unity
+        ModelGraphApi
+        Model
+        OpTable
+        AddApi
+        AddLayer
+        TrainingLoopApi
+        TrainingEpochDefault
+        TrainingBatchDefault
+        CalculateGradsSequential
+        RematScheduler
+        RematPlan
+        CommonLayerLibs
+        LayerConfigAccess
+        LinearApi
+        ReluApi
+        SoftmaxApi
+        BfpSoftmaxExp
+        Conv1dApi
+        BatchNorm1dApi
+        BatchNorm1d
+        FlattenApi
+        LayerQuant
+        LayerCommon
+        LayerWeightsApi
+        ArithmeticType
+        Quantization
+        QuantizationApi
+        TensorApi
+        Tensor
+        Rounding
+        StorageApi
+        LossFunction
+        InferenceApi
+        DataLoader
+        DataLoaderApi
+        OptimizerApi
+        Optimizer
+        Sgd
+        SgdApi
+        RNG
+        Reduce
+        Common
+        odt_test_death
+        odt_test_layer_builders
+        odt_test_dag_fixtures
+)
+add_dependencies(UnitTestDagTraining generate_expected_dag)
+target_include_directories(UnitTestDagTraining PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+__register_target_as_unit_test(UnitTestDagTraining)
+
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST StackGather
         MORE_LIBS

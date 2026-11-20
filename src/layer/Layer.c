@@ -16,6 +16,41 @@
 #include "Relu.h"
 #include "Softmax.h"
 
+#include <stdlib.h>
+
+#include "Common.h"
+
+/* ADD is a merge node: only the graph driver runs it. A chain driver reaching it is a wiring
+ * bug, so fail loudly instead of running a unary op on one input. */
+static void addChainForwardStub(layer_t *layer, tensor_t *in, tensor_t *out,
+                                const layerExec_t *exec) {
+    (void)layer;
+    (void)in;
+    (void)out;
+    (void)exec;
+    PRINT_ERROR("merge node reached a chain driver (layer type ADD has no unary forward/backward/shape)");
+    exit(1);
+}
+
+static void addChainBackwardStub(layer_t *layer, tensor_t *in, tensor_t *loss, tensor_t *propLoss,
+                                 const layerExec_t *exec) {
+    (void)layer;
+    (void)in;
+    (void)loss;
+    (void)propLoss;
+    (void)exec;
+    PRINT_ERROR("merge node reached a chain driver (layer type ADD has no unary forward/backward/shape)");
+    exit(1);
+}
+
+static void addChainShapeStub(layer_t *layer, shape_t *inShape, shape_t *outShape) {
+    (void)layer;
+    (void)inShape;
+    (void)outShape;
+    PRINT_ERROR("merge node reached a chain driver (layer type ADD has no unary forward/backward/shape)");
+    exit(1);
+}
+
 layerFunctions_t layerFunctions[] = {
     [LINEAR] = {linearForward, linearBackward, linearCalcOutputShape},
     [RELU] = {reluForward, reluBackward, reluCalcOutputShape},
@@ -32,7 +67,8 @@ layerFunctions_t layerFunctions[] = {
     [DROPOUT] = {dropoutForward, dropoutBackward, dropoutCalcOutputShape},
     [LAYERNORM] = {layerNormForward, layerNormBackward, layerNormCalcOutputShape},
     [GROUPNORM] = {groupNormForward, groupNormBackward, groupNormCalcOutputShape},
-    [BATCHNORM1D] = {batchNorm1dForward, batchNorm1dBackward, batchNorm1dCalcOutputShape}};
+    [BATCHNORM1D] = {batchNorm1dForward, batchNorm1dBackward, batchNorm1dCalcOutputShape},
+    [ADD] = {addChainForwardStub, addChainBackwardStub, addChainShapeStub}};
 
 void initLayer(layer_t *layer, layerType_t type, layerConfig_t *config) {
     layer->type = type;

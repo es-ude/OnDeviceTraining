@@ -18,6 +18,7 @@ typedef struct dropoutConfig dropoutConfig_t;
 typedef struct layerNormConfig layerNormConfig_t;
 typedef struct groupNormConfig groupNormConfig_t;
 typedef struct batchNorm1dConfig batchNorm1dConfig_t;
+typedef struct addConfig addConfig_t;
 typedef struct quantizationConfig quantizationConfig_t;
 
 /* WIRE FORMAT -- append-only. The serialized layer record's uint8 tag is this
@@ -39,7 +40,8 @@ typedef enum layerType {
     DROPOUT,
     LAYERNORM,
     GROUPNORM,
-    BATCHNORM1D
+    BATCHNORM1D,
+    ADD
 } layerType_t;
 
 typedef enum layerQType { FLOAT_LAYER, ASYM_LAYER } layerQType_t;
@@ -57,6 +59,7 @@ typedef union layerConfig {
     layerNormConfig_t *layerNorm;
     groupNormConfig_t *groupNorm;
     batchNorm1dConfig_t *batchNorm1d;
+    addConfig_t *add;
     quantizationConfig_t *quantization;
 } layerConfig_t;
 

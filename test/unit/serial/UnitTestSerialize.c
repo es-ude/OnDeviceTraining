@@ -72,7 +72,8 @@ _Static_assert(LAYERNORM == 11, "layerType_t wire tag: LAYERNORM must stay 11 (a
 _Static_assert(GROUPNORM == 12, "layerType_t wire tag: GROUPNORM must stay 12 (append-only enum)");
 _Static_assert(BATCHNORM1D == 13,
                "layerType_t wire tag: BATCHNORM1D must stay 13 (append-only enum)");
-_Static_assert(BATCHNORM1D + 1 == 14,
+_Static_assert(ADD == 14, "layerType_t wire tag: ADD must stay 14 (append-only enum)");
+_Static_assert(ADD + 1 == 15,
                "new layerType_t member: append at the END and add its wire-tag pin above");
 
 /* WIRE-FORMAT PINS (#serial): the serialized arithmetic record's uint8 tag IS the

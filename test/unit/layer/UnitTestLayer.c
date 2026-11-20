@@ -6,6 +6,7 @@
 
 #include "BatchNorm1d.h"
 #include "Conv1d.h"
+#include "DeathTest.h"
 #include "Conv1dTransposed.h"
 #include "GroupNorm.h"
 #include "Layer.h"
@@ -97,10 +98,20 @@ void testLayerParametersIgnoresFrozen(void) {
                  "frozen LAYERNORM");
 }
 
+void testAddReachingAChainDriverExits(void) {
+    layer_t add = {.type = ADD, .config = NULL};
+    tensor_t x = {0}, y = {0};
+    ASSERT_EXITS_WITH_OUTPUT(1, "merge node reached a chain driver",
+                             layerFunctions[ADD].forward(&add, &x, &y, NULL));
+    ASSERT_EXITS_WITH_OUTPUT(1, "merge node reached a chain driver",
+                             layerFunctions[ADD].backward(&add, &x, &y, &y, NULL));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testLayerParametersReturnsEachParamLayersOwnPair);
     RUN_TEST(testLayerParametersFalseForParamFreeLayers);
     RUN_TEST(testLayerParametersIgnoresFrozen);
+    RUN_TEST(testAddReachingAChainDriverExits);
     return UNITY_END();
 }

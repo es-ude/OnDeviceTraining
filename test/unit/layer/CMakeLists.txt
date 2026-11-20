@@ -585,6 +585,7 @@ add_elastic_ai_unit_test(
         ArithmeticType
         ExecuteOp
         Kernel
+        odt_test_death
 )
 
 add_elastic_ai_unit_test(

@@ -23,8 +23,8 @@ SUPPORTED_MODULES: tuple[type[nn.Module], ...] = (
     nn.Linear,
 )
 
-# The residual add has a shape rule and is rejected later as a non-chain,
-# with the node named.
+# operator.add and torch.add become the ADD merge node; annotate refuses a
+# constant operand or keyword arguments.
 SUPPORTED_FUNCTIONS: tuple[object, ...] = (operator.add, torch.add)
 
 

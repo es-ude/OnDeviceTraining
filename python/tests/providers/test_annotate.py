@@ -5,8 +5,8 @@ from torch import nn
 from elasticai.creator import ir
 from odt.providers.annotate import Annotated, annotate
 from odt.providers.errors import (
-    NotAChainError,
     UnsupportedDtypeError,
+    UnsupportedGraphError,
     UnsupportedLayerError,
 )
 from odt.providers.trace import to_shaped_ir
@@ -111,14 +111,127 @@ class _Residual(nn.Module):
         return x + self.conv(x)
 
 
-def test_rejects_non_chain() -> None:
+class _TwoBranch(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.a1 = nn.Conv1d(2, 2, 3, padding=1)
+        self.a2 = nn.ReLU()
+        self.b1 = nn.Conv1d(2, 2, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.a2(self.a1(x)) + self.b1(x)
+
+
+class _Double(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = nn.Conv1d(2, 2, 3, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.conv(x)
+        return y + y
+
+
+class _FanOut3(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = nn.Conv1d(2, 2, 3, padding=1)
+        self.relu = nn.ReLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.conv(x)
+        return (y + self.relu(y)) + y
+
+
+class _BranchFirst(nn.Module):  # conv(x) + x: argument order differs from _Residual's
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = nn.Conv1d(2, 2, 3, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x) + x
+
+
+class _LongSkip(nn.Module):  # the reducer reaches the output before c2
+    def __init__(self) -> None:
+        super().__init__()
+        self.c1 = nn.Conv1d(2, 2, 3, padding=1)
+        self.c2 = nn.Conv1d(2, 2, 3, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.c2(self.c1(x))
+
+
+@pytest.mark.parametrize(
+    "model, order, inputs",
+    [
+        (_Residual, ("conv", "add"), [(0,), (0, 1)]),
+        (_BranchFirst, ("conv", "add"), [(0,), (1, 0)]),
+        (_TwoBranch, ("a1", "a2", "b1", "add"), [(0,), (1,), (0,), (2, 3)]),
+        (_Double, ("conv", "add"), [(0,), (1, 1)]),
+        (_FanOut3, ("conv", "relu", "add", "add_1"), [(0,), (1,), (1, 2), (3, 1)]),
+        (_LongSkip, ("c1", "c2", "add"), [(0,), (1,), (0, 2)]),
+    ],
+    ids=[
+        "skip-from-input",
+        "branch-first",
+        "two-branch",
+        "add-y-y",
+        "fan-out-3",
+        "long-skip",
+    ],
+)
+def test_a_dag_annotates_in_fx_order_with_its_inputs(model, order, inputs) -> None:
+    result = _run(model(), (1, 2, 8))
+    assert (
+        result.order == order
+    )  # fx program order = C node order, not the reducer's BFS order
+    assert [_block(result, n)["inputs"] for n in order] == inputs
+    for name in order:
+        if name.startswith("add"):
+            block = _block(result, name)
+            assert block["odt_type"] == "ADD" and block["frozen"] is False
+            assert block["out_shape"] == (1, 2, 8) and "cost" not in block
+            assert dict(block["output_q"]) == {"kind": "FLOAT32"}
+            assert dict(block["prop_loss_q"]) == {"kind": "FLOAT32"}
+
+
+def test_a_chain_block_reads_its_predecessor() -> None:
+    result = _run(_tiny())
+    assert [_block(result, n)["inputs"] for n in result.order] == [
+        (j,) for j in range(6)
+    ]
+
+
+def test_add_with_keyword_arguments_is_refused() -> None:
+    class Net(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.conv = nn.Conv1d(2, 2, 3, padding=1)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.add(self.conv(x), x, alpha=2.0)
+
+    with pytest.raises(UnsupportedLayerError) as info:
+        _run(Net(), (1, 2, 8))
+    assert (info.value.layer_type, info.value.where) == ("add", "add")
+
+
+def test_a_value_nobody_reads_is_refused() -> None:
     model = _Residual()
     root, registry = to_shaped_ir(model, (1, 2, 8))
     (input_name,) = [n.name for n in root.nodes.values() if n.type == "input"]
+    root = root.add_node(
+        "dangling", ir.attribute(type="relu", implementation="dangling")
+    )
+    root = root.add_edge(input_name, "dangling", ir.attribute(shape=(1, 2, 8)))
 
-    with pytest.raises(NotAChainError, match=repr(input_name)) as info:
+    with pytest.raises(UnsupportedGraphError) as info:
         annotate(root, registry, model)
-    assert info.value.node == input_name
+    assert (info.value.node, info.value.reason) == (
+        "dangling",
+        "its output is never read",
+    )
 
 
 def test_rejects_nodes_unreachable_from_input() -> None:
@@ -132,9 +245,10 @@ def test_rejects_nodes_unreachable_from_input() -> None:
         ("loop_b", "loop_a", ir.attribute(shape=(1, 4, 16))),
     )
 
-    with pytest.raises(NotAChainError) as info:
+    with pytest.raises(UnsupportedGraphError) as info:
         annotate(root, registry, model)
     assert info.value.node == "loop_a"
+    assert info.value.reason == "not reachable from the input"
 
 
 def test_rejects_non_float32_params() -> None:

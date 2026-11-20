@@ -1,15 +1,15 @@
 """Write a ``training`` metadata block onto every node of a shaped creator IR."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 
 import torch
-from torch import nn
+from torch import fx, nn
 
 from elasticai.creator import ir
 from elasticai.creator.experimental.ir.shape_inference import ShapedDatagraph
 
-from .errors import NotAChainError, UnsupportedDtypeError, UnsupportedLayerError
+from .errors import UnsupportedDtypeError, UnsupportedGraphError, UnsupportedLayerError
 from .profile import FLOAT32_UNIFORM, QuantProfile
 
 
@@ -17,7 +17,8 @@ from .profile import FLOAT32_UNIFORM, QuantProfile
 class Annotated:
     root: ShapedDatagraph
     registry: ir.Registry
-    order: tuple[str, ...]  # annotated layer names in execution order, no input/output
+    # annotated layer names in C node order (fx program order), no input/output
+    order: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -27,7 +28,9 @@ class _Acc:
     registry: ir.Registry
     model: nn.Module
     profile: QuantProfile
-    order: tuple[str, ...] = ()
+    fx: Mapping[str, fx.Node]
+    buffer: Mapping[str, int]  # value name -> C buffer id (0 = input, j + 1 = layer j)
+    order: tuple[str, ...] = ()  # visit order of the reducer, not C node order
 
 
 # --- helpers ---------------------------------------------------------------
@@ -40,8 +43,18 @@ def _unwrap1(value: int | tuple[int]) -> int:
     return int(value)
 
 
+def _fx_program(model: nn.Module) -> tuple[Mapping[str, fx.Node], Mapping[str, int]]:
+    """fx program order is the C node order; IR node names are fx node names."""
+    graph = fx.symbolic_trace(model).graph
+    (placeholder,) = [n for n in graph.nodes if n.op == "placeholder"]
+    layers = (n for n in graph.nodes if n.op in ("call_module", "call_function"))
+    buffer = {placeholder.name: 0} | {n.name: j + 1 for j, n in enumerate(layers)}
+    return {n.name: n for n in graph.nodes}, buffer
+
+
 def _out_shape(acc: _Acc, node: ir.Node) -> tuple[int, ...]:
-    (succ,) = acc.shaped.successors[node.name]
+    """Every out-edge of a value carries its shape; a fanned-out value has several."""
+    succ = next(iter(acc.shaped.successors[node.name]))
     return acc.shaped.edges[(node.name, succ)].shape
 
 
@@ -51,6 +64,8 @@ def _impl_attrs(acc: _Acc, node: ir.Node) -> ir.AttributeMapping:
 
 def _frozen(acc: _Acc, node: ir.Node) -> bool:
     """True iff the module has parameters and none of them requires grad."""
+    if node.type == "function":
+        return False  # an ADD has no module and no parameters
     module = acc.model.get_submodule(node.attributes["implementation"])
     params = list(module.parameters())
     return bool(params) and not any(p.requires_grad for p in params)
@@ -79,6 +94,7 @@ def _layer(
     }
     if cost is not None:
         block["cost"] = cost
+    block["inputs"] = tuple(acc.buffer[a.name] for a in acc.fx[node.name].args)
     acc = _write(acc, node, block)
     return replace(acc, order=acc.order + (node.name,))
 
@@ -139,16 +155,23 @@ def _linear(node: ir.Node, acc: _Acc) -> _Acc:
     return _layer(acc, node, "LINEAR", {"macPerElement": in_features})
 
 
-def _output(node: ir.Node, acc: _Acc) -> _Acc:
-    """Write nothing; check that every layer was visited before the output.
+def _add(node: ir.Node, acc: _Acc) -> _Acc:
+    """Trace admits only operator.add and torch.add as calls, so every function
+    node is an ADD; operand order is the fx argument order (the IR keeps one
+    edge per producer, so ``y + y`` and the order of operands are lost there)."""
+    fx_node = acc.fx[node.name]
+    if (
+        fx_node.kwargs
+        or len(fx_node.args) != 2
+        or not all(isinstance(a, fx.Node) for a in fx_node.args)
+    ):
+        raise UnsupportedLayerError("add", node.name)
+    return _layer(acc, node, "ADD")
 
-    A part of the graph not reachable from the input (e.g. a disconnected
-    cycle) passes the degree check but is never handed to a handler.
-    """
-    visited = set(acc.order)
-    for n in acc.shaped.nodes.values():
-        if n.type not in ("input", "output") and n.name not in visited:
-            raise NotAChainError(n.name)
+
+def _output(node: ir.Node, acc: _Acc) -> _Acc:
+    # The reachability check runs after the reducer: in a DAG the reducer can
+    # reach the output before a layer on a longer branch.
     return acc
 
 
@@ -160,6 +183,7 @@ _HANDLERS: dict[str, Callable[[ir.Node, _Acc], _Acc]] = {
     "avgpool1d": _avgpool1d,
     "flatten": _flatten,
     "linear": _linear,
+    "function": _add,
     "output": _output,
 }
 
@@ -184,29 +208,37 @@ def _check_float32(model: nn.Module) -> None:
             )
 
 
-def _check_chain(root: ShapedDatagraph) -> None:
-    """Exactly one input and one output, and a single path between them.
-
-    The input is checked first, so a branch right after it is reported there.
-    """
+def _check_graph(root: ShapedDatagraph) -> None:
+    """One input, one output fed by one tensor, and every value read."""
     nodes = list(root.nodes.values())
     inputs = [n.name for n in nodes if n.type == "input"]
     outputs = [n.name for n in nodes if n.type == "output"]
     if len(inputs) != 1:
-        raise NotAChainError(inputs[1] if inputs else "<no input>")
+        raise UnsupportedGraphError(
+            inputs[1] if inputs else "<no input>",
+            "the model must have exactly one input",
+        )
     if len(outputs) != 1:
-        raise NotAChainError(outputs[1] if outputs else "<no output>")
-
-    def degree(name: str) -> tuple[int, int]:
-        return len(root.predecessors[name]), len(root.successors[name])
-
-    if degree(inputs[0]) != (0, 1):
-        raise NotAChainError(inputs[0])
+        raise UnsupportedGraphError(
+            outputs[1] if outputs else "<no output>",
+            "the model must have exactly one output",
+        )
+    if len(root.predecessors[outputs[0]]) != 1:
+        raise UnsupportedGraphError(
+            outputs[0], "the model must return exactly one tensor"
+        )
     for n in nodes:
-        if n.type not in ("input", "output") and degree(n.name) != (1, 1):
-            raise NotAChainError(n.name)
-    if degree(outputs[0]) != (1, 0):
-        raise NotAChainError(outputs[0])
+        if n.type != "output" and not root.successors[n.name]:
+            raise UnsupportedGraphError(n.name, "its output is never read")
+
+
+def _check_reached(acc: _Acc) -> None:
+    """A part of the graph not reachable from the input (e.g. a disconnected
+    cycle) passes the graph check but is never handed to a handler."""
+    visited = set(acc.order)
+    for n in acc.shaped.nodes.values():
+        if n.type not in ("input", "output") and n.name not in visited:
+            raise UnsupportedGraphError(n.name, "not reachable from the input")
 
 
 # --- entry point -------------------------------------------------------------
@@ -218,16 +250,27 @@ def annotate(
     model: nn.Module,
     profile: QuantProfile = FLOAT32_UNIFORM,
 ) -> Annotated:
-    """Annotate each node of a chain-shaped IR with its ``training`` block."""
+    """Annotate each node of a DAG-shaped IR with its ``training`` block.
+
+    Handlers never read another node's block: the reducer may visit a merge
+    before its producers.
+    """
     _check_float32(model)
-    _check_chain(root)
+    _check_graph(root)
+    fx_nodes, buffer = _fx_program(model)
 
     reducer = ir.ExecutionOrderGraphReducer()
     for node_type, handler in _HANDLERS.items():
         reducer.register(node_type, handler)
 
     start = _Acc(
-        root=root, shaped=root, registry=registry, model=model, profile=profile
+        root=root,
+        shaped=root,
+        registry=registry,
+        model=model,
+        profile=profile,
+        fx=fx_nodes,
+        buffer=buffer,
     )
     try:
         acc = reducer(root, start)
@@ -238,13 +281,9 @@ def annotate(
         )
         if unknown is None:
             raise
-        # a function node names its op (e.g. "add") in its implementation
-        layer_type = (
-            unknown.attributes.get("implementation", unknown.type)
-            if unknown.type == "function"
-            else unknown.type
-        )
-        raise UnsupportedLayerError(layer_type, unknown.name) from err
+        raise UnsupportedLayerError(unknown.type, unknown.name) from err
+    _check_reached(acc)
     if not acc.order:
         raise ValueError("model has no layers")
-    return Annotated(root=acc.root, registry=registry, order=acc.order)
+    order = tuple(sorted(acc.order, key=acc.buffer.__getitem__))
+    return Annotated(root=acc.root, registry=registry, order=order)

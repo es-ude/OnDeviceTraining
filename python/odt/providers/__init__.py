@@ -5,16 +5,16 @@ from torch import nn
 from odt.planner import problem_bytes
 
 from .annotate import annotate
-from .errors import NotAChainError, UnsupportedDtypeError, UnsupportedLayerError
+from .errors import UnsupportedDtypeError, UnsupportedGraphError, UnsupportedLayerError
 from .problem import problem_from_annotated
 from .profile import FLOAT32_UNIFORM, QuantProfile
 from .trace import to_shaped_ir
 
 __all__ = [
     "FLOAT32_UNIFORM",
-    "NotAChainError",
     "QuantProfile",
     "UnsupportedDtypeError",
+    "UnsupportedGraphError",
     "UnsupportedLayerError",
     "build_problem",
     "problem_bytes",

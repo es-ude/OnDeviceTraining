@@ -17,9 +17,11 @@ class UnsupportedDtypeError(ValueError):
     """
 
 
-class NotAChainError(ValueError):
-    """The model graph is not a single linear chain of layers."""
+class UnsupportedGraphError(ValueError):
+    """The model graph is not one the C framework runs: one input, one output,
+    every value read, every node reachable from the input."""
 
-    def __init__(self, node: str) -> None:
-        super().__init__(f"model is not a linear chain at node {node!r}")
+    def __init__(self, node: str, reason: str) -> None:
+        super().__init__(f"unsupported graph at node {node!r}: {reason}")
         self.node = node
+        self.reason = reason

@@ -1,14 +1,17 @@
 #define SOURCE_FILE "LAYER"
 
-#include "Layer.h"
+#include <stdlib.h>
+
 #include "AdaptiveAvgPool1d.h"
 #include "AvgPool1d.h"
 #include "BatchNorm1d.h"
+#include "Common.h"
 #include "Conv1d.h"
 #include "Conv1dTransposed.h"
 #include "Dropout.h"
 #include "Flatten.h"
 #include "GroupNorm.h"
+#include "Layer.h"
 #include "LayerNorm.h"
 #include "Linear.h"
 #include "MaxPool1d.h"
@@ -16,19 +19,19 @@
 #include "Relu.h"
 #include "Softmax.h"
 
-#include <stdlib.h>
-
-#include "Common.h"
-
 /* ADD is a merge node: only the graph driver runs it. A chain driver reaching it is a wiring
  * bug, so fail loudly instead of running a unary op on one input. */
+#define ADD_CHAIN_DRIVER_ERROR                                                                     \
+    "merge node reached a chain driver "                                                           \
+    "(layer type ADD has no unary forward/backward/shape)"
+
 static void addChainForwardStub(layer_t *layer, tensor_t *in, tensor_t *out,
                                 const layerExec_t *exec) {
     (void)layer;
     (void)in;
     (void)out;
     (void)exec;
-    PRINT_ERROR("merge node reached a chain driver (layer type ADD has no unary forward/backward/shape)");
+    PRINT_ERROR(ADD_CHAIN_DRIVER_ERROR);
     exit(1);
 }
 
@@ -39,7 +42,7 @@ static void addChainBackwardStub(layer_t *layer, tensor_t *in, tensor_t *loss, t
     (void)loss;
     (void)propLoss;
     (void)exec;
-    PRINT_ERROR("merge node reached a chain driver (layer type ADD has no unary forward/backward/shape)");
+    PRINT_ERROR(ADD_CHAIN_DRIVER_ERROR);
     exit(1);
 }
 
@@ -47,7 +50,7 @@ static void addChainShapeStub(layer_t *layer, shape_t *inShape, shape_t *outShap
     (void)layer;
     (void)inShape;
     (void)outShape;
-    PRINT_ERROR("merge node reached a chain driver (layer type ADD has no unary forward/backward/shape)");
+    PRINT_ERROR(ADD_CHAIN_DRIVER_ERROR);
     exit(1);
 }
 

@@ -259,6 +259,20 @@ target_link_libraries(QuantizationLayer PRIVATE
         RNG
 )
 
+add_library(AddLayer AddLayer.c)
+target_include_directories(AddLayer PUBLIC include)
+target_link_libraries(AddLayer PRIVATE
+        Layer
+        LayerExec
+        RNG
+        DTypes
+        Tensor
+        Quantization
+        ArithmeticType
+        ExecuteOp
+        Common
+)
+
 add_library(Relu Relu.c)
 target_include_directories(Relu PUBLIC include)
 target_link_libraries(Relu PRIVATE
@@ -317,6 +331,7 @@ target_link_libraries(CommonLayerLibs INTERFACE
         LayerNorm
         GroupNorm
         BatchNorm1d
+        AddLayer
         Rounding
         Tensor
         Sgd

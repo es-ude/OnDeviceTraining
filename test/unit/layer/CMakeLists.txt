@@ -567,6 +567,25 @@ add_elastic_ai_unit_test(
 
 add_elastic_ai_unit_test(
         LIB_UNDER_TEST
+        AddLayer
+        MORE_LIBS
+        Tensor
+        TensorApi
+        Quantization
+        QuantizationApi
+        ExecuteOp
+        ArithmeticType
+        LayerExec
+        RNG
+        StorageApi
+        Common
+        odt_test_death
+        odt_test_assert
+        m
+)
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
         LayerExec
         MORE_LIBS
         RNG

@@ -6,8 +6,8 @@
 
 #include "BatchNorm1d.h"
 #include "Conv1d.h"
-#include "DeathTest.h"
 #include "Conv1dTransposed.h"
+#include "DeathTest.h"
 #include "GroupNorm.h"
 #include "Layer.h"
 #include "LayerNorm.h"

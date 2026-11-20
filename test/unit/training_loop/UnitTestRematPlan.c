@@ -1591,6 +1591,110 @@ void testTableOfAChainKeepsNoWiring(void) {
     freeModel(model, HAR_N);
 }
 
+/* F3 under MSE, in walk order: the seed (GRAD 4) = 5; B3 opens GRAD 3 = 6 and GRAD 1 = 7; B2
+ * opens GRAD 2 = 8 and accumulates into 7 (ADD); B1, a Linear and b1's third contributor, writes
+ * PART 1 = 9. GRAD 1's WRITE contributor is the ADD n3, not node 1, so its template is n3's. */
+void testF3TableNumbersGradsThenThePartInWalkOrder(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    dagTensor_t xs;
+    tensor_t *x = dagInput(&xs, 1, 2);
+    uint8_t ng[5];
+    uint8_t rb[4];
+    modelGradFlags(&f.m, MSE, ng, rb);
+    rematWireTable_t *t;
+    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
+    TEST_ASSERT_EQUAL_size_t(10u, t->numWires);
+    const uint8_t kind[] = {REMAT_WIRE_GRAD, REMAT_WIRE_GRAD, REMAT_WIRE_GRAD, REMAT_WIRE_GRAD,
+                            REMAT_WIRE_PART};
+    const uint16_t index[] = {4, 3, 1, 2, 1};
+    for (uint16_t w = 5; w < 10; w++) {
+        TEST_ASSERT_EQUAL_UINT8(kind[w - 5], t->wires[w].kind);
+        TEST_ASSERT_EQUAL_UINT16(index[w - 5], t->wires[w].index);
+    }
+    TEST_ASSERT_EQUAL_UINT16(4, t->wires[5].inheritFrom);
+    for (uint16_t w = 6; w < 10; w++) {
+        TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, t->wires[w].inheritFrom);
+    }
+    TEST_ASSERT_EQUAL_UINT16_ARRAY(((uint16_t[]){REMAT_NONE, 7, 8, 6, 5}), t->gradIdOf, 5);
+    const uint16_t dxW[] = {REMAT_NONE, REMAT_NONE, 9, REMAT_NONE, 8, 7, 6, 7};
+    TEST_ASSERT_EQUAL_UINT16_ARRAY(dxW, t->dxWire, 8);
+    TEST_ASSERT_EQUAL_UINT8(OP_MODE_WRITE, t->dxMode[2]);
+    TEST_ASSERT_EQUAL_UINT8(OP_MODE_WRITE, t->dxMode[4]);
+    TEST_ASSERT_EQUAL_UINT8(OP_MODE_ACC, t->dxMode[5]);
+    TEST_ASSERT_EQUAL_UINT8(OP_MODE_WRITE, t->dxMode[6]);
+    TEST_ASSERT_EQUAL_UINT8(OP_MODE_WRITE, t->dxMode[7]);
+    uint16_t scratchDxWire[4 * MODEL_MAX_ARITY];
+    uint8_t scratchDxMode[4 * MODEL_MAX_ARITY];
+    TEST_ASSERT_EQUAL_size_t(
+        5u, rematDeriveGradWires(&f.m, MSE, ng, rb, NULL, scratchDxWire, scratchDxMode));
+
+    rematWireTableBind(t, &f.m, MSE, REMAT_MODE_TRAIN, x);
+    TEST_ASSERT_TRUE(backwardWireQ(f.layers[3]) != backwardWireQ(f.layers[1]));
+    TEST_ASSERT_TRUE(t->bindScratch[7].tmpl == backwardWireQ(f.layers[3]));
+    TEST_ASSERT_TRUE(t->bindScratch[9].tmpl == backwardWireQ(f.layers[1]));
+    rematWireTableUnbind(t);
+    rematWireTableFree(t);
+    dagFree(&f);
+}
+
+/* Y = ADD(b1, b1): one BACKWARD opens GRAD 1 through slot 0 and accumulates into it through
+ * slot 1. ACT 0..2, the seed 3, GRAD 1 = 4. */
+void testAddOfTheSameBufferWritesThenAccumulates(void) {
+    dagFixture_t f;
+    dagBuildY(&f);
+    dagTensor_t xs;
+    rematWireTable_t *t;
+    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2)));
+    TEST_ASSERT_EQUAL_size_t(5u, t->numWires);
+    TEST_ASSERT_EQUAL_UINT8(REMAT_WIRE_GRAD, t->wires[4].kind);
+    TEST_ASSERT_EQUAL_UINT16(1, t->wires[4].index);
+    TEST_ASSERT_EQUAL_UINT16(REMAT_NONE, t->dxWire[0]);
+    TEST_ASSERT_EQUAL_UINT16_ARRAY(((uint16_t[]){4, 4}), &t->dxWire[2], 2);
+    TEST_ASSERT_EQUAL_UINT8(OP_MODE_WRITE, t->dxMode[2]);
+    TEST_ASSERT_EQUAL_UINT8(OP_MODE_ACC, t->dxMode[3]);
+    rematWireTableFree(t);
+    dagFree(&f);
+}
+
+/* K = ADD(b1, b0): the input needs no gradient, so the merge writes no dx for its skip slot.
+ * ACT 0..2, the seed 3, GRAD 1 = 4. */
+void testSkipFromTheInputGetsNoDx(void) {
+    dagFixture_t f;
+    dagBuildK(&f);
+    dagTensor_t xs;
+    rematWireTable_t *t;
+    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2)));
+    TEST_ASSERT_EQUAL_size_t(5u, t->numWires);
+    TEST_ASSERT_EQUAL_UINT16_ARRAY(((uint16_t[]){4, REMAT_NONE}), &t->dxWire[2], 2);
+    TEST_ASSERT_EQUAL_UINT8(OP_MODE_WRITE, t->dxMode[2]);
+    rematWireTableFree(t);
+    dagFree(&f);
+}
+
+/* n0 = Linear(b0); n1 = Flatten(b0); n2 = ADD(b1, b2). A Flatten passes its input's config
+ * through, and its input is the wired b0, not the buffer before it. */
+void testFlattenActTakesTheTemplateOfItsWiredInput(void) {
+    dagFixture_t f;
+    dagBegin(&f);
+    uint16_t b1 = graphNode(&f.g, dagLinear(0, 1.0f, 1.0f, false), GRAPH_INPUT);
+    uint16_t b2 = graphNode(&f.g, flattenLayerInit(), GRAPH_INPUT);
+    (void)graphMerge(&f.g, addLayerInit(NULL), b1, b2);
+    f.m = graphFinish(&f.g);
+    dagTensor_t xs;
+    tensor_t *x = dagInput(&xs, 1, 2);
+    rematWireTable_t *t;
+    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
+    rematWireTableBind(t, &f.m, MSE, REMAT_MODE_TRAIN, x);
+    TEST_ASSERT_TRUE(t->bindScratch[1].tmpl != x->quantization);
+    TEST_ASSERT_TRUE(t->bindScratch[2].tmpl == x->quantization);
+    rematWireTableUnbind(t);
+    rematWireTableFree(t);
+    freeLinearLayer(f.layers[0]);
+    freeFlattenLayer(f.layers[1]);
+    freeAddLayer(f.layers[2]);
+}
+
 void testUnbindClearsTheBorrowedInputOnly(void) {
     layer_t *model[1] = {makeRelu(&g_floatQ)};
     inputLike_t in;
@@ -5216,6 +5320,10 @@ int main(void) {
     RUN_TEST(testHarSlabHoldsTheBindScratch);
     RUN_TEST(testTableCopiesTheWiringOfADag);
     RUN_TEST(testTableOfAChainKeepsNoWiring);
+    RUN_TEST(testF3TableNumbersGradsThenThePartInWalkOrder);
+    RUN_TEST(testAddOfTheSameBufferWritesThenAccumulates);
+    RUN_TEST(testSkipFromTheInputGetsNoDx);
+    RUN_TEST(testFlattenActTakesTheTemplateOfItsWiredInput);
     RUN_TEST(testUnbindClearsTheBorrowedInputOnly);
 #ifdef ODT_TEST_ASAN
     RUN_TEST(testAsanDeathCallbackExitsWithADistinctCode);

@@ -17,13 +17,16 @@ bool rematHasBackward(size_t n, lossFuncType_t lt, const uint8_t *needsGrad);
  * writes ids[0..k) and returns k (a chain: k = 1, ids[0] = j). */
 uint8_t rematNodeInputs(const rematWireTable_t *t, size_t j, uint16_t ids[MODEL_MAX_ARITY]);
 
-/* The one owner of the gradient-wire decision, made once at table init (and repeated at every
- * bind from the same key, so it gives the same values). Numbers the seed (only when a backward
- * runs), then, walking the runsBackward nodes in descending order and each node's inputs in input
- * order, a GRAD for every input buffer that needs a gradient, at that buffer's first
- * contribution; ids start at n + 1. Fills dxWire/dxMode for every node's MODEL_MAX_ARITY slots.
- * With facts == NULL it only counts, so the table can be sized first; dxWire/dxMode may then be
- * NULL too. Returns the number of GRAD wires. */
+/* The one owner of the gradient-wire decision (the fan-out contributor rule), made once at table
+ * init (and repeated at every bind from the same key, so it gives the same values). Numbers the
+ * seed (only when a backward runs), then walks the runsBackward nodes in descending order and each
+ * node's inputs in input order; every input buffer that needs a gradient is a contribution. The
+ * buffer's first contribution opens its GRAD (WRITE); a later one from an accumulatesDx row adds
+ * into that GRAD (ACC); a later one from any other row writes a fresh PART (WRITE), which a SUM
+ * adds into the GRAD. Ids start at n + 1, in walk order. Always fills dxWire/dxMode (n *
+ * MODEL_MAX_ARITY slots): the walk finds an open GRAD in the slots it already wrote. With
+ * facts == NULL it only counts, so the table can be sized first. Returns the number of GRAD and
+ * PART wires. */
 size_t rematDeriveGradWires(const model_t *m, lossFuncType_t lt, const uint8_t *needsGrad,
                             const uint8_t *runsBackward, rematWireFact_t *facts, uint16_t *dxWire,
                             uint8_t *dxMode);

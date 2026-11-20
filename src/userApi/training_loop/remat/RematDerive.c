@@ -14,23 +14,39 @@
 #include "RematPlan.h"
 #include "RematPlanPolicy.h"
 
-static void setSlot(uint16_t *dxWire, uint8_t *dxMode, size_t slot, uint16_t wire, opMode_t mode) {
-    if (dxWire != NULL) {
-        dxWire[slot] = wire;
-        dxMode[slot] = (uint8_t)mode;
-    }
-}
-
 bool rematHasBackward(size_t n, lossFuncType_t lt, const uint8_t *needsGrad) {
     return needsGrad[lt == CROSS_ENTROPY ? n - 1u : n] != 0;
+}
+
+/* The GRAD an earlier contribution to buffer b opened, or REMAT_NONE when slot (j, i) is b's
+ * first contribution. Contributions arrive in walk order, so the first already written slot that
+ * reads b from a node running backward is the opener. O(edges) per call, so O(edges^2) per walk:
+ * fine for the walk's once-per-init-and-bind use. */
+static uint16_t openGradOf(const model_t *m, const uint8_t *runsBackward, const uint16_t *dxWire,
+                           size_t j, size_t i, uint16_t b) {
+    for (size_t c = m->numLayers; c-- > j;) {
+        if (!runsBackward[c]) {
+            continue;
+        }
+        uint16_t ids[MODEL_MAX_ARITY];
+        uint8_t k = modelNodeInputs(m, c, ids);
+        size_t end = (c == j) ? i : k;
+        for (size_t s = 0; s < end; s++) {
+            if (ids[s] == b) {
+                return dxWire[c * MODEL_MAX_ARITY + s];
+            }
+        }
+    }
+    return REMAT_NONE;
 }
 
 /* The seed GRAD n: under CrossEntropy with a BFP-declaring head
  * (crossEntropyHeadDeclaresBfp) it IS the last Softmax's dx wire (the combined gradient replaces
  * its backward), so its template is the Softmax's propLossQ, type-derived. Every other seed -- MSE,
  * and CrossEntropy on a FLOAT32 / SYM head, whose propLossQ stays unused -- inherits ACT n, the
- * model output it is the gradient of. A Flatten passes its dx through, so its GRAD inherits the
- * ACT it is the gradient of. */
+ * model output it is the gradient of. A Flatten passes its dx through, so the GRAD or PART it
+ * writes inherits the ACT it is the gradient of. Under CrossEntropy no contribution reaches the
+ * seed: the Softmax input n - 1 has the sink as its only consumer. */
 size_t rematDeriveGradWires(const model_t *m, lossFuncType_t lt, const uint8_t *needsGrad,
                             const uint8_t *runsBackward, rematWireFact_t *facts, uint16_t *dxWire,
                             uint8_t *dxMode) {
@@ -50,25 +66,35 @@ size_t rematDeriveGradWires(const model_t *m, lossFuncType_t lt, const uint8_t *
     for (size_t j = n; j-- > 0;) {
         uint16_t ids[MODEL_MAX_ARITY];
         uint8_t k = modelNodeInputs(m, j, ids);
+        layerType_t type = m->layers[j]->type;
         for (size_t i = 0; i < MODEL_MAX_ARITY; i++) {
             size_t slot = j * MODEL_MAX_ARITY + i;
             if (i >= k || !runsBackward[j]) {
-                setSlot(dxWire, dxMode, slot, REMAT_NONE, OP_MODE_READ);
+                dxWire[slot] = REMAT_NONE;
+                dxMode[slot] = OP_MODE_READ;
                 continue;
             }
             uint16_t b = ids[i];
             if (!needsGrad[b]) {
-                setSlot(dxWire, dxMode, slot, REMAT_NONE, OP_MODE_WRITE);
+                dxWire[slot] = REMAT_NONE;
+                dxMode[slot] = OP_MODE_WRITE;
+                continue;
+            }
+            uint16_t open = openGradOf(m, runsBackward, dxWire, j, i, b);
+            if (open != REMAT_NONE && opFunctions[type].accumulatesDx) {
+                dxWire[slot] = open;
+                dxMode[slot] = OP_MODE_ACC;
                 continue;
             }
             size_t id = n + 1u + count++;
             if (facts != NULL) {
-                bool passThrough = m->layers[j]->type == FLATTEN;
-                facts[id] = (rematWireFact_t){.kind = REMAT_WIRE_GRAD,
+                facts[id] = (rematWireFact_t){.kind = (open == REMAT_NONE) ? REMAT_WIRE_GRAD
+                                                                           : REMAT_WIRE_PART,
                                               .index = b,
-                                              .inheritFrom = passThrough ? b : REMAT_NONE};
+                                              .inheritFrom = (type == FLATTEN) ? b : REMAT_NONE};
             }
-            setSlot(dxWire, dxMode, slot, (uint16_t)id, OP_MODE_WRITE);
+            dxWire[slot] = (uint16_t)id;
+            dxMode[slot] = OP_MODE_WRITE;
         }
     }
     return count;

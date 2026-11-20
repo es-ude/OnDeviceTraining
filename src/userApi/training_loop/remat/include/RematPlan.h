@@ -48,14 +48,14 @@
 _Static_assert(ODT_REMAT_MAX_RANGES < REMAT_NONE,
                "range ids are uint16_t, and REMAT_NONE means no range");
 
-typedef enum rematWireKind { REMAT_WIRE_ACT = 0, REMAT_WIRE_GRAD } rematWireKind_t;
+typedef enum rematWireKind { REMAT_WIRE_ACT = 0, REMAT_WIRE_GRAD, REMAT_WIRE_PART } rematWireKind_t;
 
 typedef struct rematWire {
     uint8_t kind;         /* rematWireKind_t */
     uint8_t dtype;        /* qtype_t; key */
     uint8_t rank;         /* key */
     uint8_t borrowed;     /* ACT 0 only: the caller's tensor; never bound, released or poisoned */
-    uint16_t index;       /* j of ACT j / GRAD j */
+    uint16_t index;       /* the buffer b of ACT, GRAD or PART b */
     uint16_t inheritFrom; /* GRAD whose config comes from a LIVE ACT header when it is bound (the
                              loss seed, Flatten's dx): that ACT's index; REMAT_NONE otherwise (the
                              CrossEntropy seed of a BFP-declaring head is the last Softmax's dx:
@@ -88,7 +88,7 @@ typedef struct rematWireTable {
     bool hasBackward;
     uint8_t isChain; /* modelIsChain of the built model: then the wiring below is NULL and 0 */
     size_t numWires;
-    rematWire_t *wires;    /* ACT j at id j (0..n), then the GRAD wires in production order */
+    rematWire_t *wires;    /* ACT j at id j (0..n), then GRAD and PART wires in production order */
     uint16_t *gradIdOf;    /* [n+1]: the GRAD holding buffer b's gradient, else REMAT_NONE; under
                               CROSS_ENTROPY the seed is the Softmax input's gradient too */
     uint8_t *layerType;    /* [n], key */

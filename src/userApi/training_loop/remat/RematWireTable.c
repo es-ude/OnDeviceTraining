@@ -19,7 +19,7 @@
 #include "Tensor.h"
 
 static const char *wireKindName(uint8_t kind) {
-    return kind == REMAT_WIRE_ACT ? "ACT" : "GRAD";
+    return kind == REMAT_WIRE_ACT ? "ACT" : kind == REMAT_WIRE_GRAD ? "GRAD" : "PART";
 }
 
 /* Every size product and sum of the table goes through these; f names the wire in an overflow exit
@@ -112,7 +112,7 @@ rematBfpGroups_t rematBfpWireGrouping(const bfpQConfig_t *tmpl, size_t elements,
                               .groupSize = tmpl->groupSize};
 }
 
-/* Production order: with ACT j at id j and GRADs in the order BACKWARD writes them
+/* Production order: with ACT j at id j and GRAD/PART wires in the order BACKWARD writes them
  * (rematDeriveGradWires), every range begins in wire-id order. */
 static void numberWires(rematWireFact_t *facts, const model_t *m, lossFuncType_t lt,
                         const uint8_t *needsGrad, const uint8_t *runsBackward, uint16_t *dxWire,
@@ -139,32 +139,53 @@ static void setWireFacts(rematWireFact_t *f, const quantization_t *tmpl, uint8_t
     }
 }
 
-/* ACT j takes layerOutputQ(model[j-1]), or for Flatten the template of ACT j-1
- * (for Flatten-at-0 the caller's live input config): config fields only, never
- * a scale or exponents. A GRAD takes backwardWireQ(model[l]) and ACT l's
- * shape, or inherits its ACT's template. shapes[0..n] is modelShapePass's
- * output for this input; ACT j's rank and elements come from shapes[j]. */
+/* A gradient wire (GRAD or PART) takes the shape of the ACT it is the gradient of, and either
+ * inherits that ACT's template or takes its writer's backwardWireQ. */
+static void setGradWireFacts(rematWireFact_t *facts, size_t id, layer_t *writer) {
+    rematWireFact_t *f = &facts[id];
+    const rematWireFact_t *act = &facts[f->index];
+    const quantization_t *tmpl =
+        (f->inheritFrom != REMAT_NONE) ? facts[f->inheritFrom].tmpl : backwardWireQ(writer);
+    setWireFacts(f, tmpl, act->rank, act->elements);
+}
+
+/* ACT j takes layerOutputQ(model[j-1]), or for a Flatten the template of its input ACT (for a
+ * Flatten on buffer 0 the caller's live input config): config fields only, never a scale or
+ * exponents. The seed's writer is the last node (its template matters only for a BFP-declaring
+ * CE head: the last Softmax's dx wire); every other gradient wire's writer is the node whose dx
+ * slot WRITEs it, so dxWire/dxMode must be numbered first. The slots are visited in walk order,
+ * which is wire-id order. shapes[0..n] is modelShapePass's output for this input; ACT j's rank
+ * and elements come from shapes[j]. */
 static void deriveFacts(rematWireFact_t *facts, size_t numWires, const model_t *m,
-                        const shape_t *shapes, const tensor_t *input) {
+                        const shape_t *shapes, const tensor_t *input, const uint16_t *dxWire,
+                        const uint8_t *dxMode) {
     size_t n = m->numLayers;
     setWireFacts(&facts[0], input->quantization, (uint8_t)shapes[0].numberOfDimensions,
                  elementsOf(&shapes[0], &facts[0]));
     for (size_t j = 1; j <= n; j++) {
         layer_t *layer = m->layers[j - 1];
-        const quantization_t *tmpl =
-            (layer->type == FLATTEN) ? facts[j - 1].tmpl : layerOutputQ(layer);
+        const quantization_t *tmpl;
+        if (layer->type == FLATTEN) {
+            uint16_t ids[MODEL_MAX_ARITY];
+            (void)modelNodeInputs(m, j - 1, ids);
+            tmpl = facts[ids[0]].tmpl;
+        } else {
+            tmpl = layerOutputQ(layer);
+        }
         setWireFacts(&facts[j], tmpl, (uint8_t)shapes[j].numberOfDimensions,
                      elementsOf(&shapes[j], &facts[j]));
     }
-    for (size_t id = n + 1u; id < numWires; id++) {
-        rematWireFact_t *f = &facts[id];
-        const rematWireFact_t *act = &facts[f->index];
-        /* index n here is only the seed of a BFP-declaring CE head: the
-         * last Softmax's dx wire */
-        const quantization_t *tmpl = (f->inheritFrom != REMAT_NONE) ? facts[f->inheritFrom].tmpl
-                                     : (f->index == n) ? backwardWireQ(m->layers[n - 1u])
-                                                       : backwardWireQ(m->layers[f->index]);
-        setWireFacts(f, tmpl, act->rank, act->elements);
+    if (numWires == n + 1u) {
+        return;
+    }
+    setGradWireFacts(facts, n + 1u, m->layers[n - 1u]);
+    for (size_t j = n; j-- > 0;) {
+        for (size_t i = 0; i < MODEL_MAX_ARITY; i++) {
+            size_t slot = j * MODEL_MAX_ARITY + i;
+            if (dxWire[slot] != REMAT_NONE && dxMode[slot] == OP_MODE_WRITE) {
+                setGradWireFacts(facts, dxWire[slot], m->layers[j]);
+            }
+        }
     }
 }
 
@@ -353,10 +374,10 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
     bool hasBackward = rematHasBackward(n, loss.funcType, needsGrad);
     bool isChain = modelIsChain(m);
     size_t numEdges = isChain ? 0u : m->inputStart[n];
-    size_t numWires =
-        addSize(addSize(n, 1u, NULL, "numWires"),
-                rematDeriveGradWires(m, loss.funcType, needsGrad, runsBackward, NULL, NULL, NULL),
-                NULL, "numWires");
+    size_t numWires = addSize(
+        addSize(n, 1u, NULL, "numWires"),
+        rematDeriveGradWires(m, loss.funcType, needsGrad, runsBackward, NULL, dxWire, dxMode), NULL,
+        "numWires");
     if (numWires >= REMAT_NONE) {
         PRINT_ERROR("rematWireTableInit: %zu wires reach REMAT_NONE (0xFFFF): wire ids are "
                     "uint16_t",
@@ -394,7 +415,7 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
     shape_t *shapes = placeShapes(&shapePlacing, n + 1u, maxRank);
     modelShapePass(m, inputLike->shape, shapes, maxRank);
     numberWires(facts, m, loss.funcType, needsGrad, runsBackward, dxWire, dxMode);
-    deriveFacts(facts, numWires, m, shapes, inputLike);
+    deriveFacts(facts, numWires, m, shapes, inputLike, dxWire, dxMode);
 
     size_t totalBytes = 0;
     for (size_t id = 1; id < numWires; id++) {
@@ -436,7 +457,9 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
         t->gradIdOf[j] = REMAT_NONE;
     }
     for (size_t id = n + 1u; id < numWires; id++) {
-        t->gradIdOf[t->wires[id].index] = (uint16_t)id;
+        if (t->wires[id].kind == REMAT_WIRE_GRAD) {
+            t->gradIdOf[t->wires[id].index] = (uint16_t)id;
+        }
     }
     if (loss.funcType == CROSS_ENTROPY && hasBackward) {
         t->gradIdOf[n - 1u] = t->gradIdOf[n]; /* the seed is the Softmax input's gradient */
@@ -667,7 +690,7 @@ void rematWireTableBind(rematWireTable_t *t, const model_t *m, lossFuncType_t lt
     modelShapePass(m, input->shape, t->actShapes, t->maxRank);
     rematWireFact_t *facts = t->bindScratch;
     numberWires(facts, m, t->lossType, t->needsGrad, t->runsBackward, t->dxWire, t->dxMode);
-    deriveFacts(facts, t->numWires, m, t->actShapes, input);
+    deriveFacts(facts, t->numWires, m, t->actShapes, input, t->dxWire, t->dxMode);
     requireWireKey(t, facts);
     writeHeaders(t, mode, input, facts);
 }

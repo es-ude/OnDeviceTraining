@@ -211,21 +211,106 @@ static tensor_t *inferChain(const model_t *m, tensor_t *input) {
     return output;
 }
 
+/* The eval half of the validating interpreter (CalculateGradsSequential.c):
+ * the scheduler hands out FORWARD and LOSS_FORWARD steps of its EVAL program,
+ * the checker validates each before it runs, and ACT 0 is the caller's input,
+ * borrowed, not copied. No hook fires and no training-mode flag changes.
+ * Returns a copy of the model output; with a label, *loss gets the loss,
+ * which runs before that copy is allocated (a label whose shape differs from
+ * the output exits first). A NULL label runs no loss and leaves *loss
+ * alone, which only an eval-only scheduler admits (its bind keys no loss). */
+static tensor_t *forwardOnScheduler(const model_t *m, rematScheduler_t *s, tensor_t *input,
+                                    tensor_t *label, lossFuncType_t funcType,
+                                    reduction_t forwardReduction, const rngKey_t *callKey,
+                                    float *loss) {
+    uint32_t producedGen[rematCheckNumWires(s)];
+    uint16_t pending[rematCheckNumWires(s)];
+    rematCheck_t chk;
+    rematCheckInit(&chk, s, m, REMAT_MODE_EVAL, producedGen, pending);
+    rematBeginEval(s, m, funcType, input);
+    tensor_t *output = NULL;
+    for (;;) {
+        rematStep_t st;
+        if (!rematNext(s, &st)) {
+            break;
+        }
+        rematOperands_t op;
+        rematCheckStep(&chk, &st, &op);
+        /* From the checked step's layer index only, as in the training driver. */
+        layerExec_t exStorage;
+        const layerExec_t *ex = layerExecForLayer(callKey, st.layer, &exStorage);
+        if (st.kind == REMAT_STEP_FORWARD) {
+            layer_t *layer = m->layers[st.layer];
+            opFunctions[layer->type].forward(layer, op.in, op.k, op.out, ex);
+        } else { /* LOSS_FORWARD: the checker admits nothing else in EVAL */
+            /* All of it before rematDone releases ACT n. */
+            if (label != NULL) {
+                *loss = lossFunctions[funcType].forward(op.in[0], label, forwardReduction, ex);
+            }
+            output = getTensorLike(op.in[0]);
+            convertTensor(op.in[0], output, NULL);
+        }
+        rematDone(s, &st);
+    }
+    rematCheckFinish(&chk);
+    rematEnd(s);
+    rematCheckReleased(&chk);
+    return output;
+}
+
+/* A non-chain model runs on a scheduler. Its init validates m once more: inference callers
+ * validate at their own entry so a malformed model exits under their name. */
+static void initDagScheduler(rematScheduler_t *s, const model_t *m, const tensor_t *inputLike,
+                             const char *caller) {
+    if (!rematHeapInitEval(s, m, inputLike)) {
+        PRINT_ERROR("%s: no memory for the eval-only scheduler of a non-chain model", caller);
+        exit(1);
+    }
+}
+
+/* The key-less, loss-free forward of a non-chain model on s; the caller has validated m. */
+static tensor_t *inferenceDagOnScheduler(const model_t *m, rematScheduler_t *s, tensor_t *input) {
+    return forwardOnScheduler(m, s, input, NULL, MSE, REDUCTION_MEAN, NULL, NULL);
+}
+
 tensor_t *inference(const model_t *m, tensor_t *input) {
     modelRequireValid(m, "inference");
-    return inferChain(m, input);
+    if (modelIsChain(m)) {
+        return inferChain(m, input);
+    }
+    rematScheduler_t s;
+    initDagScheduler(&s, m, input, "inference");
+    tensor_t *output = inferenceDagOnScheduler(m, &s, input);
+    rematSchedulerDeinit(&s);
+    return output;
 }
 
 tensor_t **inferenceBatched(const model_t *m, batch_t *batch) {
     modelRequireValid(m, "inferenceBatched");
     tensor_t **tensorArr = reserveMemory(batch->size * sizeof(*tensorArr));
 
-    for (size_t i = 0; i < batch->size; i++) {
-        /* batch_t consumer: the sample is natural-shape, inferChain takes [B, ...]. */
-        batchView_t itemView;
-        tensorArr[i] = inferChain(m, batchViewOf(&itemView, batch->samples[i]->item));
+    /* batch_t consumer: each sample is natural-shape, both forwards take [B, ...]. */
+    if (modelIsChain(m)) {
+        for (size_t i = 0; i < batch->size; i++) {
+            batchView_t itemView;
+            tensorArr[i] = inferChain(m, batchViewOf(&itemView, batch->samples[i]->item));
+        }
+        return tensorArr;
     }
-
+    if (batch->size == 0) {
+        return tensorArr;
+    }
+    /* One scheduler per call, keyed on the first sample: every other sample must match its
+     * shape and dtype or exits at bind. */
+    batchView_t keyView;
+    rematScheduler_t s;
+    initDagScheduler(&s, m, batchViewOf(&keyView, batch->samples[0]->item), "inferenceBatched");
+    for (size_t i = 0; i < batch->size; i++) {
+        batchView_t itemView;
+        tensorArr[i] =
+            inferenceDagOnScheduler(m, &s, batchViewOf(&itemView, batch->samples[i]->item));
+    }
+    rematSchedulerDeinit(&s);
     return tensorArr;
 }
 
@@ -245,46 +330,15 @@ void freeInferenceStats(inferenceStats_t *inferenceStats) {
     freeReservedMemory(inferenceStats);
 }
 
-/* The eval half of the validating interpreter (CalculateGradsSequential.c):
- * the scheduler hands out FORWARD and LOSS_FORWARD steps of its EVAL program,
- * the checker validates each before it runs, and ACT 0 is the caller's input,
- * borrowed, not copied. No hook fires and no training-mode flag changes. */
 static inferenceStats_t *inferenceOnScheduler(const model_t *m, tensor_t *input, tensor_t *label,
                                               lossFuncType_t funcType, reduction_t forwardReduction,
                                               rematScheduler_t *s, const rngKey_t *callKey) {
-    uint32_t producedGen[rematCheckNumWires(s)];
-    uint16_t pending[rematCheckNumWires(s)];
-    rematCheck_t chk;
-    rematCheckInit(&chk, s, m, REMAT_MODE_EVAL, producedGen, pending);
-    rematBeginEval(s, m, funcType, input);
-    inferenceStats_t *inferenceStats = NULL;
-    for (;;) {
-        rematStep_t st;
-        if (!rematNext(s, &st)) {
-            break;
-        }
-        rematOperands_t op;
-        rematCheckStep(&chk, &st, &op);
-        /* From the checked step's layer index only, as in the training driver. */
-        layerExec_t exStorage;
-        const layerExec_t *ex = layerExecForLayer(callKey, st.layer, &exStorage);
-        if (st.kind == REMAT_STEP_FORWARD) {
-            layer_t *layer = m->layers[st.layer];
-            opFunctions[layer->type].forward(layer, op.in, op.k, op.out, ex);
-        } else { /* LOSS_FORWARD: the checker admits nothing else in EVAL */
-            /* As on the NULL path: the loss first (a label whose shape differs
-             * from the output exits before the stats exist, #153), and all of it
-             * before rematDone releases ACT n. */
-            float loss = lossFunctions[funcType].forward(op.in[0], label, forwardReduction, ex);
-            inferenceStats = reserveInferenceStats(op.in[0]);
-            convertTensor(op.in[0], inferenceStats->output, NULL);
-            inferenceStats->loss = loss;
-        }
-        rematDone(s, &st);
-    }
-    rematCheckFinish(&chk);
-    rematEnd(s);
-    rematCheckReleased(&chk);
+    float loss;
+    tensor_t *output =
+        forwardOnScheduler(m, s, input, label, funcType, forwardReduction, callKey, &loss);
+    inferenceStats_t *inferenceStats = reserveMemory(sizeof(inferenceStats_t));
+    inferenceStats->output = output;
+    inferenceStats->loss = loss;
     return inferenceStats;
 }
 
@@ -297,6 +351,14 @@ inferenceStats_t *inferenceWithLoss(const model_t *m, tensor_t *input, tensor_t 
                                     callKey);
     }
     modelRequireValid(m, "inferenceWithLoss");
+    if (!modelIsChain(m)) {
+        rematScheduler_t s;
+        initDagScheduler(&s, m, input, "inferenceWithLoss");
+        inferenceStats_t *inferenceStats =
+            inferenceOnScheduler(m, input, label, funcType, forwardReduction, &s, callKey);
+        rematSchedulerDeinit(&s);
+        return inferenceStats;
+    }
     tensor_t outputNext;
     initBufferInput(input, &outputNext);
 

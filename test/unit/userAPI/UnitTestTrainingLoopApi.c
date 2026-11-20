@@ -2406,6 +2406,29 @@ void testTrainingRunKeepsEpochZerosOrderWithoutPerEpochReshuffle(void) {
     }
 }
 
+/* Node 0 reads its own output buffer. */
+static const uint16_t g_selfReadStart[] = {0, 1};
+static const uint16_t g_selfReadIds[] = {1};
+
+static void runOnASelfReadingWiring(shuffleRunFixture_t *f) {
+    const model_t m = {f->model, 1, g_selfReadStart, g_selfReadIds};
+    trainingRng_t rng;
+    trainingRngInit(&rng, SHUFFLE_RUN_SEED);
+    (void)trainingRun(&m, defaultLossConfig(MSE), f->trainDl, f->evalDl, f->sgd, 1,
+                      calculateGradsSequential, inferenceWithLoss,
+                      &(trainingRunOptions_t){.rng = &rng});
+}
+
+/* The evaluation pre-flight reads the wiring, so the run validates it first, under its own name. */
+void testTrainingRunValidatesTheWiringAtItsEntry(void) {
+    shuffleRunFixture_t f;
+    buildShuffleRunFixture(&f, false, false);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "trainingRun: wiring: node 0 reads buffer 1, which is not produced before it",
+        runOnASelfReadingWiring(&f));
+    freeShuffleRunFixture(&f);
+}
+
 /* Fills params[0..5] with the fixture's weights, then its biases. */
 static void captureShuffleRunParams(const shuffleRunFixture_t *f, float params[6]) {
     for (size_t i = 0; i < 4; i++) {
@@ -4428,6 +4451,7 @@ int main(void) {
     RUN_TEST(testTrainingRunRejectsOneLoaderPassedAsTrainAndEvalLoader);
     RUN_TEST(testTrainingRunShufflesEachEpochUnderItsOwnKey);
     RUN_TEST(testTrainingRunKeepsEpochZerosOrderWithoutPerEpochReshuffle);
+    RUN_TEST(testTrainingRunValidatesTheWiringAtItsEntry);
     RUN_TEST(testTrainingRunShuffleFollowsTheEpochCounterAcrossCalls);
     RUN_TEST(testTrainingRunWithoutAnRngStopsAtAShuffledEvalLoader);
     RUN_TEST(testTrainingRunWithoutAnRngStopsAtAShuffledTrainLoader);

@@ -641,6 +641,30 @@ static void exitWithTheWriteVerdict(layer_t **model, const tensor_t *input) {
                                                                                               : 1);
 }
 
+/* Node 1 reads buffer 0, so buffer 1 has no consumer. */
+static const uint16_t g_skipStart[] = {0, 1, 2};
+static const uint16_t g_skipIds[] = {0, 0};
+
+static void dumpTheSkipWiring(layer_t **relus, const tensor_t *input) {
+    const model_t m = {relus, 2u, g_skipStart, g_skipIds};
+    exit(rematSelectDumpProblem(tmpfile(), stdout, &m, g_crossEntropy, input) ? 0 : 2);
+}
+
+/* The dump reads the wiring before it writes a byte, so it validates it first, under its name. */
+void testTheDumpValidatesTheWiring(void) {
+    static quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, &floatQ);
+    layer_t *relus[2] = {reluLayerInit(&lq), reluLayerInit(&lq)};
+    inputHeader_t in;
+    const tensor_t *x = makeInputHeader(&in, (const size_t[]){1, 4}, 2u, &floatQ);
+    ASSERT_EXITS_WITH_OUTPUT(1, "rematSelectDumpProblem: wiring: buffer 1 has no consumer",
+                             dumpTheSkipWiring(relus, x));
+    freeReluLayer(relus[1]);
+    freeReluLayer(relus[0]);
+}
+
 void testAFailedProblemWriteIsNamed(void) {
     static quantization_t floatQ;
     initFloat32Quantization(&floatQ);
@@ -781,6 +805,7 @@ int main(void) {
     RUN_TEST(testTheProblemDumpRefusesWhatTheProblemCannotHold);
     RUN_TEST(testAFailedHashLineFailsTheDump);
     RUN_TEST(testAFailedProblemWriteIsNamed);
+    RUN_TEST(testTheDumpValidatesTheWiring);
     RUN_TEST(testAnArenaWithinItsBudgetRuns);
     RUN_TEST(testAnArenaOverItsBudgetStopsNamingBoth);
     return UNITY_END();

@@ -19,16 +19,20 @@ void freeInferenceStats(inferenceStats_t *inferenceStats);
  *  nothing. A forward that draws (stochastic rounding, a BFP_SHIFT_SR softmax,
  *  a Dropout layer left in training mode) needs a key: run it through
  *  inferenceWithLoss with call->key (a keyed inference() is #491); here it
- *  stops with a named error at its first draw. */
+ *  stops with a named error at its first draw. A non-chain model (an ADD merge)
+ *  runs on an eval-only scheduler built and freed inside the call. */
 tensor_t *inference(const model_t *m, tensor_t *input);
 
 /*! Wraps each sample with batchViewOf before calling inference() -- see
  *  docs/conventions/data-shape.md, "Who adds the batch axis". Key-less like
- *  inference(). */
+ *  inference(). A non-chain model runs every sample on one eval-only scheduler
+ *  keyed on samples[0], so each sample must have its shape and dtype or the
+ *  call exits at bind; a chain takes mixed shapes. */
 tensor_t **inferenceBatched(const model_t *m, batch_t *batch);
 
 /*! call is NULLable: a NULL call or a NULL call->remat runs the forward on
- *  per-call buffers, as before #4. A non-NULL call->remat runs it on that
+ *  per-call buffers (a non-chain model: on a per-call eval-only scheduler, as
+ *  for inference()). A non-NULL call->remat runs it on that
  *  scheduler's EVAL program inside its memory (remat D19): the scheduler must
  *  be keyed to this model and to input's shape, or the call exits at bind
  *  naming the field. input is borrowed, never copied or written. Output

@@ -4,6 +4,7 @@
 
 #include "ArithmeticType.h"
 #include "BorrowedLayer.h"
+#include "DagFixtures.h"
 #include "DeathTest.h"
 #include "DropoutApi.h"
 #include "InferenceApi.h"
@@ -812,6 +813,95 @@ void testInferenceBatchedAddsBatchAxisToNaturalSamples(void) {
     }
 }
 
+/* ---- DAG models: F3 (DagFixtures.h), y = [4, 10] for x = [1, 2] ---------- */
+
+void testInferenceRunsF3(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    dagTensor_t xs;
+    tensor_t *y = inference(&f.m, dagInput(&xs, 1.0f, 2.0f));
+    float got[2];
+    memcpy(got, y->data, sizeof got);
+    freeTensor(y);
+    dagFree(&f);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){4.f, 10.f}), got, 2);
+}
+
+/* By hand for x = [2, 1]: y1 = [2, 1], y2 = [4, 3], y3 = [6, 4], y4 = [8, 5]. */
+void testInferenceBatchedRunsF3PerSample(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    tensor_t *item0 = buildFloatTensor1DInf(2, (float[]){1.f, 2.f}); /* natural [2] */
+    tensor_t *item1 = buildFloatTensor1DInf(2, (float[]){2.f, 1.f});
+    sample_t s0 = {.item = item0, .label = item0};
+    sample_t s1 = {.item = item1, .label = item1};
+    sample_t *samples[] = {&s0, &s1};
+    batch_t batch = {.samples = samples, .size = 2};
+
+    tensor_t **out = inferenceBatched(&f.m, &batch);
+
+    float got[2][2];
+    for (size_t i = 0; i < 2; i++) {
+        memcpy(got[i], out[i]->data, sizeof got[i]);
+        freeTensor(out[i]);
+    }
+    freeReservedMemory(out);
+    freeTensor(item1);
+    freeTensor(item0);
+    dagFree(&f);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){4.f, 10.f}), got[0], 2);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){8.f, 5.f}), got[1], 2);
+}
+
+/* The DAG scheduler is keyed on samples[0]; an empty batch has none to read. */
+static void inferEmptyDagBatch(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    batch_t empty = {.size = 0, .samples = NULL};
+    tensor_t **out = inferenceBatched(&f.m, &empty);
+    freeReservedMemory(out);
+    dagFree(&f);
+}
+
+void testInferenceBatchedOnAnEmptyDagBatchTouchesNoSample(void) {
+    ASSERT_EXITS_WITH(0, inferEmptyDagBatch());
+}
+
+/* The second sample is natural [1, 2], so its view is [1, 1, 2], not the key's [1, 2]. */
+static void inferMixedRankDagBatch(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    tensor_t *item0 = buildFloatTensor1DInf(2, (float[]){1.f, 2.f});
+    tensor_t *item1 = buildFloatTensor2DInf(1, 2, (float[]){2.f, 1.f});
+    sample_t s0 = {.item = item0, .label = item0};
+    sample_t s1 = {.item = item1, .label = item1};
+    sample_t *samples[] = {&s0, &s1};
+    batch_t batch = {.samples = samples, .size = 2};
+    (void)inferenceBatched(&f.m, &batch);
+}
+
+void testInferenceBatchedOnADagExitsOnASampleUnlikeTheFirst(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "key mismatch on wire ACT 0, field 'rank': built 2, live 3",
+                             inferMixedRankDagBatch());
+}
+
+/* Label [3, 8]: MSE mean = (1 + 4) / 2. */
+void testInferenceWithLossRunsF3WithoutAScheduler(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    dagTensor_t xs;
+    dagTensor_t ts;
+    inferenceStats_t *r = inferenceWithLoss(&f.m, dagInput(&xs, 1.0f, 2.0f),
+                                            dagInput(&ts, 3.0f, 8.0f), MSE, REDUCTION_MEAN, NULL);
+    float loss = r->loss;
+    float got[2];
+    memcpy(got, r->output->data, sizeof got);
+    freeInferenceStats(r);
+    dagFree(&f);
+    TEST_ASSERT_EQUAL_FLOAT(2.5f, loss);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){4.f, 10.f}), got, 2);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -1173,5 +1263,10 @@ int main(void) {
     RUN_TEST(testInferenceWithLossHandsEachLayerItsLayerKey);
     RUN_TEST(testInferenceWithoutAKeyHandsNoLayerContext);
     RUN_TEST(testInferenceOnADrawingForwardExits);
+    RUN_TEST(testInferenceRunsF3);
+    RUN_TEST(testInferenceBatchedRunsF3PerSample);
+    RUN_TEST(testInferenceBatchedOnAnEmptyDagBatchTouchesNoSample);
+    RUN_TEST(testInferenceBatchedOnADagExitsOnASampleUnlikeTheFirst);
+    RUN_TEST(testInferenceWithLossRunsF3WithoutAScheduler);
     return UNITY_END();
 }

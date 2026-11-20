@@ -506,6 +506,8 @@ bool rematSelectDumpProblem(FILE *json, FILE *hashLine, const model_t *m, lossCo
     if (!dumpCanWrite(m, loss, inputLike)) {
         return false;
     }
+    /* After the type refusals, so an unknown layer type never indexes the op table. */
+    modelRequireValid(m, "rematSelectDumpProblem");
     problemWriter_t w = {.f = json, .hash = REMAT_PROBLEM_HASH_BASIS};
     emit(&w, "{\"schema_version\":0,\"input\":{\"shape\":");
     emitShape(&w, inputLike->shape);

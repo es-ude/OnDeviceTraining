@@ -115,7 +115,9 @@ uint64_t rematSelectProblemHash(uint64_t state, const char *bytes, size_t n);
  * before a byte is written. A failed write of the problem prints its reason
  * and returns false without the hash line; a failed write of the hash line
  * returns false with no message (the trainers write it to stderr, so no
- * stream is left to name it on). */
+ * stream is left to name it on). A malformed wiring is a caller error, not a
+ * refusal: it exits naming rematSelectDumpProblem, after the refusals above
+ * and before a byte is written. */
 bool rematSelectDumpProblem(FILE *json, FILE *hashLine, const model_t *m, lossConfig_t loss,
                             const tensor_t *inputLike);
 

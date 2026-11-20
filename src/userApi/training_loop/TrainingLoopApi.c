@@ -657,6 +657,8 @@ trainingRunResult_t trainingRun(const model_t *model, lossConfig_t lossConfig,
                                 calculateGradsFn_t calculateGradsFn,
                                 inferenceWithLossFn_t inferenceFn,
                                 const trainingRunOptions_t *options) {
+    /* Before the evaluation pre-flight, the first reader of the wiring. */
+    modelRequireValid(model, "trainingRun");
     trainingRunResult_t result = {0};
     lrScheduler_t *lrScheduler = (options != NULL) ? options->lrScheduler : NULL;
     bsScheduler_t *bsScheduler = (options != NULL) ? options->bsScheduler : NULL;

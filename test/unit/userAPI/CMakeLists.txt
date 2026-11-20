@@ -76,6 +76,11 @@ add_elastic_ai_unit_test(
         InferenceApi
         MORE_LIBS
         StorageApi
+        AddApi
+        AddLayer
+        ModelGraphApi
+        Model
+        OpTable
         RematScheduler
         LayerExec
         RNG
@@ -97,6 +102,7 @@ add_elastic_ai_unit_test(
         DataLoader
         odt_test_death
         odt_test_layer_builders
+        odt_test_dag_fixtures
 )
 
 

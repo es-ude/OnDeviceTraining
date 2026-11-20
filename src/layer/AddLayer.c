@@ -8,6 +8,8 @@
 #include "ExecuteOp.h"
 #include "Layer.h"
 #include "LayerExec.h"
+#include "OpTable.h"
+#include "TensorConversion.h"
 
 /* OP(k) of each funnel op of this layer, for layerExecOpKey. Part of the
  * value contract: append, never renumber. */
@@ -47,6 +49,55 @@ void addForward(layer_t *layer, tensor_t *const *in, uint8_t k, tensor_t *out,
             .mode = OUT_WRITE,
         },
         out);
+}
+
+void addAccumulate(tensor_t *src, tensor_t *target) {
+    if (src->quantization->type != FLOAT32 || target->quantization->type != FLOAT32) {
+        PRINT_ERROR("addAccumulate: src %s into target %s: non-FLOAT32 merge numerics are not "
+                    "designed yet",
+                    quantTypeToString(src->quantization->type),
+                    quantTypeToString(target->quantization->type));
+        exit(1);
+    }
+    tensor_t *ops[1] = {src};
+    /* FLOAT32 accumulate draws nothing, so no RNG key. */
+    executeOp(
+        &(opSpec_t){
+            .kernel = executeOpIdentityKernel,
+            .inputs = ops,
+            .nInputs = 1,
+            .arithmetic = {ARITH_FLOAT32, HALF_AWAY},
+            .key = NULL,
+            .mode = OUT_ACC_DYNAMIC_RESCALE,
+        },
+        target);
+}
+
+void addBackward(layer_t *layer, tensor_t *const *in, uint8_t k, tensor_t *dy, tensor_t *const *dx,
+                 const uint8_t *dxMode, const layerExec_t *exec) {
+    (void)layer;
+    (void)in;
+    tensor_t *ops[1] = {dy};
+    rngKey_t opKey;
+    for (uint8_t i = 0; i < k; i++) {
+        if (dx[i] == NULL) {
+            continue;
+        }
+        if (dxMode[i] == OP_MODE_ACC) {
+            addAccumulate(dy, dx[i]);
+            continue;
+        }
+        executeOp(
+            &(opSpec_t){
+                .kernel = executeOpIdentityKernel,
+                .inputs = ops,
+                .nInputs = 1,
+                .arithmetic = {ARITH_FLOAT32, HALF_AWAY},
+                .key = layerExecOpKey(exec, RNG_TAG_BACKWARD, ADD_OP_DX, &opKey),
+                .mode = OUT_WRITE,
+            },
+            dx[i]);
+    }
 }
 
 /* Truncates silently: the text only feeds an error message. */

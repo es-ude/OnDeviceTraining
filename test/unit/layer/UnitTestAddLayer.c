@@ -18,6 +18,7 @@ void tearDown(void) {}
 /* The op table stores these without casts. */
 static const opForwardFn_t addForwardAsOp = addForward;
 static const opShapeFn_t addShapeAsOp = addShape;
+static const opBackwardFn_t addBackwardAsOp = addBackward;
 
 static tensor_t *floatTensor(const float *data) {
     size_t *dims = reserveMemory(2 * sizeof(size_t));
@@ -74,10 +75,54 @@ void testAddShapeRefusesToBroadcast(void) {
                              addShape(&add, rankIns, 2, &out));
 }
 
+void testAddBackwardWritesAccumulatesAndSkips(void) {
+    layer_t add = {.type = ADD};
+    tensor_t *dy = floatTensor((float[]){1, 2, 3});
+    tensor_t *d0 = floatTensor((float[]){9, 9, 9});
+    tensor_t *d1 = floatTensor((float[]){10, 10, 10});
+    addBackwardAsOp(&add, NULL, 2, dy, (tensor_t *const[]){d0, d1},
+                    (uint8_t[]){OP_MODE_WRITE, OP_MODE_ACC}, NULL);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){1, 2, 3}), (float *)d0->data, 3);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){11, 12, 13}), (float *)d1->data, 3);
+
+    tensor_t *d2 = floatTensor((float[]){5, 5, 5});
+    addBackwardAsOp(&add, NULL, 2, dy, (tensor_t *const[]){NULL, d2},
+                    (uint8_t[]){OP_MODE_WRITE, OP_MODE_WRITE}, NULL);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){1, 2, 3}), (float *)d2->data, 3);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){1, 2, 3}), (float *)dy->data, 3);
+}
+
+/* ADD(y, y): both slots route to one buffer, opened by slot 0 and added into by slot 1. */
+void testAddBackwardOnTheSameBufferTwiceDoublesDy(void) {
+    layer_t add = {.type = ADD};
+    tensor_t *dy = floatTensor((float[]){1, 2, 3});
+    tensor_t *g = floatTensor((float[]){-7, -7, -7});
+    addBackwardAsOp(&add, NULL, 2, dy, (tensor_t *const[]){g, g},
+                    (uint8_t[]){OP_MODE_WRITE, OP_MODE_ACC}, NULL);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){2, 4, 6}), (float *)g->data, 3);
+}
+
+void testAddAccumulateRefusesANonFloat32Target(void) {
+    tensor_t *src = floatTensor((float[]){1, 2, 3});
+    size_t *dims = reserveMemory(2 * sizeof(size_t));
+    dims[0] = 1;
+    dims[1] = 3;
+    size_t *order = reserveMemory(2 * sizeof(size_t));
+    setOrderOfDimsForNewTensor(2, order);
+    shape_t *shape = reserveMemory(sizeof(shape_t));
+    setShape(shape, dims, 2, order);
+    tensor_t *symTarget = initTensor(shape, quantizationInitSymInt32WithBits(HALF_AWAY, 12), NULL);
+    ASSERT_EXITS_WITH_OUTPUT(1, "non-FLOAT32 merge numerics are not designed yet",
+                             addAccumulate(src, symTarget));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testAddForwardSumsElementwise);
     RUN_TEST(testAddShapeCopiesTheCommonShape);
     RUN_TEST(testAddShapeRefusesToBroadcast);
+    RUN_TEST(testAddBackwardWritesAccumulatesAndSkips);
+    RUN_TEST(testAddBackwardOnTheSameBufferTwiceDoublesDy);
+    RUN_TEST(testAddAccumulateRefusesANonFloat32Target);
     return UNITY_END();
 }

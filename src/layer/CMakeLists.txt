@@ -264,6 +264,7 @@ target_include_directories(AddLayer PUBLIC include)
 target_link_libraries(AddLayer PRIVATE
         Layer
         LayerExec
+        TensorConversion
         RNG
         DTypes
         Tensor

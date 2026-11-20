@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "AddApi.h"
 #include "Conv1dApi.h"
 #include "DeathTest.h"
 #include "FlattenApi.h"
@@ -14,6 +15,8 @@
 #include "LayerQuant.h"
 #include "LinearApi.h"
 #include "LossFunction.h"
+#include "Model.h"
+#include "ModelGraphApi.h"
 #include "Pool1dApi.h"
 #include "Quantization.h"
 #include "RNG.h"
@@ -429,15 +432,19 @@ static const lossConfig_t g_crossEntropy = {
     .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL};
 
 /* Dumps into g_printed (the JSON) and g_hashLine. */
-static bool dumpOf(layer_t **model, size_t n, lossConfig_t loss, const tensor_t *input) {
+static bool dumpOfModel(const model_t *m, lossConfig_t loss, const tensor_t *input) {
     FILE *json = tmpfile();
     FILE *hashLine = tmpfile();
     TEST_ASSERT_NOT_NULL(json);
     TEST_ASSERT_NOT_NULL(hashLine);
-    bool dumped = rematSelectDumpProblem(json, hashLine, &MODEL_CHAIN(model, n), loss, input);
+    bool dumped = rematSelectDumpProblem(json, hashLine, m, loss, input);
     (void)readInto(json, g_printed, sizeof g_printed);
     (void)readInto(hashLine, g_hashLine, sizeof g_hashLine);
     return dumped;
+}
+
+static bool dumpOf(layer_t **model, size_t n, lossConfig_t loss, const tensor_t *input) {
+    return dumpOfModel(&MODEL_CHAIN(model, n), loss, input);
 }
 
 /* HAR's problem line, spelled out by layer (one JSON line, its keys in a
@@ -532,6 +539,93 @@ void testTheProblemOfTheFinetuneModelMarksItsFrozenConvs(void) {
     freeHar(model);
 }
 
+/* An explicit CSR that wires every node to the buffer before it is a chain, so its dump is the
+ * chain's, without inputs, and both hash alike. */
+void testABuilderMadeChainDumpsAsTheChain(void) {
+    layer_t *layers[HAR_N];
+    buildHar(layers, false);
+    layer_t *nodes[HAR_N];
+    uint16_t inputStart[HAR_N + 1];
+    uint16_t inputIds[HAR_N];
+    graphBuilder_t g;
+    graphBegin(&g, nodes, inputStart, inputIds, HAR_N, HAR_N);
+    uint16_t buffer = GRAPH_INPUT;
+    for (size_t l = 0; l < HAR_N; l++) {
+        buffer = graphNode(&g, layers[l], buffer);
+    }
+    const model_t m = graphFinish(&g);
+    inputHeader_t in;
+    TEST_ASSERT_TRUE(dumpOfModel(&m, g_crossEntropy, harInput(&in)));
+    TEST_ASSERT_EQUAL_STRING(g_harProblem, g_printed);
+    TEST_ASSERT_EQUAL_STRING("PROBLEM_HASH fnv1a64=26b4a7babc5f10bf\n", g_hashLine);
+    freeHar(layers);
+}
+
+/* residual_doc() of python/tests/planner_oracle.py as problem_bytes writes it: Conv1d 2->2 k3
+ * SAME, ReLU, ADD(relu, x), Flatten, Linear 16->3, Softmax; input [1, 2, 8]; CROSS_ENTROPY.
+ * Equal bytes pin the key order (inputs last) on both sides. */
+static const char g_residualProblem[] =
+    "{\"schema_version\":0,\"input\":{\"shape\":[1,2,8],\"dtype\":{\"kind\":\"FLOAT32\"}},"
+    "\"loss\":\"CROSS_ENTROPY\",\"layers\":["
+    "{\"type\":\"CONV1D\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,2,8],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"},"
+    "\"cost\":{\"macPerElement\":6},\"inputs\":[0]},"
+    "{\"type\":\"RELU\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,2,8],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"},"
+    "\"inputs\":[1]},"
+    "{\"type\":\"ADD\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,2,8],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"},"
+    "\"inputs\":[2,0]},"
+    "{\"type\":\"FLATTEN\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,16],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"},"
+    "\"inputs\":[3]},"
+    "{\"type\":\"LINEAR\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,3],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"},"
+    "\"cost\":{\"macPerElement\":16},\"inputs\":[4]},"
+    "{\"type\":\"SOFTMAX\",\"frozen\":false,\"trackRunningStats\":false,\"outShape\":[1,3],"
+    "\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"},"
+    "\"inputs\":[5]}"
+    "]}\n";
+
+void testTheProblemOfAResidualModelIsThePythonSchemasBytes(void) {
+    static quantization_t floatQ;
+    initFloat32Quantization(&floatQ);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, &floatQ);
+    const rngKey_t key = rngKeyFromSeed(1u);
+    layer_t *conv = conv1dLayerInit(&(conv1dInit_t){.inChannels = 2,
+                                                    .outChannels = 2,
+                                                    .kernelSize = 3,
+                                                    .padding = SAME,
+                                                    .weightInit.key = &key},
+                                    &lq);
+    layer_t *relu = reluLayerInit(&lq);
+    layer_t *add = addLayerInit(NULL);
+    layer_t *flatten = flattenLayerInit();
+    layer_t *linear = linearLayerInit(
+        &(linearInit_t){.inFeatures = 16, .outFeatures = 3, .weightInit.key = &key}, &lq);
+    layer_t *softmax = softmaxLayerInit(&lq);
+    layer_t *nodes[6];
+    uint16_t inputStart[7];
+    uint16_t inputIds[7];
+    graphBuilder_t g;
+    graphBegin(&g, nodes, inputStart, inputIds, 6u, 7u);
+    const uint16_t reluOut = graphNode(&g, relu, graphNode(&g, conv, GRAPH_INPUT));
+    const uint16_t sum = graphMerge(&g, add, reluOut, GRAPH_INPUT);
+    (void)graphNode(&g, softmax, graphNode(&g, linear, graphNode(&g, flatten, sum)));
+    const model_t m = graphFinish(&g);
+    inputHeader_t in;
+    const tensor_t *x = makeInputHeader(&in, (const size_t[]){1, 2, 8}, 3u, &floatQ);
+    TEST_ASSERT_TRUE(dumpOfModel(&m, g_crossEntropy, x));
+    TEST_ASSERT_EQUAL_STRING(g_residualProblem, g_printed);
+    freeSoftmaxLayer(softmax);
+    freeLinearLayer(linear);
+    freeFlattenLayer(flatten);
+    freeAddLayer(add);
+    freeReluLayer(relu);
+    freeConv1dLayer(conv);
+}
+
 /* The reason goes to stderr, here moved onto the harness's stdout. Exit 0 =
  * dumped, 1 = refused with nothing written, 2 = refused after writing. */
 static void exitWithTheDumpVerdict(FILE *json, layer_t **model, size_t n, lossConfig_t loss,
@@ -589,12 +683,12 @@ void testTheProblemDumpRefusesWhatTheProblemCannotHold(void) {
     ASSERT_EXITS_WITH_OUTPUT(1,
                              "ERROR: DUMP_PROBLEM: layer 1 has layerType_t 10, which the problem "
                              "dump does not write (it writes CONV1D, RELU, MAXPOOL1D, AVGPOOL1D, "
-                             "FLATTEN, LINEAR and SOFTMAX)",
+                             "FLATTEN, LINEAR, SOFTMAX and ADD)",
                              exitWithTheDumpVerdict(tmpfile(), relu, 2u, g_crossEntropy, x));
     ASSERT_EXITS_WITH_OUTPUT(1,
                              "ERROR: DUMP_PROBLEM: layer 0 has layerType_t 99, which the problem "
                              "dump does not write (it writes CONV1D, RELU, MAXPOOL1D, AVGPOOL1D, "
-                             "FLATTEN, LINEAR and SOFTMAX)",
+                             "FLATTEN, LINEAR, SOFTMAX and ADD)",
                              exitWithTheDumpVerdict(tmpfile(), bad, 1u, g_crossEntropy, x));
     ASSERT_EXITS_WITH_OUTPUT(
         1,
@@ -802,6 +896,8 @@ int main(void) {
     RUN_TEST(testTheProblemHashIsFnv1a64);
     RUN_TEST(testTheProblemOfHarIsItsWholeModel);
     RUN_TEST(testTheProblemOfTheFinetuneModelMarksItsFrozenConvs);
+    RUN_TEST(testABuilderMadeChainDumpsAsTheChain);
+    RUN_TEST(testTheProblemOfAResidualModelIsThePythonSchemasBytes);
     RUN_TEST(testTheProblemDumpRefusesWhatTheProblemCannotHold);
     RUN_TEST(testAFailedHashLineFailsTheDump);
     RUN_TEST(testAFailedProblemWriteIsNamed);

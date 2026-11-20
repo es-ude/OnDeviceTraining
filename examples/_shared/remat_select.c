@@ -373,6 +373,8 @@ static const char *dumpTypeName(layerType_t type) {
         return "LINEAR";
     case SOFTMAX:
         return "SOFTMAX";
+    case ADD:
+        return "ADD";
     default:
         return NULL;
     }
@@ -413,7 +415,7 @@ static bool dumpCanWrite(const model_t *m, lossConfig_t loss, const tensor_t *in
             fprintf(stderr,
                     "ERROR: DUMP_PROBLEM: layer %zu has layerType_t %d, which the problem dump "
                     "does not write (it writes CONV1D, RELU, MAXPOOL1D, AVGPOOL1D, FLATTEN, "
-                    "LINEAR and SOFTMAX)\n",
+                    "LINEAR, SOFTMAX and ADD)\n",
                     l, (int)layer->type);
             return false;
         }
@@ -489,8 +491,10 @@ static void emitCost(problemWriter_t *w, const layer_t *layer) {
     emit(w, "}");
 }
 
-/* Only a BatchNorm1d tracks running statistics; the dump writes none. */
-static void emitLayer(problemWriter_t *w, const layer_t *layer, const shape_t *out) {
+/* Only a BatchNorm1d tracks running statistics; the dump writes none. ids == NULL (a chain)
+ * writes no inputs, so a chain has one byte form; otherwise its k ids are the last key. */
+static void emitLayer(problemWriter_t *w, const layer_t *layer, const shape_t *out,
+                      const uint16_t *ids, uint8_t k) {
     emit(w, "{\"type\":\"");
     emit(w, dumpTypeName(layer->type));
     emit(w, layerIsFrozen(layer) ? "\",\"frozen\":true" : "\",\"frozen\":false");
@@ -498,6 +502,16 @@ static void emitLayer(problemWriter_t *w, const layer_t *layer, const shape_t *o
     emitShape(w, out);
     emit(w, ",\"outputDtype\":{\"kind\":\"FLOAT32\"},\"propLossDtype\":{\"kind\":\"FLOAT32\"}");
     emitCost(w, layer);
+    if (ids != NULL) {
+        emit(w, ",\"inputs\":[");
+        for (uint8_t i = 0; i < k; i++) {
+            if (i > 0u) {
+                emit(w, ",");
+            }
+            emitSize(w, ids[i]);
+        }
+        emit(w, "]");
+    }
     emit(w, "}");
 }
 
@@ -522,11 +536,14 @@ bool rematSelectDumpProblem(FILE *json, FILE *hashLine, const model_t *m, lossCo
         shapes[b] = (shape_t){.dimensions = dims[b], .orderOfDimensions = order[b]};
     }
     modelShapePass(m, inputLike->shape, &shapes[0], REMAT_DUMP_MAX_RANK);
+    const bool chain = modelIsChain(m);
     for (size_t l = 0; l < n; l++) {
         if (l > 0u) {
             emit(&w, ",");
         }
-        emitLayer(&w, m->layers[l], &shapes[l + 1]);
+        uint16_t ids[MODEL_MAX_ARITY];
+        const uint8_t k = chain ? 0u : modelNodeInputs(m, l, ids);
+        emitLayer(&w, m->layers[l], &shapes[l + 1], chain ? NULL : ids, k);
     }
     emit(&w, "]}\n");
     if (fflush(json) != 0 || ferror(json)) {

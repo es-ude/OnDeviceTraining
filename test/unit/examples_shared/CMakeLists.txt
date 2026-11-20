@@ -51,6 +51,11 @@ target_link_libraries(UnitTestRematSelect PRIVATE
         examples_shared
         RematScheduler
         LayerConfigAccess
+        AddApi
+        AddLayer
+        ModelGraphApi
+        Model
+        OpTable
         Conv1dApi
         LinearApi
         ReluApi

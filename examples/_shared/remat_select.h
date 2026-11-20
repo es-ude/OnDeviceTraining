@@ -107,9 +107,11 @@ uint64_t rematSelectProblemHash(uint64_t state, const char *bytes, size_t n);
  * layer its type, frozen flag, output shape at batch 1, output and gradient
  * dtypes as written in its config, and the cost operand the forward-cost
  * class reads beyond the element counts (macPerElement for Conv1d and Linear,
- * kernel for the pools). Then "PROBLEM_HASH fnv1a64=<16 hex digits>\n" to
- * hashLine. It writes the layer types and dtypes the example trainers use
- * (Conv1d, ReLU, MaxPool1d, AvgPool1d, Flatten, Linear, Softmax; FLOAT32);
+ * kernel for the pools), and, for non-chain models only, as its last key the
+ * buffer ids it reads, inputs (0 = the model input, j + 1 = node j). Then
+ * "PROBLEM_HASH fnv1a64=<16 hex digits>\n" to hashLine. It writes the layer
+ * types and dtypes the example trainers use (Conv1d, ReLU, MaxPool1d,
+ * AvgPool1d, Flatten, Linear, Softmax, Add; FLOAT32);
  * everything else is refused by name: it, an input not at batch 1 or of rank
  * above 8, and an unknown loss print the reason to stderr and return false
  * before a byte is written. A failed write of the problem prints its reason

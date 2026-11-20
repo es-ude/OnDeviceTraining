@@ -58,7 +58,7 @@ def _check_supported(model: nn.Module) -> None:
             if node.kwargs:
                 raise UnsupportedLayerError(
                     type(module).__name__,
-                    node.name,
+                    node.target,
                     "modules must be called with positional tensor arguments",
                 )
 

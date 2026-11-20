@@ -266,7 +266,7 @@ size_t rematProgramActPeakBytes(const rematProgram_t *p, const rematWireTable_t 
 size_t rematWalkOpening(const rematProgram_t *p, rematWalk_t *w);
 size_t rematWalkClosing(const rematProgram_t *p, rematWalk_t *w);
 
-/* Grammar validation (rules 1-4, 6 and 8). Deliberately independent of
+/* Grammar validation (rules 1-4 and 6-8). Deliberately independent of
  * RematCheck and of the deriver, so a mutation in one is caught by the other:
  * it reads wiring, read-set and needs-grad off `m` with its own code, never
  * the table's flags or dx slots, and takes the table's gradIdOf only where
@@ -276,19 +276,28 @@ size_t rematWalkClosing(const rematProgram_t *p, rematWalk_t *w);
  * rule 2 rejects LOSS_BACKWARD and BACKWARD there, rule 6 rejects REFORWARD,
  * and rule 3 does not apply. Rule 3 runs BACKWARD over the grammar's own set
  * of nodes that run backward, descending. Rule 8 holds every step's operand
- * slice inside the pool, at its node's nodeOps entry, and equal to the
- * operands the model gives that step; rules 4 and 6 then read the slice. Rule
- * 6 also bounds the step count, admits a REFORWARD only inside the backward
- * window and never for a layer whose training forward updates its state
- * (layerForwardUpdatesState), makes every write open a range of its own,
- * opens each range at a step whose write set holds its wire with WRITE, and
- * keeps the ranges on wires of the table, begin-sorted and inside the
- * stream. inPlace is the plan's
- * marks (NULL: none), checked first on their own: each sits on a ReLU,
- * Dropout or Flatten dx wire whose BACKWARD reads wire - 1, both of one
- * dtype, FLOAT32 or SYM_INT32, and equal bytes. A member's reads and its
- * write then count against its chain root's range, its write lands in that
- * range although the root opened it, and no range names a member. */
+ * slice inside the pool, at its node's nodeOps entry (a SUM at its sum
+ * entry), and equal to the operands the model gives that step, except the dx
+ * slots of buffers that need a gradient, which rule 7 judges. Rule 7, the
+ * fan-out rule, tracks each GRAD over the program: one WRITE opens it, later
+ * contributions ACC into it only from a row with accumulatesDx, any other
+ * later contribution writes a PART once that the SUM at the very next step
+ * adds in, and no BACKWARD reads a GRAD before every contribution the model
+ * gives it has arrived. Rules 4 and 6 then read the slice. Rule 6 also bounds
+ * the step count (SUM steps aside: rule 7 admits at most one per BACKWARD),
+ * admits a REFORWARD only inside the backward window and never for a layer
+ * whose training forward updates its state (layerForwardUpdatesState), makes
+ * every WRITE open a range of its own, opens each range at a step whose write
+ * set holds its wire with WRITE (an ACC only extends one), and keeps the
+ * ranges on wires of the table, begin-sorted and inside the stream. inPlace
+ * is the plan's marks (NULL: none), checked first on their own: the model is
+ * a chain (the alias rules read chain positions; a DAG exits), and each mark
+ * sits on a ReLU, Dropout or Flatten dx wire whose BACKWARD reads wire - 1,
+ * both of one dtype, FLOAT32 or SYM_INT32, and equal bytes. A member's reads
+ * and its write then count against its chain root's range, its write lands in
+ * that range although the root opened it, and no range names a member. The
+ * checker's own counts live in one transient reserveMemory block, freed
+ * before it returns; without memory it exits. */
 void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, const model_t *m,
                               rematMode_t mode, const uint8_t *inPlace);
 

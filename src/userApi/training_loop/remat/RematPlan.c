@@ -218,44 +218,36 @@ static void requireNoEarlierRangeOpen(const rematProgram_t *p, size_t s, uint16_
 }
 
 /* The grammar's own reading of the model, kept apart from the deriver's
- * inputs on purpose: the table's flags are what the deriver reads, so a
- * grammar that trusted them would share its errors. Chain form: buffer b
- * needs a gradient iff it lies above the first trainable node, and node j
- * runs its BACKWARD iff it lies at or above that node -- except, under
- * CrossEntropy, the sink Softmax, whose backward the combined p - y replaces.
- * The DAG form walks the wiring instead; grammarNeeds and grammarRuns are the
- * two places that widen. */
+ * inputs on purpose: the table's flags and dx decisions are what the deriver
+ * reads, so a grammar that trusted them would share its errors. Over the
+ * wiring, buffer b needs a gradient iff its producer is trainable or reads a
+ * buffer that needs one, and node j runs its BACKWARD iff its output needs
+ * one -- except, under CrossEntropy, the sink Softmax, whose backward the
+ * combined p - y replaces. The rest is rule 7's state over the stored program,
+ * by wire id: the contributions each GRAD expects (one per consumer edge whose
+ * node runs, plus the loss backward's into the seed) and has received, whether
+ * a GRAD was opened or a PART written, and the PART the next step must sum. */
 typedef struct grammarModel {
     const rematWireTable_t *t;
     const model_t *m;
     size_t n;
-    size_t firstTrainable; /* n: nothing trains */
     bool crossEntropy;
+    uint32_t *expected;   /* [numWires] */
+    uint32_t *received;   /* [numWires] */
+    uint8_t *opened;      /* [numWires] */
+    uint8_t *needs;       /* [n + 1] */
+    uint8_t *runs;        /* [n] */
+    uint16_t pendingPart; /* REMAT_NONE: no SUM is due */
+    uint16_t pendingGrad; /* the GRAD that SUM adds into */
+    size_t pendingLayer;  /* the BACKWARD that wrote the PART */
 } grammarModel_t;
 
-static grammarModel_t grammarModelOf(const rematWireTable_t *t, const model_t *m) {
-    grammarModel_t g = {.t = t,
-                        .m = m,
-                        .n = t->modelSize,
-                        .firstTrainable = t->modelSize,
-                        .crossEntropy = t->lossType == CROSS_ENTROPY};
-    for (size_t j = 0; j < g.n; j++) {
-        parameter_t *w = NULL;
-        parameter_t *b = NULL;
-        if (layerParameters(m->layers[j], &w, &b) && !layerIsFrozen(m->layers[j])) {
-            g.firstTrainable = j;
-            break;
-        }
-    }
-    return g;
-}
-
 static bool grammarNeeds(const grammarModel_t *g, size_t b) {
-    return b > g->firstTrainable;
+    return g->needs[b] != 0u;
 }
 
 static bool grammarRuns(const grammarModel_t *g, size_t j) {
-    return j >= g->firstTrainable && !(g->crossEntropy && j == g->n - 1u);
+    return g->runs[j] != 0u;
 }
 
 /* The loss backward runs iff the buffer its gradient lands in needs one: ACT n
@@ -294,12 +286,72 @@ static uint16_t gradWireOf(const grammarModel_t *g, size_t b) {
     return REMAT_NONE;
 }
 
+/* Fills g in one transient block (zeroed by reserveMemory) and returns it for
+ * the caller to free. The table's guard keeps n and numWires below UINT16_MAX,
+ * so the byte count cannot overflow. */
+static void *grammarModelInit(grammarModel_t *g, const rematWireTable_t *t, const model_t *m) {
+    size_t n = t->modelSize;
+    size_t wires = t->numWires;
+    size_t bytes = 2u * wires * sizeof(uint32_t) + wires + 2u * n + 1u;
+    uint8_t *block = reserveMemory(bytes);
+    if (block == NULL) {
+        PRINT_ERROR("rematPlanValidateGrammar: no memory for the %zu-byte checker scratch", bytes);
+        exit(1);
+    }
+    uint32_t *counts = (uint32_t *)block;
+    uint8_t *flags = block + 2u * wires * sizeof(uint32_t);
+    *g = (grammarModel_t){.t = t,
+                          .m = m,
+                          .n = n,
+                          .crossEntropy = t->lossType == CROSS_ENTROPY,
+                          .expected = counts,
+                          .received = counts + wires,
+                          .opened = flags,
+                          .needs = flags + wires,
+                          .runs = flags + wires + n + 1u,
+                          .pendingPart = REMAT_NONE,
+                          .pendingGrad = REMAT_NONE};
+    for (size_t j = 0; j < n; j++) {
+        parameter_t *w = NULL;
+        parameter_t *b = NULL;
+        bool needs = layerParameters(m->layers[j], &w, &b) && !layerIsFrozen(m->layers[j]);
+        uint16_t ids[MODEL_MAX_ARITY];
+        uint8_t k = modelNodeInputs(m, j, ids);
+        for (uint8_t i = 0; i < k; i++) {
+            needs = needs || g->needs[ids[i]] != 0u;
+        }
+        g->needs[j + 1u] = needs ? 1u : 0u;
+        g->runs[j] = (needs && !(g->crossEntropy && j == n - 1u)) ? 1u : 0u;
+    }
+    if (g->needs[g->crossEntropy ? n - 1u : n] != 0u) {
+        uint16_t seed = gradWireOf(g, n);
+        if (seed != REMAT_NONE) {
+            g->expected[seed]++;
+        }
+    }
+    for (size_t j = 0; j < n; j++) {
+        if (!grammarRuns(g, j)) {
+            continue;
+        }
+        uint16_t ids[MODEL_MAX_ARITY];
+        uint8_t k = modelNodeInputs(m, j, ids);
+        for (uint8_t i = 0; i < k; i++) {
+            uint16_t grad = grammarNeeds(g, ids[i]) ? gradWireOf(g, ids[i]) : REMAT_NONE;
+            if (grad != REMAT_NONE) {
+                g->expected[grad]++;
+            }
+        }
+    }
+    return block;
+}
+
 #define GRAMMAR_MAX_OPERANDS (1u + 2u * MODEL_MAX_ARITY)
 
 typedef struct expectedSlice {
     rematOperand_t ops[GRAMMAR_MAX_OPERANDS];
     uint8_t numReads;
     uint8_t numWrites;
+    uint8_t byRule7; /* bit i: write i is a dx slot of a buffer that needs a gradient */
 } expectedSlice_t;
 
 static void expectOperand(expectedSlice_t *e, uint16_t wire, opMode_t mode) {
@@ -311,16 +363,19 @@ static void expectRead(expectedSlice_t *e, uint16_t wire, opMode_t mode) {
     e->numReads++;
 }
 
-static void expectWrite(expectedSlice_t *e, uint16_t wire) {
-    expectOperand(e, wire, OP_MODE_WRITE);
+static void expectWrite(expectedSlice_t *e, uint16_t wire, opMode_t mode) {
+    expectOperand(e, wire, mode);
     e->numWrites++;
 }
 
 /* The operands a step the kind rules admitted must carry, from the model
  * alone: those rules bound a FORWARD's and a REFORWARD's layer below n, a
- * LOSS_* step's at n and a BACKWARD's to a node that runs. ACT b is wire b. */
+ * LOSS_* step's at n, a BACKWARD's to a node that runs and a SUM's to the
+ * BACKWARD just before it. ACT b is wire b. A dx slot of a buffer that needs a
+ * gradient is rule 7's: its wire and mode depend on the contributions before
+ * it, so only its place is fixed here. */
 static expectedSlice_t expectedSlice(const grammarModel_t *g, const rematStep_t *st) {
-    expectedSlice_t e = {.numReads = 0, .numWrites = 0};
+    expectedSlice_t e = {.numReads = 0, .numWrites = 0, .byRule7 = 0};
     size_t n = g->n;
     size_t j = st->layer;
     uint16_t ids[MODEL_MAX_ARITY];
@@ -331,7 +386,7 @@ static expectedSlice_t expectedSlice(const grammarModel_t *g, const rematStep_t 
         for (uint8_t i = 0; i < k; i++) {
             expectRead(&e, ids[i], OP_MODE_READ);
         }
-        expectWrite(&e, (uint16_t)(j + 1u));
+        expectWrite(&e, (uint16_t)(j + 1u), OP_MODE_WRITE);
         break;
     }
     case REMAT_STEP_LOSS_FORWARD:
@@ -339,7 +394,7 @@ static expectedSlice_t expectedSlice(const grammarModel_t *g, const rematStep_t 
         break;
     case REMAT_STEP_LOSS_BACKWARD:
         expectRead(&e, (uint16_t)n, OP_MODE_READ);
-        expectWrite(&e, gradWireOf(g, n));
+        expectWrite(&e, gradWireOf(g, n), OP_MODE_WRITE);
         break;
     case REMAT_STEP_BACKWARD: {
         uint8_t k = modelNodeInputs(g->m, j, ids);
@@ -349,10 +404,17 @@ static expectedSlice_t expectedSlice(const grammarModel_t *g, const rematStep_t 
             expectRead(&e, ids[i], input);
         }
         for (uint8_t i = 0; i < k; i++) {
-            expectWrite(&e, grammarNeeds(g, ids[i]) ? gradWireOf(g, ids[i]) : REMAT_NONE);
+            if (grammarNeeds(g, ids[i])) {
+                e.byRule7 |= (uint8_t)(1u << i);
+            }
+            expectWrite(&e, REMAT_NONE, OP_MODE_WRITE);
         }
         break;
     }
+    case REMAT_STEP_SUM:
+        expectRead(&e, g->pendingPart, OP_MODE_READ);
+        expectWrite(&e, g->pendingGrad, OP_MODE_ACC);
+        break;
     default:
         break; /* unreachable: the kind switch exits on an unknown kind first */
     }
@@ -376,9 +438,18 @@ static const char *modeName(uint8_t mode) {
 
 #define RULE8_PREFIX "rematPlanBuild: step #%zu (kind %u, layer %u) violates grammar rule 8: "
 
+static void operandExit(size_t s, const rematStep_t *st, size_t i, rematOperand_t have,
+                        rematOperand_t want) {
+    PRINT_ERROR(RULE8_PREFIX "operand %zu is wire %u (%s), expected wire %u (%s)", s,
+                (unsigned)st->kind, (unsigned)st->layer, i, (unsigned)have.wire,
+                modeName(have.mode), (unsigned)want.wire, modeName(want.mode));
+    exit(1);
+}
+
 /* Rule 8: the step's slice lies inside the pool, starts where nodeOps puts
  * its node's slice of that kind, and holds exactly the operands the model
- * gives the step. Every later rule reads the slice, so it runs first. */
+ * gives the step, rule 7's dx slots aside. Every later rule reads the slice,
+ * so it runs first. */
 static void requireTheNodesSlice(const rematProgram_t *p, const grammarModel_t *g, size_t s) {
     const rematStep_t *st = &p->steps[s];
     unsigned kind = st->kind;
@@ -387,9 +458,14 @@ static void requireTheNodesSlice(const rematProgram_t *p, const grammarModel_t *
         PRINT_ERROR(RULE8_PREFIX "its operand slice lies outside the pool", s, kind, layer);
         exit(1);
     }
-    bool backward = st->kind == REMAT_STEP_LOSS_BACKWARD || st->kind == REMAT_STEP_BACKWARD;
     const rematNodeOps_t *node = &p->nodeOps[st->layer];
-    if (st->operands != (backward ? node->backward : node->forward)) {
+    uint16_t slice = node->forward;
+    if (st->kind == REMAT_STEP_LOSS_BACKWARD || st->kind == REMAT_STEP_BACKWARD) {
+        slice = node->backward;
+    } else if (st->kind == REMAT_STEP_SUM) {
+        slice = node->sum;
+    }
+    if (st->operands != slice) {
         PRINT_ERROR(RULE8_PREFIX "its operand slice is not its node's (nodeOps)", s, kind, layer);
         exit(1);
     }
@@ -402,12 +478,140 @@ static void requireTheNodesSlice(const rematProgram_t *p, const grammarModel_t *
     }
     const rematOperand_t *ops = &p->operands[st->operands];
     for (size_t i = 0; i < (size_t)e.numReads + e.numWrites; i++) {
-        if (ops[i].wire != e.ops[i].wire || ops[i].mode != e.ops[i].mode) {
-            PRINT_ERROR(RULE8_PREFIX "operand %zu is wire %u (%s), expected wire %u (%s)", s, kind,
-                        layer, i, (unsigned)ops[i].wire, modeName(ops[i].mode),
-                        (unsigned)e.ops[i].wire, modeName(e.ops[i].mode));
+        bool byRule7 = i >= e.numReads && (e.byRule7 & (1u << (i - e.numReads))) != 0u;
+        if (!byRule7 && (ops[i].wire != e.ops[i].wire || ops[i].mode != e.ops[i].mode)) {
+            operandExit(s, st, i, ops[i], e.ops[i]);
+        }
+    }
+}
+
+#define RULE7_PREFIX "rematPlanBuild: step #%zu (kind %u, layer %u) violates grammar rule 7: "
+
+static bool isPartOf(const rematWireTable_t *t, uint16_t wire, uint16_t b) {
+    return wire < t->numWires && t->wires[wire].kind == REMAT_WIRE_PART &&
+           t->wires[wire].index == b;
+}
+
+/* What the deriver's rule puts in the dx slot of buffer b, for the message
+ * only: the opening WRITE, an ADD's ACC, or the first PART of b not written. */
+static rematOperand_t contributionOf(const grammarModel_t *g, uint16_t b, uint16_t grad,
+                                     bool accumulates) {
+    rematOperand_t op = {.wire = grad, .mode = OP_MODE_WRITE};
+    if (grad == REMAT_NONE || g->opened[grad] == 0u) {
+        return op;
+    }
+    if (accumulates) {
+        op.mode = OP_MODE_ACC;
+        return op;
+    }
+    op.wire = REMAT_NONE;
+    for (size_t w = 0; w < g->t->numWires; w++) {
+        if (isPartOf(g->t, (uint16_t)w, b) && g->opened[w] == 0u) {
+            op.wire = (uint16_t)w;
+            break;
+        }
+    }
+    return op;
+}
+
+/* Rule 7 on one dx slot of buffer b: the first contribution opens b's GRAD
+ * with WRITE; a later one from an accumulating row adds into it with ACC; a
+ * later one from any other row writes a PART of b, once, that the next step
+ * sums. A slot left empty is a missing contribution, which the read of the
+ * GRAD reports. An ACC at a step before the opening WRITE lies outside every
+ * range of the GRAD, so rule 4 reports it; one in the opening step itself,
+ * ahead of the WRITE, lies inside the range that step opens, so it is caught
+ * here, at the WRITE. */
+static void requireAContribution(grammarModel_t *g, size_t s, const rematStep_t *st, size_t i,
+                                 rematOperand_t op, uint16_t b, bool accumulates) {
+    uint16_t grad = gradWireOf(g, b);
+    if (grad != REMAT_NONE && op.wire == grad && op.mode == OP_MODE_WRITE) {
+        if (g->opened[grad] != 0u) {
+            PRINT_ERROR(RULE7_PREFIX "GRAD %u opened twice", s, (unsigned)st->kind,
+                        (unsigned)st->layer, (unsigned)grad);
             exit(1);
         }
+        if (g->received[grad] != 0u) {
+            PRINT_ERROR(RULE7_PREFIX "GRAD %u opened after an ACC into it", s, (unsigned)st->kind,
+                        (unsigned)st->layer, (unsigned)grad);
+            exit(1);
+        }
+        g->opened[grad] = 1u;
+        g->received[grad]++;
+        return;
+    }
+    if (grad != REMAT_NONE && op.wire == grad && op.mode == OP_MODE_ACC) {
+        if (!accumulates) {
+            PRINT_ERROR(RULE7_PREFIX "ACC from a row without accumulatesDx", s, (unsigned)st->kind,
+                        (unsigned)st->layer);
+            exit(1);
+        }
+        g->received[grad]++;
+        return;
+    }
+    if (op.wire == REMAT_NONE && op.mode == OP_MODE_WRITE) {
+        return;
+    }
+    if (isPartOf(g->t, op.wire, b) && op.mode == OP_MODE_WRITE && grad != REMAT_NONE &&
+        g->opened[grad] != 0u && !accumulates) {
+        if (g->opened[op.wire] != 0u) {
+            PRINT_ERROR(RULE7_PREFIX "PART %u written twice", s, (unsigned)st->kind,
+                        (unsigned)st->layer, (unsigned)op.wire);
+            exit(1);
+        }
+        g->opened[op.wire] = 1u;
+        g->pendingPart = op.wire;
+        g->pendingGrad = grad;
+        g->pendingLayer = st->layer;
+        return;
+    }
+    operandExit(s, st, i, op, contributionOf(g, b, grad, accumulates));
+}
+
+/* Rule 7 over a step rule 8 verified, in step order: a PART is summed at the
+ * very next step; a BACKWARD reads its dy only once every contribution the
+ * model gives it has arrived; and each dx slot of a buffer that needs a
+ * gradient follows the contribution rule. Runs before rules 4 and 6, whose
+ * range checks would name a second WRITE of a GRAD less precisely. */
+static void requireTheContributions(const rematProgram_t *p, grammarModel_t *g, size_t s) {
+    const rematStep_t *st = &p->steps[s];
+    const rematOperand_t *ops = &p->operands[st->operands];
+    if (g->pendingPart != REMAT_NONE && st->kind != REMAT_STEP_SUM) {
+        PRINT_ERROR(RULE7_PREFIX "PART %u not summed at the next step", s, (unsigned)st->kind,
+                    (unsigned)st->layer, (unsigned)g->pendingPart);
+        exit(1);
+    }
+    switch (st->kind) {
+    case REMAT_STEP_LOSS_BACKWARD:
+        if (ops[1].wire != REMAT_NONE) {
+            g->opened[ops[1].wire] = 1u;
+            g->received[ops[1].wire]++;
+        }
+        break;
+    case REMAT_STEP_SUM:
+        g->received[g->pendingGrad]++;
+        g->pendingPart = REMAT_NONE;
+        break;
+    case REMAT_STEP_BACKWARD: {
+        uint16_t dy = ops[0].wire;
+        if (dy == REMAT_NONE || g->received[dy] != g->expected[dy]) {
+            PRINT_ERROR(RULE7_PREFIX "GRAD %u read with contributions missing", s,
+                        (unsigned)st->kind, (unsigned)st->layer, (unsigned)dy);
+            exit(1);
+        }
+        uint16_t ids[MODEL_MAX_ARITY];
+        uint8_t k = modelNodeInputs(g->m, st->layer, ids);
+        bool accumulates = opFunctions[g->m->layers[st->layer]->type].accumulatesDx;
+        for (uint8_t i = 0; i < k; i++) {
+            if (grammarNeeds(g, ids[i])) {
+                requireAContribution(g, s, st, st->numReads + i, ops[st->numReads + i], ids[i],
+                                     accumulates);
+            }
+        }
+        break;
+    }
+    default:
+        break;
     }
 }
 
@@ -463,9 +667,10 @@ static void rangeExit(size_t r, const rematRange_t *range, const char *rule) {
  * wire of the table; no range names an in-place member (its root's range
  * holds it); each range lies inside the stream; the array is sorted by
  * begin, ties by wire id (the walk opens ranges in array order); each range
- * opens at a step whose write set holds its wire with WRITE; and a range a
- * REFORWARD opens holds a READ of that wire, so no recompute is dead. O(R)
- * plus the lengths of the REFORWARD ranges. */
+ * opens at a step whose write set holds its wire with WRITE (an ACC extends
+ * a range and never opens one); and a range a REFORWARD opens holds a READ
+ * of that wire, so no recompute is dead. O(R) plus the lengths of the
+ * REFORWARD ranges. */
 static void requireRangesWellFormed(const rematProgram_t *p, const rematWireTable_t *t,
                                     const uint8_t *inPlace) {
     for (size_t r = 0; r < p->numRanges; r++) {
@@ -507,11 +712,18 @@ static void requireRangesWellFormed(const rematProgram_t *p, const rematWireTabl
  * FLOAT32 or SYM_INT32, and their bytes. BFP wires never alias. It runs
  * before the steps, so rematChainRoot only ever walks down a valid chain.
  * The gradient BACKWARD(l) reads is the wire whose record holds GRAD l + 1
- * (gradWireOf), not the table's raw gradIdOf lookup. */
+ * (gradWireOf), not the table's raw gradIdOf lookup. These rules read chain
+ * positions (layer l is the dx wire's node, its dy is wire - 1), so a DAG
+ * carries no marks at all. */
 static void requireMarksOnAliasPairs(const grammarModel_t *g, const uint8_t *inPlace) {
     const rematWireTable_t *t = g->t;
     const model_t *m = g->m;
     size_t n = t->modelSize;
+    if (!modelIsChain(m)) {
+        PRINT_ERROR("rematPlanBuild: in-place dx marks on a DAG model are not supported (the "
+                    "alias rules read chain positions)");
+        exit(1);
+    }
     for (size_t w = 0; w < t->numWires; w++) {
         if (inPlace[w] == 0u) {
             continue;
@@ -557,7 +769,8 @@ static void requireMarksOnAliasPairs(const grammarModel_t *g, const uint8_t *inP
 
 void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t, const model_t *m,
                               rematMode_t mode, const uint8_t *inPlace) {
-    grammarModel_t g = grammarModelOf(t, m);
+    grammarModel_t g;
+    void *scratch = grammarModelInit(&g, t, m);
     if (inPlace != NULL) {
         requireMarksOnAliasPairs(&g, inPlace);
     }
@@ -567,9 +780,15 @@ void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t
     ptrdiff_t nextBackward = nextRunningBelow(&g, (ptrdiff_t)n); /* -1: no BACKWARD pending */
     bool lossForward = false;
     bool lossBackward = false;
-    /* Rule 6's step bound. The table keeps n below UINT16_MAX, so n(n + 1)
-     * fits even a 32-bit size_t and the sum needs no checked arithmetic. */
-    if (p->numSteps > 2u * n + 2u + n * (n + 1u) / 2u) {
+    /* Rule 6's step bound, over the steps other than SUM: rule 7 admits a SUM
+     * only right after the BACKWARD that wrote its PART, so at most one per
+     * BACKWARD. The table keeps n below UINT16_MAX, so n(n + 1) fits even a
+     * 32-bit size_t and the sum needs no checked arithmetic. */
+    size_t sums = 0;
+    for (size_t s = 0; s < p->numSteps; s++) {
+        sums += (p->steps[s].kind == REMAT_STEP_SUM) ? 1u : 0u;
+    }
+    if (p->numSteps - sums > 2u * n + 2u + n * (n + 1u) / 2u) {
         grammarEndExit(p->numSteps, "rule 6: more steps than 2n + 2 + n(n+1)/2");
     }
     for (size_t s = 0; s < p->numSteps; s++) {
@@ -626,6 +845,12 @@ void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t
                 exit(1);
             }
             break;
+        case REMAT_STEP_SUM:
+            if (g.pendingPart == REMAT_NONE || st->layer != g.pendingLayer) {
+                grammarExit(s, st,
+                            "rule 7: a SUM comes right after the BACKWARD that wrote its PART");
+            }
+            break;
         default:
             PRINT_ERROR("rematPlanBuild: step #%zu (kind %u, layer %u) violates grammar: unknown "
                         "step kind",
@@ -633,6 +858,7 @@ void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t
             exit(1);
         }
         requireTheNodesSlice(p, &g, s);
+        requireTheContributions(p, &g, s);
         requireOperandsCovered(p, inPlace, s);
     }
     if (!lossForward) {
@@ -645,6 +871,7 @@ void rematPlanValidateGrammar(const rematProgram_t *p, const rematWireTable_t *t
         grammarEndExit(p->numSteps, "rule 3: BACKWARD set incomplete");
     }
     requireRangesWellFormed(p, t, inPlace);
+    freeReservedMemory(scratch);
 }
 
 /* The deriver reads the table and the grammar the model passed here: a model
@@ -727,8 +954,9 @@ static void requireARetainMaskWithAWindow(const rematPlanSpec_t *spec, const rem
 }
 
 /* Rule 5 for a generated program, before anything is reserved or cast to
- * uint16_t. A RETAIN_LIST program holds at most 3n + 2 steps, never more than
- * 2n + 2 + n(n+1)/2, so only UINT16_MAX can stop it. */
+ * uint16_t. A RETAIN_LIST program holds at most 3n + 2 steps plus at most one
+ * SUM per BACKWARD. A SUM needs a fan-out, so n >= 3, where 4n + 2 is within
+ * 2n + 2 + n(n+1)/2: only UINT16_MAX can stop it. */
 static void requireAProgramWithinTheBound(size_t numSteps, size_t n) {
     size_t bound = stepBound(n);
     if (numSteps > bound) {

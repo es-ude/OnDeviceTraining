@@ -2648,20 +2648,22 @@ void testEvalSlicesOfADagReadTheWiring(void) {
     dagFree(&f);
 }
 
-/* Room for the DAG fixtures' programs, derived directly: the chain-form grammar of a plan build
- * rejects a DAG. Zeroed, so the pool's padding bytes compare. */
 static const rematPlanSpec_t g_storeAllSpec = {.policy = REMAT_PLAN_STORE_ALL};
 
+/* Room for the DAG fixtures' programs, derived directly into test arrays, so a test can read or
+ * tamper with every step before the grammar sees it. Zeroed, so the pool's padding bytes
+ * compare. */
 typedef struct dagProgram {
-    rematStep_t steps[16];
+    rematStep_t steps[24];
     rematOperand_t operands[48];
     rematNodeOps_t nodeOps[6];
+    rematRange_t ranges[16];
     rematProgram_t p;
 } dagProgram_t;
 
 static void deriveDagTrain(const rematWireTable_t *t, const rematPlanSpec_t *spec,
                            rematDeriveSize_t z, dagProgram_t *d) {
-    TEST_ASSERT_TRUE(z.numSteps <= 16u && z.numOperands <= 48u && t->modelSize < 6u);
+    TEST_ASSERT_TRUE(z.numSteps <= 24u && z.numOperands <= 48u && t->modelSize < 6u);
     memset(d, 0, sizeof *d);
     d->p = (rematProgram_t){.numSteps = z.numSteps,
                             .steps = d->steps,
@@ -2834,6 +2836,239 @@ void testDeriveF3RetainListProgramKeepsTheSum(void) {
     TEST_ASSERT_EQUAL_size_t(z.numRanges, opened);
     rematWireTableFree(t);
     dagFree(&f);
+}
+
+/* ---- the grammar on DAGs (derived programs, tampered inside the death-test child) ---- */
+
+/* A DAG fixture's STORE_ALL TRAIN program under MSE with its scanned ranges. Built in place:
+ * the model points into the fixture's own arrays. */
+typedef struct dagGrammar {
+    dagFixture_t f;
+    dagTensor_t xs;
+    rematWireTable_t *t;
+    dagProgram_t d;
+} dagGrammar_t;
+
+/* The ranges of the program as it now stands under a policy the DAG gates admit; a tamper that
+ * changes the steps calls it again. */
+static void scanDagRanges(dagGrammar_t *g, rematPlanPolicy_t policy) {
+    for (size_t r = 0; r < 16u; r++) {
+        g->d.ranges[r] = (rematRange_t){.wire = REMAT_NONE};
+    }
+    rematScanRanges(g->t, &g->d.p, policy, NULL, g->d.ranges);
+    size_t opened = 0;
+    while (opened < 16u && g->d.ranges[opened].wire != REMAT_NONE) {
+        opened++;
+    }
+    g->d.p.ranges = g->d.ranges;
+    g->d.p.numRanges = opened;
+}
+
+static void buildDagGrammar(dagGrammar_t *g, void (*build)(dagFixture_t *)) {
+    build(&g->f);
+    TEST_ASSERT_TRUE(
+        rematWireTableInit(&g->t, &g->f.m, defaultLossConfig(MSE), dagInput(&g->xs, 1, 2)));
+    deriveDagTrain(g->t, &g_storeAllSpec, rematDeriveTrainSize(g->t, &g_storeAllSpec), &g->d);
+    scanDagRanges(g, REMAT_PLAN_STORE_ALL);
+}
+
+static void freeDagGrammar(dagGrammar_t *g) {
+    rematWireTableFree(g->t);
+    dagFree(&g->f);
+}
+
+static void validateDag(dagGrammar_t *g) {
+    rematPlanValidateGrammar(&g->d.p, g->t, &g->f.m, REMAT_MODE_TRAIN, NULL);
+}
+
+static void buildF3(dagFixture_t *f) {
+    dagBuildF3(f, false);
+}
+
+static void tamperAndValidateDag(dagGrammar_t *g, void (*tamper)(dagGrammar_t *)) {
+    tamper(g);
+    validateDag(g);
+}
+
+#define ASSERT_DAG_GRAMMAR_EXIT(build, tamper, message)                                            \
+    do {                                                                                           \
+        dagGrammar_t _g;                                                                           \
+        buildDagGrammar(&_g, build);                                                               \
+        ASSERT_EXITS_WITH_OUTPUT(1, message, tamperAndValidateDag(&_g, tamper));                   \
+        freeDagGrammar(&_g);                                                                       \
+    } while (0)
+
+static void assertTheGrammarAccepts(void (*build)(dagFixture_t *)) {
+    dagGrammar_t g;
+    buildDagGrammar(&g, build);
+    ASSERT_EXITS_WITH(0, validateDag(&g));
+    scanDagRanges(&g, REMAT_PLAN_LIVENESS);
+    ASSERT_EXITS_WITH(0, validateDag(&g));
+    freeDagGrammar(&g);
+}
+
+/* F3's program, under STORE_ALL and LIVENESS ranges (B3 opens GRAD 1 = 7, the ADD B2 accumulates
+ * into it, the Linear B1 writes PART 9 and the SUM right after adds it) and S's, whose backward
+ * skips the frozen n1. */
+void testGrammarAcceptsF3AndS(void) {
+    assertTheGrammarAccepts(buildF3);
+    assertTheGrammarAccepts(dagBuildS);
+}
+
+/* Y opens and accumulates GRAD 1 in one step; K's skip from the input gets no dx; P2 writes two
+ * PARTs into one buffer, each summed right after its BACKWARD. */
+void testGrammarAcceptsYKAndP2(void) {
+    assertTheGrammarAccepts(dagBuildY);
+    assertTheGrammarAccepts(dagBuildK);
+    assertTheGrammarAccepts(dagBuildP2);
+}
+
+/* F3 steps: F0..F3 = 0..3, LOSS_FORWARD 4, LOSS_BACKWARD 5, B3 6, B2 7, B1 8, SUM(1) 9, B0 10. A
+ * BACKWARD's dx slots follow its dy and its k inputs in the pool. */
+static rematOperand_t *dxSlot(dagGrammar_t *g, size_t node, size_t slot) {
+    uint16_t ids[MODEL_MAX_ARITY];
+    uint8_t k = modelNodeInputs(&g->f.m, node, ids);
+    return &g->d.operands[g->d.nodeOps[node].backward + 1u + k + slot];
+}
+
+static void secondWriteOfGrad7(dagGrammar_t *g) {
+    dxSlot(g, 2, 1)->mode = OP_MODE_WRITE;
+}
+
+static void accFromTheLinearB1(dagGrammar_t *g) {
+    *dxSlot(g, 1, 0) = (rematOperand_t){.wire = 7, .mode = OP_MODE_ACC};
+    g->d.steps[9] = g->d.steps[10];
+    g->d.p.numSteps = 10;
+    scanDagRanges(g, REMAT_PLAN_STORE_ALL);
+}
+
+static void swapTheSumAndB0(dagGrammar_t *g) {
+    rematStep_t sum = g->d.steps[9];
+    g->d.steps[9] = g->d.steps[10];
+    g->d.steps[10] = sum;
+}
+
+static void dropTheAccOfB2(dagGrammar_t *g) {
+    *dxSlot(g, 2, 1) = (rematOperand_t){.wire = REMAT_NONE, .mode = OP_MODE_WRITE};
+}
+
+/* Ten more SUM(1) after B0: 21 steps, one above F3's step bound 2n + 2 + n(n+1)/2 = 20, but only
+ * 10 of them are not SUMs. */
+static void tenSumsAfterTheLastBackward(dagGrammar_t *g) {
+    for (size_t s = 11; s < 21u; s++) {
+        g->d.steps[s] = g->d.steps[9];
+    }
+    g->d.p.numSteps = 21;
+}
+
+/* S steps: F0..F2 = 0..2, LOSS_FORWARD 3, LOSS_BACKWARD 4, B2 5, B0 6. */
+static void b1OfTheFrozenSkipNode(dagGrammar_t *g) {
+    g->d.steps[6].layer = 1;
+}
+
+/* P2 wires: ACT 0..5, the seed 6, GRAD 4 = 7, GRAD 1 = 8, GRAD 2 = 9, GRAD 3 = 10, PART 11 (B2),
+ * PART 12 (B1). The ReLU B1 writes B2's PART again. */
+static void b1WritesThePartOfB2(dagGrammar_t *g) {
+    TEST_ASSERT_EQUAL_UINT16(12, dxSlot(g, 1, 0)->wire);
+    dxSlot(g, 1, 0)->wire = 11;
+}
+
+void testGrammarRejectsASecondWriteOfAGrad(void) {
+    ASSERT_DAG_GRAMMAR_EXIT(
+        buildF3, secondWriteOfGrad7,
+        "step #7 (kind 3, layer 2) violates grammar rule 7: GRAD 7 opened twice");
+}
+
+void testGrammarRejectsAnAccFromANonAccumulatingRow(void) {
+    ASSERT_DAG_GRAMMAR_EXIT(buildF3, accFromTheLinearB1,
+                            "violates grammar rule 7: ACC from a row without accumulatesDx");
+}
+
+void testGrammarRejectsAPartNotSummedNext(void) {
+    ASSERT_DAG_GRAMMAR_EXIT(buildF3, swapTheSumAndB0,
+                            "violates grammar rule 7: PART 9 not summed at the next step");
+}
+
+void testGrammarRejectsAGradReadBeforeItsLastContribution(void) {
+    ASSERT_DAG_GRAMMAR_EXIT(buildF3, dropTheAccOfB2,
+                            "violates grammar rule 7: GRAD 7 read with contributions missing");
+}
+
+void testGrammarRejectsABackwardOfTheFrozenSkipNode(void) {
+    ASSERT_DAG_GRAMMAR_EXIT(dagBuildS, b1OfTheFrozenSkipNode,
+                            "step #6 (kind 3, layer 1) violates grammar rule 3");
+}
+
+/* The step bound counts no SUM: rule 7 admits a SUM only right after the BACKWARD that wrote its
+ * PART, so at most one per BACKWARD, and it is rule 7 that rejects the extra ones. */
+void testGrammarRejectsASumWithoutItsPart(void) {
+    ASSERT_DAG_GRAMMAR_EXIT(buildF3, tenSumsAfterTheLastBackward,
+                            "step #11 (kind 5, layer 1) violates grammar rule 7: a SUM comes "
+                            "right after the BACKWARD that wrote its PART");
+}
+
+void testGrammarRejectsAPartWrittenTwice(void) {
+    ASSERT_DAG_GRAMMAR_EXIT(dagBuildP2, b1WritesThePartOfB2,
+                            "step #11 (kind 3, layer 1) violates grammar rule 7: PART 11 written "
+                            "twice");
+}
+
+/* Y steps: F0, F1, LOSS_FORWARD 2, LOSS_BACKWARD 3, B1 4, B0 5; GRAD 1 = 4. B1's two slots in
+ * the other order: the ACC lands inside the range its own step opens, so no range rule sees it. */
+static void accBeforeWriteInOneStep(dagGrammar_t *g) {
+    *dxSlot(g, 1, 0) = (rematOperand_t){.wire = 4, .mode = OP_MODE_ACC};
+    *dxSlot(g, 1, 1) = (rematOperand_t){.wire = 4, .mode = OP_MODE_WRITE};
+}
+
+void testGrammarRejectsAnAccBeforeTheOpeningWriteInOneStep(void) {
+    ASSERT_DAG_GRAMMAR_EXIT(dagBuildY, accBeforeWriteInOneStep,
+                            "step #4 (kind 3, layer 1) violates grammar rule 7: GRAD 4 opened "
+                            "after an ACC into it");
+}
+
+/* F3 STORE_ALL ranges: ACT 1..4 = #0..#3, wire 5 #4, wire 6 #5, wire 7 [6, 10] #6, wire 8 #7,
+ * wire 9 #8. Wire 7 split at B2's ACC: [6, 6] and [7, 10]. */
+static void aRangeOpenedByAnAcc(dagGrammar_t *g) {
+    rematRange_t *r = g->d.ranges;
+    TEST_ASSERT_TRUE(r[6].wire == 7 && r[6].begin == 6 && r[7].wire == 8);
+    memmove(&r[8], &r[7], (g->d.p.numRanges - 7u) * sizeof *r);
+    r[6].end = 6;
+    r[7] = (rematRange_t){.wire = 7, .begin = 7, .end = 10};
+    g->d.p.numRanges++;
+}
+
+void testGrammarRejectsARangeAnAccOpens(void) {
+    ASSERT_DAG_GRAMMAR_EXIT(buildF3, aRangeOpenedByAnAcc,
+                            "range #7 (wire 7, steps 7..10) violates grammar rule 6: a range "
+                            "opens where its wire is written");
+}
+
+/* Wire 7's range ends at B1, so the SUM's ACC at step 9 lies outside it. */
+static void endGrad7BeforeTheSum(dagGrammar_t *g) {
+    TEST_ASSERT_EQUAL_UINT16(7, g->d.ranges[6].wire);
+    g->d.ranges[6].end = 8;
+}
+
+void testGrammarRejectsAnAccOutsideAnOpenRange(void) {
+    ASSERT_DAG_GRAMMAR_EXIT(buildF3, endGrad7BeforeTheSum,
+                            "step #9 (kind 5, layer 1) violates grammar rule 4: it writes wire 7 "
+                            "outside any open range");
+}
+
+/* The alias rule reads chain positions, so a DAG program carries no in-place mark. */
+static void validateDagWithAMark(dagGrammar_t *g) {
+    uint8_t inPlace[16] = {0};
+    inPlace[9] = 1u;
+    rematPlanValidateGrammar(&g->d.p, g->t, &g->f.m, REMAT_MODE_TRAIN, inPlace);
+}
+
+void testGrammarRejectsInPlaceMarksOnADag(void) {
+    dagGrammar_t g;
+    buildDagGrammar(&g, buildF3);
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "rematPlanBuild: in-place dx marks on a DAG model are not supported",
+                             validateDagWithAMark(&g));
+    freeDagGrammar(&g);
 }
 
 #undef R
@@ -5609,6 +5844,19 @@ int main(void) {
     RUN_TEST(testDeriveF3EvalIsTheTrainPrefix);
     RUN_TEST(testDeriveSkipsTheFrozenSkipNode);
     RUN_TEST(testDeriveF3RetainListProgramKeepsTheSum);
+    RUN_TEST(testGrammarAcceptsF3AndS);
+    RUN_TEST(testGrammarAcceptsYKAndP2);
+    RUN_TEST(testGrammarRejectsASecondWriteOfAGrad);
+    RUN_TEST(testGrammarRejectsAnAccFromANonAccumulatingRow);
+    RUN_TEST(testGrammarRejectsAPartNotSummedNext);
+    RUN_TEST(testGrammarRejectsAGradReadBeforeItsLastContribution);
+    RUN_TEST(testGrammarRejectsABackwardOfTheFrozenSkipNode);
+    RUN_TEST(testGrammarRejectsASumWithoutItsPart);
+    RUN_TEST(testGrammarRejectsAPartWrittenTwice);
+    RUN_TEST(testGrammarRejectsAnAccBeforeTheOpeningWriteInOneStep);
+    RUN_TEST(testGrammarRejectsARangeAnAccOpens);
+    RUN_TEST(testGrammarRejectsAnAccOutsideAnOpenRange);
+    RUN_TEST(testGrammarRejectsInPlaceMarksOnADag);
     RUN_TEST(testAReforwardCarriesItsForwardsSlice);
     RUN_TEST(testTheDeriverGivesARejectedSequenceStepAnEmptySlice);
     RUN_TEST(testPlanProgramOfTrainIsTheTrainProgram);

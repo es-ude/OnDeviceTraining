@@ -92,10 +92,10 @@ uint16_t rematChainRoot(const uint8_t *inPlace, uint16_t wire);
  * REFORWARD run k..j-1 that recomputes a dropped ACT j (j = n, or l) from the
  * nearest present ACT k < j: ACT 0, a kept one, or one an earlier run
  * recomputed. The needs only descend, so each ACT is recomputed at most once
- * and a program holds at most 3n + 2 steps plus its SUMs. So the program is
- * the default TRAIN program, a SUM after every BACKWARD that writes a PART
- * included, plus REFORWARD steps. With steps == NULL it only counts (the
- * plan sizes its block first). Returns the step count. */
+ * and a program holds at most 3n + 2 steps plus at most one SUM per
+ * BACKWARD. So the program is the default TRAIN program, a SUM after every
+ * BACKWARD that writes a PART included, plus REFORWARD steps. With steps == NULL it only counts
+ * (the plan sizes its block first). Returns the step count. */
 size_t rematFillRetainSteps(const rematWireTable_t *t, const bool *retain, rematStep_t *steps);
 
 #endif // ODT_REMAT_PLAN_POLICY_H

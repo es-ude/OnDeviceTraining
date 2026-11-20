@@ -12,6 +12,7 @@
 #include "LayerConfigAccess.h"
 #include "LossFunction.h"
 #include "Model.h"
+#include "OpTable.h"
 #include "Quantization.h"
 #include "RematPlan.h"
 #include "RematPlanPolicy.h"
@@ -184,6 +185,65 @@ static void deriveFacts(rematWireFact_t *facts, size_t numWires, const model_t *
             if (dxWire[slot] != REMAT_NONE && dxMode[slot] == OP_MODE_WRITE) {
                 setGradWireFacts(facts, dxWire[slot], m->layers[j]);
             }
+        }
+    }
+}
+
+static bool isMerge(const model_t *m, size_t j) {
+    return opFunctions[m->layers[j]->type].arity > 1u;
+}
+
+static void requireFloat32MergeWire(const rematWireFact_t *f) {
+    if (f->dtype != FLOAT32) {
+        PRINT_ERROR("rematWireTableInit: non-FLOAT32 merge or accumulate: wire %s %u has dtype %u",
+                    rematWireKindName(f->kind), (unsigned)f->index, (unsigned)f->dtype);
+        exit(1);
+    }
+}
+
+/* Merge numerics are FLOAT32 only (addAccumulate exits on any other dtype at run time), so a
+ * non-chain model is refused at init, before any block holds its wires, when a merge-touched wire
+ * is not FLOAT32: every ACT an ADD reads or writes, every GRAD an ADD's backward reads as dy,
+ * every GRAD something accumulates into (an ADD's ACC slot or a SUM step) and every PART. Needs
+ * the facts and the dx slots numbered. Never called on a chain, which has no merge, so a chain's
+ * SYM_INT32 / BFP wires stay admitted. */
+static void requireFloat32MergeWires(const rematWireFact_t *facts, size_t numWires,
+                                     const model_t *m, lossFuncType_t lt, const uint16_t *dxWire,
+                                     const uint8_t *dxMode) {
+    size_t n = m->numLayers;
+    for (size_t j = 0; j < n; j++) {
+        if (!isMerge(m, j)) {
+            continue;
+        }
+        uint16_t ids[MODEL_MAX_ARITY];
+        uint8_t k = modelNodeInputs(m, j, ids);
+        for (uint8_t i = 0; i < k; i++) {
+            requireFloat32MergeWire(&facts[ids[i]]);
+        }
+        requireFloat32MergeWire(&facts[j + 1u]);
+    }
+    for (size_t id = n + 1u; id < numWires; id++) {
+        const rematWireFact_t *f = &facts[id];
+        if (f->kind == REMAT_WIRE_PART) {
+            requireFloat32MergeWire(f);
+            /* Its SUM target: the GRAD an earlier contribution opened, so numbered before it. */
+            size_t open = id - 1u;
+            while (facts[open].kind != REMAT_WIRE_GRAD || facts[open].index != f->index) {
+                open--;
+            }
+            requireFloat32MergeWire(&facts[open]);
+            continue;
+        }
+        /* GRAD b is node b - 1's dy; under CROSS_ENTROPY the seed GRAD n is the Softmax input's
+         * gradient, so node n - 2's dy. */
+        size_t b = (lt == CROSS_ENTROPY && f->index == n) ? n - 1u : f->index;
+        if (b > 0u && isMerge(m, b - 1u)) {
+            requireFloat32MergeWire(f);
+        }
+    }
+    for (size_t slot = 0; slot < n * MODEL_MAX_ARITY; slot++) {
+        if (dxMode[slot] == OP_MODE_ACC) {
+            requireFloat32MergeWire(&facts[dxWire[slot]]);
         }
     }
 }
@@ -432,6 +492,9 @@ bool rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t l
         }
         /* Makes every later sum over wires (liveBytes, peakLiveBytes) provably in range. */
         totalBytes = addSize(totalBytes, f->bytes, f, "total wire bytes");
+    }
+    if (!isChain) {
+        requireFloat32MergeWires(facts, numWires, m, loss.funcType, dxWire, dxMode);
     }
 
     slabLayout_t sizing = {.base = NULL, .cursor = 0};

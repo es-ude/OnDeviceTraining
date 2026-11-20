@@ -1724,6 +1724,151 @@ void testAPartAFlattenWritesInheritsItsInputsTemplate(void) {
     freeAddLayer(f.layers[2]);
 }
 
+/* A 2 -> 2 Linear with drawn weights (only table init reads it) whose dx wire is propLossQ,
+ * borrowed: it must outlive the layer. */
+static layer_t *dagLinearWithPropLossQ(size_t position, quantization_t *propLossQ) {
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, dagFloatQ());
+    lq.propLossQ = propLossQ;
+    const rngKey_t key = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, (uint32_t)position);
+    return linearLayerInit(&(linearInit_t){.inFeatures = 2,
+                                           .outFeatures = 2,
+                                           .trainable = TRAINABLE_DEFAULT,
+                                           .weightInit.key = &key},
+                           &lq);
+}
+
+/* x -> Quantization (SYM_INT32 12 bit) = b1; ADD(b1, b0): nothing trains, so the refusal rests on
+ * the forward wire alone. */
+void testTableInitRefusesASymInt32WireIntoAnAdd(void) {
+    symInt32QConfig_t symQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &symQc, 12);
+    quantization_t symQ = {.type = SYM_INT32, .qConfig = &symQc};
+    dagFixture_t f;
+    dagBegin(&f);
+    uint16_t b1 = graphNode(&f.g, makeQuant(&symQ, &g_floatQ), GRAPH_INPUT);
+    (void)graphMerge(&f.g, addLayerInit(NULL), b1, GRAPH_INPUT);
+    f.m = graphFinish(&f.g);
+    dagTensor_t xs;
+    tensor_t *x = dagInput(&xs, 1, 2);
+    rematWireTable_t *t = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1, "non-FLOAT32 merge or accumulate: wire ACT 1 has dtype 2",
+                             (void)rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
+    freeQuantLayer(f.layers[0]);
+    freeAddLayer(f.layers[1]);
+}
+
+/* F3 with n1's dx wire SYM_INT32: n1 is b1's third contributor, so that wire is PART 1, which
+ * the SUM step adds into GRAD 1. */
+void testTableInitRefusesASymInt32Part(void) {
+    symInt32QConfig_t symQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &symQc, 12);
+    quantization_t symQ = {.type = SYM_INT32, .qConfig = &symQc};
+    dagFixture_t f;
+    dagBegin(&f);
+    uint16_t b1 = graphNode(&f.g, dagLinear(0, 1.0f, 1.0f, false), GRAPH_INPUT);
+    uint16_t b2 = graphNode(&f.g, dagLinearWithPropLossQ(1, &symQ), b1);
+    uint16_t b3 = graphMerge(&f.g, addLayerInit(NULL), b2, b1);
+    (void)graphMerge(&f.g, addLayerInit(NULL), b3, b1);
+    f.m = graphFinish(&f.g);
+    dagTensor_t xs;
+    tensor_t *x = dagInput(&xs, 1, 2);
+    rematWireTable_t *t = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1, "non-FLOAT32 merge or accumulate: wire PART 1 has dtype 2",
+                             (void)rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
+    dagFree(&f);
+}
+
+/* n0 = Linear(b0); n1 = Linear(b1); n2 = Linear(b1), dx SYM_INT32; n3 = ADD(b2, b3). n2 opens
+ * GRAD 1 and n1 writes a FLOAT32 PART that the SUM step adds into it: no slot accumulates, yet
+ * GRAD 1 is an accumulate target. */
+void testTableInitRefusesASymInt32GradASumAddsInto(void) {
+    symInt32QConfig_t symQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &symQc, 12);
+    quantization_t symQ = {.type = SYM_INT32, .qConfig = &symQc};
+    dagFixture_t f;
+    dagBegin(&f);
+    uint16_t b1 = graphNode(&f.g, dagLinear(0, 1.0f, 1.0f, false), GRAPH_INPUT);
+    uint16_t b2 = graphNode(&f.g, dagLinear(1, 2.0f, 3.0f, false), b1);
+    uint16_t b3 = graphNode(&f.g, dagLinearWithPropLossQ(2, &symQ), b1);
+    (void)graphMerge(&f.g, addLayerInit(NULL), b2, b3);
+    f.m = graphFinish(&f.g);
+    dagTensor_t xs;
+    tensor_t *x = dagInput(&xs, 1, 2);
+    rematWireTable_t *t = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1, "non-FLOAT32 merge or accumulate: wire GRAD 1 has dtype 2",
+                             (void)rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
+    dagFree(&f);
+}
+
+/* n0 = Linear(b0); n1 = ADD(b1, b0); n2 = Linear(b1), dx SYM_INT32; n3 = ADD(b2, b3). n2 opens
+ * GRAD 1, and the ADD n1 accumulates into it. */
+void testTableInitRefusesASymInt32GradAnAddAccumulatesInto(void) {
+    symInt32QConfig_t symQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &symQc, 12);
+    quantization_t symQ = {.type = SYM_INT32, .qConfig = &symQc};
+    dagFixture_t f;
+    dagBegin(&f);
+    uint16_t b1 = graphNode(&f.g, dagLinear(0, 1.0f, 1.0f, false), GRAPH_INPUT);
+    uint16_t b2 = graphMerge(&f.g, addLayerInit(NULL), b1, GRAPH_INPUT);
+    uint16_t b3 = graphNode(&f.g, dagLinearWithPropLossQ(2, &symQ), b1);
+    (void)graphMerge(&f.g, addLayerInit(NULL), b2, b3);
+    f.m = graphFinish(&f.g);
+    dagTensor_t xs;
+    tensor_t *x = dagInput(&xs, 1, 2);
+    rematWireTable_t *t = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1, "non-FLOAT32 merge or accumulate: wire GRAD 1 has dtype 2",
+                             (void)rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
+    dagFree(&f);
+}
+
+/* n0 = Linear(b0); n1 = ADD(b1, b1); n2 = Linear(b2), dx SYM_INT32: GRAD 2, which n2 opens, is
+ * the dy the ADD accumulates from. */
+void testTableInitRefusesASymInt32DyOfAnAdd(void) {
+    symInt32QConfig_t symQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &symQc, 12);
+    quantization_t symQ = {.type = SYM_INT32, .qConfig = &symQc};
+    dagFixture_t f;
+    dagBegin(&f);
+    uint16_t b1 = graphNode(&f.g, dagLinear(0, 1.0f, 1.0f, false), GRAPH_INPUT);
+    uint16_t b2 = graphMerge(&f.g, addLayerInit(NULL), b1, b1);
+    (void)graphNode(&f.g, dagLinearWithPropLossQ(2, &symQ), b2);
+    f.m = graphFinish(&f.g);
+    dagTensor_t xs;
+    tensor_t *x = dagInput(&xs, 1, 2);
+    rematWireTable_t *t = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(1, "non-FLOAT32 merge or accumulate: wire GRAD 2 has dtype 2",
+                             (void)rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), x));
+    dagFree(&f);
+}
+
+/* n0 = Linear(b0); n1 = ADD(b1, b1); n2 = Softmax, outputQ SYM_INT32, under CrossEntropy: the
+ * seed GRAD 3 inherits the SYM_INT32 output and, the Softmax's backward being skipped, is the dy
+ * the ADD accumulates from. */
+void testTableInitRefusesASymInt32CrossEntropySeedIntoAnAdd(void) {
+    symInt32QConfig_t symQc;
+    initSymInt32QConfigWithQMaxBits(HALF_AWAY, &symQc, 12);
+    quantization_t symQ = {.type = SYM_INT32, .qConfig = &symQc};
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, dagFloatQ());
+    lq.outputQ = &symQ;
+    dagFixture_t f;
+    dagBegin(&f);
+    uint16_t b1 = graphNode(&f.g, dagLinear(0, 1.0f, 1.0f, false), GRAPH_INPUT);
+    uint16_t b2 = graphMerge(&f.g, addLayerInit(NULL), b1, b1);
+    (void)graphNode(&f.g, softmaxLayerInit(&lq), b2);
+    f.m = graphFinish(&f.g);
+    dagTensor_t xs;
+    tensor_t *x = dagInput(&xs, 1, 2);
+    rematWireTable_t *t = NULL;
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "non-FLOAT32 merge or accumulate: wire GRAD 3 has dtype 2",
+        (void)rematWireTableInit(&t, &f.m, defaultLossConfig(CROSS_ENTROPY), x));
+    freeLinearLayer(f.layers[0]);
+    freeAddLayer(f.layers[1]);
+    freeSoftmaxLayer(f.layers[2]);
+}
+
 void testUnbindClearsTheBorrowedInputOnly(void) {
     layer_t *model[1] = {makeRelu(&g_floatQ)};
     inputLike_t in;
@@ -5903,6 +6048,12 @@ int main(void) {
     RUN_TEST(testSkipFromTheInputGetsNoDx);
     RUN_TEST(testFlattenActTakesTheTemplateOfItsWiredInput);
     RUN_TEST(testAPartAFlattenWritesInheritsItsInputsTemplate);
+    RUN_TEST(testTableInitRefusesASymInt32WireIntoAnAdd);
+    RUN_TEST(testTableInitRefusesASymInt32Part);
+    RUN_TEST(testTableInitRefusesASymInt32GradASumAddsInto);
+    RUN_TEST(testTableInitRefusesASymInt32GradAnAddAccumulatesInto);
+    RUN_TEST(testTableInitRefusesASymInt32DyOfAnAdd);
+    RUN_TEST(testTableInitRefusesASymInt32CrossEntropySeedIntoAnAdd);
     RUN_TEST(testUnbindClearsTheBorrowedInputOnly);
 #ifdef ODT_TEST_ASAN
     RUN_TEST(testAsanDeathCallbackExitsWithADistinctCode);

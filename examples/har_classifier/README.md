@@ -53,6 +53,50 @@ After the train-from-scratch demo, `examples/har_classifier/` contains:
 - Global `AvgPool1d` → `Flatten → Linear → Softmax → CrossEntropy`
 - ~10 K parameters
 
+## Residual variant
+
+`train_c_har_residual` adds one skip connection to the model above: the first
+pool's output is added to the third conv's output (an `ADD` merge node) before
+its ReLU. `SKIP=0` builds the same model without the skip (the chain twin).
+
+```bash
+uv run examples/har_classifier/train_pytorch_residual.py
+BIT_PARITY=1 ./build/examples/examples/har_classifier/train_c_har_residual
+uv run examples/_shared/compare_predictions.py \
+  --pytorch examples/har_classifier/outputs/pytorch_residual_predictions.npy \
+  --c examples/har_classifier/outputs/c_residual_predictions.npy \
+  --dtype int32
+```
+
+CI runs the same three steps (`c-bit-parity`) and requires int32 predictions to
+match exactly. Training knobs: `SEED`, `EPOCHS`, `SKIP`, `REMAT_STORAGE`,
+`REMAT_PLAN`, `LOG_PATH`. A `SKIP=0` run writes `c_residual_chain_*` outputs so it
+never overwrites the parity files.
+
+### Memory with and without the skip
+
+Only `store_all` and `liveness` are valid `REMAT_PLAN`s for a graph model.
+Numbers (bytes) come from `DRY_PLAN=1 REMAT_STORAGE=arena REMAT_PLAN=<plan>
+SKIP=<0|1> ./build/examples/examples/har_classifier/train_c_har_residual`:
+
+| Plan | Row | With skip | Without skip | Delta |
+|---|---|---:|---:|---:|
+| `store_all` | `wires_peak_b` | 57520 | 53424 | +4096 |
+| `store_all` | `activations_peak_b` | 41136 | 37040 | +4096 |
+| `store_all` | `arena_b` | 57520 | 53424 | +4096 |
+| `liveness` | `wires_peak_b` | 32768 | 32768 | +0 |
+| `liveness` | `activations_peak_b` | 28736 | 28736 | +0 |
+| `liveness` | `arena_b` | 32768 | 32768 | +0 |
+
+- The skip adds 4096 B of `wires_peak_b` under `store_all` and nothing under
+  `liveness`, where the peak sits elsewhere in the net.
+- Gradient fan-out uses one partial buffer: at most one is live, for two steps, of
+  the skip wire's gradient size, 16 x 64 x 4 = 4096 B at micro-batch 1. Giving each
+  contribution its own buffer plus a sum would need (k+1) x that at the sum, 3 x 4096 B
+  for k = 2.
+- A pinned unit-test fixture shows the same effect in small: the skip costs +16 B
+  (`liveness`) / +32 B (`store_all`) and the partial buffer adds 0 B at the peak.
+
 ## Parity tolerance (train-from-scratch demo)
 
 | Metric | Tolerance |

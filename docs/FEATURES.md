@@ -38,7 +38,7 @@ end to end, plus BFP native forward+backward; packed SYM/ASYM serve as param (GE
 family, requantize route), grad and optimizer-state storage. BOOL storage (masks
 only) and grouped grad/optimizer-state templates (SYM/ASYM/BFP) are unsupported.
 
-## Layers (`layerType_t`, 14 total)
+## Layers (`layerType_t`, 15 total)
 
 | Layer | Trainable | FLOAT32 arith | SYM_INT32 arith | BFP arith | Quant params | Quant grads | (De)serialize |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
@@ -56,6 +56,7 @@ only) and grouped grad/optimizer-state templates (SYM/ASYM/BFP) are unsupported.
 | `AVGPOOL1D` | – | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | n/a | n/a | ✓ |
 | `ADAPTIVE_AVGPOOL1D` | – | ✓ | ✓ native (fwd+bwd) | ✓ native (fwd+bwd) | n/a | n/a | ✓ |
 | `QUANTIZATION` | – | converter node | converter node | converter node | n/a | n/a | ✓ |
+| `ADD` | – | ✓ (merge node, two inputs) | – FLOAT32 only | – FLOAT32 only | n/a | n/a | ✓ |
 
 Notes on the qualified cells:
 
@@ -190,6 +191,26 @@ Notes on the qualified cells:
   #468). Dropout fails fast when *training* at m > 1 (its caller-allocated mask holds
   one sample's elements; pinned by `testStackedDropoutFailsFastOnItsMaskCount`);
   stacked evaluation is unaffected (no mask in eval mode).
+
+### Graph topology
+
+- **Model shape** — a `model_t` is a chain by default. Skip connections use a DAG: the
+  graph builder (`ModelGraphApi.h`: `graphBegin` / `graphNode` / `graphMerge` /
+  `graphFinish`) records each node's input wires as a CSR table and returns a `model_t`
+  that points into the caller's storage. A graph that only spells a chain is normalised
+  back to a chain. Invalid wiring fails at `graphFinish`.
+- **`ADD`** — the merge node (`addLayerInit`): sums its two inputs, no parameters,
+  FLOAT32 only (any other arithmetic or storage is refused at init and at deserialize).
+- **Training** — a wire read by more than one node (fan-out) gets one gradient from
+  each reader; the backward writes the first and sums the rest into it, so the
+  gradient is complete before it flows past the fork.
+- **Remat on DAGs** — `REMAT_PLAN_STORE_ALL` and `REMAT_PLAN_LIVENESS` on `REMAT_HEAP`
+  and `REMAT_ARENA`. The planner and scheduler treat a wire's lifetime as ending at its
+  last reader. Refused by name on a DAG: `REMAT_PLAN_SEQUENCE`,
+  `REMAT_PLAN_RETAIN_LIST`, `inPlaceDx`, and any non-FLOAT32 merge or accumulate.
+- **Example** — `examples/har_classifier/train_c_residual.c`
+  (`train_c_har_residual`): HAR with one skip connection, bit-parity checked against
+  PyTorch in CI; its memory numbers are in `examples/har_classifier/README.md`.
 
 ## Optimizer (`optimizerType_t`)
 
@@ -891,6 +912,8 @@ checkpointing, limitations, literature).
 
 ## Known gaps / partial features
 
+- Recompute and in-place backward are not available on DAG models: only
+  `STORE_ALL`/`LIVENESS` plans plan a graph (#530).
 - Linear/Conv factories allocate FLOAT32 params only — settled as by-design (#270);
   SYM_INT32/SYM/ASYM/BFP params on the GEMM family via post-init
   `requantizeTensorInPlace()` (mixed_width_mlp / HAR `_sym`/`_bfp` pattern).

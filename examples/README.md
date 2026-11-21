@@ -46,6 +46,7 @@ Some examples build additional targets beyond `train_c_<name>`:
 
 - `har_classifier/`: `train_c_har_classifier_adamw`, `_finetune`, `_sym`,
   `_bfp` (optimizer, freezing and quantization studies) and
+  `train_c_har_residual` (a skip-connection variant with a bit-parity check) and
   `train_c_continual` (continual learning with PPCA replay) — see
   [`har_classifier/README.md`](har_classifier/README.md).
 - `kws_raw/`: `trace_c_kws_raw`, a per-layer C-vs-PyTorch trace of one

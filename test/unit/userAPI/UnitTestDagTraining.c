@@ -786,13 +786,140 @@ void testTrainingRunWithEvaluationIsBitIdenticalOnEveryScheduler(void) {
         TEST_ASSERT_EQUAL_MEMORY_MESSAGE(ref.params, run[c].params, sizeof ref.params,
                                          kCells[c].name);
         TEST_ASSERT_EQUAL_MEMORY(&ref.trainLoss, &run[c].trainLoss, sizeof(float));
-        TEST_ASSERT_EQUAL_MEMORY(&ref.evalLoss, &run[c].evalLoss, sizeof(float));
-        TEST_ASSERT_EQUAL_size_t(12, run[c].onScheduler);
+        TEST_ASSERT_EQUAL_MEMORY_MESSAGE(&ref.evalLoss, &run[c].evalLoss, sizeof(float),
+                                         kCells[c].name);
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(12, run[c].onScheduler, kCells[c].name);
         TEST_ASSERT_EQUAL_size_t(evalPeak[c], rep[c].observedPeakLiveBytes);
     }
     TEST_ASSERT_EQUAL_size_t_MESSAGE(SIZE_MAX,
                                      firstMismatch(dagRunFinal, ref.params, 50, 1e-5f, 1e-4f),
                                      "trained params diverge from PyTorch");
+}
+
+/* ---- memory of the fan-out scheme ---------------------------------------------------------- */
+
+/* The plan numbers of m under policy p; a HEAP row, since the plan peaks are placement-free. */
+static rematReport_t planReport(const model_t *m, lossConfig_t loss, tensor_t *xView,
+                                rematPlanPolicy_t p) {
+    rematScheduler_t s;
+    TEST_ASSERT_TRUE(rematHeapInit(&s, m, loss, xView, &(rematPlanSpec_t){.policy = p}));
+    rematReport_t rep;
+    rematSchedulerReport(&s, &rep);
+    rematSchedulerDeinit(&s);
+    return rep;
+}
+
+/* M is the residual trunk with its ADD as the MSE sink; the chain twin drops the skip. Every wire
+ * is [1, 4] FLOAT32 (16 B), and every number below is derived by hand from the TRAIN programs,
+ * ACT 0 excluded. The skip keeps b1 live until the ReLU's backward, and g(b1) opens at the ADD's
+ * backward while g3 is still unread: +16 B under LIVENESS, +32 B under STORE_ALL. */
+void testResidualPeaksAgainstTheChainTwin(void) {
+    dagGraph_t f;
+    (void)buildResidualTrunk(&f, dagResW0, dagResB0, dagResW2, dagResB2);
+    f.m = graphFinish(&f.g);
+    layer_t *chain[3] = {goldLinear(4, 4, TRAINABLE_DEFAULT, dagResW0, dagResB0, 0), dagRelu(),
+                         goldLinear(4, 4, TRAINABLE_DEFAULT, dagResW2, dagResB2, 2)};
+    tensor_t *x = buildFloatTensor((size_t[]){4}, 1, dagResX);
+    batchView_t xv;
+    tensor_t *xView = batchViewOf(&xv, x);
+    const lossConfig_t mse = defaultLossConfig(MSE);
+
+    rematReport_t resLive = planReport(&f.m, mse, xView, REMAT_PLAN_LIVENESS);
+    rematReport_t resAll = planReport(&f.m, mse, xView, REMAT_PLAN_STORE_ALL);
+    rematReport_t chainLive = planReport(&MODEL_CHAIN(chain, 3), mse, xView, REMAT_PLAN_LIVENESS);
+    rematReport_t chainAll = planReport(&MODEL_CHAIN(chain, 3), mse, xView, REMAT_PLAN_STORE_ALL);
+
+    freeTensor(x);
+    freeLinearLayer(chain[2]);
+    freeReluLayer(chain[1]);
+    freeLinearLayer(chain[0]);
+    dagGraphFree(&f);
+
+    TEST_ASSERT_EQUAL_size_t(11, resLive.numSteps);
+    TEST_ASSERT_EQUAL_size_t(80, resLive.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(64, resLive.activationsPeakBytes);
+    TEST_ASSERT_EQUAL_size_t(11, resAll.numSteps);
+    TEST_ASSERT_EQUAL_size_t(112, resAll.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(64, resAll.activationsPeakBytes);
+    TEST_ASSERT_EQUAL_size_t(8, chainLive.numSteps);
+    TEST_ASSERT_EQUAL_size_t(64, chainLive.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(48, chainLive.activationsPeakBytes);
+    TEST_ASSERT_EQUAL_size_t(8, chainAll.numSteps);
+    TEST_ASSERT_EQUAL_size_t(80, chainAll.peakLiveBytes);
+    TEST_ASSERT_EQUAL_size_t(48, chainAll.activationsPeakBytes);
+}
+
+/* The ReLU's dx for b1 arrives after the ADD opened g(b1), so it is a PART: written by the ReLU's
+ * backward (step 8), summed at step 9, and sized as g(b1). It lives outside the peak steps 6-7,
+ * so it adds nothing to M's peak. */
+void testPartWireLivesExactlyTwoSteps(void) {
+    static const rematPlanPolicy_t policies[2] = {REMAT_PLAN_LIVENESS, REMAT_PLAN_STORE_ALL};
+    static const char *const name[2] = {"LIVENESS", "STORE_ALL"};
+    dagGraph_t f;
+    (void)buildResidualTrunk(&f, dagResW0, dagResB0, dagResW2, dagResB2);
+    f.m = graphFinish(&f.g);
+    tensor_t *x = buildFloatTensor((size_t[]){4}, 1, dagResX);
+    batchView_t xv;
+    tensor_t *xView = batchViewOf(&xv, x);
+
+    size_t partRanges[2] = {0, 0};
+    rematRange_t part[2] = {{0}};
+    size_t partBytes[2] = {0, 0};
+    for (size_t k = 0; k < 2; k++) {
+        rematScheduler_t s;
+        TEST_ASSERT_TRUE_MESSAGE(rematHeapInit(&s, &f.m, defaultLossConfig(MSE), xView,
+                                               &(rematPlanSpec_t){.policy = policies[k]}),
+                                 name[k]);
+        const rematProgram_t *p = rematPlanProgram(s.plan, REMAT_MODE_TRAIN);
+        for (size_t r = 0; r < p->numRanges; r++) {
+            const rematWire_t *w = &s.wires->wires[p->ranges[r].wire];
+            if (w->kind == REMAT_WIRE_PART) {
+                part[k] = p->ranges[r];
+                partBytes[k] = w->bytes;
+                partRanges[k]++;
+            }
+        }
+        rematSchedulerDeinit(&s);
+    }
+
+    freeTensor(x);
+    dagGraphFree(&f);
+
+    for (size_t k = 0; k < 2; k++) {
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(1, partRanges[k], name[k]);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(8, part[k].begin, name[k]);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(9, part[k].end, name[k]);
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(16, partBytes[k], name[k]);
+    }
+}
+
+/* One real training call on M's LIVENESS plan: the SDK's bind/release accounting reaches the
+ * plan's hand-derived 80 B, so the PART and the SUM's accumulate are booked as planned. */
+void testObservedPeakEqualsPlanPeakOnADag(void) {
+    dagGraph_t f;
+    (void)buildResidualTrunk(&f, dagResW0, dagResB0, dagResW2, dagResB2);
+    f.m = graphFinish(&f.g);
+    tensor_t *x = buildFloatTensor((size_t[]){4}, 1, dagResX);
+    tensor_t *y = buildFloatTensor((size_t[]){4}, 1, dagResCeY);
+    batchView_t xv;
+    batchView_t yv;
+    tensor_t *xView = batchViewOf(&xv, x);
+    const lossConfig_t mse = defaultLossConfig(MSE);
+
+    rematScheduler_t s;
+    TEST_ASSERT_TRUE(
+        rematHeapInit(&s, &f.m, mse, xView, &(rematPlanSpec_t){.policy = REMAT_PLAN_LIVENESS}));
+    freeTrainingStats(calculateGradsSequential(
+        &f.m, mse, REDUCTION_MEAN, xView, batchViewOf(&yv, y), &(trainingCall_t){.remat = &s}));
+    rematReport_t rep;
+    rematSchedulerReport(&s, &rep);
+    rematSchedulerDeinit(&s);
+
+    freeTensor(y);
+    freeTensor(x);
+    dagGraphFree(&f);
+
+    TEST_ASSERT_EQUAL_size_t(80, rep.observedPeakLiveBytes);
 }
 
 int main(void) {
@@ -807,5 +934,8 @@ int main(void) {
     RUN_TEST(testBatchNormInsideTheBlockMatchesPyTorchPerMicroBatch);
     RUN_TEST(testTrainingRunOnResidualModelMatchesPyTorch);
     RUN_TEST(testTrainingRunWithEvaluationIsBitIdenticalOnEveryScheduler);
+    RUN_TEST(testResidualPeaksAgainstTheChainTwin);
+    RUN_TEST(testPartWireLivesExactlyTwoSteps);
+    RUN_TEST(testObservedPeakEqualsPlanPeakOnADag);
     return UNITY_END();
 }

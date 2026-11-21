@@ -28,6 +28,7 @@
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "TraceApi.h"
 #include "TrainingLoopApi.h"
 #include "expected_dag.h"
 #include "unity.h"
@@ -381,6 +382,98 @@ void testFanOutThreeWritesAccumulatesAndSums(void) {
     assertMseParity(&r, 50, dagFan3Grads, dagFan3Loss, dagFan3Out);
 }
 
+/* ---- freezing: which nodes run backward --------------------------------------------------- */
+
+typedef struct agradLog {
+    size_t idx[8];
+    size_t n;
+} agradLog_t;
+
+/* Counts every "agrad" event but stores at most 8, so an overflow shows up as a wrong count. */
+static void recordAgrad(void *ctx, size_t layerIdx, layerType_t t, const char *phase, tensor_t *x) {
+    (void)t;
+    (void)x;
+    agradLog_t *log = ctx;
+    if (strcmp(phase, "agrad") == 0) {
+        if (log->n < 8) {
+            log->idx[log->n] = layerIdx;
+        }
+        log->n++;
+    }
+}
+
+/* runMseParity with a traced NULL-call run first: its agrad order and grads land in log/got. */
+static void runTracedMseParity(dagGraph_t *f, const float *xData, const float *yData,
+                               agradLog_t *log, float *got, size_t *gotCount, parityRun_t *r) {
+    f->m = graphFinish(&f->g);
+    tensor_t *x = buildFloatTensor((size_t[]){4}, 1, xData);
+    tensor_t *y = buildFloatTensor((size_t[]){2}, 1, yData);
+    batchView_t xv;
+    batchView_t yv;
+    tensor_t *xView = batchViewOf(&xv, x);
+    tensor_t *yView = batchViewOf(&yv, y);
+    zeroGrads(&f->m);
+    freeTrainingStats(tracedGrads(&f->m, defaultLossConfig(MSE), REDUCTION_MEAN, xView, yView,
+                                  recordAgrad, log, NULL));
+    *gotCount = snapshotGrads(&f->m, 1.0f, got, DAG_MAX_GRADS);
+    runParity(&f->m, defaultLossConfig(MSE), xView, yView, 2, r);
+    freeTensor(y);
+    freeTensor(x);
+    dagGraphFree(f);
+}
+
+/* The skip carries b1 out of the frozen prefix: the ADD gives b1 no gradient, and node 2, whose
+ * input needs none either, runs grads-only. The prefix never runs backward. */
+void testFrozenPrefixWithSkipAcrossTheBoundary(void) {
+    dagGraph_t f;
+    dagGraphBegin(&f);
+    uint16_t h1 =
+        graphNode(&f.g, goldLinear(4, 4, TRAINABLE_FALSE, dagFrzW0, dagFrzB0, 0), GRAPH_INPUT);
+    uint16_t h2 = graphNode(&f.g, dagRelu(), h1);
+    uint16_t h3 = graphNode(&f.g, goldLinear(4, 4, TRAINABLE_DEFAULT, dagFrzW2, dagFrzB2, 2), h2);
+    uint16_t h4 = graphMerge(&f.g, addLayerInit(NULL), h1, h3);
+    (void)graphNode(&f.g, goldLinear(4, 2, TRAINABLE_DEFAULT, dagFrzW4, dagFrzB4, 4), h4);
+
+    agradLog_t log = {0};
+    float got[DAG_MAX_GRADS];
+    size_t count;
+    parityRun_t r;
+    runTracedMseParity(&f, dagFrzX, dagFrzY, &log, got, &count, &r);
+
+    TEST_ASSERT_EQUAL_size_t(3, log.n);
+    TEST_ASSERT_EQUAL_size_t_ARRAY(((size_t[]){4, 3, 2}), log.idx, 3);
+    TEST_ASSERT_EQUAL_size_t(30, count);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(SIZE_MAX, firstMismatch(dagFrzGrads, got, 30, 1e-6f, 1e-4f),
+                                     "grads diverge from PyTorch");
+    assertMseParity(&r, 30, dagFrzGrads, dagFrzLoss, dagFrzOut);
+}
+
+/* Node 2 is frozen and reads b1, which needs no gradient, so the backward skips it between
+ * nodes 3 and 1: the ADD gives b3 no gradient, and node 1 runs grads-only. */
+void testFrozenNodeOnTheSkipPathLeavesAGapInTheBackward(void) {
+    dagGraph_t f;
+    dagGraphBegin(&f);
+    uint16_t h1 =
+        graphNode(&f.g, goldLinear(4, 4, TRAINABLE_FALSE, dagGapW0, dagGapB0, 0), GRAPH_INPUT);
+    uint16_t h2 = graphNode(&f.g, goldLinear(4, 4, TRAINABLE_DEFAULT, dagGapW1, dagGapB1, 1), h1);
+    uint16_t h3 = graphNode(&f.g, goldLinear(4, 4, TRAINABLE_FALSE, dagGapW2, dagGapB2, 2), h1);
+    uint16_t h4 = graphMerge(&f.g, addLayerInit(NULL), h2, h3);
+    (void)graphNode(&f.g, goldLinear(4, 2, TRAINABLE_DEFAULT, dagGapW4, dagGapB4, 4), h4);
+
+    agradLog_t log = {0};
+    float got[DAG_MAX_GRADS];
+    size_t count;
+    parityRun_t r;
+    runTracedMseParity(&f, dagGapX, dagGapY, &log, got, &count, &r);
+
+    TEST_ASSERT_EQUAL_size_t(3, log.n);
+    TEST_ASSERT_EQUAL_size_t_ARRAY(((size_t[]){4, 3, 1}), log.idx, 3);
+    TEST_ASSERT_EQUAL_size_t(30, count);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(SIZE_MAX, firstMismatch(dagGapGrads, got, 30, 1e-6f, 1e-4f),
+                                     "grads diverge from PyTorch");
+    assertMseParity(&r, 30, dagGapGrads, dagGapLoss, dagGapOut);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testResidualBlockMatchesPyTorchOnEveryAdmittedPlan);
@@ -388,5 +481,7 @@ int main(void) {
     RUN_TEST(testAddOfOneBufferWithItselfDoublesItsGradient);
     RUN_TEST(testSkipFromTheModelInputGetsNoGradient);
     RUN_TEST(testFanOutThreeWritesAccumulatesAndSums);
+    RUN_TEST(testFrozenPrefixWithSkipAcrossTheBoundary);
+    RUN_TEST(testFrozenNodeOnTheSkipPathLeavesAGapInTheBackward);
     return UNITY_END();
 }

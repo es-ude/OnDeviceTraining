@@ -19,12 +19,12 @@
  *                the scheduler's plan asks for, every layer backward, the
  *                scheduler's end and teardown, and the Dropout and
  *                BatchNorm1d train-mode reset. Fires even when backward
- *                truncates at the deepest trainable layer or is skipped
- *                entirely (all-frozen model), and a recompute adds no event:
- *                every call yields exactly FORWARD_BEGIN, FORWARD_END,
- *                BACKWARD_BEGIN, BACKWARD_END in that order, so an external
- *                occurrence count per step is a constant, never a function of
- *                the model.
+ *                runs for only some layers (modelGradFlags' runsBackward)
+ *                or is skipped entirely (all-frozen model), and a recompute
+ *                adds no event: every call yields exactly FORWARD_BEGIN,
+ *                FORWARD_END, BACKWARD_BEGIN, BACKWARD_END in that order, so an
+ *                external occurrence count per step is a constant, never a
+ *                function of the model.
  *   - OPTIMIZER: the parameter update inside optimizerStep() (Optimizer.h),
  *                and only that -- grad zeroing, mean-scaling and clipping are
  *                outside the phase. A direct optimizerFunctions[type].step()

@@ -2429,6 +2429,37 @@ void testTrainingRunValidatesTheWiringAtItsEntry(void) {
     freeShuffleRunFixture(&f);
 }
 
+static void evaluateOnASelfReadingWiring(shuffleRunFixture_t *f, int entry) {
+    const model_t m = {f->model, 1, g_selfReadStart, g_selfReadIds};
+    size_t cm[4];
+    if (entry == 0) {
+        (void)evaluationEpoch(&m, MSE, f->evalDl, inferenceWithLoss, REDUCTION_MEAN, 1);
+    } else if (entry == 1) {
+        (void)evaluationEpochWithMetrics(&m, MSE, f->evalDl, inferenceWithLoss, REDUCTION_MEAN, 1);
+    } else {
+        (void)evaluationEpochWithReport(&m, MSE, f->evalDl, inferenceWithLoss, cm, 2,
+                                        REDUCTION_MEAN, 1);
+    }
+}
+
+/* Each evaluation entry validates the wiring under its own name, before its pre-flight reads it. */
+void testEvaluationEntriesValidateTheWiringAtTheirEntry(void) {
+    shuffleRunFixture_t f;
+    buildShuffleRunFixture(&f, false, false);
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "evaluationEpoch: wiring: node 0 reads buffer 1, which is not produced before it",
+        evaluateOnASelfReadingWiring(&f, 0));
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "evaluationEpochWithMetrics: wiring: node 0 reads buffer 1, which is "
+                             "not produced before it",
+                             evaluateOnASelfReadingWiring(&f, 1));
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "evaluationEpochWithReport: wiring: node 0 reads buffer 1, which is "
+                             "not produced before it",
+                             evaluateOnASelfReadingWiring(&f, 2));
+    freeShuffleRunFixture(&f);
+}
+
 /* Fills params[0..5] with the fixture's weights, then its biases. */
 static void captureShuffleRunParams(const shuffleRunFixture_t *f, float params[6]) {
     for (size_t i = 0; i < 4; i++) {
@@ -2858,6 +2889,10 @@ static size_t getBfpMetricsDatasetSize(void) {
     return 1;
 }
 
+/* The evaluation entries validate the model; a stub inferenceFn never runs it. */
+static layer_t g_stubEvalLayer = {.type = RELU, .config = NULL};
+static layer_t *g_stubEvalModel[1] = {&g_stubEvalLayer};
+
 void testEvaluationEpochWithMetrics_BfpOutputWireDequantCompares() {
     bfpMetricsItem = buildFloatTensor1D(2, (float[]){1.f, 1.f});
     bfpMetricsLabel = buildFloatTensor1D(2, (float[]){0.f, 1.f});
@@ -2865,7 +2900,7 @@ void testEvaluationEpochWithMetrics_BfpOutputWireDequantCompares() {
     dataLoader_t *dl =
         dataLoaderInit(getBfpMetricsSample, getBfpMetricsDatasetSize, 1, NULL, NULL, false, true);
 
-    epochStats_t stats = evaluationEpochWithMetrics(&MODEL_CHAIN(NULL, 0), MSE, dl,
+    epochStats_t stats = evaluationEpochWithMetrics(&MODEL_CHAIN(g_stubEvalModel, 1), MSE, dl,
                                                     bfpOutputWireInference, REDUCTION_MEAN, 0);
 
     float capturedAccuracy = stats.accuracy;
@@ -3061,8 +3096,8 @@ void testEvaluationEpochWithMetricsHandsInferenceBatchAxisViews(void) {
         dataLoaderInit(getProbeSample, getProbeDatasetSize, 1, NULL, NULL, false, true);
     g_probe = (shapeProbe_t){0};
 
-    epochStats_t stats = evaluationEpochWithMetrics(&MODEL_CHAIN(NULL, 0), MSE, dl, probeInference,
-                                                    REDUCTION_MEAN, 0);
+    epochStats_t stats = evaluationEpochWithMetrics(&MODEL_CHAIN(g_stubEvalModel, 1), MSE, dl,
+                                                    probeInference, REDUCTION_MEAN, 0);
 
     bool itemDataShared = g_probe.inputData == probeDatasetItem->data;
     bool labelDataShared = g_probe.labelData == probeDatasetLabel->data;
@@ -4452,6 +4487,7 @@ int main(void) {
     RUN_TEST(testTrainingRunShufflesEachEpochUnderItsOwnKey);
     RUN_TEST(testTrainingRunKeepsEpochZerosOrderWithoutPerEpochReshuffle);
     RUN_TEST(testTrainingRunValidatesTheWiringAtItsEntry);
+    RUN_TEST(testEvaluationEntriesValidateTheWiringAtTheirEntry);
     RUN_TEST(testTrainingRunShuffleFollowsTheEpochCounterAcrossCalls);
     RUN_TEST(testTrainingRunWithoutAnRngStopsAtAShuffledEvalLoader);
     RUN_TEST(testTrainingRunWithoutAnRngStopsAtAShuffledTrainLoader);

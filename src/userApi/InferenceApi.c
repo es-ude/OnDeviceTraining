@@ -345,6 +345,11 @@ static inferenceStats_t *inferenceOnScheduler(const model_t *m, tensor_t *input,
 inferenceStats_t *inferenceWithLoss(const model_t *m, tensor_t *input, tensor_t *label,
                                     lossFuncType_t funcType, reduction_t forwardReduction,
                                     const trainingCall_t *call) {
+    if (label == NULL) {
+        PRINT_ERROR("inferenceWithLoss: label is NULL -- the loss needs one; inference() runs a "
+                    "forward without a label");
+        exit(1);
+    }
     const rngKey_t *callKey = (call != NULL) ? call->key : NULL;
     if (call != NULL && call->remat != NULL) {
         return inferenceOnScheduler(m, input, label, funcType, forwardReduction, call->remat,

@@ -216,6 +216,21 @@ def test_add_with_keyword_arguments_is_refused() -> None:
     assert (info.value.layer_type, info.value.where) == ("add", "add")
 
 
+def test_broadcasting_add_is_refused() -> None:
+    class Net(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.pool = nn.AvgPool1d(8)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x + self.pool(x)  # [1, 2, 8] + [1, 2, 1]
+
+    with pytest.raises(UnsupportedLayerError) as info:
+        _run(Net(), (1, 2, 8))
+    assert (info.value.layer_type, info.value.where) == ("add", "add")
+    assert "(1, 2, 8)" in str(info.value) and "(1, 2, 1)" in str(info.value)
+
+
 def test_a_value_nobody_reads_is_refused() -> None:
     model = _Residual()
     root, registry = to_shaped_ir(model, (1, 2, 8))

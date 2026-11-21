@@ -29,9 +29,12 @@ typedef void (*traceSink_t)(void *ctx, size_t layerIdx, layerType_t layerType, c
  *  each layer's backward ("agrad", with the gradient entering it: the
  *  gradient w.r.t. that layer's output).
  *
- *  Backward truncates at the deepest (closest-to-input) trainable layer
- *  (#380 PR2): "lossgrad"/"agrad" fire only for that layer and everything
- *  above it, never for a layer below it (no dx is consumed there). If no
+ *  A layer's backward, and its "agrad", runs exactly where modelGradFlags
+ *  sets runsBackward: the layer has trainable params, or an input that
+ *  needs a gradient. A frozen layer whose inputs need no gradient fires no
+ *  "agrad", even when a trainable layer has a lower node index (a DAG
+ *  branch it does not read). On a chain
+ *  this is the range from the deepest trainable layer to the top. If no
  *  layer in the model trains, backward is skipped entirely -- NO "lossgrad"
  *  and NO "agrad" events fire (the loss value is still computed and "fwd"
  *  still fires for every layer). Preconditions: as for

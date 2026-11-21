@@ -166,6 +166,12 @@ def _add(node: ir.Node, acc: _Acc) -> _Acc:
         or not all(isinstance(a, fx.Node) for a in fx_node.args)
     ):
         raise UnsupportedLayerError("add", node.name)
+    # the C ADD does not broadcast
+    shapes = [acc.shaped.edges[(a.name, node.name)].shape for a in fx_node.args]
+    if shapes[0] != shapes[1]:
+        raise UnsupportedLayerError(
+            "add", node.name, f"operand shapes {shapes[0]} and {shapes[1]} differ"
+        )
     return _layer(acc, node, "ADD")
 
 

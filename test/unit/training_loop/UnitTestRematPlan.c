@@ -5298,6 +5298,30 @@ void testPlanCostsAnAdaptivePoolOnItsInput(void) {
     rematWireTableFree(t);
 }
 
+/* In a DAG a node's input is its wired buffer, not the buffer before it: n0 and n1 both pool the
+ * [1, 3, 8] input (b0) to [1, 3, 4] and n2 = ADD(b1, b2), so n1 costs its 24 inputs, not b1's 12,
+ * and the plan costs 24 + 24 + 12. */
+void testPlanCostsADagNodeOnItsWiredInput(void) {
+    adaptiveAvgPool1dConfig_t poolConfig = {
+        .outputSize = 4, .outputQ = &g_floatQ, .propLossQ = &g_floatQ};
+    layer_t pool0 = {.type = ADAPTIVE_AVGPOOL1D,
+                     .config = &(layerConfig_t){.adaptiveAvgPool1d = &poolConfig}};
+    layer_t pool1 = pool0;
+    layer_t *model[3] = {&pool0, &pool1, addLayerInit(NULL)};
+    static const uint16_t start[4] = {0, 1, 2, 4}, ids[4] = {0, 0, 1, 2};
+    const model_t m = {model, 3, start, ids};
+    inputLike_t in;
+    tensor_t *x = makeInput(&in, (size_t[]){1, 3, 8}, 3, &g_floatQ);
+    rematWireTable_t *t = NULL;
+    TEST_ASSERT_TRUE(rematWireTableInit(&t, &m, defaultLossConfig(MSE), x));
+    rematPlan_t *p = NULL;
+    TEST_ASSERT_TRUE(rematPlanBuild(&p, t, &m, NULL));
+    TEST_ASSERT_EQUAL_size_t(60, p->forwardCost);
+    rematPlanFree(p);
+    rematWireTableFree(t);
+    freeAddLayer(model[2]);
+}
+
 /* Layer 0's input width raised in its weights' shape, which only the cost
  * reads (the table and the grammar read the output width): with SIZE_MAX / 4,
  * Linear 2->4 costs 4 * (SIZE_MAX / 4) = SIZE_MAX - 3, and ReLU's 4 more
@@ -6236,6 +6260,7 @@ int main(void) {
     RUN_TEST(testRetainListHarKeepingActs3And7);
     RUN_TEST(testPlanCostsEveryForwardAndEveryRecomputeOfMlp3);
     RUN_TEST(testPlanCostsAnAdaptivePoolOnItsInput);
+    RUN_TEST(testPlanCostsADagNodeOnItsWiredInput);
     RUN_TEST(testPlanBuildExitsOnAForwardCostAboveSizeMax);
     RUN_TEST(testPlanBuildExitsOnARecomputeCostAboveSizeMax);
     RUN_TEST(testRetainListPlanEvalProgramIsTheStoreAllEvalProgram);

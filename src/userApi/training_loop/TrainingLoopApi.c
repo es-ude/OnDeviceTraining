@@ -437,6 +437,7 @@ static float evaluateStacked(const char *caller, const char *knob, const model_t
 float evaluationEpoch(const model_t *model, lossFuncType_t funcType, dataLoader_t *dataLoader,
                       inferenceWithLossFn_t inferenceFn, reduction_t forwardReduction,
                       size_t microBatchSize) {
+    modelRequireValid(model, "evaluationEpoch");
     size_t m = resolveEvalMicroBatch(microBatchSize);
     size_t numberOfBatches = requireEvalBatches(dataLoader, "evaluationEpoch");
     float totalLoss = 0.0f;
@@ -609,6 +610,7 @@ static epochStats_t evaluateEpochInternal(const char *knob, const model_t *model
 epochStats_t evaluationEpochWithMetrics(const model_t *model, lossFuncType_t funcType,
                                         dataLoader_t *dataLoader, inferenceWithLossFn_t inferenceFn,
                                         reduction_t forwardReduction, size_t microBatchSize) {
+    modelRequireValid(model, "evaluationEpochWithMetrics");
     size_t m = resolveEvalMicroBatch(microBatchSize);
     (void)requireEvalBatches(dataLoader, "evaluationEpochWithMetrics");
     // Peek at first sample to derive numClasses from label shape
@@ -629,6 +631,7 @@ classificationReport_t
 evaluationEpochWithReport(const model_t *model, lossFuncType_t funcType, dataLoader_t *dataLoader,
                           inferenceWithLossFn_t inferenceFn, size_t *cmBuffer, size_t numClasses,
                           reduction_t forwardReduction, size_t microBatchSize) {
+    modelRequireValid(model, "evaluationEpochWithReport");
     /* #468: 0 is evalFirstSample's "no metrics" opt-out, so the
      * first-sample check would let it through to 0-sized counters. */
     if (numClasses == 0) {

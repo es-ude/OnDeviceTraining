@@ -41,7 +41,8 @@ tensor_t **inferenceBatched(const model_t *m, batch_t *batch);
  *  output is unmarked, where the NULL path marks it). A non-NULL call->key is
  *  this call's key: layer i gets it folded with (LAYER, i) and the loss with
  *  (LAYER, m->numLayers), on either path; without it every layer gets a
- *  NULL context. */
+ *  NULL context. label is required: a NULL label exits (inference() is the
+ *  forward without a loss). */
 inferenceStats_t *inferenceWithLoss(const model_t *m, tensor_t *input, tensor_t *label,
                                     lossFuncType_t funcType, reduction_t forwardReduction,
                                     const trainingCall_t *call);

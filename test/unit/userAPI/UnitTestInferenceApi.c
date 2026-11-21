@@ -1235,6 +1235,18 @@ void testInferenceWithLossValidatesTheWiring(void) {
     freeSkipFixture(&f);
 }
 
+/* A DAG runs on a scheduler, whose forward would skip the loss for a NULL label. */
+static void inferF3WithANullLabel(void) {
+    dagFixture_t f;
+    dagBuildF3(&f, false);
+    dagTensor_t xs;
+    (void)inferenceWithLoss(&f.m, dagInput(&xs, 1.0f, 2.0f), NULL, MSE, REDUCTION_MEAN, NULL);
+}
+
+void testInferenceWithLossRefusesANullLabel(void) {
+    ASSERT_EXITS_WITH_OUTPUT(1, "inferenceWithLoss: label is NULL", inferF3WithANullLabel());
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testInferenceLinearReluFloat);
@@ -1245,6 +1257,7 @@ int main(void) {
     RUN_TEST(testInferenceValidatesTheWiring);
     RUN_TEST(testInferenceBatchedValidatesOncePerCall);
     RUN_TEST(testInferenceWithLossValidatesTheWiring);
+    RUN_TEST(testInferenceWithLossRefusesANullLabel);
 
     RUN_TEST(testInferenceWithLossLinearReluFloat);
     RUN_TEST(testInferenceWithLossRejectsRank1LabelAgainstBatchedOutput);

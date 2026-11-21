@@ -89,11 +89,17 @@ SKIP=<0|1> ./build/examples/examples/har_classifier/train_c_har_residual`:
 | `liveness` | `arena_b` | 32768 | 32768 | +0 |
 
 - The skip adds 4096 B of `wires_peak_b` under `store_all` and nothing under
-  `liveness`, where the peak sits elsewhere in the net.
+  `liveness`, where the peak sits elsewhere in the net. `store_all` keeps every
+  activation for the whole step, so its `activations_peak_b` is the sum of all node
+  outputs (37040 B for the chain). The skip adds one node, the `ADD`, whose
+  [16, 64] FLOAT32 output is exactly the extra 16 x 64 x 4 = 4096 B. The first pool's
+  output is kept in both topologies (the conv after it reads it for its weight
+  gradient), so the skip does not add it.
 - Gradient fan-out uses one partial buffer: at most one is live, for two steps, of
   the skip wire's gradient size, 16 x 64 x 4 = 4096 B at micro-batch 1. Giving each
   contribution its own buffer plus a sum would need (k+1) x that at the sum, 3 x 4096 B
-  for k = 2.
+  for k = 2. This bound is not the +4096 B delta above: the partial buffer adds
+  0 B to either peak (the `wires_peak_b` and `activations_peak_b` deltas are equal).
 - A pinned unit-test fixture shows the same effect in small: the skip costs +16 B
   (`liveness`) / +32 B (`store_all`) and the partial buffer adds 0 B at the peak.
 

@@ -1073,7 +1073,9 @@ static void recordRecomputeNumbers(rematPlan_t *p, const rematWireTable_t *t, co
     size_t forwardCost = 0;
     size_t recomputeCost = 0;
     for (size_t l = 0; l < t->modelSize; l++) {
-        size_t cost = layerForwardCost(m->layers[l], activationElements(&t->actShapes[l]),
+        uint16_t ids[MODEL_MAX_ARITY];
+        (void)modelNodeInputs(m, l, ids);
+        size_t cost = layerForwardCost(m->layers[l], activationElements(&t->actShapes[ids[0]]),
                                        activationElements(&t->actShapes[l + 1u]));
         forwardCost = planAdd(forwardCost, cost, "forwardCost");
         if (refwdSteps > 0u) {

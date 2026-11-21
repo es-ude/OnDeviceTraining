@@ -29,6 +29,7 @@
 #include "QuantizationApi.h"
 #include "RNG.h"
 #include "ReluApi.h"
+#include "RematPlan.h"
 #include "RematScheduler.h"
 #include "SgdApi.h"
 #include "SoftmaxApi.h"
@@ -181,11 +182,13 @@ static void dagGraphFree(dagGraph_t *f) {
 }
 
 /* The remat plans a DAG admits. */
-static const struct {
+typedef struct dagCell {
     bool arena;
     rematPlanPolicy_t policy;
     const char *name;
-} kCells[4] = {
+} dagCell_t;
+
+static const dagCell_t kCells[4] = {
     {false, REMAT_PLAN_STORE_ALL, "HEAP/STORE_ALL"},
     {false, REMAT_PLAN_LIVENESS, "HEAP/LIVENESS"},
     {true, REMAT_PLAN_STORE_ALL, "ARENA/STORE_ALL"},
@@ -648,12 +651,33 @@ typedef struct runOut {
     float params[RES_GRADS];
     float trainLoss;
     float evalLoss;
+    size_t calls;       /* forwardingInference calls */
+    size_t onScheduler; /* of those, the calls on g_expectedRemat */
 } runOut_t;
 
+/* An inferenceWithLossFn_t conformer that wraps the real one: it counts its calls and those on
+ * g_expectedRemat, and forwards each call unchanged. */
+static size_t g_forwardedCalls;
+static size_t g_forwardedOnScheduler;
+static rematScheduler_t *g_expectedRemat;
+
+static inferenceStats_t *forwardingInference(const model_t *model, tensor_t *input, tensor_t *label,
+                                             lossFuncType_t funcType, reduction_t forwardReduction,
+                                             const trainingCall_t *call) {
+    g_forwardedCalls++;
+    if (call != NULL && call->remat != NULL && call->remat == g_expectedRemat) {
+        g_forwardedOnScheduler++;
+    }
+    return inferenceWithLoss(model, input, label, funcType, forwardReduction, call);
+}
+
 /* Model R from dagRunInit, 3 epochs of SGD over the 4 samples (train batch 2 in order, eval
- * batch 1); s == NULL trains without a scheduler. Everything it builds is freed before it
- * returns; freeOptim owns the parameters, so the Linears go as shells. */
-static runOut_t runResidualTraining(rematScheduler_t *s, inferenceWithLossFn_t fn) {
+ * batch 1); s == NULL trains without a scheduler. Otherwise s is initialised as cell on the
+ * built model, keyed to the [1, 4] view of one sample, and is left for the caller to report on
+ * and deinit. Everything else it builds is freed before it returns; freeOptim owns the
+ * parameters, so the Linears go as shells. */
+static runOut_t runResidualTraining(rematScheduler_t *s, const dagCell_t *cell,
+                                    inferenceWithLossFn_t fn) {
     for (size_t i = 0; i < RUN_N; i++) {
         runItems[i] = buildFloatTensor((size_t[]){4}, 1, dagRunX + 4 * i);
         runLabels[i] = buildFloatTensor((size_t[]){2}, 1, dagRunY + 2 * i);
@@ -664,6 +688,14 @@ static runOut_t runResidualTraining(rematScheduler_t *s, inferenceWithLossFn_t f
     (void)graphNode(&f.g, goldLinear(4, 2, TRAINABLE_DEFAULT, dagRunInit + 40, dagRunInit + 48, 4),
                     h4);
     f.m = graphFinish(&f.g);
+    if (s != NULL) {
+        batchView_t view;
+        const rematPlanSpec_t spec = {.policy = cell->policy};
+        const tensor_t *x0 = batchViewOf(&view, runItems[0]);
+        bool ok = cell->arena ? rematArenaInit(s, &f.m, defaultLossConfig(MSE), x0, &spec)
+                              : rematHeapInit(s, &f.m, defaultLossConfig(MSE), x0, &spec);
+        TEST_ASSERT_TRUE_MESSAGE(ok, cell->name);
+    }
 
     dataLoader_t *trainDl =
         dataLoaderInit(getRunSample, getRunDatasetSize, 2, NULL, NULL, false, true);
@@ -674,12 +706,16 @@ static runOut_t runResidualTraining(rematScheduler_t *s, inferenceWithLossFn_t f
         sgdMCreateOptim(0.1f, 0.f, 0.f, &f.m, momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
     const trainingRunOptions_t *options = s != NULL ? &(trainingRunOptions_t){.remat = s} : NULL;
+    g_forwardedCalls = 0;
+    g_forwardedOnScheduler = 0;
     trainingRunResult_t res = trainingRun(&f.m, defaultLossConfig(MSE), trainDl, evalDl, sgd, 3,
                                           calculateGradsSequential, fn, options);
 
     runOut_t r = {.epochsCompleted = res.epochsCompleted,
                   .trainLoss = res.finalTrainLoss,
-                  .evalLoss = res.finalEvalStats.loss};
+                  .evalLoss = res.finalEvalStats.loss,
+                  .calls = g_forwardedCalls,
+                  .onScheduler = g_forwardedOnScheduler};
     parameter_t *slots[MAX_PARAMS];
     size_t n = trainableSlots(&f.m, slots);
     size_t k = 0;
@@ -715,13 +751,48 @@ static runOut_t runResidualTraining(rematScheduler_t *s, inferenceWithLossFn_t f
 /* Six optimizer steps compound every gradient path, the fan-out SUM included, into the
  * parameters; both reported losses follow trainingRun's MEAN convention. */
 void testTrainingRunOnResidualModelMatchesPyTorch(void) {
-    runOut_t r = runResidualTraining(NULL, inferenceWithLoss);
+    runOut_t r = runResidualTraining(NULL, NULL, inferenceWithLoss);
     TEST_ASSERT_EQUAL_size_t(3, r.epochsCompleted);
     TEST_ASSERT_EQUAL_size_t_MESSAGE(SIZE_MAX,
                                      firstMismatch(dagRunFinal, r.params, 50, 1e-5f, 1e-4f),
                                      "trained params diverge from PyTorch");
     TEST_ASSERT_FLOAT_WITHIN(1e-5f + 1e-4f * fabsf(dagRunTrainLoss), dagRunTrainLoss, r.trainLoss);
     TEST_ASSERT_FLOAT_WITHIN(1e-5f + 1e-4f * fabsf(dagRunEvalLoss), dagRunEvalLoss, r.evalLoss);
+}
+
+/* Evaluation inherits the training micro-batch 1, so it runs on the training scheduler keyed to
+ * the [1, 4] view, and a DAG's EVAL on ARENA uses the TRAIN offsets: every cell reproduces the
+ * scheduler-free run bit for bit. The last scheduler call is an eval call, so the observed peak
+ * is the EVAL program's. */
+void testTrainingRunWithEvaluationIsBitIdenticalOnEveryScheduler(void) {
+    g_expectedRemat = NULL;
+    runOut_t ref = runResidualTraining(NULL, NULL, forwardingInference);
+    runOut_t run[4];
+    rematReport_t rep[4];
+    size_t evalPeak[4];
+    for (size_t c = 0; c < 4; c++) {
+        rematScheduler_t s;
+        g_expectedRemat = &s;
+        run[c] = runResidualTraining(&s, &kCells[c], forwardingInference);
+        rematSchedulerReport(&s, &rep[c]);
+        evalPeak[c] = rematPlanProgram(s.plan, REMAT_MODE_EVAL)->peakLiveBytes;
+        rematSchedulerDeinit(&s);
+    }
+    g_expectedRemat = NULL;
+
+    TEST_ASSERT_EQUAL_size_t(12, ref.calls); /* 3 epochs x 4 eval samples */
+    TEST_ASSERT_EQUAL_size_t(0, ref.onScheduler);
+    for (size_t c = 0; c < 4; c++) {
+        TEST_ASSERT_EQUAL_MEMORY_MESSAGE(ref.params, run[c].params, sizeof ref.params,
+                                         kCells[c].name);
+        TEST_ASSERT_EQUAL_MEMORY(&ref.trainLoss, &run[c].trainLoss, sizeof(float));
+        TEST_ASSERT_EQUAL_MEMORY(&ref.evalLoss, &run[c].evalLoss, sizeof(float));
+        TEST_ASSERT_EQUAL_size_t(12, run[c].onScheduler);
+        TEST_ASSERT_EQUAL_size_t(evalPeak[c], rep[c].observedPeakLiveBytes);
+    }
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(SIZE_MAX,
+                                     firstMismatch(dagRunFinal, ref.params, 50, 1e-5f, 1e-4f),
+                                     "trained params diverge from PyTorch");
 }
 
 int main(void) {
@@ -735,5 +806,6 @@ int main(void) {
     RUN_TEST(testFrozenNodeOnTheSkipPathLeavesAGapInTheBackward);
     RUN_TEST(testBatchNormInsideTheBlockMatchesPyTorchPerMicroBatch);
     RUN_TEST(testTrainingRunOnResidualModelMatchesPyTorch);
+    RUN_TEST(testTrainingRunWithEvaluationIsBitIdenticalOnEveryScheduler);
     return UNITY_END();
 }

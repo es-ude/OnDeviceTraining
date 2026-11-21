@@ -10,6 +10,7 @@
 #include "BatchNorm1d.h"
 #include "BatchNorm1dApi.h"
 #include "BatchView.h"
+#include "BorrowedLayer.h"
 #include "CalculateGradsSequential.h"
 #include "Conv1dApi.h"
 #include "DagFixtures.h"
@@ -29,6 +30,7 @@
 #include "RNG.h"
 #include "ReluApi.h"
 #include "RematScheduler.h"
+#include "SgdApi.h"
 #include "SoftmaxApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
@@ -239,12 +241,12 @@ static void runParity(const model_t *m, lossConfig_t loss, tensor_t *x, tensor_t
 
 /* n0 = Linear 4->4 (b0); n1 = ReLU (b1); n2 = Linear 4->4 (b2); n3 = ADD (b1, b3). b1 fans out
  * to the ReLU and the ADD, so its gradient is the SUM of two contributions. */
-static uint16_t buildResidualTrunk(dagGraph_t *f) {
+static uint16_t buildResidualTrunk(dagGraph_t *f, const float *w0, const float *b0, const float *w2,
+                                   const float *b2) {
     dagGraphBegin(f);
-    uint16_t h1 =
-        graphNode(&f->g, goldLinear(4, 4, TRAINABLE_DEFAULT, dagResW0, dagResB0, 0), GRAPH_INPUT);
+    uint16_t h1 = graphNode(&f->g, goldLinear(4, 4, TRAINABLE_DEFAULT, w0, b0, 0), GRAPH_INPUT);
     uint16_t h2 = graphNode(&f->g, dagRelu(), h1);
-    uint16_t h3 = graphNode(&f->g, goldLinear(4, 4, TRAINABLE_DEFAULT, dagResW2, dagResB2, 2), h2);
+    uint16_t h3 = graphNode(&f->g, goldLinear(4, 4, TRAINABLE_DEFAULT, w2, b2, 2), h2);
     return graphMerge(&f->g, addLayerInit(NULL), h1, h3);
 }
 
@@ -253,7 +255,7 @@ static uint16_t buildResidualTrunk(dagGraph_t *f) {
 
 void testResidualBlockMatchesPyTorchOnEveryAdmittedPlan(void) {
     dagGraph_t f;
-    uint16_t h4 = buildResidualTrunk(&f);
+    uint16_t h4 = buildResidualTrunk(&f, dagResW0, dagResB0, dagResW2, dagResB2);
     (void)graphNode(&f.g, goldLinear(4, 2, TRAINABLE_DEFAULT, dagResW4, dagResB4, 4), h4);
     f.m = graphFinish(&f.g);
     tensor_t *x = buildFloatTensor((size_t[]){4}, 1, dagResX);
@@ -284,7 +286,7 @@ void testResidualBlockMatchesPyTorchOnEveryAdmittedPlan(void) {
  * Softmax itself never runs backward. */
 void testResidualIntoSoftmaxMatchesPyTorchUnderCrossEntropy(void) {
     dagGraph_t f;
-    uint16_t h4 = buildResidualTrunk(&f);
+    uint16_t h4 = buildResidualTrunk(&f, dagResW0, dagResB0, dagResW2, dagResB2);
     (void)graphNode(&f.g, goldSoftmax(), h4);
     f.m = graphFinish(&f.g);
     tensor_t *x = buildFloatTensor((size_t[]){4}, 1, dagResX);
@@ -591,7 +593,7 @@ static void runBnResidual(size_t m, bnRun_t *r) {
     dagGraphFree(&f);
 }
 
-/* Ghost BN over each chunk of m rows: the running stats update b/m times, and b1's gradient
+/* Ghost BN over each chunk of m rows: the running stats update B/m times, and b1's gradient
  * sums the ADD's skip contribution with the BN branch's partial. */
 void testBatchNormInsideTheBlockMatchesPyTorchPerMicroBatch(void) {
     static const size_t ms[3] = {1, 2, 4};
@@ -622,6 +624,106 @@ void testBatchNormInsideTheBlockMatchesPyTorchPerMicroBatch(void) {
     }
 }
 
+/* ---- full training through trainingRun ---------------------------------------------------- */
+
+#define RUN_N 4
+
+/* File-scope because the loader callbacks take no context. */
+static tensor_t *runItems[RUN_N];
+static tensor_t *runLabels[RUN_N];
+
+static sample_t *getRunSample(size_t id) {
+    sample_t *s = reserveMemory(sizeof(sample_t));
+    s->item = runItems[id];
+    s->label = runLabels[id];
+    return s;
+}
+
+static size_t getRunDatasetSize(void) {
+    return RUN_N;
+}
+
+typedef struct runOut {
+    size_t epochsCompleted;
+    float params[RES_GRADS];
+    float trainLoss;
+    float evalLoss;
+} runOut_t;
+
+/* Model R from dagRunInit, 3 epochs of SGD over the 4 samples (train batch 2 in order, eval
+ * batch 1); s == NULL trains without a scheduler. Everything it builds is freed before it
+ * returns; freeOptim owns the parameters, so the Linears go as shells. */
+static runOut_t runResidualTraining(rematScheduler_t *s, inferenceWithLossFn_t fn) {
+    for (size_t i = 0; i < RUN_N; i++) {
+        runItems[i] = buildFloatTensor((size_t[]){4}, 1, dagRunX + 4 * i);
+        runLabels[i] = buildFloatTensor((size_t[]){2}, 1, dagRunY + 2 * i);
+    }
+    dagGraph_t f;
+    uint16_t h4 =
+        buildResidualTrunk(&f, dagRunInit, dagRunInit + 16, dagRunInit + 20, dagRunInit + 36);
+    (void)graphNode(&f.g, goldLinear(4, 2, TRAINABLE_DEFAULT, dagRunInit + 40, dagRunInit + 48, 4),
+                    h4);
+    f.m = graphFinish(&f.g);
+
+    dataLoader_t *trainDl =
+        dataLoaderInit(getRunSample, getRunDatasetSize, 2, NULL, NULL, false, true);
+    dataLoader_t *evalDl =
+        dataLoaderInit(getRunSample, getRunDatasetSize, 1, NULL, NULL, false, true);
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.1f, 0.f, 0.f, &f.m, momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    const trainingRunOptions_t *options = s != NULL ? &(trainingRunOptions_t){.remat = s} : NULL;
+    trainingRunResult_t res = trainingRun(&f.m, defaultLossConfig(MSE), trainDl, evalDl, sgd, 3,
+                                          calculateGradsSequential, fn, options);
+
+    runOut_t r = {.epochsCompleted = res.epochsCompleted,
+                  .trainLoss = res.finalTrainLoss,
+                  .evalLoss = res.finalEvalStats.loss};
+    parameter_t *slots[MAX_PARAMS];
+    size_t n = trainableSlots(&f.m, slots);
+    size_t k = 0;
+    for (size_t p = 0; p < n; p++) {
+        size_t count = calcNumberOfElementsByTensor(slots[p]->param);
+        TEST_ASSERT_TRUE_MESSAGE(k + count <= RES_GRADS, "model R has 50 parameters");
+        memcpy(r.params + k, slots[p]->param->data, count * sizeof(float));
+        k += count;
+    }
+    TEST_ASSERT_EQUAL_size_t(RES_GRADS, k);
+
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeDataLoader(evalDl);
+    freeDataLoader(trainDl);
+    for (size_t j = 0; j < f.m.numLayers; j++) {
+        layer_t *layer = f.layers[j];
+        if (layer->type == LINEAR) {
+            freeLinearLayerShellOnly(layer);
+        } else if (layer->type == RELU) {
+            freeReluLayer(layer);
+        } else {
+            freeAddLayer(layer);
+        }
+    }
+    for (size_t i = 0; i < RUN_N; i++) {
+        freeTensor(runLabels[i]);
+        freeTensor(runItems[i]);
+    }
+    return r;
+}
+
+/* Six optimizer steps compound every gradient path, the fan-out SUM included, into the
+ * parameters; both reported losses follow trainingRun's MEAN convention. */
+void testTrainingRunOnResidualModelMatchesPyTorch(void) {
+    runOut_t r = runResidualTraining(NULL, inferenceWithLoss);
+    TEST_ASSERT_EQUAL_size_t(3, r.epochsCompleted);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(SIZE_MAX,
+                                     firstMismatch(dagRunFinal, r.params, 50, 1e-5f, 1e-4f),
+                                     "trained params diverge from PyTorch");
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f + 1e-4f * fabsf(dagRunTrainLoss), dagRunTrainLoss, r.trainLoss);
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f + 1e-4f * fabsf(dagRunEvalLoss), dagRunEvalLoss, r.evalLoss);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testResidualBlockMatchesPyTorchOnEveryAdmittedPlan);
@@ -632,5 +734,6 @@ int main(void) {
     RUN_TEST(testFrozenPrefixWithSkipAcrossTheBoundary);
     RUN_TEST(testFrozenNodeOnTheSkipPathLeavesAGapInTheBackward);
     RUN_TEST(testBatchNormInsideTheBlockMatchesPyTorchPerMicroBatch);
+    RUN_TEST(testTrainingRunOnResidualModelMatchesPyTorch);
     return UNITY_END();
 }

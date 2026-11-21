@@ -73,6 +73,9 @@ layerFunctions_t layerFunctions[] = {
     [BATCHNORM1D] = {batchNorm1dForward, batchNorm1dBackward, batchNorm1dCalcOutputShape},
     [ADD] = {addChainForwardStub, addChainBackwardStub, addChainShapeStub}};
 
+_Static_assert(sizeof layerFunctions / sizeof layerFunctions[0] == LAYER_TYPE_COUNT,
+               "one layerFunctions row per layerType_t member");
+
 void initLayer(layer_t *layer, layerType_t type, layerConfig_t *config) {
     layer->type = type;
     layer->config = config;

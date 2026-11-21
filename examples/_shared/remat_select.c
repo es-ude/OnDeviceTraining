@@ -535,7 +535,7 @@ bool rematSelectDumpProblem(FILE *json, FILE *hashLine, const model_t *m, lossCo
     for (size_t b = 0; b <= n; b++) {
         shapes[b] = (shape_t){.dimensions = dims[b], .orderOfDimensions = order[b]};
     }
-    modelShapePass(m, inputLike->shape, &shapes[0], REMAT_DUMP_MAX_RANK);
+    modelShapePass(m, inputLike->shape, &shapes[0]);
     const bool chain = modelIsChain(m);
     for (size_t l = 0; l < n; l++) {
         if (l > 0u) {

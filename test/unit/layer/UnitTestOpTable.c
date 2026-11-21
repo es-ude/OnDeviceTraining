@@ -86,24 +86,29 @@ static void spyBackward(layer_t *layer, tensor_t *in, tensor_t *dy, tensor_t *dx
     g_bwd.exec = exec;
 }
 
-/* The 14 layer rows. A row left out of the designated initialiser reads as zeros: arity 0
- * makes modelRequireValid's wiring arity check reject every wired node of that type, and a
- * NULL slot crashes the driver. accumulatesDx on a unary row would let the deriver ask a
- * layer for an ACC it cannot do. */
+/* Every layer row but ADD's, so a type appended later is checked too. A row left out of the
+ * designated initialiser reads as zeros: arity 0 makes modelRequireValid's wiring arity check
+ * reject every wired node of that type, and a NULL slot crashes the driver. accumulatesDx on a
+ * unary row would let the deriver ask a layer for an ACC it cannot do. */
 void testEveryLayerRowIsAUnaryRowWithAllThreeFunctions(void) {
-    for (size_t t = LINEAR; t <= BATCHNORM1D; t++) {
+    for (size_t t = LINEAR; t < LAYER_TYPE_COUNT; t++) {
+        if (t == ADD) {
+            continue;
+        }
         TEST_ASSERT_NOT_NULL(opFunctions[t].forward);
         TEST_ASSERT_NOT_NULL(opFunctions[t].backward);
         TEST_ASSERT_NOT_NULL(opFunctions[t].shape);
         TEST_ASSERT_EQUAL_UINT8(1u, opFunctions[t].arity);
-        TEST_ASSERT_FALSE(opFunctions[t].readsOutput);
         TEST_ASSERT_FALSE(opFunctions[t].accumulatesDx);
     }
 }
 
 /* Tests and tools patch the mutable layerFunctions[]; the const table must reach the patch. */
 void testEveryRowDispatchesThroughLayerFunctionsAtCallTime(void) {
-    for (size_t t = LINEAR; t <= BATCHNORM1D; t++) {
+    for (size_t t = LINEAR; t < LAYER_TYPE_COUNT; t++) {
+        if (t == ADD) {
+            continue;
+        }
         layerFunctions_t saved = layerFunctions[t];
         layerFunctions[t].forward = spyForward;
         layerFunctions[t].backward = spyBackward;

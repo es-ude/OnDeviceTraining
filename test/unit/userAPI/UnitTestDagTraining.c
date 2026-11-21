@@ -653,7 +653,24 @@ typedef struct runOut {
     float evalLoss;
     size_t calls;       /* forwardingInference calls */
     size_t onScheduler; /* of those, the calls on g_expectedRemat */
+    size_t gradCalls;   /* countingGrads calls */
+    size_t gradRows2;   /* of those, the calls on a [2, 4] input */
 } runOut_t;
+
+/* A calculateGradsFn_t conformer that wraps calculateGradsSequential: it counts its calls and
+ * those whose input stacks two rows, and forwards each call unchanged. */
+static size_t g_gradCalls;
+static size_t g_gradRows2;
+
+static trainingStats_t *countingGrads(const model_t *model, lossConfig_t lossConfig,
+                                      reduction_t forwardReduction, tensor_t *input,
+                                      tensor_t *label, const trainingCall_t *call) {
+    g_gradCalls++;
+    if (input->shape->numberOfDimensions == 2 && input->shape->dimensions[0] == 2) {
+        g_gradRows2++;
+    }
+    return calculateGradsSequential(model, lossConfig, forwardReduction, input, label, call);
+}
 
 /* An inferenceWithLossFn_t conformer that wraps the real one: it counts its calls and those on
  * g_expectedRemat, and forwards each call unchanged. */
@@ -671,13 +688,14 @@ static inferenceStats_t *forwardingInference(const model_t *model, tensor_t *inp
     return inferenceWithLoss(model, input, label, funcType, forwardReduction, call);
 }
 
-/* Model R from dagRunInit, 3 epochs of SGD over the 4 samples (train batch 2 in order, eval
- * batch 1); s == NULL trains without a scheduler. Otherwise s is initialised as cell on the
- * built model, keyed to the [1, 4] view of one sample, and is left for the caller to report on
- * and deinit. Everything else it builds is freed before it returns; freeOptim owns the
+/* Model R from dagRunInit, 3 epochs of SGD over the 4 samples (train batch trainBatch in order,
+ * eval batch 1) through countingGrads; micro == 0 passes no micro-batch size (options NULL
+ * without a scheduler). s == NULL trains without a scheduler. Otherwise s is initialised as cell
+ * on the built model, keyed to the [1, 4] view of one sample, and is left for the caller to
+ * report on and deinit. Everything else it builds is freed before it returns; freeOptim owns the
  * parameters, so the Linears go as shells. */
 static runOut_t runResidualTraining(rematScheduler_t *s, const dagCell_t *cell,
-                                    inferenceWithLossFn_t fn) {
+                                    inferenceWithLossFn_t fn, size_t trainBatch, size_t micro) {
     for (size_t i = 0; i < RUN_N; i++) {
         runItems[i] = buildFloatTensor((size_t[]){4}, 1, dagRunX + 4 * i);
         runLabels[i] = buildFloatTensor((size_t[]){2}, 1, dagRunY + 2 * i);
@@ -698,24 +716,29 @@ static runOut_t runResidualTraining(rematScheduler_t *s, const dagCell_t *cell,
     }
 
     dataLoader_t *trainDl =
-        dataLoaderInit(getRunSample, getRunDatasetSize, 2, NULL, NULL, false, true);
+        dataLoaderInit(getRunSample, getRunDatasetSize, trainBatch, NULL, NULL, false, true);
     dataLoader_t *evalDl =
         dataLoaderInit(getRunSample, getRunDatasetSize, 1, NULL, NULL, false, true);
     quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
         sgdMCreateOptim(0.1f, 0.f, 0.f, &f.m, momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
-    const trainingRunOptions_t *options = s != NULL ? &(trainingRunOptions_t){.remat = s} : NULL;
+    const trainingRunOptions_t opt = {.remat = s, .microBatchSize = micro};
+    const trainingRunOptions_t *options = (s != NULL || micro != 0) ? &opt : NULL;
     g_forwardedCalls = 0;
     g_forwardedOnScheduler = 0;
+    g_gradCalls = 0;
+    g_gradRows2 = 0;
     trainingRunResult_t res = trainingRun(&f.m, defaultLossConfig(MSE), trainDl, evalDl, sgd, 3,
-                                          calculateGradsSequential, fn, options);
+                                          countingGrads, fn, options);
 
     runOut_t r = {.epochsCompleted = res.epochsCompleted,
                   .trainLoss = res.finalTrainLoss,
                   .evalLoss = res.finalEvalStats.loss,
                   .calls = g_forwardedCalls,
-                  .onScheduler = g_forwardedOnScheduler};
+                  .onScheduler = g_forwardedOnScheduler,
+                  .gradCalls = g_gradCalls,
+                  .gradRows2 = g_gradRows2};
     parameter_t *slots[MAX_PARAMS];
     size_t n = trainableSlots(&f.m, slots);
     size_t k = 0;
@@ -751,7 +774,7 @@ static runOut_t runResidualTraining(rematScheduler_t *s, const dagCell_t *cell,
 /* Six optimizer steps compound every gradient path, the fan-out SUM included, into the
  * parameters; both reported losses follow trainingRun's MEAN convention. */
 void testTrainingRunOnResidualModelMatchesPyTorch(void) {
-    runOut_t r = runResidualTraining(NULL, NULL, inferenceWithLoss);
+    runOut_t r = runResidualTraining(NULL, NULL, inferenceWithLoss, 2, 0);
     TEST_ASSERT_EQUAL_size_t(3, r.epochsCompleted);
     TEST_ASSERT_EQUAL_size_t_MESSAGE(SIZE_MAX,
                                      firstMismatch(dagRunFinal, r.params, 50, 1e-5f, 1e-4f),
@@ -760,20 +783,39 @@ void testTrainingRunOnResidualModelMatchesPyTorch(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-5f + 1e-4f * fabsf(dagRunEvalLoss), dagRunEvalLoss, r.evalLoss);
 }
 
+/* Batch 4 in two stacked [2, 4] calls per step: the ADD, its fan-out SUM and the loss run on two
+ * rows, and the grads of both calls add up before the one step. R has no batch statistics, so
+ * the gold is that of any m; the call counts pin that m = 2 reached the driver and the eval
+ * chunks, and a loop that stepped per micro-batch would land on dagRunFinal instead. */
+void testTrainingRunOnResidualModelWithMicroBatchTwoMatchesPyTorch(void) {
+    g_expectedRemat = NULL;
+    runOut_t r = runResidualTraining(NULL, NULL, forwardingInference, 4, 2);
+    TEST_ASSERT_EQUAL_size_t(3, r.epochsCompleted);
+    TEST_ASSERT_EQUAL_size_t(6, r.gradCalls); /* 3 epochs x 2 chunks */
+    TEST_ASSERT_EQUAL_size_t(6, r.gradRows2);
+    TEST_ASSERT_EQUAL_size_t(6, r.calls); /* eval inherits m: 3 epochs x 2 chunks */
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(SIZE_MAX,
+                                     firstMismatch(dagRunMbFinal, r.params, 50, 1e-5f, 1e-4f),
+                                     "trained params diverge from PyTorch");
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f + 1e-4f * fabsf(dagRunMbTrainLoss), dagRunMbTrainLoss,
+                             r.trainLoss);
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f + 1e-4f * fabsf(dagRunMbEvalLoss), dagRunMbEvalLoss, r.evalLoss);
+}
+
 /* Evaluation inherits the training micro-batch 1, so it runs on the training scheduler keyed to
  * the [1, 4] view, and a DAG's EVAL on ARENA uses the TRAIN offsets: every cell reproduces the
  * scheduler-free run bit for bit. The last scheduler call is an eval call, so the observed peak
  * is the EVAL program's. */
 void testTrainingRunWithEvaluationIsBitIdenticalOnEveryScheduler(void) {
     g_expectedRemat = NULL;
-    runOut_t ref = runResidualTraining(NULL, NULL, forwardingInference);
+    runOut_t ref = runResidualTraining(NULL, NULL, forwardingInference, 2, 0);
     runOut_t run[4];
     rematReport_t rep[4];
     size_t evalPeak[4];
     for (size_t c = 0; c < 4; c++) {
         rematScheduler_t s;
         g_expectedRemat = &s;
-        run[c] = runResidualTraining(&s, &kCells[c], forwardingInference);
+        run[c] = runResidualTraining(&s, &kCells[c], forwardingInference, 2, 0);
         rematSchedulerReport(&s, &rep[c]);
         evalPeak[c] = rematPlanProgram(s.plan, REMAT_MODE_EVAL)->peakLiveBytes;
         rematSchedulerDeinit(&s);
@@ -934,6 +976,7 @@ int main(void) {
     RUN_TEST(testFrozenNodeOnTheSkipPathLeavesAGapInTheBackward);
     RUN_TEST(testBatchNormInsideTheBlockMatchesPyTorchPerMicroBatch);
     RUN_TEST(testTrainingRunOnResidualModelMatchesPyTorch);
+    RUN_TEST(testTrainingRunOnResidualModelWithMicroBatchTwoMatchesPyTorch);
     RUN_TEST(testTrainingRunWithEvaluationIsBitIdenticalOnEveryScheduler);
     RUN_TEST(testResidualPeaksAgainstTheChainTwin);
     RUN_TEST(testPartWireLivesExactlyTwoSteps);

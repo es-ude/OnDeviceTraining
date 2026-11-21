@@ -24,8 +24,8 @@ typedef struct quantizationConfig quantizationConfig_t;
 /* WIRE FORMAT -- append-only. The serialized layer record's uint8 tag is this
  * enum's POSITION (src/serial/Serialize.c). Never insert or reorder members:
  * that renumbers the tail and silently corrupts every previously serialized
- * model. Append new members at the end and extend the wire-tag pins in
- * test/unit/serial/UnitTestSerialize.c. */
+ * model. Append new members directly before LAYER_TYPE_COUNT and extend the
+ * wire-tag pins in test/unit/serial/UnitTestSerialize.c. */
 typedef enum layerType {
     LINEAR,
     RELU,
@@ -41,7 +41,9 @@ typedef enum layerType {
     LAYERNORM,
     GROUPNORM,
     BATCHNORM1D,
-    ADD
+    ADD,
+    /* Not a layer: the member count, so it bounds every table indexed by type. Stays last. */
+    LAYER_TYPE_COUNT
 } layerType_t;
 
 typedef enum layerQType { FLOAT_LAYER, ASYM_LAYER } layerQType_t;

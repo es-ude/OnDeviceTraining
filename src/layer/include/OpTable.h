@@ -8,8 +8,7 @@
 #include "Layer.h"
 #include "Tensor.h"
 
-/* One row per layerType_t member: the last member + 1. */
-#define OP_TABLE_ROWS ((size_t)ADD + 1u)
+#define OP_TABLE_ROWS ((size_t)LAYER_TYPE_COUNT)
 
 /* in[0..k) are the input shapes; out arrives with caller-owned dimension
  * storage and receives the output shape. */
@@ -32,7 +31,6 @@ typedef struct opFunctions {
     opShapeFn_t shape;
     uint8_t arity;       /* number of input buffers a node of this op reads */
     uint8_t readsInputs; /* opReads_t: whether backward reads the forward inputs */
-    bool readsOutput;    /* backward reads the node's own forward output */
     bool accumulatesDx;  /* backward can add into an open dx wire (OP_MODE_ACC) */
 } opFunctions_t;
 

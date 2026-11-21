@@ -212,7 +212,7 @@ static void requireUntrackedBatchNormsEvaluable(const model_t *model, const tens
         shapes[s] = (shape_t){.dimensions = pool + 2u * s * maxRank,
                               .orderOfDimensions = pool + (2u * s + 1u) * maxRank};
     }
-    modelShapePass(&prefix, &a, shapes, maxRank);
+    modelShapePass(&prefix, &a, shapes);
     for (size_t i = 0; i <= last; i++) {
         if (model->layers[i]->type == BATCHNORM1D) {
             uint16_t ids[MODEL_MAX_ARITY];

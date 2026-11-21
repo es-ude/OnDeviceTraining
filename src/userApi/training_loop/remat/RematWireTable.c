@@ -475,7 +475,7 @@ static bool tableInit(rematWireTable_t **out, const model_t *m, lossFuncType_t l
     }
     slabLayout_t shapePlacing = {.base = shapeBlock, .cursor = 0};
     shape_t *shapes = placeShapes(&shapePlacing, n + 1u, maxRank);
-    modelShapePass(m, inputLike->shape, shapes, maxRank);
+    modelShapePass(m, inputLike->shape, shapes);
     numberWires(facts, m, lt, needsGrad, runsBackward, dxWire, dxMode);
     deriveFacts(facts, numWires, m, shapes, inputLike, dxWire, dxMode);
 
@@ -511,7 +511,7 @@ static bool tableInit(rematWireTable_t **out, const model_t *m, lossFuncType_t l
     slabLayout_t placing = {.base = block, .cursor = 0};
     rematWireTable_t *t =
         layoutTable(&placing, facts, numWires, n, isChain, numEdges, inputRank, maxRank);
-    modelShapePass(m, inputLike->shape, t->actShapes, maxRank);
+    modelShapePass(m, inputLike->shape, t->actShapes);
 
     t->modelSize = n;
     t->lossType = lt;
@@ -792,7 +792,7 @@ void rematWireTableBind(rematWireTable_t *t, const model_t *m, lossFuncType_t lt
                         tensor_t *input) {
     requireModelKey(t, m, lt, input);
     /* Phase 1 writes only into the table block: the shapes, then the per-wire facts. */
-    modelShapePass(m, input->shape, t->actShapes, t->maxRank);
+    modelShapePass(m, input->shape, t->actShapes);
     rematWireFact_t *facts = t->bindScratch;
     numberWires(facts, m, t->lossType, t->needsGrad, t->runsBackward, t->dxWire, t->dxMode);
     deriveFacts(facts, t->numWires, m, t->actShapes, input, t->dxWire, t->dxMode);

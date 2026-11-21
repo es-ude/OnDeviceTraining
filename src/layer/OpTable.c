@@ -37,7 +37,6 @@ static void opUnaryBackward(layer_t *layer, tensor_t *const *in, uint8_t k, tens
      .shape = opUnaryShape,                                                                        \
      .arity = 1u,                                                                                  \
      .readsInputs = (reads),                                                                       \
-     .readsOutput = false,                                                                         \
      .accumulatesDx = false}
 
 const opFunctions_t opFunctions[] = {
@@ -66,9 +65,8 @@ const opFunctions_t opFunctions[] = {
              .shape = addShape,
              .arity = 2u,
              .readsInputs = OP_READS_NEVER,
-             .readsOutput = false,
              .accumulatesDx = true},
 };
 
-_Static_assert(sizeof opFunctions / sizeof opFunctions[0] == OP_TABLE_ROWS,
-               "one op row per layerType_t member");
+_Static_assert(sizeof opFunctions / sizeof opFunctions[0] == LAYER_TYPE_COUNT,
+               "one op row per layerType_t member: a type appended without its row stops here");

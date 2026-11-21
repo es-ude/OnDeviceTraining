@@ -30,8 +30,8 @@ uint8_t modelNodeInputs(const model_t *m, size_t j, uint16_t ids[MODEL_MAX_ARITY
 bool modelIsChain(const model_t *m);
 /* Writes the shape of every buffer: shapes[0] gets a copy of input, shapes[j + 1] the output of
  * node j, each derived from the shapes of the buffers node j is wired to. Fine for any validated
- * model; the caller sizes every shape's dims and order to maxRank = max(input rank, 2). */
-void modelShapePass(const model_t *m, const shape_t *input, shape_t *shapes, size_t maxRank);
+ * model; the caller sizes every shape's dims and order to max(input rank, 2) entries. */
+void modelShapePass(const model_t *m, const shape_t *input, shape_t *shapes);
 /* The one producer of the needs-grad flags; anything else that needs them reads its output.
  * needsGrad[b] for b in 0..n: buffer b needs a gradient iff its producer is trainable
  * (layerParameters && !layerIsFrozen) or reads a buffer that needs one; needsGrad[0] = 0.

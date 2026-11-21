@@ -76,7 +76,7 @@ void testShapePassWritesEveryBufferShape(void) {
     size_t d[4][MAX_RANK], o[4][MAX_RANK];
     shape_t shapes[4];
     bindShapes(shapes, d, o, 4);
-    modelShapePass(&MODEL_CHAIN(layers, 3), &input, shapes, MAX_RANK);
+    modelShapePass(&MODEL_CHAIN(layers, 3), &input, shapes);
     const size_t rank[4] = {3, 3, 2, 2};
     const size_t dims[4][3] = {{2, 3, 4}, {2, 3, 4}, {2, 12, 0}, {2, 12, 0}};
     for (size_t j = 0; j < 4; j++) {
@@ -101,7 +101,7 @@ void testShapePassReadsTheWiredInput(void) {
     size_t d[3][MAX_RANK], o[3][MAX_RANK];
     shape_t shapes[3];
     bindShapes(shapes, d, o, 3);
-    modelShapePass(&(model_t){layers, 2, start, in}, &input, shapes, MAX_RANK);
+    modelShapePass(&(model_t){layers, 2, start, in}, &input, shapes);
     TEST_ASSERT_EQUAL_size_t(3, shapes[2].numberOfDimensions);
     TEST_ASSERT_EQUAL_size_t(4, shapes[2].dimensions[2]);
 }
@@ -121,7 +121,6 @@ void testAddRowIsTheNativeAccumulatingMerge(void) {
     TEST_ASSERT_EQUAL_UINT8(2, opFunctions[ADD].arity);
     TEST_ASSERT_TRUE(opFunctions[ADD].accumulatesDx);
     TEST_ASSERT_EQUAL_UINT8(OP_READS_NEVER, opFunctions[ADD].readsInputs);
-    TEST_ASSERT_FALSE(opFunctions[ADD].readsOutput);
 }
 
 void testGraphFinishAcceptsF3(void) {
@@ -145,7 +144,7 @@ void testShapePassCarriesTheMergeShape(void) {
     size_t d[5][MAX_RANK], o[5][MAX_RANK];
     shape_t shapes[5];
     bindShapes(shapes, d, o, 5);
-    modelShapePass(&f.m, x->shape, shapes, 2);
+    modelShapePass(&f.m, x->shape, shapes);
     for (size_t j = 0; j < 5; j++) {
         TEST_ASSERT_EQUAL_size_t(2, shapes[j].numberOfDimensions);
         TEST_ASSERT_EQUAL_size_t(1, shapes[j].dimensions[0]);

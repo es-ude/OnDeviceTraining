@@ -37,8 +37,7 @@ bool modelIsChain(const model_t *m) {
     return true;
 }
 
-void modelShapePass(const model_t *m, const shape_t *input, shape_t *shapes, size_t maxRank) {
-    (void)maxRank;
+void modelShapePass(const model_t *m, const shape_t *input, shape_t *shapes) {
     shapes[0].numberOfDimensions = input->numberOfDimensions;
     for (size_t d = 0; d < input->numberOfDimensions; d++) {
         shapes[0].dimensions[d] = input->dimensions[d];

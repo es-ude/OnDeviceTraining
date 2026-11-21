@@ -7,9 +7,14 @@
 #include <string.h>
 
 #include "AddApi.h"
+#include "BatchNorm1d.h"
+#include "BatchNorm1dApi.h"
 #include "BatchView.h"
 #include "CalculateGradsSequential.h"
+#include "Conv1dApi.h"
 #include "DagFixtures.h"
+#include "DataLoaderApi.h"
+#include "FlattenApi.h"
 #include "InferenceApi.h"
 #include "Layer.h"
 #include "LayerQuant.h"
@@ -29,6 +34,7 @@
 #include "Tensor.h"
 #include "TensorApi.h"
 #include "TraceApi.h"
+#include "TrainingBatchDefault.h"
 #include "TrainingLoopApi.h"
 #include "expected_dag.h"
 #include "unity.h"
@@ -156,6 +162,15 @@ static void dagGraphFree(dagGraph_t *f) {
             break;
         case ADD:
             freeAddLayer(layer);
+            break;
+        case CONV1D:
+            freeConv1dLayer(layer);
+            break;
+        case BATCHNORM1D:
+            freeBatchNorm1dLayer(layer);
+            break;
+        case FLATTEN:
+            freeFlattenLayer(layer);
             break;
         default:
             TEST_FAIL_MESSAGE("dagGraphFree: a layer type the harness does not build");
@@ -474,6 +489,139 @@ void testFrozenNodeOnTheSkipPathLeavesAGapInTheBackward(void) {
     assertMseParity(&r, 30, dagGapGrads, dagGapLoss, dagGapOut);
 }
 
+/* ---- BatchNorm inside the residual block, per micro-batch --------------------------------- */
+
+/* A FLOAT32 Conv1d k3 SAME holding the gold weights ([out, in, k], as in PyTorch). */
+static layer_t *goldConv1d(size_t in, size_t out, const float *w, const float *b, size_t node) {
+    TEST_ASSERT_TRUE(in * out * 3 <= GOLD_MAX_WEIGHTS);
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, dagFloatQ());
+    const rngKey_t key = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, (uint32_t)node);
+    layer_t *layer = conv1dLayerInit(&(conv1dInit_t){.inChannels = in,
+                                                     .outChannels = out,
+                                                     .kernelSize = 3,
+                                                     .padding = SAME,
+                                                     .weightInit.key = &key},
+                                     &lq);
+    float wCopy[GOLD_MAX_WEIGHTS];
+    float bCopy[GOLD_MAX_WEIGHTS];
+    memcpy(wCopy, w, in * out * 3 * sizeof(float));
+    memcpy(bCopy, b, out * sizeof(float));
+    layerLoadWeights(layer, wCopy, bCopy);
+    return layer;
+}
+
+static layer_t *goldBatchNorm1d(const float *gamma, const float *beta) {
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, dagFloatQ());
+    layer_t *layer = batchNorm1dLayerInit(&(batchNorm1dInit_t){.numChannels = 3}, &lq);
+    float g[3];
+    float b[3];
+    memcpy(g, gamma, sizeof g);
+    memcpy(b, beta, sizeof b);
+    layerLoadWeights(layer, g, b);
+    return layer;
+}
+
+/* trainingBatchDefault frees every sample_t it consumes, so each run needs fresh samples over
+ * the same tensors; freeBatch releases the rest afterwards. */
+static batch_t *buildBatch(tensor_t **items, tensor_t **labels, size_t n) {
+    batch_t *batch = reserveMemory(sizeof(batch_t));
+    batch->samples = reserveMemory(n * sizeof(sample_t *));
+    batch->size = n;
+    for (size_t i = 0; i < n; i++) {
+        sample_t *s = reserveMemory(sizeof(sample_t));
+        s->item = items[i];
+        s->label = labels[i];
+        batch->samples[i] = s;
+    }
+    return batch;
+}
+
+#define BN_B 4
+#define BN_GRADS 95 /* (18 + 3) + (3 + 3) + (27 + 3) + (36 + 2) */
+
+typedef struct bnRun {
+    size_t count;
+    float grads[DAG_MAX_GRADS];
+    float mean[3];
+    float var[3];
+    uint64_t nbt;
+    float loss;
+} bnRun_t;
+
+/* n0 = Conv1d 2->3 (b0); n1 = BN (b1); n2 = ReLU (b2); n3 = Conv1d 3->3 (b3); n4 = ADD(b1, b4);
+ * n5 = Flatten (b5); n6 = Linear 18->2 (b6). One macro batch of 4 in chunks of m rows; the
+ * grads are snapshot times the MSE mean scale, as the optimizer would see them. */
+static void runBnResidual(size_t m, bnRun_t *r) {
+    dagGraph_t f;
+    dagGraphBegin(&f);
+    layer_t *bn = goldBatchNorm1d(dagBnGamma, dagBnBeta);
+    uint16_t h1 = graphNode(&f.g, goldConv1d(2, 3, dagBnW0, dagBnB0, 0), GRAPH_INPUT);
+    uint16_t h2 = graphNode(&f.g, bn, h1);
+    uint16_t h3 = graphNode(&f.g, dagRelu(), h2);
+    uint16_t h4 = graphNode(&f.g, goldConv1d(3, 3, dagBnW3, dagBnB3, 3), h3);
+    uint16_t h5 = graphMerge(&f.g, addLayerInit(NULL), h1, h4);
+    uint16_t h6 = graphNode(&f.g, flattenLayerInit(), h5);
+    (void)graphNode(&f.g, goldLinear(18, 2, TRAINABLE_DEFAULT, dagBnW6, dagBnB6, 6), h6);
+    f.m = graphFinish(&f.g);
+
+    tensor_t *items[BN_B];
+    tensor_t *labels[BN_B];
+    for (size_t s = 0; s < BN_B; s++) {
+        items[s] = buildFloatTensor((size_t[]){2, 6}, 2, dagBnX + 12 * s);
+        labels[s] = buildFloatTensor((size_t[]){2}, 1, dagBnY + 2 * s);
+    }
+    batchView_t view;
+    float scale = lossFunctions[MSE].computeMeanScale(BN_B, batchViewOf(&view, labels[0]));
+    batch_t *batch = buildBatch(items, labels, BN_B);
+    r->loss = trainingBatchDefault(&f.m, defaultLossConfig(MSE), batch, calculateGradsSequential,
+                                   REDUCTION_MEAN, m, NULL);
+    freeBatch(batch);
+    r->count = snapshotGrads(&f.m, scale, r->grads, DAG_MAX_GRADS);
+    const batchNorm1dConfig_t *c = bn->config->batchNorm1d;
+    memcpy(r->mean, c->runningMean->data, sizeof r->mean);
+    memcpy(r->var, c->runningVar->data, sizeof r->var);
+    r->nbt = c->numBatchesTracked;
+
+    for (size_t s = 0; s < BN_B; s++) {
+        freeTensor(labels[s]);
+        freeTensor(items[s]);
+    }
+    dagGraphFree(&f);
+}
+
+/* Ghost BN over each chunk of m rows: the running stats update b/m times, and b1's gradient
+ * sums the ADD's skip contribution with the BN branch's partial. */
+void testBatchNormInsideTheBlockMatchesPyTorchPerMicroBatch(void) {
+    static const size_t ms[3] = {1, 2, 4};
+    static const char *const label[3] = {"m=1", "m=2", "m=4"};
+    static const char *const diverge[3] = {"m=1: grads diverge from PyTorch",
+                                           "m=2: grads diverge from PyTorch",
+                                           "m=4: grads diverge from PyTorch"};
+    const float *goldGrads[3] = {dagBnGrads_m1, dagBnGrads_m2, dagBnGrads_m4};
+    const float *goldMean[3] = {dagBnRunningMean_m1, dagBnRunningMean_m2, dagBnRunningMean_m4};
+    const float *goldVar[3] = {dagBnRunningVar_m1, dagBnRunningVar_m2, dagBnRunningVar_m4};
+    const uint64_t goldNbt[3] = {dagBnNbt_m1, dagBnNbt_m2, dagBnNbt_m4};
+    const float goldLoss[3] = {dagBnLoss_m1, dagBnLoss_m2, dagBnLoss_m4};
+    bnRun_t r[3];
+    for (size_t k = 0; k < 3; k++) {
+        runBnResidual(ms[k], &r[k]);
+    }
+
+    for (size_t k = 0; k < 3; k++) {
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(BN_GRADS, r[k].count, label[k]);
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(
+            SIZE_MAX, firstMismatch(goldGrads[k], r[k].grads, BN_GRADS, 1e-6f, 1e-4f), diverge[k]);
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(
+            SIZE_MAX, firstMismatch(goldMean[k], r[k].mean, 3, 1e-6f, 1e-5f), label[k]);
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(
+            SIZE_MAX, firstMismatch(goldVar[k], r[k].var, 3, 1e-6f, 1e-5f), label[k]);
+        TEST_ASSERT_EQUAL_UINT64_MESSAGE(goldNbt[k], r[k].nbt, label[k]);
+        TEST_ASSERT_FLOAT_WITHIN_MESSAGE(1e-5f, goldLoss[k], r[k].loss, label[k]);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testResidualBlockMatchesPyTorchOnEveryAdmittedPlan);
@@ -483,5 +631,6 @@ int main(void) {
     RUN_TEST(testFanOutThreeWritesAccumulatesAndSums);
     RUN_TEST(testFrozenPrefixWithSkipAcrossTheBoundary);
     RUN_TEST(testFrozenNodeOnTheSkipPathLeavesAGapInTheBackward);
+    RUN_TEST(testBatchNormInsideTheBlockMatchesPyTorchPerMicroBatch);
     return UNITY_END();
 }

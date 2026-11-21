@@ -15,7 +15,7 @@
  * docs/conventions/arithmetic-sym.md). The entry point stays for future
  * model-wide rules; today it only guards the model array shape itself. */
 bool validateModelQuantization(const model_t *m) {
-    if (m->layers == NULL) {
+    if (m == NULL || m->layers == NULL) {
         PRINT_ERROR("validateModelQuantization: model is NULL");
         return false;
     }

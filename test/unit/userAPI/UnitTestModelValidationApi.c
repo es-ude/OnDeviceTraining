@@ -79,9 +79,13 @@ void testValidatorAcceptsEmptyModel(void) {
 }
 
 void testValidatorRejectsNullModel(void) {
-    /* m->layers == NULL: guarded at entry, returns false. */
-    bool valid = validateModelQuantization(&MODEL_CHAIN(NULL, 0));
+    bool valid = validateModelQuantization(NULL);
     TEST_ASSERT_FALSE_MESSAGE(valid, "NULL model pointer should be rejected");
+}
+
+void testValidatorRejectsNullLayerArray(void) {
+    bool valid = validateModelQuantization(&MODEL_CHAIN(NULL, 0));
+    TEST_ASSERT_FALSE_MESSAGE(valid, "NULL layer array should be rejected");
 }
 
 void testValidatorRejectsNullElementMidArray(void) {
@@ -142,6 +146,7 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testValidatorAcceptsEmptyModel);
     RUN_TEST(testValidatorRejectsNullModel);
+    RUN_TEST(testValidatorRejectsNullLayerArray);
     RUN_TEST(testValidatorRejectsNullElementMidArray);
     RUN_TEST(testValidatorAcceptsSymProducerFollowedByNonQuantLayer);
     RUN_TEST(testValidatorAcceptsFloatOnlyModel);

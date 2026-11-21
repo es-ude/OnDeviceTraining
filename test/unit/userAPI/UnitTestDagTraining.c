@@ -893,8 +893,9 @@ void testPartWireLivesExactlyTwoSteps(void) {
     }
 }
 
-/* One real training call on M's LIVENESS plan: the SDK's bind/release accounting reaches the
- * plan's hand-derived 80 B, so the PART and the SUM's accumulate are booked as planned. */
+/* One real training call on M's LIVENESS plan: the SDK's observed bind/release maximum equals
+ * the plan's hand-derived 80 B peak at steps 6-7. The PART (steps 8-9) lives under that peak, so
+ * this does not pin how the PART is booked; testPartWireLivesExactlyTwoSteps pins its range. */
 void testObservedPeakEqualsPlanPeakOnADag(void) {
     dagGraph_t f;
     (void)buildResidualTrunk(&f, dagResW0, dagResB0, dagResW2, dagResB2);

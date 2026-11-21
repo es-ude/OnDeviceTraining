@@ -1,4 +1,5 @@
 """The HAR and mnist_cnn PyTorch twins are expressed with modules only."""
+import operator
 import sys
 from pathlib import Path
 
@@ -9,8 +10,10 @@ import numpy as np
 import torch
 import torch.fx
 import torch.nn.functional as F
+from odt.providers import build_problem
 
 from examples.har_classifier import train_pytorch as har
+from examples.har_classifier import train_pytorch_residual as har_res
 from examples.mnist_cnn import train_pytorch as mnist
 
 
@@ -59,3 +62,21 @@ def test_mnist_to_model_input_shape():
         out = mnist.to_model_input(arr)
         assert tuple(out.shape) == (3, 1, 784)
         assert out.dtype == torch.float32
+
+
+def test_har_residual_twin_order_matches_c_nodes():
+    gm = torch.fx.symbolic_trace(har_res.HarResidualModel())
+    ops = [n.target for n in gm.graph.nodes if n.op in ("call_module", "call_function")]
+    assert ops == ["conv1", "relu1", "pool1", "conv2", "relu2", "conv3", operator.add,
+                   "relu3", "gap", "flatten", "fc"]
+    assert list(har_res.HarResidualModel().state_dict()) == [
+        "conv1.weight", "conv1.bias", "conv2.weight", "conv2.bias",
+        "conv3.weight", "conv3.bias", "fc.weight", "fc.bias"]
+
+
+def test_har_residual_problem_carries_the_skip():
+    p = build_problem(har_res.HarResidualModel(), (1, 9, 128), "CROSS_ENTROPY")
+    assert [l["type"] for l in p["layers"]] == ["CONV1D", "RELU", "MAXPOOL1D", "CONV1D", "RELU",
+        "CONV1D", "ADD", "RELU", "AVGPOOL1D", "FLATTEN", "LINEAR", "SOFTMAX"]
+    assert p["layers"][6]["inputs"] == [3, 6]  # ADD(pool1 out, conv3 out); buffer ids as in C
+    assert p["layers"][3]["inputs"] == [3]  # conv2 reads the fanned-out buffer

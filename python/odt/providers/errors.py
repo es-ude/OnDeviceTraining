@@ -20,7 +20,8 @@ class UnsupportedDtypeError(ValueError):
 
 class UnsupportedGraphError(ValueError):
     """The model graph is not one the C framework runs: one input, one output,
-    every value read, every node reachable from the input."""
+    every value read, every node reachable from the input, each module with
+    parameters or buffers called once, and an in-place ReLU only in a chain."""
 
     def __init__(self, node: str, reason: str) -> None:
         super().__init__(f"unsupported graph at node {node!r}: {reason}")

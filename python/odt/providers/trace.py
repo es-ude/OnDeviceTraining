@@ -1,6 +1,7 @@
 """Trace a PyTorch model into a shaped creator IR at batch size 1."""
 
 import operator
+from collections import Counter
 
 import torch
 from torch import fx, nn
@@ -12,7 +13,7 @@ from elasticai.creator.experimental.ir.shape_inference import (
 )
 from elasticai.creator.torch2ir import get_default_converter
 
-from .errors import UnsupportedLayerError
+from .errors import UnsupportedGraphError, UnsupportedLayerError
 
 SUPPORTED_MODULES: tuple[type[nn.Module], ...] = (
     nn.Conv1d,
@@ -45,7 +46,8 @@ def _check_supported(model: nn.Module) -> None:
     Only the ops ``forward`` actually calls are checked, so a module that is
     defined but never called is ignored.
     """
-    for node in fx.symbolic_trace(model).graph.nodes:
+    graph = fx.symbolic_trace(model).graph
+    for node in graph.nodes:
         if node.op == "call_method":
             raise UnsupportedLayerError(node.target, node.name)
         if node.op == "call_function" and node.target not in SUPPORTED_FUNCTIONS:
@@ -61,6 +63,58 @@ def _check_supported(model: nn.Module) -> None:
                     node.target,
                     "modules must be called with positional tensor arguments",
                 )
+    _check_no_shared_state(model, graph)
+    if not _is_chain(graph):
+        _check_no_inplace_relu(model, graph)
+
+
+def _check_no_shared_state(model: nn.Module, graph: fx.Graph) -> None:
+    """Each C node owns its parameters and buffers, so a module holding any (frozen
+    ones too) may be called once; a stateless module becomes one node per call."""
+    calls = Counter(
+        id(model.get_submodule(n.target)) for n in graph.nodes if n.op == "call_module"
+    )
+    for node in graph.nodes:
+        if node.op != "call_module":
+            continue
+        module = model.get_submodule(node.target)
+        stateful = bool(list(module.parameters()) or list(module.buffers()))
+        if stateful and calls[id(module)] > 1:
+            raise UnsupportedGraphError(
+                node.target,
+                f"module {node.target!r} is called {calls[id(module)]} times; a module "
+                "with parameters must be called once (weight sharing is not supported)",
+            )
+
+
+def _is_chain(graph: fx.Graph) -> bool:
+    """problem.py's chain test on the fx program: every call reads exactly the value
+    produced just before it."""
+    previous = None
+    for node in graph.nodes:
+        if node.op == "placeholder":
+            previous = node
+        elif node.op in ("call_module", "call_function"):
+            if node.args != (previous,):
+                return False
+            previous = node
+    return True
+
+
+def _check_no_inplace_relu(model: nn.Module, graph: fx.Graph) -> None:
+    """Off a chain an in-place ReLU can rewrite a value another layer still reads,
+    directly or through a view (a Flatten output aliases its input), which the C
+    model's separate buffers would not reproduce."""
+    for node in graph.nodes:
+        if node.op != "call_module":
+            continue
+        module = model.get_submodule(node.target)
+        if isinstance(module, nn.ReLU) and module.inplace:
+            raise UnsupportedGraphError(
+                node.target,
+                "in-place ReLU in a branching model is not supported (it would "
+                "mutate a value another layer reads)",
+            )
 
 
 def to_shaped_ir(

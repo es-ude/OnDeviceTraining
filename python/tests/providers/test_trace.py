@@ -2,7 +2,7 @@ import pytest
 import torch
 from torch import nn
 
-from odt.providers.errors import UnsupportedLayerError
+from odt.providers.errors import UnsupportedGraphError, UnsupportedLayerError
 from odt.providers.trace import to_shaped_ir
 
 
@@ -128,3 +128,67 @@ def test_a_module_called_by_keyword_is_refused_naming_its_target() -> None:
     ) as info:
         to_shaped_ir(Net(), (1, 2, 16))
     assert (info.value.layer_type, info.value.where) == ("Conv1d", "body.conv")
+
+
+class _ConvTwiceSideBySide(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = nn.Conv1d(2, 2, 3, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x) + self.conv(x)
+
+
+class _ConvTwiceStacked(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = nn.Conv1d(2, 2, 3, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(self.conv(x)) + x
+
+
+@pytest.mark.parametrize(
+    "model", [_ConvTwiceSideBySide, _ConvTwiceStacked], ids=["side-by-side", "stacked"]
+)
+def test_a_module_with_parameters_called_twice_is_refused(model) -> None:
+    # each C node owns its own weights, so one weight tensor cannot serve two call sites
+    with pytest.raises(UnsupportedGraphError, match="called 2 times") as info:
+        to_shaped_ir(model(), (1, 2, 16))
+    assert info.value.node == "conv"
+
+
+class _InplaceReluOnFanOut(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = nn.Conv1d(2, 2, 3, padding=1)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.conv(x)
+        return y + self.relu(y)
+
+
+class _InplaceReluThroughFlattenAlias(nn.Module):
+    # a has one reader, but flat1 returns a view of y: the ReLU rewrites y under flat2
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = nn.Conv1d(2, 2, 3, padding=1)
+        self.flat1 = nn.Flatten()
+        self.relu = nn.ReLU(True)
+        self.flat2 = nn.Flatten()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.conv(x)
+        return self.relu(self.flat1(y)) + self.flat2(y)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [_InplaceReluOnFanOut, _InplaceReluThroughFlattenAlias],
+    ids=["fan-out", "flatten-alias"],
+)
+def test_an_inplace_relu_in_a_branching_model_is_refused(model) -> None:
+    with pytest.raises(UnsupportedGraphError, match="in-place ReLU") as info:
+        to_shaped_ir(model(), (1, 2, 16))
+    assert info.value.node == "relu"

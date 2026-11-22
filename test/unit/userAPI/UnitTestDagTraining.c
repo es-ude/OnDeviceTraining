@@ -199,8 +199,9 @@ static const dagCell_t kCells[4] = {
 #define DAG_MAX_OUT 8
 
 /* One parity run: the NULL-call reference (loss, output, grads), then the same call on each
- * caller-owned cell scheduler, compared byte for byte against the reference, then loss-free
- * inference. Everything it builds is freed before it returns. */
+ * caller-owned cell scheduler, compared byte for byte against the reference (loss and output
+ * asserted here, grads left in cellDiff), then loss-free inference. Everything it builds is freed
+ * before it returns. */
 typedef struct parityRun {
     size_t count;
     float loss;
@@ -228,9 +229,15 @@ static void runParity(const model_t *m, lossConfig_t loss, tensor_t *x, tensor_t
         bool ok = kCells[c].arena ? rematArenaInit(&s, m, loss, x, &spec)
                                   : rematHeapInit(&s, m, loss, x, &spec);
         TEST_ASSERT_TRUE_MESSAGE(ok, kCells[c].name);
-        freeTrainingStats(calculateGradsSequential(m, loss, REDUCTION_MEAN, x, y,
-                                                   &(trainingCall_t){.remat = &s}));
+        trainingStats_t *cellSt =
+            calculateGradsSequential(m, loss, REDUCTION_MEAN, x, y, &(trainingCall_t){.remat = &s});
+        float cellLoss = cellSt->loss;
+        float cellOut[DAG_MAX_OUT];
+        memcpy(cellOut, cellSt->output->data, numOut * sizeof(float));
+        freeTrainingStats(cellSt);
         rematSchedulerDeinit(&s);
+        TEST_ASSERT_EQUAL_MEMORY_MESSAGE(&r->loss, &cellLoss, sizeof(float), kCells[c].name);
+        TEST_ASSERT_EQUAL_MEMORY_MESSAGE(r->out, cellOut, numOut * sizeof(float), kCells[c].name);
         snapshotGrads(m, 1.0f, got, DAG_MAX_GRADS);
         r->cellDiff[c] = memcmp(r->ref, got, r->count * sizeof(float));
     }

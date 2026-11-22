@@ -259,7 +259,8 @@ typedef struct rematPlan {
  * layerType/frozen mismatch exits by name. A DAG model plans under STORE_ALL
  * and LIVENESS only: SEQUENCE, RETAIN_LIST and inPlaceDx exit on it, since
  * recompute and in-place read chain positions. Returns false only when
- * reserveMemory fails. */
+ * reserving the plan block fails; the grammar checker's transient scratch
+ * exits on allocation failure instead. */
 bool rematPlanBuild(rematPlan_t **out, const rematWireTable_t *t, const model_t *m,
                     const rematPlanSpec_t *spec);
 /* The plan of an eval-only table: the EVAL program alone, the same as rematPlanBuild's, and a

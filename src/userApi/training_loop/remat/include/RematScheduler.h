@@ -156,10 +156,13 @@ struct rematScheduler {
     } row;
 };
 
-/* One init per row (the LrScheduler idiom). Returns false iff a reserveMemory
- * failed; s is then safe for rematSchedulerDeinit and rematSchedulerReport,
- * whose flags say which fields are valid. A model the table cannot describe,
- * or whose size arithmetic overflows, exits naming it. In builds with the
+/* One init per row (the LrScheduler idiom). Returns false iff reserving the
+ * scheduler's own memory failed (the table, the plan block and, on ARENA, the
+ * offsets, the placement scratch and the arena data); s is then safe for
+ * rematSchedulerDeinit and rematSchedulerReport, whose flags say which fields
+ * are valid. A model the table cannot describe, or whose size arithmetic
+ * overflows, exits naming it; so does a failed reservation of the plan grammar
+ * checker's small transient scratch. In builds with the
  * memory counter (ODT_MEM_PROFILE) a successful init checks that it reserved
  * exactly its report's arenaBytes + metadataBytes and exits naming both
  * otherwise. The counter is process-wide: no other thread may reserve or free

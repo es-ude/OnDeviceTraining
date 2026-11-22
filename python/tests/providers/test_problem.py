@@ -134,3 +134,31 @@ def test_a_residual_problem_loads_and_the_planner_refuses_it() -> None:
         match=re.escape("layers[2].inputs: [2, 0] has no C reference run"),
     ):
         require_supported(problem, 1)
+
+
+class _SharedRelu(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = nn.Conv1d(2, 2, 3, padding=1)
+        self.relu = nn.ReLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.relu(self.conv(x)) + self.relu(x)
+
+
+def test_a_reused_stateless_module_yields_one_layer_per_call_site() -> None:
+    p = build_problem(_SharedRelu(), (1, 2, 8), "MSE")
+    assert [(layer["type"], layer["inputs"]) for layer in p["layers"]] == [
+        ("CONV1D", [0]),
+        ("RELU", [1]),
+        ("RELU", [0]),
+        ("ADD", [2, 3]),
+    ]
+
+
+def test_an_inplace_relu_chain_has_the_problem_of_the_out_of_place_chain() -> None:
+    inplace = _tiny()
+    inplace[1] = nn.ReLU(inplace=True)
+    got = build_problem(inplace, SHAPE, "CROSS_ENTROPY")
+    want = build_problem(_tiny(), SHAPE, "CROSS_ENTROPY")
+    assert problem_bytes(got) == problem_bytes(want)

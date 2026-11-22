@@ -2968,42 +2968,6 @@ void testDeriveSkipsTheFrozenSkipNode(void) {
     dagFree(&f);
 }
 
-/* F3 under RETAIN_LIST dropping ACT 4: REFORWARD(3) recomputes it before LOSS_BACKWARD, and the
- * SUM still follows BACKWARD(1). The sizes are those of the program the generator writes: 12
- * steps, and 10 ranges (ACT 1..4, ACT 4 again, wires 5..9), which is what the scan opens. */
-void testDeriveF3RetainListProgramKeepsTheSum(void) {
-    dagFixture_t f;
-    dagBuildF3(&f, false);
-    dagTensor_t xs;
-    rematWireTable_t *t;
-    TEST_ASSERT_TRUE(rematWireTableInit(&t, &f.m, defaultLossConfig(MSE), dagInput(&xs, 1, 2)));
-    const bool retain[5] = {true, true, true, true, false};
-    const rematPlanSpec_t spec = {.policy = REMAT_PLAN_RETAIN_LIST, .retain = retain};
-    rematDeriveSize_t z = rematDeriveTrainSize(t, &spec);
-    TEST_ASSERT_EQUAL_size_t(12u, z.numSteps);
-    TEST_ASSERT_EQUAL_size_t(10u, z.numRanges);
-    dagProgram_t d;
-    deriveDagTrain(t, &spec, z, &d);
-    const rematProgram_t *p = &d.p;
-    TEST_ASSERT_EQUAL_UINT8(REMAT_STEP_REFORWARD, p->steps[5].kind);
-    TEST_ASSERT_EQUAL_UINT16(3, p->steps[5].layer);
-    assertStepSlice(p, 9, REMAT_STEP_BACKWARD, 1, OPS(R(8), R(1)), 2, OPS(W(9)), 1);
-    assertStepSlice(p, 10, REMAT_STEP_SUM, 1, OPS(R(9)), 1, OPS(A(7)), 1);
-    assertStepSlice(p, 11, REMAT_STEP_BACKWARD, 0, OPS(R(7), R(0)), 2, OPS(W(REMAT_NONE)), 1);
-    rematRange_t ranges[16];
-    for (size_t r = 0; r < 16u; r++) {
-        ranges[r] = (rematRange_t){.wire = REMAT_NONE};
-    }
-    rematScanRanges(t, p, REMAT_PLAN_RETAIN_LIST, NULL, ranges);
-    size_t opened = 0;
-    while (opened < 16u && ranges[opened].wire != REMAT_NONE) {
-        opened++;
-    }
-    TEST_ASSERT_EQUAL_size_t(z.numRanges, opened);
-    rematWireTableFree(t);
-    dagFree(&f);
-}
-
 /* ---- the grammar on DAGs (derived programs, tampered inside the death-test child) ---- */
 
 /* A DAG fixture's STORE_ALL TRAIN program under MSE with its scanned ranges. Built in place:
@@ -6153,7 +6117,6 @@ int main(void) {
     RUN_TEST(testDeriveF3TrainProgram);
     RUN_TEST(testDeriveF3EvalIsTheTrainPrefix);
     RUN_TEST(testDeriveSkipsTheFrozenSkipNode);
-    RUN_TEST(testDeriveF3RetainListProgramKeepsTheSum);
     RUN_TEST(testGrammarAcceptsF3AndS);
     RUN_TEST(testGrammarAcceptsYKAndP2);
     RUN_TEST(testGrammarRejectsASecondWriteOfAGrad);

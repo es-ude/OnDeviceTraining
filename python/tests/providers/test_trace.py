@@ -158,6 +158,36 @@ def test_a_module_with_parameters_called_twice_is_refused(model) -> None:
     assert info.value.node == "conv"
 
 
+class _TiedChain(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first = nn.Linear(4, 4)
+        self.second = nn.Linear(4, 4)
+        self.second.weight = self.first.weight
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.second(self.first(x))
+
+
+class _TiedBranches(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first = nn.Conv1d(2, 2, 3, padding=1)
+        self.second = nn.Conv1d(2, 2, 3, padding=1)
+        self.second.bias = self.first.bias
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.first(x) + self.second(x)
+
+
+@pytest.mark.parametrize("model", [_TiedChain, _TiedBranches], ids=["chain", "branches"])
+def test_two_modules_sharing_one_parameter_are_refused(model) -> None:
+    # two C nodes would train two independent copies of the one shared tensor
+    with pytest.raises(UnsupportedGraphError, match="shares a parameter or buffer with 'first'") as info:
+        to_shaped_ir(model(), (1, 2, 4) if model is _TiedChain else (1, 2, 16))
+    assert info.value.node == "second"
+
+
 class _InplaceReluOnFanOut(nn.Module):
     def __init__(self) -> None:
         super().__init__()

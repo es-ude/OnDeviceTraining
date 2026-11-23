@@ -69,22 +69,33 @@ def _check_supported(model: nn.Module) -> None:
 
 
 def _check_no_shared_state(model: nn.Module, graph: fx.Graph) -> None:
-    """Each C node owns its parameters and buffers, so a module holding any (frozen
-    ones too) may be called once; a stateless module becomes one node per call."""
+    """Each C node owns its parameters and buffers (frozen ones too), so one tensor
+    may reach only one call site: a module holding any is called once, and two
+    modules never hold the same tensor (tied weights). A stateless module becomes
+    one node per call."""
     calls = Counter(
         id(model.get_submodule(n.target)) for n in graph.nodes if n.op == "call_module"
     )
+    owner: dict[int, str] = {}
     for node in graph.nodes:
         if node.op != "call_module":
             continue
         module = model.get_submodule(node.target)
-        stateful = bool(list(module.parameters()) or list(module.buffers()))
-        if stateful and calls[id(module)] > 1:
+        tensors = {id(t) for t in [*module.parameters(), *module.buffers()]}
+        if tensors and calls[id(module)] > 1:
             raise UnsupportedGraphError(
                 node.target,
                 f"module {node.target!r} is called {calls[id(module)]} times; a module "
                 "with parameters must be called once (weight sharing is not supported)",
             )
+        for tensor in tensors:
+            first = owner.setdefault(tensor, node.target)
+            if first != node.target:
+                raise UnsupportedGraphError(
+                    node.target,
+                    f"module {node.target!r} shares a parameter or buffer with {first!r} "
+                    "(weight sharing is not supported)",
+                )
 
 
 def _is_chain(graph: fx.Graph) -> bool:

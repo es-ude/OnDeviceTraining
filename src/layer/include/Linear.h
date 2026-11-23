@@ -32,6 +32,11 @@ typedef struct linearConfig {
                     allocation and backward weight/bias-grad ops skip this layer */
 } linearConfig_t;
 
+/*! The geometry contract forward/backward rely on: a bias of outFeatures (weight dim 0)
+ *  elements. The factory builds this by construction; call it where a config enters from outside
+ *  (the deserializer), never per step. `who` prefixes the message. */
+void linearValidateConfig(const linearConfig_t *cfg, const char *who);
+
 // IMPORTANT: Assumes all tensors have FLOAT32 quantization
 void linearForwardFloat(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output);
 // IMPORTANT: Assumes all tensors have SYM_INT32 quantization

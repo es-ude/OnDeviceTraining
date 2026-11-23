@@ -29,6 +29,7 @@ target_link_libraries(Serialize PRIVATE
         GroupNorm
         Kernel
         LayerNorm
+        Linear
         MaxPool1d
         QuantizationLayer
 )

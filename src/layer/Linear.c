@@ -20,6 +20,15 @@
 #include "SymAccumGuard.h"
 #include "SymGroupedWeight.h"
 
+void linearValidateConfig(const linearConfig_t *cfg, const char *who) {
+    size_t outFeatures = cfg->weights->param->shape->dimensions[0];
+    if (cfg->bias != NULL && calcNumberOfElementsByTensor(cfg->bias->param) != outFeatures) {
+        PRINT_ERROR("%s: bias length (%zu) must equal outFeatures (%zu)", who,
+                    calcNumberOfElementsByTensor(cfg->bias->param), outFeatures);
+        exit(1);
+    }
+}
+
 void linearForwardFloat(tensor_t *w, tensor_t *b, tensor_t *input, tensor_t *output) {
     transposeTensor(w, 0, 1);
     matmulFloat32TensorsWithBias(input, w, output, b);

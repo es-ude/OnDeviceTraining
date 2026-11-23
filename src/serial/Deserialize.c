@@ -585,6 +585,7 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         deserializeArithmetic(&linearConfig->propLossMath, f);
         deserializeQuantization(linearConfig->outputQ, f, 0);
         deserializeQuantization(linearConfig->propLossQ, f, 0);
+        linearValidateConfig(linearConfig, "deserializeModel: LINEAR");
         break;
     }
     case RELU: {

@@ -24,6 +24,8 @@
 #include "LayerNorm.h"
 #include "LayerNormApi.h"
 #include "LayerQuant.h"
+#include "Linear.h"
+#include "LinearApi.h"
 #include "Model.h"
 #include "OdtAssert.h"
 #include "QuantizationApi.h"
@@ -2886,6 +2888,35 @@ static void testDeserializeConv1dRejectsGroupsNotDividingOutChannels(void) {
     freeQuantization(floatQ);
 }
 
+/* The LINEAR record carries the weight dims, and forward reads one bias value per weight row:
+ * a [3, 2] weight keeps the element count of the skeleton's [2, 3] but its 2-element bias is
+ * one row short. */
+static void testDeserializeLinearRejectsBiasNotMatchingOutFeatures(void) {
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    const rngKey_t initKey = rngFold(rngKeyFromSeed(1u), RNG_TAG_INIT, 0u);
+    linearInit_t init = {.inFeatures = 3, .outFeatures = 2, .weightInit.key = &initKey};
+    layer_t *layer = linearLayerInitOwning(&init, &lq);
+    size_t *weightDims = layer->config->linear->weights->param->shape->dimensions;
+    weightDims[0] = 3;
+    weightDims[1] = 2;
+    layer_t *model[] = {layer};
+    FILE *f = fopen(FILE_PATH, "wb");
+    serializeModel(&MODEL_CHAIN(model, 1), f);
+    fclose(f);
+    weightDims[0] = 2;
+    weightDims[1] = 3;
+
+    f = fopen(FILE_PATH, "rb");
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "deserializeModel: LINEAR: bias length (2) must equal outFeatures (3)",
+                             deserializeModel(&MODEL_CHAIN(model, 1), f));
+    fclose(f);
+    freeLinearLayer(layer);
+    freeQuantization(floatQ);
+}
+
 #define BN_OFFSET_PROP_LOSS_MATH_TYPE (BN_OFFSET_FORWARD_MATH_TYPE + 2)
 
 static void testDeserializeBatchNormRejectsNonFloat32PropLossMath(void) {
@@ -3321,6 +3352,7 @@ int main(void) {
     RUN_TEST(testDeserializeLayerNormRejectsNormalizedShapeGammaMismatch);
     RUN_TEST(testDeserializeSoftmaxRejectsBfpMathOverANonBfpWire);
     RUN_TEST(testDeserializeDropoutRejectsAnOutOfRangeP);
+    RUN_TEST(testDeserializeLinearRejectsBiasNotMatchingOutFeatures);
     RUN_TEST(testDeserializeConv1dRejectsGroupsNotDividingOutChannels);
     RUN_TEST(testDeserializeConv1dTransposedRejectsNonValidPadding);
     RUN_TEST(testDeserializeConv1dTransposedRejectsOutputPaddingAtStride);

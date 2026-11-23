@@ -13,6 +13,7 @@
 #include "LayerExec.h"
 #include "Softmax.h"
 #include "TensorConversion.h"
+#include "TensorRows.h"
 
 void softmaxInitConfig(softmaxConfig_t *softmaxConfig, quantization_t *forwardQ,
                        quantization_t *backwardQ) {
@@ -78,38 +79,6 @@ static void softmaxValuesFloat(const float *x, float *s, size_t n) {
     }
 }
 
-/* Rows per the Softmax.h contract (TensorRows.h's rule, the one CrossEntropy's one-hot rows use).
- * rowLen is the trailing-dimension product, not count / rows, so an empty leading axis cannot
- * divide by zero. */
-static void softmaxRowGeometry(const shape_t *s, size_t *rows, size_t *rowLen) {
-    size_t first = (s->numberOfDimensions >= 2) ? 1 : 0;
-    *rows = (first == 1) ? s->dimensions[0] : 1;
-    size_t len = 1;
-    for (size_t d = first; d < s->numberOfDimensions; d++) {
-        len *= s->dimensions[d];
-    }
-    *rowLen = len;
-}
-
-/* The row walk runs over physical storage, so a permuted multi-row wire would normalize a
- * partition that is not its logical rows. One storage row is the whole tensor in any order. */
-static void softmaxRequireRowOrder(const shape_t *s, const char *where) {
-    size_t rows;
-    size_t rowLen;
-    softmaxRowGeometry(s, &rows, &rowLen);
-    if (rows <= 1) {
-        return;
-    }
-    for (size_t d = 0; d < s->numberOfDimensions; d++) {
-        if (s->orderOfDimensions[d] != d) {
-            PRINT_ERROR("%s: a wire with %zu storage rows must be identity-order (dim %zu is "
-                        "order %zu)",
-                        where, rows, d, s->orderOfDimensions[d]);
-            exit(1);
-        }
-    }
-}
-
 /* Float compute for both ARITH_FLOAT32 and ARITH_SYM_INT32 forwardMath: the funnel's prologue and
  * epilogue convert a SYM wire. */
 static void softmaxForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, tensor_t *auxOut,
@@ -120,7 +89,7 @@ static void softmaxForwardKernel(tensor_t **ops, size_t n, tensor_t *rawOut, ten
     tensor_t *input = ops[0];
     size_t rows;
     size_t rowLen;
-    softmaxRowGeometry(input->shape, &rows, &rowLen);
+    tensorShapeRows(input->shape, &rows, &rowLen);
     if (rowLen == 0) {
         return; /* empty rows: no max to read */
     }
@@ -388,7 +357,7 @@ static void softmaxForwardKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, 
 static void softmaxBfpRequireSingleRow(const tensor_t *t, const char *where) {
     size_t rows;
     size_t rowLen;
-    softmaxRowGeometry(t->shape, &rows, &rowLen);
+    tensorShapeRows(t->shape, &rows, &rowLen);
     if (rows > 1) {
         PRINT_ERROR("%s: ARITH_BFP softmax takes a single row, got %zu rows of %zu elements", where,
                     rows, rowLen);
@@ -418,7 +387,7 @@ static void softmaxRequireWire(const tensor_t *input, const tensor_t *t, const c
                     where, what, a->numberOfDimensions, what, b->numberOfDimensions);
         exit(1);
     }
-    softmaxRequireRowOrder(b, where);
+    tensorRequireRowOrder(b, where);
 }
 
 /* Admits the input; the caller admits the other wires against it. */
@@ -520,7 +489,7 @@ static void softmaxRequireNonBfpGradWires(tensor_t *input, tensor_t *loss, tenso
 static void softmaxBackwardFloat(tensor_t *input, tensor_t *loss, tensor_t *propLoss) {
     size_t rows;
     size_t rowLen;
-    softmaxRowGeometry(input->shape, &rows, &rowLen);
+    tensorShapeRows(input->shape, &rows, &rowLen);
     softmaxVjpRows((const float *)input->data, (const float *)loss->data, (float *)propLoss->data,
                    rows, rowLen);
 }
@@ -529,7 +498,7 @@ static void softmaxBackwardSymInt32(tensor_t *input, tensor_t *loss, tensor_t *p
                                     rngStream_t *convert) {
     size_t rows;
     size_t rowLen;
-    softmaxRowGeometry(input->shape, &rows, &rowLen);
+    tensorShapeRows(input->shape, &rows, &rowLen);
     size_t inputSize = calcNumberOfElementsByTensor(input);
     if (inputSize == 0) {
         return; /* no zero-length scratch VLAs */
@@ -732,7 +701,7 @@ void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, ten
 
 void softmaxCalcOutputShape(layer_t *softmaxLayer, shape_t *inputShape, shape_t *outputShape) {
     (void)softmaxLayer;
-    softmaxRequireRowOrder(inputShape, "Softmax");
+    tensorRequireRowOrder(inputShape, "Softmax");
     memcpy(outputShape->dimensions, inputShape->dimensions,
            inputShape->numberOfDimensions * sizeof(size_t));
     memcpy(outputShape->orderOfDimensions, inputShape->orderOfDimensions,

@@ -95,7 +95,7 @@ def softmax_values(x: torch.Tensor) -> torch.Tensor:
 
 
 def row_view(x: torch.Tensor) -> torch.Tensor:
-    """The #152 row partition (softmaxRowGeometry): [rows, rowLen] with
+    """The row partition (TensorRows.h's tensorShapeRows): [rows, rowLen] with
     rows = dims[0] for rank >= 2, one row for rank 1."""
     rows = x.shape[0] if x.dim() >= 2 else 1
     return x.reshape(rows, -1)

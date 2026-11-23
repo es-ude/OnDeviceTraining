@@ -191,10 +191,6 @@ static void requireUntrackedBatchNormsEvaluable(const model_t *model, const tens
     /* Heap, not stack: the shapes of a deep model would cost too much MCU stack. */
     shape_t *shapes =
         reserveMemory(numShapes * sizeof(shape_t) + 2u * numShapes * maxRank * sizeof(size_t));
-    if (shapes == NULL) {
-        PRINT_ERROR("%s pre-flight: no memory for %zu shapes", caller, numShapes);
-        exit(1);
-    }
     size_t *pool = (size_t *)(shapes + numShapes);
     for (size_t s = 0; s < numShapes; s++) {
         shapes[s] = (shape_t){.dimensions = pool + 2u * s * maxRank,

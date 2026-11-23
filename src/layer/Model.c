@@ -97,11 +97,6 @@ static int compareNodeLayers(const void *a, const void *b) {
 static void requireOneLayerPerNode(const model_t *m, const char *caller) {
     size_t n = m->numLayers;
     nodeLayer_t *pairs = reserveMemory(n * sizeof(nodeLayer_t));
-    if (pairs == NULL) {
-        PRINT_ERROR("%s: wiring: no memory for the %zu-byte layer map", caller,
-                    n * sizeof(nodeLayer_t));
-        exit(1);
-    }
     for (size_t j = 0; j < n; j++) {
         pairs[j] = (nodeLayer_t){(uintptr_t)m->layers[j], j};
     }
@@ -177,10 +172,6 @@ void modelRequireValid(const model_t *m, const char *caller) {
         return;
     }
     uint8_t *consumed = reserveMemory(n);
-    if (consumed == NULL) {
-        PRINT_ERROR("%s: wiring: no memory for the %zu-byte consumer map", caller, n);
-        exit(1);
-    }
     for (uint16_t e = 0; e < start[n]; e++) {
         consumed[m->inputIds[e]] = 1;
     }

@@ -142,7 +142,8 @@ rematBfpGroups_t rematBfpWireGrouping(const bfpQConfig_t *tmpl, size_t elements,
 void rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t loss,
                         const tensor_t *inputLike);
 /* The loss-free table of an inference scheduler: the ACT wires alone, no loss head check.
- * Validates the model like rematWireTableInit and refuses a non-FLOAT32 ACT that an ADD reads.
+ * The caller has passed the model through modelRequireValid (the inference entries do); it
+ * refuses a non-FLOAT32 ACT that an ADD reads.
  * Its bind keys no loss type, and its plan comes from rematPlanBuildEval only. */
 void rematWireTableInitEval(rematWireTable_t **out, const model_t *m, const tensor_t *inputLike);
 /* NULL-safe. One freeReservedMemory; never freeTensor on a slab header. */

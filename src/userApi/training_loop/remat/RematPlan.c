@@ -282,10 +282,6 @@ static void *grammarModelInit(grammarModel_t *g, const rematWireTable_t *t, cons
     size_t wires = t->numWires;
     size_t bytes = 2u * wires * sizeof(uint32_t) + wires + 2u * n + 1u;
     uint8_t *block = reserveMemory(bytes);
-    if (block == NULL) {
-        PRINT_ERROR("rematPlanValidateGrammar: no memory for the %zu-byte checker scratch", bytes);
-        exit(1);
-    }
     uint32_t *counts = (uint32_t *)block;
     uint8_t *flags = block + 2u * wires * sizeof(uint32_t);
     *g = (grammarModel_t){.t = t,

@@ -398,9 +398,10 @@ bool layerBackwardReadsInput(const layer_t *layer) {
         return true;
     case OP_READS_IF_TRAINABLE:
         return !layerIsFrozen(layer);
-    default:
-        return false;
+    case OP_READS_NEVER:
+        break;
     }
+    return false;
 }
 
 /* A new layer type needs its own row: a wrong `false` lets a plan recompute a

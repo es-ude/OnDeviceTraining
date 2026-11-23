@@ -195,7 +195,7 @@ static void requireFloat32MergeWire(const rematWireFact_t *f, const char *caller
     }
 }
 
-/* Merge numerics are FLOAT32 only (addAccumulate exits on any other dtype at run time), so a
+/* Merge numerics are FLOAT32 only (addAccumulate trusts this check), so a
  * non-chain model is refused at init, before any block holds its wires, when a merge-touched wire
  * is not FLOAT32: every ACT an ADD reads (addLayerInit already makes its output FLOAT32), every
  * GRAD an ADD's backward reads as dy, every GRAD something accumulates into (an ADD's ACC slot or
@@ -400,7 +400,6 @@ static rematWireTable_t *layoutTable(slabLayout_t *layout, const rematWireFact_t
  * the ACTs the ADDs read. */
 static void tableInit(rematWireTable_t **out, const model_t *m, lossFuncType_t lt, bool evalOnly,
                       const tensor_t *inputLike, const char *caller) {
-    modelRequireValid(m, caller);
     size_t n = m->numLayers;
 
     /* The gradient flags and the dx slots, derived once here and copied into the table: dxWire
@@ -534,6 +533,7 @@ static void tableInit(rematWireTable_t **out, const model_t *m, lossFuncType_t l
 
 void rematWireTableInit(rematWireTable_t **out, const model_t *m, lossConfig_t loss,
                         const tensor_t *inputLike) {
+    modelRequireValid(m, "rematWireTableInit");
     tableInit(out, m, loss.funcType, false, inputLike, "rematWireTableInit");
 }
 

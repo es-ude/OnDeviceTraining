@@ -24,7 +24,8 @@ void addForward(layer_t *layer, tensor_t *const *in, uint8_t k, tensor_t *out,
                 const layerExec_t *exec);
 
 /* target += src, exactly. The one way a merge adds into an open wire, so ADD's dx accumulate and
- * a SUM step share its numerics. Both FLOAT32 and equally sized; exits on any other dtype. */
+ * a SUM step share its numerics. The caller guarantees both FLOAT32 and equally sized: the remat
+ * wire table refuses a non-FLOAT32 merge or accumulate wire at init. */
 void addAccumulate(tensor_t *src, tensor_t *target);
 
 /* dx[i] = dy (OP_MODE_WRITE) or dx[i] += dy (OP_MODE_ACC), slots in input order, so ADD(y, y)

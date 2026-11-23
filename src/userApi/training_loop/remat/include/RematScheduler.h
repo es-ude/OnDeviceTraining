@@ -164,9 +164,10 @@ void rematHeapInit(rematScheduler_t *s, const model_t *m, lossConfig_t loss,
                    const tensor_t *inputLike, const rematPlanSpec_t *spec);
 /* The inference scheduler: a HEAP row for a model without a loss or gradients (a DAG
  * included), so it builds only the ACT wires and the EVAL program. Only rematBeginEval runs on
- * it (rematBegin exits); the loss type it is given is not keyed. Validates the model, refuses a
- * non-FLOAT32 ACT that an ADD reads, and otherwise initialises like rematHeapInit; its report
- * has the TRAIN numbers 0 and metadataBytes as usual. */
+ * it (rematBegin exits); the loss type it is given is not keyed. The caller has validated the
+ * model (modelRequireValid, as the inference entries do); it refuses a non-FLOAT32 ACT that an
+ * ADD reads and otherwise initialises like rematHeapInit; its report has the TRAIN numbers 0
+ * and metadataBytes as usual. */
 void rematHeapInitEval(rematScheduler_t *s, const model_t *m, const tensor_t *inputLike);
 /* NULL-safe and idempotent: the row's blocks (fns->deinit), then the plan and
  * the table. Exits inside a call. */

@@ -102,20 +102,6 @@ void testAddBackwardOnTheSameBufferTwiceDoublesDy(void) {
     TEST_ASSERT_EQUAL_FLOAT_ARRAY(((float[]){2, 4, 6}), (float *)g->data, 3);
 }
 
-void testAddAccumulateRefusesANonFloat32Target(void) {
-    tensor_t *src = floatTensor((float[]){1, 2, 3});
-    size_t *dims = reserveMemory(2 * sizeof(size_t));
-    dims[0] = 1;
-    dims[1] = 3;
-    size_t *order = reserveMemory(2 * sizeof(size_t));
-    setOrderOfDimsForNewTensor(2, order);
-    shape_t *shape = reserveMemory(sizeof(shape_t));
-    setShape(shape, dims, 2, order);
-    tensor_t *symTarget = initTensor(shape, quantizationInitSymInt32WithBits(HALF_AWAY, 12), NULL);
-    ASSERT_EXITS_WITH_OUTPUT(1, "non-FLOAT32 merge numerics are not designed yet",
-                             addAccumulate(src, symTarget));
-}
-
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(testAddForwardSumsElementwise);
@@ -123,6 +109,5 @@ int main(void) {
     RUN_TEST(testAddShapeRefusesToBroadcast);
     RUN_TEST(testAddBackwardWritesAccumulatesAndSkips);
     RUN_TEST(testAddBackwardOnTheSameBufferTwiceDoublesDy);
-    RUN_TEST(testAddAccumulateRefusesANonFloat32Target);
     return UNITY_END();
 }

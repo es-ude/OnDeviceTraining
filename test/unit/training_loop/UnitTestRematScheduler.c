@@ -2110,7 +2110,8 @@ static void walkEvalAfterFreezingN0(dagFixture_t *f) {
     rematSchedulerDeinit(&s);
 }
 
-/* Freezing changes no EVAL program: an eval-only scheduler built before the freeze keeps serving. */
+/* Freezing changes no EVAL program: an eval-only scheduler built before the freeze keeps serving.
+ */
 void testEvalOnlySchedulerSurvivesAFreezeBetweenCalls(void) {
     dagFixture_t f;
     dagBuildF3(&f, false);

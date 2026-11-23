@@ -153,7 +153,8 @@ static layer_t *conv(size_t in, size_t k, const trainingRng_t *rng, size_t node,
                            lq);
 }
 
-/* Each weight init draws the key of its node index, so the two topologies differ only in fc's key. */
+/* Each weight init draws the key of its node index, so the two topologies differ only in fc's key.
+ */
 static model_t buildModel(bool skip, layerQuant_t *lq, const trainingRng_t *rng) {
     graphBuilder_t g;
     graphBegin(&g, g_layers, g_inputStart, g_inputIds, MAX_NODES, MAX_EDGES);

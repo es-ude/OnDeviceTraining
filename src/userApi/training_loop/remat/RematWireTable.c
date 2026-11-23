@@ -209,8 +209,7 @@ static void requireFloat32MergeWire(const rematWireFact_t *f, const char *caller
  * which has no merge, so a chain's SYM_INT32 / BFP wires stay admitted. */
 static void requireFloat32MergeWires(const rematWireFact_t *facts, size_t numWires,
                                      const model_t *m, lossFuncType_t lt, const uint16_t *dxWire,
-                                     const uint8_t *dxMode,
-                                     const char *caller) {
+                                     const uint8_t *dxMode, const char *caller) {
     size_t n = m->numLayers;
     for (size_t j = 0; j < n; j++) {
         if (!isMerge(m, j)) {
@@ -488,8 +487,8 @@ static bool tableInit(rematWireTable_t **out, const model_t *m, lossFuncType_t l
             exit(1);
         }
         if (f->bytes == 0) {
-            PRINT_ERROR("%s: wire %s %u has zero bytes (#160)", caller,
-                        rematWireKindName(f->kind), (unsigned)f->index);
+            PRINT_ERROR("%s: wire %s %u has zero bytes (#160)", caller, rematWireKindName(f->kind),
+                        (unsigned)f->index);
             exit(1);
         }
         /* Makes every later sum over wires (liveBytes, peakLiveBytes) provably in range. */

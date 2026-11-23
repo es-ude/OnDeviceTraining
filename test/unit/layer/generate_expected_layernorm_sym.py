@@ -150,7 +150,7 @@ def emulate_sym_forward(xq, sx, gq, sg, bq, sb, normalized_shape, eps):
 
 
 def _requant_i12_f32(mantissas: torch.Tensor, scale: float):
-    """PR1b.2 (Task 3): requantSymInt32Tensor (TensorConversion.c) applied to
+    """requantSymInt32Tensor (TensorConversion.c) applied to
     the funnel's raw affine-stage output -- the canonical grid fitted from the
     max |code| (sym_gold.requant_absmax_i12_f32). Returns (restored int32
     mantissas, restored scale)."""

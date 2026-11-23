@@ -544,7 +544,7 @@ def emulate_sym_conv(fx):
 
     # biasGrad: int sum over (batch, outLen) per oc, fixed-scale rescale (s_bg = 1.0, zero-init grad).
     # The division below mirrors rescaleIntoAccumulatorScale(sum_int, s_loss, s_bg=1.0, HALF_AWAY) =
-    # roundByMode(sum_int*s_loss/1.0, HALF_AWAY) — the exact op Task 6's C calls. The #189 ODT_SEED_GUARD
+    # roundByMode(sum_int*s_loss/1.0, HALF_AWAY) — the exact op Task 6's C calls. The seed-rescale guard
     # is inactive at these fixture scales (no overflow), so the guarded helper and this raw cast agree.
     db_q = db_scale = None
     if q["bq"] is not None:

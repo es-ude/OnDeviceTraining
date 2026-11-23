@@ -110,7 +110,7 @@ def quantize_sym_grad(x: torch.Tensor):
     """int16 GRAD-ACCUMULATOR requant (qMaxBits=16): the running-sum requant of
     dgamma/dbeta back into a gradInitSymInt32 tensor (addSymInt32TensorsInplace ->
     convertTensor into the int16 grad). absmax -> canonical CEIL scale
-    fit_scale(absmax, 32767), round-clamp [-32768, 32767]. ONLY the grad running sum uses this width (#227)."""
+    fit_scale(absmax, 32767), round-clamp [-32768, 32767]. ONLY the grad running sum uses this width."""
     absmax = x.abs().max().item()
     scale = fit_scale(absmax, QMAX_GRAD)
     q = round_half_away(torch.clamp(x / scale, QMIN_GRAD, QMAX_GRAD))

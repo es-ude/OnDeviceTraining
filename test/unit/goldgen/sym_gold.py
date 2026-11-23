@@ -600,7 +600,7 @@ def convT1d_grouped_ref(x_mantissas, in_scale: float, w_mantissas, w_scales, gro
     return out, s_acc, out_len
 
 
-# ---- linq fold T3: the grouped ConvT scatter's per-group integer fold
+# ---- The grouped ConvT scatter's per-group integer fold
 # (SymGroupFold.h, convTranspose1dKernelSymInt32Grouped's fold path). Python
 # ints only, independent of the C code: E, F, A and every fold are derived
 # here from the canonical (m, e) of each scale. ----
@@ -613,7 +613,7 @@ _SCALE_E_MIN = -140
 _SCALE_E_MAX = 113
 
 
-# rescaleIntoAccumulatorScale's ODT_SEED_GUARD limit (ODT_GROUP_FOLD_SEED_LIMIT)
+# The group fold's seed-rescale guard limit (ODT_GROUP_FOLD_SEED_LIMIT, SymGroupFold.h)
 FOLD_SEED_LIMIT = _INT32_MAX - 32768 * 32767
 
 
@@ -814,7 +814,7 @@ def conv1d_dx_grouped_fold_ref(loss_mantissas, loss_scale: float, loss_bits: int
     return r
 
 
-# ---- linq fold T4: the grouped Conv1d gather's integer combine
+# ---- The grouped Conv1d gather's integer combine
 # (conv1dKernelSymInt32Grouped's fold path). Python ints only, E/F/A derived
 # here from the canonical (m, e) of each scale, independent of the C code. ----
 
@@ -909,9 +909,8 @@ def conv1d_grouped_fold_ref(x_mantissas, in_scale: float, x_bits: int, w_mantiss
             "frac_bits": frac, "out_len": out_len, "combines": combines, "seeds": seeds}
 
 
-# ---- Group-quant PR3 Task 3: dx-orientation reference for the ConvT1d
-# adjoint (the Conv1d one is conv1d_dx_grouped_fold_ref above, since linq fold
-# T3). A pure PARAMETER REMAPPING of the forward emulations above -- the flat
+# ---- dx-orientation reference for the ConvT1d adjoint (the Conv1d one is
+# conv1d_dx_grouped_fold_ref above). A pure PARAMETER REMAPPING of the forward emulations above -- the flat
 # weight STORAGE index each core computes in the adjoint role is identical to
 # the layer's own storage index, so the group binding (g = w_idx // group_size)
 # carries over unchanged. VALID-only (the dx fixtures' scope; the C kernels
@@ -927,8 +926,7 @@ def convT1d_dx_grouped_fold_ref(loss_mantissas, loss_scale: float, loss_bits: in
     """ConvT1d dx (propLoss) with a grouped weight: the adjoint of a VALID
     forward ConvT1d is a GATHER (correlation) of lossGrad with the SAME
     weight -- conv1dTransposedBackward routes it to conv1dKernelSymInt32Grouped
-    (running group-partial, one integer combine per group run since linq fold
-    T4), so this ref delegates to conv1d_grouped_fold_ref with the roles
+    (running group-partial, one integer combine per group run), so this ref delegates to conv1d_grouped_fold_ref with the roles
     swapped: the gather's "input" is lossGrad [batch, out_channels, out_len]
     and its "output" is dx [batch, in_channels, input_length]. Parameters are
     named from the FORWARD ConvT1d's perspective (in_channels/out_channels/

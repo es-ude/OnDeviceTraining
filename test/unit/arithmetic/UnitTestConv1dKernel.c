@@ -1687,7 +1687,7 @@ void testConv1dKernelSymChainedRawOutputOverflowAborts(void) {
 /* ---- Grouped-kernel goldens (LCG fixture) -------------------------------
  * kCgGold* were captured before the per-element group division became a
  * range cursor (that refactor was bit-identical, SR stream included); since
- * linq fold T4 they pin the LEGACY float path (17-bit input), and the int8
+ * the integer group fold they pin the LEGACY float path (17-bit input), and the int8
  * fixture's fold-path golds are kCgFold* (Python-int HALF_AWAY, kernel-recorded
  * SR). batch 2, Cin 2 (conv groups 1, so
  * inChPerGroup 2), L 8, K 5, stride 2, dilation 2: one weight row is 10 codes.
@@ -2023,7 +2023,7 @@ void testConv1dGroupedGoldenConvGroups2ChannelAligned(void) {
  * goldens recorded before the fold existed (codes, scale and the SR stream).
  * Covers both legacy loops: the cursor loop (cgGold, cg2 4/8) and the
  * channel-aligned loop (cgGold group size 10, cg2 10/20). The stamped width
- * (#516) is the legacy rescaled site over the 17-bit x range with the bias
+ * is the legacy rescaled site over the 17-bit x range with the bias
  * seeds at sAcc; cgLegacyStampCountsTheSeed pins the seed's part of it. */
 static uint8_t cgLegacyBits(size_t nTerms, int32_t wMin, int32_t wMax, int32_t seedMin,
                             int32_t seedMax) {
@@ -2090,7 +2090,7 @@ void testConv1dGroupedFoldFallsBackToLegacyForWideInput(void) {
     cgLegacyStampCountsTheSeed();
 }
 
-/* ---- linq fold T4: the grouped gather's integer combine -------------------
+/* ---- The grouped gather's integer combine ---------------------------------
  * Each group run's raw int32 partial is combined once into the accumulator
  * scale A = {inScale.m, inScale.e + E + 15 - F} (SymGroupFold.h):
  * acc += round(partial * m_g * 2^-(E - e_g + 15 - F)). Golds:
@@ -2472,7 +2472,7 @@ void testConv1dGroupedFoldLargeBiasLowersFInsteadOfAborting(void) {
     }
 }
 
-/* ---- linq fold T6: groups that do not line up with a weight row ----------
+/* ---- Groups that do not line up with a weight row ------------------------
  * kCuFold* (golden_conv1d_grouped.h) were recorded from the cursor loop
  * before the segment walk replaced it; the walk must reproduce them, the SR
  * stream included. Non-dyadic group scales make the combines inexact, so a

@@ -117,10 +117,10 @@ static void initDataSets(void) {
     /* Only the first TRAIN_SUBSET samples are ever touched (training budget):
      * quantize just those to SYM_INT32@12 (the operand-contract
      * width — Quantization.h's ODT_SYM_OPERAND_QMAXBITS). Linear0's forward
-     * (ARITH_SYM_INT32) is the raw/unmigrated kernel (matmulValidateSymOperand,
-     * Matmul.c): it fails fast unless its input tensor is natively SYM_INT32,
-     * so the dataset's native FLOAT32 samples must be pre-quantized here
-     * rather than relying on Flatten's dtype-passthrough. */
+     * (ARITH_SYM_INT32) computes on SYM_INT32 operands: the samples are
+     * quantized once here, at the operand-contract width, instead of the
+     * funnel staging a FLOAT32 input onto a freshly fitted grid on every
+     * forward. */
     quantization_t *inputQ = quantizationInitSymInt32WithBits(HALF_AWAY, WIRE_QMAXBITS);
     for (size_t i = 0; i < TRAIN_SUBSET; i++) {
         requantizeTensorInPlace(g_trainDataset.items->array[i], inputQ);

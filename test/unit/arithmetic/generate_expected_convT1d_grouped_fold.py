@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate expected_convT1d_grouped_fold.h for UnitTestConvTranspose1dKernel's
-grouped-scatter fold tests (linq fold T3).
+grouped-scatter fold tests.
 
 Every gold comes from sym_gold.convt_grouped_fold_ref, which computes the fold
 in Python ints from the canonical (m, e) of each scale -- independent of the C

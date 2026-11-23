@@ -3281,7 +3281,7 @@ void testPackUnpackSignExtendRoundTripsNegativeSym4AndSym8(void) {
     TEST_ASSERT_EQUAL_INT32_ARRAY(codes8, got8, 6);
 }
 
-/* Reference for the 8/16-bit unpack fast path: the frozen pre-#505 bit
+/* Reference for the 8/16-bit unpack fast path: the frozen bit
  * walker (ReferenceByteConversion.h) widened to int32, then the sign-extend
  * idiom -- independent of both the streaming engine and the byte loads under
  * test. */
@@ -8274,7 +8274,7 @@ void testBfpRawToBfpSrPinnedDrawLiftsIffUBelowFrac(void) {
 
 /* An all-zero group is the zero state (stored = bias) whatever its raw
  * exponent says, and its neighbour derives independently. n == 0 writes the
- * zero state for every group and no payload (#421 R7 parity). */
+ * zero state for every group and no payload, like the other BFP engines. */
 void testBfpRawToBfpZeroGroupIsZeroStateIndependently(void) {
     int32_t mant[8] = {0, 0, 0, 0, 8, -8, 4, 2};
     int16_t rawE[2] = {50, 0};
@@ -8291,7 +8291,7 @@ void testBfpRawToBfpZeroGroupIsZeroStateIndependently(void) {
     TEST_ASSERT_EQUAL_UINT8(127, stored0[0]);
 }
 
-/* D6 at both ends, integer form. High: raw E = 200 at e=8 would store 326;
+/* Exponent saturation at both ends, integer form. High: raw E = 200 at e=8 would store 326;
  * the cap is bias + 127 = 254, so the group is LEFT-shifted 73 beyond its
  * natural grid and saturates to [-2^(m-1), qMax] (sign-dependent caps). At
  * e=4 the cap is the stored range top (15). Low: raw E = -130 stores 0 (not

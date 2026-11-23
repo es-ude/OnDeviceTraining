@@ -444,7 +444,7 @@ void testTapOutputRangeEmptyWhenStrideSkipsTheInput() {
     TEST_ASSERT_EQUAL_size_t(1, hi);
 }
 
-/* ---- B6: differential tests against the pre-B6 (int64-divide) geometry ----
+/* ---- Differential tests against the int64-divide geometry ----------------
  * refWindowSlice1dAt / refWindowTapOutputRange1d are verbatim copies of the
  * long-long implementations that the divide-free rewrite replaced; the
  * exhaustive sweeps below pin the rewrite as bit-identical on every field. */

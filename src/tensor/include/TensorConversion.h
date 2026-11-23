@@ -222,14 +222,14 @@ void scaleBfpTensorInPlace(tensor_t *t, float factor, rngStream_t *rs);
  * form (the bits an alignment drops are carried to the final rounding, so a
  * small increment is never erased before SR); the fresh exponent from the SUM
  * (cancellation included) by the integer exponent rule, floored at E_c (a sum
- * cancelled below the working grid's top m - 1 bits keeps E_c), then the BFP
- * D6 clamp; ONE rounding per element by the target config's roundingMode
+ * cancelled below the working grid's top m - 1 bits keeps E_c), then the
+ * exponent-saturation clamp; ONE rounding per element by the target config's roundingMode
  * (HALF_AWAY, or SR "lift iff u < frac" on a 32-bit fraction: exact for a
  * remainder of up to 32 bits, below 2^-32 of a code step the probability is
  * truncated -- the documented cutoff), clamped to [-2^(m-1), qMax]. Under SR
  * exactly one draw per element in element order on every path (zero, exact,
  * saturated). An all-zero sum is the zero state (stored = bias); n == 0
- * leaves the zero state too (R7). A raw so large that it exceeds the
+ * leaves the zero state too. A raw so large that it exceeds the
  * exponent cap by 2^30 code steps saturates its element exactly.
  *
  * In place, alias-safe: the old exponents are published only after the last
@@ -282,8 +282,8 @@ void scaleBfpTensorByScalarInPlace(tensor_t *t, struct bfpScalar s, rngStream_t 
  * quotient/remainder form (the term that sets E_c is exact, so at most one
  * operand carries a tail -- bfpQrAdd checks it); the fresh exponent from the
  * SUM (cancellation included) by the integer exponent rule, floored at E_c,
- * then the BFP D6 clamp; ONE rounding per element by `rm` -- the
- * operation's write-back mode, not the state's storage mode (#282) -- with
+ * then the exponent-saturation clamp; ONE rounding per element by `rm` -- the
+ * operation's write-back mode, not the state's storage mode -- with
  * the discarded tail carried to it (SR "lift iff u < frac" on a 32-bit
  * fraction; below 2^-32 of a code step truncated, the §15 cutoff), clamped
  * to [-2^(m-1), qMax]. Under SR exactly one draw per element in element
@@ -318,8 +318,8 @@ void momentumStoreBfpInPlace(tensor_t *state, const tensor_t *grad, struct bfpSc
  * max(E_w + bitlen(A_w), E_u + e + bitlen(q * A_u)) - 30, capped at the
  * parameter's top exponent; the exact difference in quotient/remainder form;
  * the fresh exponent from the RESULT (cancellation included) by the integer
- * exponent rule, floored at E_c, then the BFP D6 clamp; ONE rounding per
- * element by `rm` (the optimizer's write-back mode, #282) with the discarded
+ * exponent rule, floored at E_c, then the exponent-saturation clamp; ONE
+ * rounding per element by `rm` (the optimizer's write-back mode) with the discarded
  * tail carried to it -- an update far below one code step still moves the
  * code with its exact probability (SR "lift iff u < frac" on a 32-bit
  * fraction; below 2^-32 of a step truncated, the §15 cutoff) -- clamped to
@@ -346,21 +346,21 @@ void paramUpdateBfpInPlace(tensor_t *param, const tensor_t *update, struct bfpSc
  * Per target group: uint32 absmax of the mantissas; stored exponent by the
  * SAME rule as deriveBfpStoredExponent in integer form (smallest E with
  * absmax <= qMax * 2^E, from one bit length plus one correcting compare,
- * then the BFP D6 clamp to [0, min(2^e - 1, bias + 127)]; an all-zero group
+ * then the exponent-saturation clamp to [0, min(2^e - 1, bias + 127)]; an all-zero group
  * is the zero state, stored = bias); then ONE two-sided shift per group,
  * k = stored - bias - rawE: k in [1, 31] rounds by the target config's
  * roundingMode -- HALF_AWAY on the magnitude, or SR in integer form (lift
  * iff u < rem, u = the draw's top k bits, rem = the k dropped bits: the
  * shipped "lift iff u < frac" law on a k-bit grid); k >= 32 flushes to 0;
  * k <= 0 is an exact left shift that saturates. Codes clamp to
- * [-2^(m-1), qMax] (D6 cap regime). Under SR exactly ONE draw is consumed
+ * [-2^(m-1), qMax] (the cap regime). Under SR exactly ONE draw is consumed
  * per element in element order whatever k is, like roundByMode -- the same
  * stream and order as the float re-pack it replaces, so pinned draws and
  * Python mirrors keep their positions. Raw and target geometry must be
  * identical (fail-fast); n == 0 writes zero-state exponents and no payload.
  * Packed through packChunkGuarded (byte/halfword fast path at m = 8/16).
  * Wired into conversionMatrix[BFP_RAW][BFP]; the OUT_WRITE epilogue reaches
- * it through convertTensor with the #282 rounding swap in place. */
+ * it through convertTensor with the operation's rounding swapped in. */
 void reblockBfpRawTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t *rs);
 /*! @brief BFP_RAW -> FLOAT32: the loss-facing dequant, value = ldexpf((float)
  * mantissa, rawE[g]) per element (exact where representable; a zero mantissa

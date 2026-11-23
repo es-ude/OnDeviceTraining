@@ -438,7 +438,7 @@ void testGroupFoldBiasSeedAtFracMaxEdges(void) {
                              symGroupFoldBiasSeedAtFracMax(tinyBias, 1, huge, &qc, one));
 }
 
-/* The HAR forward shapes (linq fold T4): conv1 9->16 K7 (N = 63), conv2
+/* The HAR forward shapes: conv1 9->16 K7 (N = 63), conv2
  * 16->32 K5 (N = 80), conv3 32->64 K3 (N = 96); int12 activations, int8
  * per-channel weights, a bias of real magnitude 0.25 (int12 codes at
  * 0.25/2047). Activations absmax 4.0 (0.0019541...), weights absmax 0.4

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate expected_conv1d_grouped_fold.h for UnitTestConv1dKernel's grouped
-gather fold tests (linq fold T4).
+gather fold tests.
 
 Every gold comes from sym_gold.conv1d_grouped_fold_ref, which computes the
 fold in Python ints from the canonical (m, e) of each scale -- independent of

@@ -1,11 +1,9 @@
 /* Goldens for UnitTestConv1dTransposed.c's
  * testConv1dTransposedLayerWeightGradGolden, recorded from the layer's float
- * and SYM weight-grad scatters at linq/b6 (6a1dff5a) before the ConvT
- * valid-tap range refactor; that refactor must reproduce them bit for bit.
- * Regenerate only for an intended numeric change. Re-recorded at linq/s2:
- * the SYM grad's fitted grid is now the canonical 15-bit dyadic CEIL value
- * (DyadicScale.h), which moved the scale by +3.8e-6 relative and two codes
- * (elements 10 and 58, each one step toward zero); the float arrays are unchanged. Arrays are the
+ * and SYM weight-grad scatters before the ConvT valid-tap range refactor;
+ * that refactor must reproduce them bit for bit. Regenerate only for an
+ * intended numeric change. The SYM grad's fitted grid is the canonical
+ * 15-bit dyadic CEIL value (DyadicScale.h). Arrays are the
  * [Cin, Cout/groups, K] weight-grad storage, flat. The SYM grad is the
  * funnel-restored wire (mantissas + scale + width). */
 #ifndef GOLDEN_CONV1D_TRANSPOSED_WEIGHT_GRAD_H

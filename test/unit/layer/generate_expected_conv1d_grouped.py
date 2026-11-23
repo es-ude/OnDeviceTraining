@@ -3,8 +3,8 @@
 Task 4 -- docs/conventions/tensor.md).
 
 Pins conv1dKernelSymInt32Grouped's running group-partial gather: int MACs
-per group run (exact), then ONE integer combine per run (linq fold T4,
-SymGroupFold.h) at every group boundary AND at the end of each
+per group run (exact), then ONE integer combine per run
+(SymGroupFold.h) at every group boundary AND at the end of each
 (batch, outChannel, outPos) reduction,
     acc += round(partial * m_g * 2^-(E - e_g + 15 - F)),
 at the exact accumulator scale A = {in.m, in.e + E + 15 - F}, from the bias
@@ -42,7 +42,7 @@ test) mirror generate_expected_group_matmul.py's Task-3 discipline exactly:
 Group-quant PR3 (Task 3) additions:
   dx        Conv1d backward propLoss with the grouped weight -- the adjoint
             SCATTER (convTranspose1dKernelSymInt32Grouped in the adjoint
-            role). Its fold path (linq fold T3) folds each lossGrad code into
+            role). Its fold path folds each lossGrad code into
             its weight group once, at A = {loss.m, loss.e + E + 15 - F}.
             Gold via sym_gold.conv1d_dx_grouped_fold_ref (Python ints, int12
             lossGrad, the weight's code range: SYM [-2048, 2047], and the

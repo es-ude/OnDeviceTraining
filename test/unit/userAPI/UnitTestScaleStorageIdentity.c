@@ -24,17 +24,17 @@
 #include <stdint.h>
 #include <string.h>
 
-/* S3 (integer dyadic scale storage) must be bit-identical to S2 (float storage
- * of canonical dyadic values). This file runs one pass over the S2 boundary
+/* Integer dyadic scale storage (odtScale_t) must be bit-identical to float
+ * storage of canonical dyadic values. This file runs one pass over the boundary
  * cases -- every fitted-grid route (float CEIL, integer-codes CEIL, ASYM range),
  * the fixed-target requant, the NEAREST product, the exact quotient, the
  * accumulate engines, the v7 float deserialize, the neutral 1.0 grids, the
  * bias-seeded and grouped (CEIL sAcc) Matmul, the Dropout coefficient and the
  * LayerNorm forward/backward grids -- and records codes, the
  * stored scale's float bits and the RNG state after each SR case. The golden
- * below was captured from the S2 build (linq/s2) BEFORE the storage type
- * changed; S3 may only change how this file reads and writes a scale (the
- * accessors directly below), never the golden.
+ * below was captured from the float-storage build before the storage type
+ * changed; a storage change may only change how this file reads and writes a
+ * scale (the accessors directly below), never the golden.
  *
  * Build with -DODT_SCALE_IDENTITY_CAPTURE to print the record instead of
  * comparing it. */
@@ -100,8 +100,7 @@ static void floatView(tensor_t *t, float *data, quantization_t *q) {
     setTensorValues(t, (uint8_t *)data, &shape1, q, NULL);
 }
 
-/* Captured from linq/s2 (02408f84). */
-static const uint32_t S2_GOLDEN[] = {
+static const uint32_t FLOAT_STORAGE_GOLDEN[] = {
     0xca5e0001u, 0x000007ffu, 0xfffffbe2u, 0x00000083u, 0xfffff8dau, 0x0000028bu, 0x00000000u,
     0xffffff31u, 0x0000064cu, 0x3ad34e00u, 0xcc29ed04u, 0xca5e0002u, 0x0000047fu, 0xfffffdc0u,
     0x000007ffu, 0x0000005au, 0xfffff9c1u, 0x00000300u, 0xfffffc01u, 0x000001a6u, 0x3a4ce800u,
@@ -136,7 +135,7 @@ static const uint32_t S2_GOLDEN[] = {
     0xfffffd2au, 0x000002ddu, 0x39e08800u,
 };
 
-void testS3MatchesS2OnBoundaryCases(void) {
+void testDyadicStorageMatchesFloatStorageOnBoundaryCases(void) {
     recLen = 0;
     float va[N];
     float vb[N];
@@ -524,14 +523,14 @@ void testS3MatchesS2OnBoundaryCases(void) {
     freeQuantization(lnQ);
 
 #ifdef ODT_SCALE_IDENTITY_CAPTURE
-    printf("static const uint32_t S2_GOLDEN[] = {\n");
+    printf("static const uint32_t FLOAT_STORAGE_GOLDEN[] = {\n");
     for (size_t i = 0; i < recLen; i++) {
         printf("0x%08xu,%s", rec[i], (i % 6 == 5) ? "\n" : " ");
     }
     printf("};\n");
 #else
-    TEST_ASSERT_EQUAL_size_t(sizeof S2_GOLDEN / sizeof S2_GOLDEN[0], recLen);
-    TEST_ASSERT_EQUAL_HEX32_ARRAY(S2_GOLDEN, rec, recLen);
+    TEST_ASSERT_EQUAL_size_t(sizeof FLOAT_STORAGE_GOLDEN / sizeof FLOAT_STORAGE_GOLDEN[0], recLen);
+    TEST_ASSERT_EQUAL_HEX32_ARRAY(FLOAT_STORAGE_GOLDEN, rec, recLen);
 #endif
 }
 
@@ -540,6 +539,6 @@ void tearDown(void) {}
 
 int main(void) {
     UNITY_BEGIN();
-    RUN_TEST(testS3MatchesS2OnBoundaryCases);
+    RUN_TEST(testDyadicStorageMatchesFloatStorageOnBoundaryCases);
     return UNITY_END();
 }

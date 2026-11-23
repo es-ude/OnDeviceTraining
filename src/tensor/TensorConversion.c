@@ -1454,7 +1454,7 @@ void requantBfpTensor(tensor_t *inputTensor, tensor_t *outputTensor, rngStream_t
  * b = bfpBitLength32(absMax), s = b - (m - 1) gives absMax < 2^(m-1) * 2^s; since
  * qMax = 2^(m-1) - 1 is one below a power of two, the top of each octave
  * (absMax > qMax << s, s >= 1) needs one more; for s <= 0 that never
- * happens. Then the BFP D6 clamp to [0, cap]. *shiftOut = stored - bias -
+ * happens. Then the exponent-saturation clamp to [0, cap]. *shiftOut = stored - bias -
  * rawE is the right shift (negative: left) from raw mantissa to stored code
  * The emit shift stored - bias - rawE differs from s exactly when a clamp
  * fired. */
@@ -1499,8 +1499,8 @@ static inline uint32_t shiftRawMagnitudeCold(uint32_t mag, int k, uint32_t cap) 
  * chunked, per run inside a chunk (groups are contiguous, so a run cursor
  * replaces every division): one shift k per run; k in [1, 31] is the hot
  * path with the rounding mode hoisted out of the element loop. Codes are
- * clamped to the sign's bound ([-2^(m-1), qMax]), which only binds in the D6
- * cap regime. Under SR every element consumes exactly one draw, on every
+ * clamped to the sign's bound ([-2^(m-1), qMax]), which only binds in the
+ * exponent cap regime. Under SR every element consumes exactly one draw, on every
  * path, so the stream position matches the float re-pack's. */
 static void reblockBfpRawBuffer(const int32_t *mant, const int16_t *rawE, size_t n,
                                 bfpQConfig_t *outQC, uint8_t *dst, const char *what,
@@ -1829,7 +1829,7 @@ static void rejectOverlappingOperands(const tensor_t *updated, const tensor_t *r
 static void rejectAliasedIncrement(const tensor_t *target, const tensor_t *increment,
                                    const char *what) {
     /* The rescale engines rewrite the target's grid between phase A and
-     * phase B (PR #324), and every engine packs the target chunk by chunk:
+     * phase B, and every engine packs the target chunk by chunk:
      * an increment sharing any byte of the target's storage would be decoded
      * from rewritten bytes mid-stream. The funnel epilogue always passes a
      * distinct intermediate. */
@@ -2422,7 +2422,7 @@ void scaleBfpTensorInPlace(tensor_t *t, float factor, rngStream_t *rs) {
  *           qMax * 2^E is a grid multiple for E >= E_c, the rounded-up
  *           magnitude decides exactly like the exact sum would: E_d is the
  *           exact rule's exponent of the true sum, floored at E_c, then the
- *           D6 clamp. An all-zero sum (both sides zero, or exact
+ *           exponent-saturation clamp. An all-zero sum (both sides zero, or exact
  *           cancellation) is the zero state.
  *   pass 2: per element the same exact sum, re-gridded E_d - E_c >= 0 steps
  *           and rounded once by the target's mode (bfpQrRound), one draw per
@@ -2433,7 +2433,7 @@ void scaleBfpTensorInPlace(tensor_t *t, float factor, rngStream_t *rs) {
  * term at or beyond 2^30 on the grid -- the only one that could overflow --
  * saturates the element with the raw's sign, exactly: |sum| > 2^30 - 2^15.
  * Passes 0 and 1 run one group boundary ahead of pass 2, the window rule of
- * bfpRescaleWalk (#421 U6), so qc->exponents keeps the OLD grid for every
+ * bfpRescaleWalk, so qc->exponents keeps the OLD grid for every
  * group pass 2 has not finished, and the per-group state lives in two fixed
  * rings of ODT_RESCALE_FRESH_WINDOW slots. */
 #define BFP_INT_ACC_ZERO_GROUP INT32_MIN /* workE marker: every sum of the group is 0 */
@@ -2550,7 +2550,7 @@ void accumulateBfpRawIntoBfpRescale(tensor_t *target, const tensor_t *increment,
     const bfpRawQConfig_t *rawQC = increment->quantization->qConfig;
     validateBfpQConfigShape(qc, n);
     if (n == 0) {
-        resetBfpGridToZeroState(qc); /* R7 */
+        resetBfpGridToZeroState(qc);
         return;
     }
     const roundingMode_t rm = qc->roundingMode;
@@ -2700,7 +2700,7 @@ void scaleBfpTensorByScalarInPlace(tensor_t *t, bfpScalar_t s, rngStream_t *rs) 
     const size_t n = calcNumberOfElementsByTensor(t);
     validateBfpQConfigShape(qc, n);
     if (n == 0) {
-        resetBfpGridToZeroState(qc); /* R7 */
+        resetBfpGridToZeroState(qc);
         return;
     }
     const roundingMode_t rm = qc->roundingMode;
@@ -2780,7 +2780,7 @@ void scaleBfpTensorByScalarInPlace(tensor_t *t, bfpScalar_t s, rngStream_t *rs) 
  *           that sets E_c is then exact on the grid (shift <= 0), so at most
  *           one term carries a tail.
  *   pass 1: absmax of the exact sums rounded UP to the grid -> the integer
- *           exponent rule, floored at E_c, D6 clamp (the accumulate engine's
+ *           exponent rule, floored at E_c, exponent-saturation clamp (the accumulate engine's
  *           exactness argument verbatim).
  *   pass 2: the same exact sum re-gridded and rounded once by the caller's
  *           mode, one draw per element in element order on every path.
@@ -2963,7 +2963,7 @@ static void bfpScaledSumInPlace(tensor_t *t, bfpScalar_t a, const tensor_t *s, b
     }
     requireNormalizedSignedScalar(b, what, "scalar");
     if (n == 0) {
-        resetBfpGridToZeroState(tqc); /* R7 */
+        resetBfpGridToZeroState(tqc);
         return;
     }
     if (rm == SR_HALF_AWAY && rs == NULL) {

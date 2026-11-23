@@ -1,11 +1,9 @@
 /* Goldens for UnitTestConv1dKernel.c's testConv1dGroupedGolden* tests,
- * recorded from conv1dKernelSymInt32Grouped at linq/b6 (6a1dff5a) before the
- * grouped-kernel range-cursor refactor; that refactor must reproduce them bit
- * for bit. Regenerate only for an intended numeric change. linq S3: the bias
- * scale input became NEAREST15(0.3) (an odtScale_t cannot hold 0.3f); only
- * kCgGoldHa11 moved (output channel 0's bias seed, one LSB), re-recorded from
- * the same kernel. linq fold T4: the int8 fixtures now take the integer
- * fold path, so the kCgGold* / kCg2Gold* / kCg2AlignedGold* arrays below pin
+ * recorded from conv1dKernelSymInt32Grouped before the grouped-kernel
+ * range-cursor refactor; that refactor must reproduce them bit for bit.
+ * Regenerate only for an intended numeric change. The bias scale input is
+ * NEAREST15(0.3) (an odtScale_t cannot hold 0.3f). The int8 fixtures take the
+ * integer fold path, so the kCgGold* / kCg2Gold* / kCg2AlignedGold* arrays below pin
  * the LEGACY float path (testConv1dGroupedFoldFallsBackToLegacyForWideInput
  * runs the same operands declared 17 bits wide); the fold-path goldens are
  * the generated expected_conv1d_grouped_fold.h (HALF_AWAY) and the kCg*FoldSr*
@@ -120,8 +118,8 @@ static const int32_t kCgGoldSr11[54] = {
     -3116, -2685, 2379, -1548, 1624,  2832,   -5065,  -771, 1201,  3589, 5400,  3248, -1916, -8963,
     1118,  6894,  463,  -175,  -6235, -12207, 9369,   -932, -2497, 7057, -2589, -559};
 
-/* testConv1dGroupedGoldenConvGroups2 (conv groups 2), recorded at linq/b6b
- * (b269e8e8), same refactor contract as above. Index i is kCg2GoldGroupSize[i]. */
+/* testConv1dGroupedGoldenConvGroups2 (conv groups 2), same refactor contract
+ * as above. Index i is kCg2GoldGroupSize[i]. */
 static const int32_t kCg2GoldHa0[24] = {-3310, -2232,  -4815, 1297, 229,  -2747, -225, -1933,
                                         -196,  4639,   -1525, 1299, -236, 3585,  1210, 6429,
                                         -1953, -10232, -3262, 7197, 1089, -2300, 3403, 1578};
@@ -137,7 +135,7 @@ static const int32_t kCg2GoldSr1[24] = {2108,  -9341, -2256, 1374,   18418, 3778
 static const uint32_t kCg2GoldSrState[2] = {2690316087u, 3869888365u};
 static const float kCg2GoldScale[2] = {0x1p-3f, 0x1.1p-4f};
 
-/* Channel-aligned conv-groups-2 goldens (linq fold T2): the cg2 fixture with
+/* Channel-aligned conv-groups-2 goldens: the cg2 fixture with
  * group sizes 10 (one group per weight row) and 20 (one group spans two rows),
  * recorded from the cursor kernel before the channel-aligned fast path so that
  * path must reproduce them. SR seeds are 0xC2A00000u + i. Index i is
@@ -157,7 +155,7 @@ static const int32_t kCg2AlignedGoldSr1[24] = {
 static const uint32_t kCg2AlignedGoldSrState[2] = {910915442u, 289642743u};
 static const float kCg2AlignedGoldScale[2] = {0x1.cp-5f, 0x1p-5f};
 
-/* Fold-path SR goldens (linq fold T4), recorded from conv1dKernelSymInt32Grouped
+/* Fold-path SR goldens, recorded from conv1dKernelSymInt32Grouped
  * after the integer combine landed (the Python fold reference has no C RNG):
  * cgGoldRun / cg2GoldRun with an int8 input, SR seeds as in the tests. Every
  * combine of these k/64-scale fixtures is exact (generator-asserted), so each
@@ -251,7 +249,7 @@ static const int32_t kCg2AlignedFoldSr1[24] = {
     -594693, -753893,  1045324,  627020,  33740,   643406,  -278194, 1103694};
 static const uint32_t kCg2AlignedFoldSrState[2] = {910915442u, 289642743u};
 
-/* Unaligned fold goldens (linq fold T6 step 1), recorded from
+/* Unaligned fold goldens, recorded from
  * conv1dKernelSymInt32Grouped's cursor loop before the
  * segment walk replaced it. HALF_AWAY and SR codes, the SR stream state after
  * the call, and the stamped accumulator scale {m, e} and width. Index i is

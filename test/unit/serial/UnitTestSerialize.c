@@ -2313,7 +2313,7 @@ static void testGoldenBytesModelReluV5(void) {
     TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, got, sizeof(expected));
 }
 
-/*! GOLDEN BYTES (linq S4, wire format v9): a stored scale is written as its
+/*! GOLDEN BYTES (wire format v9): a stored scale is written as its
  *  dyadic fields, `u16 m` then `i16 e` (both LE), never as a float. The
  *  scales are not powers of two, so a float encoding or swapped fields
  *  cannot produce these bytes: 0.375 = 24576 * 2^-16, 3.0 = 24576 * 2^-13. */

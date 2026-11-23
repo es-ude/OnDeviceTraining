@@ -859,7 +859,7 @@ add_elastic_ai_unit_test(
         odt_test_death
 )
 
-# S3 bit-identity pin: the S2 (float-storage) outputs of every canonical-scale
+# Scale-storage bit-identity pin: the float-storage outputs of every canonical-scale
 # boundary case, captured before the storage type became odtScale_t.
 add_executable(UnitTestScaleStorageIdentity UnitTestScaleStorageIdentity.c)
 target_link_libraries(UnitTestScaleStorageIdentity PRIVATE

@@ -2034,7 +2034,7 @@ void testConvTGroupedGoldenSr(void) {
     }
 }
 
-/* ---- linq fold T3: the grouped scatter's per-group integer fold ----------
+/* ---- The grouped scatter's per-group integer fold ------------------------
  * Each input code meeting group g is folded once into the accumulator scale
  * A = {inScale.m, inScale.e + E + 15 - F} (SymGroupFold.h); the products are
  * then plain int32 MACs. Golds: generate_expected_convT1d_grouped_fold.py
@@ -2195,7 +2195,7 @@ void testConvTGroupedFoldTinyGroupScaleContributesNothingNotGarbage(void) {
 /* Review Focus 3: a 17-bit input takes the legacy float path, bit-identical
  * to the pre-fold kernel -- kCtGoldGrouped{Ha,Sr}* and kCtGoldGroupedScale are
  * the goldens recorded before the fold existed (codes, scale and the SR
- * stream). The stamped width (#516) is the legacy rescaled site over the
+ * stream). The stamped width is the legacy rescaled site over the
  * 17-bit x range with the bias pass's seed range; this fixture's seeds
  * (|bias| <= 200 at 0.3 / sAcc 0.125, i.e. <= 480) sit far below its 2^26
  * boundary, so their part is pinned by ctLegacyStampCountsTheSeed. */
@@ -2488,7 +2488,7 @@ void testConvTGroupedFoldGoldenConvGroups2Cursor(void) {
                        kConvTFoldCgCursorAccM, kConvTFoldCgCursorAccE, kConvTFoldCgCursorBits);
 }
 
-/* ---- linq fold T7: groups that do not line up with an input channel's block
+/* ---- Groups that do not line up with an input channel's block
  * kCtuFold* (golden_convT1d_scatter.h) were recorded from the cursor scatter
  * before the segment walk replaced it; the walk must reproduce them, the SR
  * stream included. Non-dyadic scales make every fold inexact, so an extra or

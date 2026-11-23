@@ -1138,7 +1138,7 @@ void testConv1dTransposedBackwardNullPropLossComputesGradsOnly(void) {
  * Grouped ConvT1d forward routes through the grouped SCATTER
  * core convTranspose1dKernelSymInt32Grouped. A scatter has no per-(target,
  * group) run across which a raw partial could be carried, unlike the gather
- * cores' running-partial idiom; its fold path (linq fold T3) instead folds
+ * cores' running-partial idiom; its fold path instead folds
  * each input code into its weight group once, at the accumulator scale
  * A = {in.m, in.e + E + 15 - F}, then runs plain int32 MACs.
  *
@@ -1287,7 +1287,7 @@ void testConvT1dForwardGroupedGeneralMatchesGold(void) {
 
 /* Equal-scales grouped twin: every group's scale is the SAME power-of-two
  * value (0.25f, m = 2^14) and inScale (0.5f, kConvTGroupedXScale) is also a
- * power of two, so the grouped scatter's fold (linq fold T3) is exact for
+ * power of two, so the grouped scatter's fold is exact for
  * every code -- x_g = x * 2^14 * 2^-(15 - F) = x * 2^(F-1), F >= 1 -- and its
  * accumulator scale A = inScale * 2^(E + 15 - F) makes x_g * w * A exactly
  * x * w * inScale * 0.25. The grouped kernel's output must therefore
@@ -1357,7 +1357,7 @@ void testConvT1dForwardGroupedEqualScalesBitIdenticalToScalar(void) {
  * groupedSymOperandPos declaration -- both math arms must declare it:
  * omitting it on the FLOAT32 arm makes this test die with the funnel's deny message.
  *
- * Tolerance derivation (fold error model, linq fold T3): the float path is
+ * Tolerance derivation (fold error model): the float path is
  * (near-)exact real arithmetic, while the SYM gold folds each input code into
  * its weight group once at the accumulator scale A (= kConvTPerChannelOutScale),
  * each fold off by <= 0.5 code, so an output element is off by
@@ -1389,7 +1389,7 @@ void testConvT1dForwardGroupedFloatPathAgreesWithinTolerance(void) {
 /* ---- ConvT1d backward dx with a grouped SYM
  * weight -- the adjoint GATHER (conv1dKernelSymInt32Grouped in the adjoint
  * role: running group-partial, one integer combine per group RUN of the
- * reduction at A = {loss.m, loss.e + E + 15 - F}, linq fold T4). Fixture:
+ * reduction at A = {loss.m, loss.e + E + 15 - F}). Fixture:
  * the forward fixture's weight/group shapes with a seeded random SYM_INT32
  * lossGrad [1, 3, 6] (generate_expected_convT1d_grouped.py's dx fixtures,
  * torch-autograd cross-checked there). ---- */
@@ -1558,7 +1558,7 @@ void testConvT1dBackwardGroupedDxFloatPathAgreesWithinTolerance(void) {
  * Smoke test at the ConvT1d layer (the UnitTestConv1d.c ASYM-twin design,
  * transplanted to the scatter core): after the funnel's ASYM grouped-unpack
  * arm shifts the codes (code - zp[g]) the compute path IS the grouped-SYM
- * scatter on the resulting mantissas. Since the fold (linq fold T3) the twins
+ * scatter on the resulting mantissas. Since the fold the twins
  * are no longer bit-identical: the scatter's fold proves its fraction bits F
  * over the weight's code range, and the ASYM image (+-4095) is twice the SYM
  * range, so the ASYM twin folds with F one lower (generator-asserted). Each

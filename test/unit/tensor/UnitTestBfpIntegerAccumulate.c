@@ -587,7 +587,7 @@ void testEngineMatchesExactReferenceOnRandomTargets(void) {
     }
 }
 
-/* Dead zone (#279), pinned: w = 64 * Delta, increment -Delta/256 (a raw of
+/* Dead zone, pinned: w = 64 * Delta, increment -Delta/256 (a raw of
  * 2^20 codes at 2^-28). The sum 63.996 Delta keeps the exponent, and SR
  * must move it to 63 with probability exactly 1/256: lift iff
  * u < 255 * 2^24. The +Delta/256 twin moves to 65 iff u < 2^24. */
@@ -901,7 +901,7 @@ void testEngineFreshAccumulatorTakesTheIncrementGrid(void) {
 }
 
 /* HALF_AWAY consumes no draw and runs without a stream; n == 0 leaves the
- * canonical zero state (R7). */
+ * canonical zero state. */
 void testEngineEmptyTargetIsZeroState(void) {
     const uint8_t stored[1] = {3};
     const int16_t rawE[1] = {5};

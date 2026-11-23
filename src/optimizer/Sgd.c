@@ -196,7 +196,7 @@ static void sgdRejectIntegerWeightDecay(const sgd_t *sgd) {
  * contract as the funnel op it replaces: the OUT stream of the state op's
  * key, one draw per element in element order -- the draw count of the
  * OUT_WRITE re-pack -- so every other op's stream is untouched. Rounds by
- * the optimizer's write-back mode (#282). Out of line: its own census root,
+ * the optimizer's write-back mode. Out of line: its own census root,
  * integer only. */
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((noinline))
@@ -219,7 +219,7 @@ static void sgdMomentumStoreBfp(const sgd_t *sgd, tensor_t *state, const tensor_
  * (after the state op's own rounding: the float op's order) or, without
  * momentum, the gradient. Same RNG contract as the funnel op it replaces: the
  * OUT stream of the param op's key, one draw per element in element order.
- * Rounds by the optimizer's write-back mode (#282). Out of line: its own
+ * Rounds by the optimizer's write-back mode. Out of line: its own
  * census root, integer only. */
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((noinline))

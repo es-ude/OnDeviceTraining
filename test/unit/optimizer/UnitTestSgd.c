@@ -48,13 +48,13 @@ _Static_assert(_Generic(&sgdMCreateOptim,
 _Static_assert(_Generic(&collectTrainableParameters,
                    void (*)(const model_t *, parameter_t **): 1,
                    default: 0),
-               "#328: collectTrainableParameters must be (model, slots)");
+               "collectTrainableParameters must be (model, slots)");
 _Static_assert(_Generic(&validateOptimizerGradStorage,
                    void (*)(optimizer_t *, const char *): 1,
                    default: 0),
-               "#328: validateOptimizerGradStorage must be (optim, factoryName)");
+               "validateOptimizerGradStorage must be (optim, factoryName)");
 _Static_assert(_Generic(&modelHasFrozenLayer, bool (*)(const model_t *): 1, default: 0),
-               "#380: modelHasFrozenLayer must be (model)");
+               "modelHasFrozenLayer must be (model)");
 _Static_assert(_Generic(&freeOptim, void (*)(optimizer_t *): 1, default: 0),
                "#328: freeOptim must be (optim)");
 _Static_assert(_Generic(&optimizerClipGradNorm, float (*)(optimizer_t *, float): 1, default: 0),

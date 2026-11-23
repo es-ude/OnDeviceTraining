@@ -122,7 +122,7 @@ CONFIGS: dict[str, tuple[str, dict[str, str]]] = {
     # Full-SYM wires (#206 acceptance): SYM_INT32 activation + dx wires, SYM
     # dx compute, SYM softmax output -> fake-quant CE + SYM metrics argmax.
     "sym8w": ("train_c_har_classifier_sym", {"SYM_BITS": "8", "SYM_WIRES": "1"}),
-    # E0 linear-quant baseline (host twins of the board firmware arms): SYM_BWD=1
+    # Linear-quant baseline (host twins of the board firmware arms): SYM_BWD=1
     # = integer dW/db/dx (SYM_INT32 grad math, FLOAT32 grad storage) under
     # FLOAT32 wires (sym8b), + SYM_INT32 wires (sym8bw), + per-output-channel
     # weight groups (sym8bwg). asym8 = ASYM@8 weights, FLOAT32 backward.
@@ -332,7 +332,7 @@ def run_one(
 
 def log_diverged(log_path: Path) -> bool:
     """True iff the run's JSON log records `final.diverged == 1` (graceful stop at
-    the first non-finite loss, #446). A missing/unreadable log is not divergence."""
+    the first non-finite loss). A missing/unreadable log is not divergence."""
     try:
         final = json.loads(log_path.read_text()).get("final", {})
     except (json.JSONDecodeError, OSError):

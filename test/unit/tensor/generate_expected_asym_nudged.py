@@ -23,8 +23,7 @@ Fixtures:
                (= 15.999755859375) -- all-negative band; the nudge extends it
                to [-B, 0], whose grid B / 65535 = 2^-12 is exactly dyadic (the
                canonical CEIL grid keeps it), so zp lands exactly on the uint16
-               ceiling 2^16-1 = 65535 (the group-quant D6 boundary pin that
-               replaces the old -72817 int32-width pin). A non-dyadic band
+               ceiling 2^16-1 = 65535 (the uint16 boundary pin). A non-dyadic band
                such as [-10, 0] gets a coarser CEIL grid and zp 65533.
   f3NegFar     {-5000000, -4999999.5} @ qBits=8 -- the old
                ZeroPointBeyondInt32 DEATH data: un-nudged zpReal ~ -2.55e9

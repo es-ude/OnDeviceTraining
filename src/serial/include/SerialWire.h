@@ -19,7 +19,7 @@
 void serialWriteBytes(const void *bytes, size_t numberOfBytes, FILE *f);
 void serialWriteU8(uint8_t value, FILE *f);
 void serialWriteU16LE(uint16_t value, FILE *f);
-/*! linq S4 (ODTS v9): i16 carrier for a dyadic scale's exponent (odtScale_t.e). */
+/*! The ODTS v9 i16 carrier for a dyadic scale's exponent (odtScale_t.e). */
 void serialWriteI16LE(int16_t value, FILE *f);
 void serialWriteU32LE(uint32_t value, FILE *f);
 void serialWriteI32LE(int32_t value, FILE *f);

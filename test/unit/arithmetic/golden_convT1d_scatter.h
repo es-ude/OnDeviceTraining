@@ -1,5 +1,5 @@
 /* Goldens for UnitTestConvTranspose1dKernel.c's *Golden tests, recorded from
- * the scatter kernels at linq/b6 (6a1dff5a) before the ConvT valid-tap range
+ * the scatter kernels before the ConvT valid-tap range
  * refactor; that refactor must reproduce them bit for bit. Regenerate only
  * for an intended numeric change. Arrays are [batch][channel][position]
  * flat; suffixes A/B/C name the geometries of kCtGoldGeoms. */
@@ -162,7 +162,7 @@ static const int32_t kCtGoldGroupedSrC[154] = {
     1073,  -8544, -3906, -1787, -1031, -929,  1518,   -980,  6145,  -3703, -1538, -1795, 3494,
     -313,  1205,  -658,  1229,  -3724, -5757, 357,    5897,  -9767, 4078,  1244};
 
-/* Fold path SR (linq fold T3), recorded from the kernel: codes equal the
+/* Fold path SR, recorded from the kernel: codes equal the
  * Python HALF_AWAY gold (kCtFoldHa*, every fold of this fixture is exact)
  * except each bias seed, which SR may lift by 1; the stream state pins one
  * draw per fold plus one per bias seed. The kCtGoldGrouped* arrays above are
@@ -212,7 +212,7 @@ static const int32_t kCtFoldSrC[154] = {
     754560,  -1250204, 521892,  159148};
 static const uint32_t kCtFoldSrState[3] = {2211702708u, 1573832094u, 1218822890u};
 
-/* Unaligned fold goldens (linq fold T7 step 1), recorded from
+/* Unaligned fold goldens, recorded from
  * convTranspose1dKernelSymInt32Grouped's cursor scatter before
  * the segment walk replaced it. HALF_AWAY and SR codes, the SR stream state
  * after the call, and the stamped accumulator scale {m, e} and width. Index i

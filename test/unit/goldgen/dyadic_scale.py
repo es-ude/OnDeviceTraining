@@ -120,7 +120,7 @@ def coeff_scale(s: float, factor: float) -> float:
 
 
 def _self_check():
-    # S1's directed product: 16385 * 24560 = 24561.49.. * 2^14 -> 24561
+    # The directed product: 16385 * 24560 = 24561.49.. * 2^14 -> 24561
     # NEAREST, 24562 CEIL (the float32 product would tie up to 24562).
     a = _value(16385, -14)
     b = _value(24560, -14)

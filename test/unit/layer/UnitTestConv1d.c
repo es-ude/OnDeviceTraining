@@ -1663,7 +1663,7 @@ static layer_t *buildGroupedConv1dFixtureLayer(quantization_t *q, size_t numGrou
  * The exact FLOAT32 wire has no such blind spot: it is bit-for-bit the
  * deterministic integer arithmetic generate_expected_conv1d_grouped.py's
  * conv1d_grouped_fold_ref computes (python-int MACs, one integer combine per
- * group run at A, linq fold T4), so ANY divergence in the kernel's internal
+ * group run at A), so ANY divergence in the kernel's internal
  * arithmetic (wrong A, dropped combine, wrong rounding mode) changes the
  * compared value measurably. Still routes through
  * conv1dForward -> executeOp's grouped-operand gate, so the layer's
@@ -1712,7 +1712,7 @@ void testConv1dForwardGroupedGeneralMatchesGold(void) {
  * testMatmulGroupedEqualScalesBitIdenticalToScalar (UnitTestMatmul.c) at the
  * LAYER level. Every group's scale is the SAME power-of-two value (0.25f,
  * m = 2^14) and inScale (0.5f, kConv1dGroupedXScale) is also a power of two,
- * so the grouped kernel's integer combine (linq fold T4) is exact for every
+ * so the grouped kernel's integer combine is exact for every
  * partial -- round(partial * 2^14 * 2^-(15 - F)) = partial * 2^(F-1), F >= 1
  * -- at A = inScale * 2^(E + 15 - F), i.e. exactly partial * inScale * 0.25.
  * The grouped output must therefore dequantize BIT-IDENTICALLY to the scalar
@@ -1936,7 +1936,7 @@ void testConv1dBackwardGroupedDxEqualScalesBitIdenticalToScalar(void) {
  * declare the same operand position), then the float scatter computes the
  * reference value with NO per-product rounding.
  *
- * Tolerance derivation (fold error model, linq fold T3): the SYM gold folds
+ * Tolerance derivation (fold error model): the SYM gold folds
  * each lossGrad code into its weight group once, at the accumulator scale A
  * (= kDxPerChannelOutScale), each fold off by <= 0.5 code, so an element is
  * off by <= 0.5*A*sum|w| over its contributing products. The generator emits
@@ -2051,8 +2051,8 @@ void testConv1dForwardGroupedConvGroupsMatchesGold(void) {
  * Smoke test at the Conv1d layer: after the funnel's ASYM grouped-unpack arm
  * shifts the codes (code - zp[g]) the compute path IS the grouped-SYM path
  * on the resulting mantissas, but over the ASYM image's code range
- * (+-(2^qBits - 1), twice the SYM range). Since the integer fold (linq fold
- * T3 dx, T4 forward) that range proves one fraction bit less, so each twin
+ * (+-(2^qBits - 1), twice the SYM range). Since the integer fold (dx and
+ * forward) that range proves one fraction bit less, so each twin
  * is pinned to its own Python-int gold over exact FLOAT32 wires.
  * Pairwise-distinct zps keep group 1/2 sensitive to a zp[0]-everywhere
  * shift (the targeted discriminators live in
@@ -2137,7 +2137,7 @@ void testConv1dForwardGroupedAsymMatchesItsImageRangeGold(void) {
 
 /* dx twin (the adjoint scatter consumes the SAME stored weight): both layers
  * frozen (dx-only, the grouped-dx test convention above), same SYM_INT32
- * lossGrad, exact FLOAT32 dx wires. Since the fold (linq fold T3) the twins
+ * lossGrad, exact FLOAT32 dx wires. Since the fold the twins
  * are no longer bit-identical: the scatter's fold proves its fraction bits F
  * over the weight's code range, and the ASYM image (+-4095) is twice the SYM
  * range, so the ASYM twin folds with F one lower (generator-asserted). It
@@ -4072,7 +4072,7 @@ void testConv1dBfpWeightGradFixedScaleKeepsTheFloatBridge(void) {
     freeQuantization(floatQ);
 }
 
-/* E0 characterization (SYM_BWD=1 HAR arm): integer dW/db/dx behind FLOAT32
+/* Characterization of the SYM_BWD=1 HAR arm: integer dW/db/dx behind FLOAT32
  * wires. Twin layers from the same FLOAT32 values: (a) all-FLOAT32 reference;
  * (b) params requantized to packed SYM@8 per-tensor, all four math slots
  * {ARITH_SYM_INT32, HALF_AWAY}, outputQ = propLossQ = FLOAT32, FLOAT32 grad

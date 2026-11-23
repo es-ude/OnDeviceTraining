@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scale-access gate (linq S3): every SYM / SYM_INT32 / ASYM scale is stored as
+# Scale-access gate: every SYM / SYM_INT32 / ASYM scale is stored as
 # an integer dyadic odtScale_t (src/tensor/include/DyadicScale.h) and is read
 # and written ONLY through the accessors:
 #   odtScaleStore / odtScaleLoad          (DyadicScale.h, 4-byte copies)

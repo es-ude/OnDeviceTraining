@@ -51,7 +51,7 @@ static void reserveAndFreeZeroBytes(void) {
     freeReservedMemory(reserveMemory(0));
 }
 
-/* A 0-byte request is not a failure, even where calloc(1, 0) is NULL (#160). */
+/* A 0-byte request is not a failure, even where a zero-size allocation returns NULL. */
 void testReserveMemoryOfZeroBytesReturns(void) {
     ASSERT_EXITS_WITH(0, reserveAndFreeZeroBytes());
 }

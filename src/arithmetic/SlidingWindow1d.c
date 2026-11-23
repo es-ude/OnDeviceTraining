@@ -47,7 +47,7 @@ windowGeometry1d_t windowGeometry1dCalc(size_t inputLength, kernel_t const *kern
     return g;
 }
 
-/* Unsigned, divide-free geometry (B6). These run once per output position or
+/* Unsigned, divide-free geometry. These run once per output position or
  * tap in every conv/pool kernel, so they avoid 64-bit math (a libgcc call on
  * Cortex-M) and skip the divide entirely for the common stride/dilation 1.
  * ceilDivSize uses (n - 1) / d + 1, not (n + d - 1) / d: the latter wraps once

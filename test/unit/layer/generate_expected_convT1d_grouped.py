@@ -3,7 +3,7 @@
 PR3, Task 2 -- docs/conventions/tensor.md).
 
 Pins convTranspose1dKernelSymInt32Grouped's SCATTER core on its fold path
-(linq fold T3, SymGroupFold.h): each input code is folded into its weight
+(SymGroupFold.h): each input code is folded into its weight
 group once, x_g = round(x * m_g * 2^-(E - e_g + 15 - F)), then accumulated in
 plain int32 at A = {in.m, in.e + E + 15 - F}; bias AFTER the scatter at A.
 F is the largest fraction count the accumulator guard proves for int12 x
@@ -59,7 +59,7 @@ test):
 Group-quant PR3 (Task 3) addition -- ConvT1d dx (adjoint GATHER): backward
 propLoss consumes the grouped weight through conv1dKernelSymInt32Grouped in
 the adjoint role (running group-partial, one integer combine per group RUN of
-the reduction at A = {loss.m, loss.e + E + 15 - F}, linq fold T4). Gold via
+the reduction at A = {loss.m, loss.e + E + 15 - F}). Gold via
 sym_gold.convT1d_dx_grouped_fold_ref (the gather fold emulation under the
 ConvT1d-adjoint parameter remapping; int12 lossGrad, SYM weight range);
 cross-checked against a PyTorch float autograd reference (y.backward(lossGrad))

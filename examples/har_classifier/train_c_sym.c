@@ -229,7 +229,7 @@ typedef struct symQuant {
 
 /* SYM layerQuant for conv/linear: SYM_INT32 forward compute, FLOAT32 grad
  * storage (weightGradStorage/biasGradStorage NULL => per-layer FLOAT32
- * default). Wires are FLOAT32 by default; SYM_WIRES=1 (#206 acceptance)
+ * default). Wires are FLOAT32 by default; SYM_WIRES=1
  * switches the activation + dx wires to SYM_INT32 and the dx COMPUTE to the
  * native SYM arms. SYM_BWD=1 switches the dW/db/dx COMPUTE to SYM_INT32 under
  * either wire setting (FLOAT32 wire operands are staged to SYM_INT32 by the

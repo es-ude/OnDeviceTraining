@@ -4733,7 +4733,7 @@ void testLinearBackwardBfpDxIntoBfpWireSrFollowsTheOpModeAndTheOutStream(void) {
                               "SR and HALF_AWAY agree: the SR test is vacuous");
 }
 
-/* E0 characterization (SYM_BWD=1 HAR arm): integer dW/db/dx behind FLOAT32
+/* Characterization of the SYM_BWD=1 HAR arm: integer dW/db/dx behind FLOAT32
  * wires. Twin layers from the same FLOAT32 values: (a) all-FLOAT32 reference;
  * (b) params requantized to packed SYM@8 per-tensor, all four math slots
  * {ARITH_SYM_INT32, HALF_AWAY}, outputQ = propLossQ = FLOAT32, FLOAT32 grad

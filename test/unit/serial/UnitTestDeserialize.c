@@ -228,7 +228,7 @@ static void testDeserializeRejectsV7Version(void) {
 }
 
 /*! v8 = the wiring format whose SYM / SYM_INT32 / ASYM records still carry
- *  `f32` scales where v9 (linq S4) carries `u16 m, i16 e`. Same 4 bytes, so a
+ *  `f32` scales where v9 carries `u16 m, i16 e`. Same 4 bytes, so a
  *  v8 record would misparse rather than truncate. No v8 compatibility shim. */
 static void testDeserializeRejectsV8Version(void) {
     FILE *f = fopen(FILE_PATH, "wb");

@@ -1715,46 +1715,6 @@ void testConvTranspose1dKernelBfpScatterRawGroupHugeGapFlushesTheLowRows(void) {
     TEST_ASSERT_TRUE(r.raw.mant[0] != 0 && r.raw.mant[1] != 0);
 }
 
-/* The raw contract: the kernel writes a BFP_RAW only. */
-static void ctScatterIntoFloatOutputBody(void) {
-    ctDxCase_t c = {.batch = 1,
-                    .cin = 1,
-                    .length = 2,
-                    .cout = 1,
-                    .groups = 1,
-                    .kernelSize = 1,
-                    .stride = 1,
-                    .dilation = 1,
-                    .padding = 0,
-                    .m = 8};
-    kernel_t kernel;
-    initKernelExplicit(&kernel, c.kernelSize, c.padding, c.dilation, c.stride);
-    int32_t gyCodes[2] = {1, 2};
-    int32_t wCodes[1] = {3};
-    uint8_t exps[] = {127};
-    size_t gyDims[3] = {1, 1, 2};
-    size_t wDims[3] = {1, 1, 1};
-    bfpScratchFixture_t gy;
-    bfpScratchFixture_t w;
-    bfpScratchInit(&gy, 3, gyDims, gyCodes, exps, 1, 0, 8, 8);
-    bfpScratchInit(&w, 3, wDims, wCodes, exps, 1, 0, 8, 8);
-    float out[2];
-    size_t outDims[3] = {1, 1, 2};
-    size_t outOrder[3] = {0, 1, 2};
-    shape_t outShape;
-    setShape(&outShape, outDims, 3, outOrder);
-    quantization_t outQ;
-    initFloat32Quantization(&outQ);
-    tensor_t outTensor;
-    setTensorValues(&outTensor, (uint8_t *)out, &outShape, &outQ, NULL);
-    convTranspose1dKernelBfpScatter(&gy.tensor, &w.tensor, &kernel, 1, 0, &outTensor);
-}
-
-void testConvTranspose1dKernelBfpScatterRejectsFloatOutput(void) {
-    ASSERT_EXITS_WITH_OUTPUT(1, "convTranspose1dKernelBfpScatter: output must be BFP_RAW",
-                             ctScatterIntoFloatOutputBody());
-}
-
 /* ---- Goldens captured before the valid-tap-range refactor ----------------
  * Outputs recorded from the scatter kernels as they were before the ConvT
  * valid-tap range refactor, which must be bit-identical (SR stream included).
@@ -2793,7 +2753,6 @@ int main(void) {
     RUN_TEST(testConvTranspose1dKernelBfpScatterRawGroupStraddlingBatchesTakesTheMaxExponent);
     RUN_TEST(testConvTranspose1dKernelBfpScatterRawGroupHugeGapFlushesTheLowRows);
     RUN_TEST(testConvTranspose1dKernelBfpScatterZeroGroupsDoNotSetTheAccumulator);
-    RUN_TEST(testConvTranspose1dKernelBfpScatterRejectsFloatOutput);
     RUN_TEST(testConvTScatterFloatGolden);
     RUN_TEST(testConvTScatterSymGolden);
     RUN_TEST(testConvTScatterBfpGolden);

@@ -1250,27 +1250,6 @@ void testConv1dKernelBfpRawPowerOfTwoDequantMatchesFloatKernel(void) {
     }
 }
 
-static void conv1dKernelBfpRawFloatOutputBody(void) {
-    bfpScratchFixture_t in, w;
-    bfpRawMainOperands(&in, &w, kBfpConvWExponents);
-    tensor_t out;
-    float outData[10];
-    size_t outDims[] = {(size_t)kBfpConvBatch, (size_t)kBfpConvOutChannels, (size_t)kBfpConvOutLen};
-    size_t outOrder[] = {0, 1, 2};
-    shape_t outShape;
-    setShape(&outShape, outDims, 3, outOrder);
-    quantization_t outQ;
-    initFloat32Quantization(&outQ);
-    setTensorValues(&out, (uint8_t *)outData, &outShape, &outQ, NULL);
-    kernel_t kernel;
-    bfpRawMainKernel(&kernel, 1);
-    conv1dKernelBfpRaw(&in.tensor, &w.tensor, NULL, &kernel, 1, &out);
-}
-
-void testConv1dKernelBfpRawRejectsNonRawOutput(void) {
-    ASSERT_EXITS_WITH_FAILURE(conv1dKernelBfpRawFloatOutputBody());
-}
-
 static void conv1dKernelBfpRawBadGeometryBody(void) {
     bfpScratchFixture_t in, w;
     bfpRawMainOperands(&in, &w, kBfpConvWExponents);
@@ -2813,7 +2792,6 @@ int main(void) {
     RUN_TEST(testConv1dKernelBfpRawWorstCaseWithBiasAtTheFloor);
     RUN_TEST(testConv1dKernelBfpRawBiasExponentDominatesTheProducts);
     RUN_TEST(testConv1dKernelBfpRawPowerOfTwoDequantMatchesFloatKernel);
-    RUN_TEST(testConv1dKernelBfpRawRejectsNonRawOutput);
     RUN_TEST(testConv1dKernelBfpRawRejectsMismatchedRawGeometry);
     RUN_TEST(testConv1dKernelBfpRawZeroInputGroupDoesNotSetTheAccumulator);
     RUN_TEST(testConv1dKernelBfpRawZeroBiasDoesNotSetTheAccumulator);

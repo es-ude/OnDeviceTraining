@@ -960,22 +960,6 @@ void testAvgPool1dBfpRawWorstCaseCodesAcrossExponentGaps(void) {
     }
 }
 
-static void avgPoolBfpRawIntoFloatRawBody(void) {
-    int32_t codes[4] = {1, 2, 3, 4};
-    uint8_t exps[1] = {127};
-    size_t inDims[3] = {1, 1, 4};
-    size_t outDims[3] = {1, 1, 3};
-    bfpScratchFixture_t in;
-    bfpScratchInit(&in, 3, inDims, codes, exps, 1, 0, 8, 8);
-    tensor_t *notRaw = makeFloatTensor(outDims, 3, NULL);
-    kernel_t kern;
-    initKernel(&kern, 2, VALID, 1, 1);
-    avgPool1dConfig_t cfg = {0};
-    cfg.kernel = &kern;
-    tensor_t *ops[1] = {&in.tensor};
-    avgPool1dForwardKernelBfpRaw(ops, 1, notRaw, NULL, &cfg, NULL);
-}
-
 /* Zero groups never set E_acc: input [1, 1, 8] in groups of 4, group 0 all
  * zero in the zero state (E = 0), group 1 live at E = -28; K = 2, stride 2
  * (a power of two: the raw is the exact window sum under E - 1). Every
@@ -1001,12 +985,6 @@ void testAvgPool1dBfpRawZeroGroupDoesNotSetTheAccumulator(void) {
         int64_t sum = (int64_t)codes[2 * o] + codes[2 * o + 1];
         assertBfpValueExact(raw.mant[o], raw.exps[0], sum, -28 - 1, o);
     }
-}
-
-void testAvgPool1dBfpRawRejectsANonRawOutput(void) {
-    ASSERT_EXITS_WITH_OUTPUT(
-        1, "AvgPool1d forward BFP: needs a BFP (unpacked scratch) input and a BFP_RAW",
-        avgPoolBfpRawIntoFloatRawBody());
 }
 
 /* ---- Integer-only backward at the kernel (arithmetic-bfp.md section 14) ----
@@ -1236,28 +1214,6 @@ void testAvgPool1dBackwardBfpIntoBfpWireReblocksTheIntegerRaw(void) {
     apLayerIntoBfpWire(2, SR_HALF_AWAY, 811u);
     apLayerIntoBfpWire(4, HALF_AWAY, 0u);
     apLayerIntoBfpWire(4, SR_HALF_AWAY, 812u);
-}
-
-static void apFloatRawBody(void) {
-    int32_t gy[4] = {1, 2, 3, 4};
-    uint8_t exps[1] = {127};
-    kernel_t kern;
-    initKernel(&kern, 2, VALID, 1, 2);
-    size_t gyDims[3] = {1, 1, 4};
-    size_t dxDims[3] = {1, 1, 8};
-    bfpScratchFixture_t g;
-    bfpScratchInit(&g, 3, gyDims, gy, exps, 1, 0, 8, 8);
-    tensor_t *notRaw = makeFloatTensor(dxDims, 3, NULL);
-    avgPool1dConfig_t cfg = {0};
-    cfg.kernel = &kern;
-    tensor_t *ops[1] = {&g.tensor};
-    avgPool1dBackwardKernelBfpRaw(ops, 1, notRaw, NULL, &cfg, NULL);
-}
-
-void testAvgPool1dBackwardBfpRawRejectsAFloatRaw(void) {
-    ASSERT_EXITS_WITH_OUTPUT(
-        1, "AvgPool1d backward BFP: needs a BFP (unpacked scratch) lossGrad and a BFP_RAW",
-        apFloatRawBody());
 }
 
 /* The dx arm is FUNNEL-ROUTED, mirroring the
@@ -1588,11 +1544,9 @@ int main(void) {
     RUN_TEST(testAvgPool1dBfpRejectsANonPowerOfTwoKernel);
     RUN_TEST(testAvgPool1dBfpLog2DivisorOfPowersOfTwo);
     RUN_TEST(testAvgPool1dBfpRawWorstCaseCodesAcrossExponentGaps);
-    RUN_TEST(testAvgPool1dBfpRawRejectsANonRawOutput);
     RUN_TEST(testAvgPool1dBackwardBfpRawMatchesTheIntegerReference);
     RUN_TEST(testAvgPool1dBackwardBfpRawRowGridAndZeroGroups);
     RUN_TEST(testAvgPool1dBackwardBfpIntoBfpWireReblocksTheIntegerRaw);
-    RUN_TEST(testAvgPool1dBackwardBfpRawRejectsAFloatRaw);
     RUN_TEST(testAvgPool1dBfpRawZeroGroupDoesNotSetTheAccumulator);
     RUN_TEST(testAvgPool1dForwardBfpSumHeadroomGuardIsWired);
     RUN_TEST(testAvgPool1dForwardBfpWireUnderPinnedFloat32);

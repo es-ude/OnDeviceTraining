@@ -956,16 +956,6 @@ void convTranspose1dKernelBfpScatter(tensor_t const *input, tensor_t const *weig
     size_t outputLength = output->shape->dimensions[2];
     size_t kernelSize = weight->shape->dimensions[2];
 
-    if (input->quantization->type != BFP || weight->quantization->type != BFP) {
-        PRINT_ERROR("convTranspose1dKernelBfpScatter: input and weight must be BFP "
-                    "(unpacked scratch form)");
-        exit(1);
-    }
-    if (output->quantization->type != BFP_RAW) {
-        PRINT_ERROR("convTranspose1dKernelBfpScatter: output must be BFP_RAW (the dx raw, "
-                    "opSpec_t.bfpRawOut = BFP_RAW_BACKWARD_DX)");
-        exit(1);
-    }
     if (inChannels % groups != 0 || outChannels % groups != 0) {
         PRINT_ERROR("convTranspose1dKernelBfpScatter: groups (%zu) must divide "
                     "in_channels (%zu) and out_channels (%zu)",
@@ -981,8 +971,6 @@ void convTranspose1dKernelBfpScatter(tensor_t const *input, tensor_t const *weig
 
     bfpQConfig_t *inQC = input->quantization->qConfig;
     bfpQConfig_t *wQC = weight->quantization->qConfig;
-    validateBfpQConfigShape(inQC, calcNumberOfElementsByShape(input->shape));
-    validateBfpQConfigShape(wQC, calcNumberOfElementsByShape(weight->shape));
 
     size_t totalOut = batch * outChannels * outputLength;
     bfpRawQConfig_t *rawQC = output->quantization->qConfig;

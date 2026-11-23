@@ -344,21 +344,7 @@ static void softmaxNormalizeRaw(int32_t *q, size_t n) {
 
 void softmaxForwardBfpRaw(const tensor_t *input, bfpShiftRounding_t mode, rngStream_t *shift,
                           tensor_t *rawOut) {
-    if (input->quantization->type != BFP) {
-        PRINT_ERROR("softmaxForwardBfpRaw: input must be BFP (unpacked scratch form)");
-        exit(1);
-    }
-    if (rawOut->quantization->type != BFP_RAW) {
-        PRINT_ERROR("softmaxForwardBfpRaw: output must be BFP_RAW (the integer forward raw)");
-        exit(1);
-    }
     const size_t n = calcNumberOfElementsByTensor((tensor_t *)input);
-    if (calcNumberOfElementsByTensor(rawOut) != n) {
-        PRINT_ERROR("softmaxForwardBfpRaw: output holds %zu elements, the input %zu",
-                    calcNumberOfElementsByTensor(rawOut), n);
-        exit(1);
-    }
-    validateBfpQConfigShape(input->quantization->qConfig, n);
     bfpRawQConfig_t *rawQC = rawOut->quantization->qConfig;
     bfpRawRequireOutput(rawQC, n, "softmaxForwardBfpRaw");
     if (n == 0) {
@@ -609,11 +595,6 @@ static void softmaxBackwardKernelBfp(tensor_t **ops, size_t nOps, tensor_t *rawO
     tensor_t *x = ops[0];
     tensor_t *dLdsT = ops[1];
     size_t n = calcNumberOfElementsByTensor(x);
-    if (rawOut->quantization->type != BFP_RAW) {
-        PRINT_ERROR("Softmax backward BFP: output must be BFP_RAW (opSpec_t.bfpRawOut = "
-                    "BFP_RAW_BACKWARD_DX)");
-        exit(1);
-    }
     bfpRawQConfig_t *rawQC = rawOut->quantization->qConfig;
     size_t gsz = bfpRawRequireOutput(rawQC, n, "Softmax backward BFP");
     if (n == 0) {

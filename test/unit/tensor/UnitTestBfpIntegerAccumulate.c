@@ -921,17 +921,6 @@ static void engineAliasBody(void) {
     accumulateBfpRawIntoBfpRescale(&fixA.target, &fixA.inc, NULL);
 }
 
-static void engineGeometryMismatchBody(void) {
-    const int32_t codes[4] = {1, 2, 3, 4};
-    const uint8_t stored[2] = {127, 127};
-    const int32_t raw[4] = {1, 2, 3, 4};
-    const int16_t rawE[2] = {0, 0};
-    accInit(&fixA, 4, 2, 2, 8, 8, HALF_AWAY, codes, stored, raw, rawE);
-    fixA.rawQC.numGroups = 1;
-    fixA.rawQC.groupSize = 0;
-    accumulateBfpRawIntoBfpRescale(&fixA.target, &fixA.inc, NULL);
-}
-
 static void engineSrWithoutStreamBody(void) {
     const int32_t codes[2] = {1, 2};
     const uint8_t stored[1] = {127};
@@ -939,29 +928,6 @@ static void engineSrWithoutStreamBody(void) {
     const int16_t rawE[1] = {0};
     accInit(&fixA, 2, 1, 0, 8, 8, SR_HALF_AWAY, codes, stored, raw, rawE);
     accumulateBfpRawIntoBfpRescale(&fixA.target, &fixA.inc, NULL);
-}
-
-static void engineCountMismatchBody(void) {
-    const int32_t codes[4] = {1, 2, 3, 4};
-    const uint8_t stored[1] = {127};
-    const int32_t raw[4] = {1, 2, 3, 4};
-    const int16_t rawE[1] = {0};
-    accInit(&fixA, 4, 1, 0, 8, 8, HALF_AWAY, codes, stored, raw, rawE);
-    static size_t shortDims[1] = {3};
-    static size_t shortOrder[1] = {0};
-    static shape_t shortShape;
-    setShape(&shortShape, shortDims, 1, shortOrder);
-    fixA.inc.shape = &shortShape;
-    accumulateBfpRawIntoBfpRescale(&fixA.target, &fixA.inc, NULL);
-}
-
-static void engineWrongDtypeBody(void) {
-    const int32_t codes[2] = {1, 2};
-    const uint8_t stored[1] = {127};
-    const int32_t raw[2] = {1, 2};
-    const int16_t rawE[1] = {0};
-    accInit(&fixA, 2, 1, 0, 8, 8, HALF_AWAY, codes, stored, raw, rawE);
-    accumulateBfpRawIntoBfpRescale(&fixA.target, &fixA.target, NULL);
 }
 
 /* The raw increment's storage must not overlap the target's: a payload that
@@ -997,10 +963,7 @@ void testEngineRejectsOverlappingStorage(void) {
 
 void testEngineRejectsBadInputs(void) {
     ASSERT_EXITS_WITH_FAILURE(engineAliasBody());
-    ASSERT_EXITS_WITH_FAILURE(engineGeometryMismatchBody());
     ASSERT_EXITS_WITH_FAILURE(engineSrWithoutStreamBody());
-    ASSERT_EXITS_WITH_FAILURE(engineCountMismatchBody());
-    ASSERT_EXITS_WITH_FAILURE(engineWrongDtypeBody());
 }
 
 int main(void) {

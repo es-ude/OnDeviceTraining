@@ -2339,19 +2339,6 @@ static void linRawDieSetup(void) {
     gLinDieW.order[0] = 1;
     gLinDieW.order[1] = 0;
 }
-static void linRawIntoFloatBody(void) {
-    linRawDieSetup();
-    float outData[2];
-    tensor_t outT;
-    shape_t outShape;
-    size_t outDims[] = {1, 2};
-    size_t outOrder[] = {0, 1};
-    setShape(&outShape, outDims, 2, outOrder);
-    quantization_t outQ;
-    initFloat32Quantization(&outQ);
-    setTensorValues(&outT, (uint8_t *)outData, &outShape, &outQ, NULL);
-    matmulBfpRawTensors(&gLinDieA.tensor, &gLinDieW.tensor, NULL, &outT);
-}
 static void linRawBadGeometryBody(void) {
     linRawDieSetup();
     size_t outDims[] = {1, 2};
@@ -2359,8 +2346,7 @@ static void linRawBadGeometryBody(void) {
     matmulBfpRawTensors(&gLinDieA.tensor, &gLinDieW.tensor, NULL, &gLinDieRaw.tensor);
 }
 
-void testMatmulBfpRawRejectsANonRawOutputAndBadRawGeometry(void) {
-    ASSERT_EXITS_WITH_FAILURE(linRawIntoFloatBody());
+void testMatmulBfpRawRejectsBadRawGeometry(void) {
     ASSERT_EXITS_WITH_FAILURE(linRawBadGeometryBody());
 }
 
@@ -2974,7 +2960,7 @@ int main(void) {
     RUN_TEST(testMatmulBfpRawStridedOperandIgnoresZeroGroups);
     RUN_TEST(testMatmulBfpRawZeroBiasDoesNotSetTheAccumulator);
     RUN_TEST(testMatmulBfpRawPowerOfTwoDequantMatchesFloatKernel);
-    RUN_TEST(testMatmulBfpRawRejectsANonRawOutputAndBadRawGeometry);
+    RUN_TEST(testMatmulBfpRawRejectsBadRawGeometry);
 
     return UNITY_END();
 }

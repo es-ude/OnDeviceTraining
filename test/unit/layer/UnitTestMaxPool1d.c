@@ -1014,23 +1014,6 @@ void testMaxPool1dBfpRawArgmaxMatchesTheFloatPath(void) {
     }
 }
 
-static void maxPoolBfpRawIntoFloatRawBody(void) {
-    int32_t codes[4] = {1, 2, 3, 4};
-    uint8_t exps[1] = {127};
-    size_t inDims[3] = {1, 1, 4};
-    size_t outDims[3] = {1, 1, 3};
-    bfpScratchFixture_t in;
-    bfpScratchInit(&in, 3, inDims, codes, exps, 1, 0, 8, 8);
-    tensor_t *notRaw = makeFloatTensor(outDims, 3, NULL);
-    tensor_t *argmax = makeInt32Tensor(outDims, 3);
-    kernel_t kern;
-    initKernel(&kern, 2, VALID, 1, 1);
-    maxPool1dConfig_t cfg = {0};
-    cfg.kernel = &kern;
-    tensor_t *ops[1] = {&in.tensor};
-    maxPool1dForwardKernelBfpRaw(ops, 1, notRaw, argmax, &cfg, NULL);
-}
-
 static void maxPoolBfpRawBadGeometryBody(void) {
     int32_t codes[4] = {1, 2, 3, 4};
     uint8_t exps[1] = {127};
@@ -1049,8 +1032,7 @@ static void maxPoolBfpRawBadGeometryBody(void) {
     maxPool1dForwardKernelBfpRaw(ops, 1, &raw.tensor, argmax, &cfg, NULL);
 }
 
-void testMaxPool1dBfpRawRejectsANonRawOutputAndBadRawGeometry(void) {
-    ASSERT_EXITS_WITH_FAILURE(maxPoolBfpRawIntoFloatRawBody());
+void testMaxPool1dBfpRawRejectsBadRawGeometry(void) {
     ASSERT_EXITS_WITH_FAILURE(maxPoolBfpRawBadGeometryBody());
 }
 
@@ -1297,29 +1279,8 @@ static void mpStaleArgmaxBody(void) {
     maxPool1dBackwardKernelBfpRaw(ops, 1, &raw.tensor, NULL, &cfg, NULL);
 }
 
-static void mpFloatRawBody(void) {
-    int32_t gy[4] = {1, 2, 3, 4};
-    uint8_t exps[1] = {127};
-    kernel_t kern;
-    initKernel(&kern, 2, VALID, 1, 2);
-    size_t gyDims[3] = {1, 1, 4};
-    size_t dxDims[3] = {1, 1, 8};
-    tensor_t *argmax = makeInt32Tensor(gyDims, 3);
-    bfpScratchFixture_t g;
-    bfpScratchInit(&g, 3, gyDims, gy, exps, 1, 0, 8, 8);
-    tensor_t *notRaw = makeFloatTensor(dxDims, 3, NULL);
-    maxPool1dConfig_t cfg = {0};
-    cfg.kernel = &kern;
-    cfg.argmaxIndices = argmax;
-    tensor_t *ops[1] = {&g.tensor};
-    maxPool1dBackwardKernelBfpRaw(ops, 1, notRaw, NULL, &cfg, NULL);
-}
-
-void testMaxPool1dBackwardBfpRawRejectsStaleArgmaxAndAFloatRaw(void) {
+void testMaxPool1dBackwardBfpRawRejectsStaleArgmax(void) {
     ASSERT_EXITS_WITH_OUTPUT(1, "that window's span", mpStaleArgmaxBody());
-    ASSERT_EXITS_WITH_OUTPUT(
-        1, "MaxPool1d backward BFP: needs a BFP (unpacked scratch) lossGrad and a BFP_RAW",
-        mpFloatRawBody());
 }
 /* Funnel-routed dx mirroring the ARITH_SYM_INT32
  * arm — gradient flows only to the argmax positions the forward recorded, and
@@ -1718,11 +1679,11 @@ int main(void) {
     RUN_TEST(testMaxPool1dBfpRawZeroWinnersDoNotSetTheExponent);
     RUN_TEST(testMaxPool1dBfpRawWorstCaseCodesAcrossExponentGaps);
     RUN_TEST(testMaxPool1dBfpRawArgmaxMatchesTheFloatPath);
-    RUN_TEST(testMaxPool1dBfpRawRejectsANonRawOutputAndBadRawGeometry);
+    RUN_TEST(testMaxPool1dBfpRawRejectsBadRawGeometry);
     RUN_TEST(testMaxPool1dBackwardBfpRawMatchesTheIntegerReference);
     RUN_TEST(testMaxPool1dBackwardBfpRawRowGridAndZeroGroups);
     RUN_TEST(testMaxPool1dBackwardBfpIntoBfpWireReblocksTheIntegerRaw);
-    RUN_TEST(testMaxPool1dBackwardBfpRawRejectsStaleArgmaxAndAFloatRaw);
+    RUN_TEST(testMaxPool1dBackwardBfpRawRejectsStaleArgmax);
     RUN_TEST(testMaxPool1dBackwardBfpScattersToArgmaxPositions);
     RUN_TEST(testMaxPool1dBackwardBfpSkipsMinusOneSentinel);
     RUN_TEST(testMaxPool1dBackwardFloatRejectsBfpWires);

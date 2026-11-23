@@ -2274,22 +2274,6 @@ void testSoftmaxBfpRawMatchesTheGoldOnTheNativeFixtures(void) {
     assertRawEquals(&out, kSmBfpCsRawMantTrunc, 8, exps, 2);
 }
 
-static void smRawNonRawOutputBody(void) {
-    static const int32_t codes[] = {1, 2};
-    static const uint8_t unit[] = {127};
-    bfpScratchFixture_t in;
-    size_t dims[] = {2};
-    bfpScratchInit(&in, 1, dims, codes, unit, 1, 0, 8, 8);
-    float outData[2];
-    tensor_t outT;
-    shape_t outShape;
-    size_t outOrder[] = {0};
-    setShape(&outShape, dims, 1, outOrder);
-    quantization_t outQ;
-    initFloat32Quantization(&outQ);
-    setTensorValues(&outT, (uint8_t *)outData, &outShape, &outQ, NULL);
-    softmaxForwardBfpRaw(&in.tensor, BFP_SHIFT_TRUNC, NULL, &outT);
-}
 static void smRawBadGeometryBody(void) {
     static const int32_t codes[] = {1, 2};
     static const uint8_t unit[] = {127};
@@ -2307,8 +2291,7 @@ static void smRawWideCodesBody(void) {
     softmaxForwardBfpRaw(&in.tensor, BFP_SHIFT_TRUNC, NULL, &out.tensor);
 }
 
-void testSoftmaxBfpRawRejectsANonRawOutputBadGeometryAndWideCodes(void) {
-    ASSERT_EXITS_WITH_FAILURE(smRawNonRawOutputBody());
+void testSoftmaxBfpRawRejectsBadGeometryAndWideCodes(void) {
     ASSERT_EXITS_WITH_FAILURE(smRawBadGeometryBody());
     ASSERT_EXITS_WITH_FAILURE(smRawWideCodesBody());
 }
@@ -2380,6 +2363,6 @@ int main() {
     RUN_TEST(testSoftmaxBfpRawTiesAcrossBlocksKeepTheFirst);
     RUN_TEST(testSoftmaxBfpRawSumsToOneWithinTheNormalisationBound);
     RUN_TEST(testSoftmaxBfpRawMatchesTheGoldOnTheNativeFixtures);
-    RUN_TEST(testSoftmaxBfpRawRejectsANonRawOutputBadGeometryAndWideCodes);
+    RUN_TEST(testSoftmaxBfpRawRejectsBadGeometryAndWideCodes);
     return UNITY_END();
 }

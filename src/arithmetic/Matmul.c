@@ -731,19 +731,6 @@ BFP_WALK_NOINLINE void matmulBfpRawTensorsWalk(const matmulBfpRawWalk_t *p) {
  * Matmul.h). */
 void matmulBfpRawTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
                          tensor_t *outputTensor) {
-    if (aTensor->shape->numberOfDimensions > 2 || bTensor->shape->numberOfDimensions > 2) {
-        PRINT_ERROR("Matmul only supports up to 2D Tensors");
-        exit(1);
-    }
-    if (aTensor->quantization->type != BFP || bTensor->quantization->type != BFP) {
-        PRINT_ERROR("matmulBfpRawTensors: operands must be BFP (unpacked scratch form)");
-        exit(1);
-    }
-    if (outputTensor->quantization->type != BFP_RAW) {
-        PRINT_ERROR("matmulBfpRawTensors: output must be BFP_RAW (the integer GEMM raw)");
-        exit(1);
-    }
-
     bfpQConfig_t *aQC = aTensor->quantization->qConfig;
     bfpQConfig_t *bQC = bTensor->quantization->qConfig;
 
@@ -769,29 +756,9 @@ void matmulBfpRawTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
         exit(1);
     }
 
-    validateBfpQConfigShape(aQC, calcNumberOfElementsByTensor(aTensor));
-    validateBfpQConfigShape(bQC, calcNumberOfElementsByTensor(bTensor));
-
-    bfpQConfig_t *biasQC = NULL;
-    if (bias != NULL) {
-        if (bias->quantization->type != BFP) {
-            PRINT_ERROR("matmulBfpRawTensors: bias must be BFP");
-            exit(1);
-        }
-        if (calcNumberOfElementsByTensor(bias) != bColumns) {
-            PRINT_ERROR("matmulBfpRawTensors: bias element count != output columns");
-            exit(1);
-        }
-        biasQC = bias->quantization->qConfig;
-        validateBfpQConfigShape(biasQC, bColumns);
-    }
+    bfpQConfig_t *biasQC = bias != NULL ? bias->quantization->qConfig : NULL;
 
     size_t outElems = aRows * bColumns;
-    if (calcNumberOfElementsByTensor(outputTensor) != outElems) {
-        PRINT_ERROR("matmulBfpRawTensors: output holds %zu elements, the product has %zu",
-                    calcNumberOfElementsByTensor(outputTensor), outElems);
-        exit(1);
-    }
     bfpRawQConfig_t *rawQC = outputTensor->quantization->qConfig;
     size_t gsz = bfpRawRequireOutput(rawQC, outElems, "matmulBfpRawTensors");
     int16_t *rawE = rawQC->exponents;

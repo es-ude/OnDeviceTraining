@@ -750,10 +750,6 @@ static void badLrTooWide(void) {
     setupBad();
     puRun((bfpScalar_t){.q = 32768, .e = -15}, HALF_AWAY, NULL);
 }
-static void badRoundingMode(void) {
-    setupBad();
-    puRun(lrOf(0.05f), (roundingMode_t)99, NULL);
-}
 static void badAlias(void) {
     setupBad();
     paramUpdateBfpInPlace(&fixW.t, &fixW.t, lrOf(0.05f), HALF_AWAY, NULL);
@@ -768,27 +764,12 @@ static void badUpdateOtherGrouping(void) {
     puInit(&fixU, 4, 4, 1, 8, 8, badCodes, badStored);
     puRun(lrOf(0.05f), HALF_AWAY, NULL);
 }
-static void badCount(void) {
-    puInit(&fixW, 4, 1, 0, 8, 8, badCodes, badStored);
-    puInit(&fixU, 3, 1, 0, 8, 8, badCodes, badStored);
-    puRun(lrOf(0.05f), HALF_AWAY, NULL);
-}
 static void badWide(void) {
     puInit(&fixW, 4, 1, 0, 8, 8, badCodes, badStored);
     puInit(&fixU, 4, 1, 0, 8, 8, badCodes, badStored);
     fixU.qc.mantissaBits = 17;
     puRun(lrOf(0.05f), HALF_AWAY, NULL);
 }
-static void badUpdateDtype(void) {
-    setupBad();
-    static float uf[4] = {1, 2, 3, 4};
-    static quantization_t fq;
-    initFloat32Quantization(&fq);
-    static tensor_t ut;
-    setTensorValues(&ut, (uint8_t *)uf, &fixU.shape, &fq, NULL);
-    paramUpdateBfpInPlace(&fixW.t, &ut, lrOf(0.05f), HALF_AWAY, NULL);
-}
-
 /* Exponent storage overlap: the engine publishes each parameter group's new
  * exponent once that group is done, so an update whose (per-tensor) exponent
  * IS the parameter's first exponent byte would see its grid move under it
@@ -826,13 +807,10 @@ void testParamUpdateRejectsBadInputs(void) {
     ASSERT_EXITS_WITH_FAILURE(badSrNoStream());
     ASSERT_EXITS_WITH_FAILURE(badLrNotNormalized());
     ASSERT_EXITS_WITH_FAILURE(badLrTooWide());
-    ASSERT_EXITS_WITH_FAILURE(badRoundingMode());
     ASSERT_EXITS_WITH_FAILURE(badAlias());
     ASSERT_EXITS_WITH_FAILURE(badUpdateGroupedFinerThanParam());
     ASSERT_EXITS_WITH_FAILURE(badUpdateOtherGrouping());
-    ASSERT_EXITS_WITH_FAILURE(badCount());
     ASSERT_EXITS_WITH_FAILURE(badWide());
-    ASSERT_EXITS_WITH_FAILURE(badUpdateDtype());
 }
 
 int main(void) {

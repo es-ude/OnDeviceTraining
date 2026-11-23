@@ -233,11 +233,11 @@ void scaleBfpTensorInPlace(tensor_t *t, float factor, rngStream_t *rs);
  * exponent cap by 2^30 code steps saturates its element exactly.
  *
  * In place, alias-safe: the old exponents are published only after the last
- * read of their group (the bfpRescaleWalk window rule). Fails fast on a
- * non-BFP target or non-BFP_RAW increment, an element-count or geometry
- * mismatch (the raw must carry the target's {numGroups, groupSize}), an
- * increment sharing the target's data pointer, and SR without a stream.
- * Direct-call only, not a conversionMatrix cell. */
+ * read of their group (the bfpRescaleWalk window rule). The caller (the
+ * executeOp epilogue) guarantees a BFP target and a BFP_RAW increment of the
+ * same element count that carries the target's {numGroups, groupSize}. Fails
+ * fast on an increment whose storage overlaps the target's and on SR without
+ * a stream. Direct-call only, not a conversionMatrix cell. */
 void accumulateBfpRawIntoBfpRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs);
 
 /* bfpScalar_t (BfpKernelSupport.h); a declaration may take it incomplete,
@@ -296,11 +296,10 @@ void scaleBfpTensorByScalarInPlace(tensor_t *t, struct bfpScalar s, rngStream_t 
  * the last read of their group (the rescale engines' one-group window, two
  * fixed rings and two fixed chunk buffers: bounded stack, no VLA). The
  * gradient is read only; it is per-tensor or in the state's geometry (its
- * exponent per state group: its own group, or its only one). Fails fast:
- * non-BFP state or gradient, element-count mismatch, any other gradient
- * geometry, mantissa width > 16, a gradient sharing the state's data, mu not
- * normalized or outside [0, 1], a rounding mode other than HALF_AWAY /
- * SR_HALF_AWAY, SR without a stream. */
+ * exponent per state group: its own group, or its only one). The caller
+ * guarantees BFP state and gradient of one element count. Fails fast: any
+ * other gradient geometry, mantissa width > 16, a gradient sharing the
+ * state's data, mu not normalized or outside [0, 1], SR without a stream. */
 void momentumStoreBfpInPlace(tensor_t *state, const tensor_t *grad, struct bfpScalar mu,
                              roundingMode_t rm, rngStream_t *rs);
 
@@ -333,11 +332,10 @@ void momentumStoreBfpInPlace(tensor_t *state, const tensor_t *grad, struct bfpSc
  *
  * In place, alias-safe (the parameter's old exponents are published only
  * after the last read of their group; fixed rings and chunk buffers, no VLA).
- * The update is read only. Fails fast: non-BFP parameter or update,
- * element-count mismatch, an update geometry other than per-tensor or the
- * parameter's, mantissa width > 16, an update sharing the parameter's data, lr
- * not normalized, a rounding mode other than HALF_AWAY / SR_HALF_AWAY, SR
- * without a stream. */
+ * The update is read only. The caller guarantees BFP parameter and update of
+ * one element count. Fails fast: an update geometry other than per-tensor or
+ * the parameter's, mantissa width > 16, an update sharing the parameter's
+ * data, lr not normalized, SR without a stream. */
 void paramUpdateBfpInPlace(tensor_t *param, const tensor_t *update, struct bfpScalar lr,
                            roundingMode_t rm, rngStream_t *rs);
 

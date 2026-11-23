@@ -2544,28 +2544,11 @@ static void bfpIntAccScan(const bfpQConfig_t *qc, const uint8_t *data, const int
 
 void accumulateBfpRawIntoBfpRescale(tensor_t *target, const tensor_t *increment, rngStream_t *rs) {
     const char *what = "accumulateBfpRawIntoBfpRescale";
-    if (target->quantization->type != BFP || increment->quantization->type != BFP_RAW) {
-        PRINT_ERROR("%s: needs a BFP target and a BFP_RAW increment, got %s and %s", what,
-                    quantTypeToString(target->quantization->type),
-                    quantTypeToString(increment->quantization->type));
-        exit(1);
-    }
     const size_t n = calcNumberOfElementsByTensor(target);
-    if (calcNumberOfElementsByTensor((tensor_t *)increment) != n) {
-        PRINT_ERROR("%s: element-count mismatch", what);
-        exit(1);
-    }
     rejectAliasedIncrement(target, increment, what);
     bfpQConfig_t *qc = target->quantization->qConfig;
     const bfpRawQConfig_t *rawQC = increment->quantization->qConfig;
     validateBfpQConfigShape(qc, n);
-    validateBfpRawQConfigShape(rawQC, n, what);
-    if (rawQC->numGroups != qc->numGroups || rawQC->groupSize != qc->groupSize) {
-        PRINT_ERROR("%s: raw geometry {numGroups=%zu, groupSize=%zu} must equal the target's "
-                    "{%zu, %zu} (one raw exponent per TARGET group)",
-                    what, rawQC->numGroups, rawQC->groupSize, qc->numGroups, qc->groupSize);
-        exit(1);
-    }
     if (n == 0) {
         resetBfpGridToZeroState(qc); /* R7 */
         return;
@@ -2941,24 +2924,14 @@ static void requireNormalizedSignedScalar(bfpScalar_t b, const char *what, const
     }
 }
 
-/* t' = a * t + b * s in place (the block comment above). Fails fast on
- * everything the engine does not implement: non-BFP operands, element-count
- * or geometry mismatch, mantissa width > 16, a source sharing any byte of the
- * target's payload or exponents, `a` not normalized or outside [0, 1], `b` not normalized, a
- * rounding mode other than HALF_AWAY / SR_HALF_AWAY, SR without a stream. */
+/* t' = a * t + b * s in place (the block comment above). The SGD step calls it only with two
+ * BFP operands of one element count. Fails fast on what the engine does not implement: a
+ * source geometry neither per-tensor nor the target's, mantissa width > 16, a source sharing any
+ * byte of the target's payload or exponents, `a` not normalized or outside [0, 1], `b` not
+ * normalized, SR without a stream. */
 static void bfpScaledSumInPlace(tensor_t *t, bfpScalar_t a, const tensor_t *s, bfpScalar_t b,
                                 roundingMode_t rm, rngStream_t *rs, const char *what) {
-    if (t->quantization->type != BFP || s->quantization->type != BFP) {
-        PRINT_ERROR("%s: needs BFP operands, got %s and %s", what,
-                    quantTypeToString(t->quantization->type),
-                    quantTypeToString(s->quantization->type));
-        exit(1);
-    }
     const size_t n = calcNumberOfElementsByTensor(t);
-    if (calcNumberOfElementsByTensor((tensor_t *)s) != n) {
-        PRINT_ERROR("%s: element-count mismatch", what);
-        exit(1);
-    }
     rejectOverlappingOperands(t, s, "read-only operand", what);
     bfpQConfig_t *tqc = t->quantization->qConfig;
     const bfpQConfig_t *sqc = s->quantization->qConfig;
@@ -2989,10 +2962,6 @@ static void bfpScaledSumInPlace(tensor_t *t, bfpScalar_t a, const tensor_t *s, b
         exit(1);
     }
     requireNormalizedSignedScalar(b, what, "scalar");
-    if (rm != HALF_AWAY && rm != SR_HALF_AWAY) {
-        PRINT_ERROR("%s: rounding mode %d unsupported (HALF_AWAY / SR_HALF_AWAY)", what, (int)rm);
-        exit(1);
-    }
     if (n == 0) {
         resetBfpGridToZeroState(tqc); /* R7 */
         return;

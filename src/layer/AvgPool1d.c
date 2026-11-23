@@ -145,13 +145,6 @@ void avgPool1dForwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, te
     (void)rs;
     const avgPool1dConfig_t *cfg = ctx;
     tensor_t *input = ops[0];
-
-    if (input->quantization->type != BFP || rawOut->quantization->type != BFP_RAW) {
-        PRINT_ERROR("AvgPool1d forward BFP: needs a BFP (unpacked scratch) input and a BFP_RAW "
-                    "output (opSpec_t.bfpRawOut), got dtypes %d -> %d",
-                    (int)input->quantization->type, (int)rawOut->quantization->type);
-        exit(1);
-    }
     const int log2K = avgPool1dBfpLog2Divisor(cfg->kernel->size, "AvgPool1d forward BFP");
     size_t batch = input->shape->dimensions[0];
     size_t channels = input->shape->dimensions[1];
@@ -454,13 +447,6 @@ void avgPool1dBackwardKernelBfpRaw(tensor_t **ops, size_t n, tensor_t *rawOut, t
     (void)rs;
     const avgPool1dConfig_t *cfg = ctx;
     tensor_t *lossGrad = ops[0];
-
-    if (lossGrad->quantization->type != BFP || rawOut->quantization->type != BFP_RAW) {
-        PRINT_ERROR("AvgPool1d backward BFP: needs a BFP (unpacked scratch) lossGrad and a BFP_RAW "
-                    "output (opSpec_t.bfpRawOut), got dtypes %d -> %d",
-                    (int)lossGrad->quantization->type, (int)rawOut->quantization->type);
-        exit(1);
-    }
     const int log2K = avgPool1dBfpLog2Divisor(cfg->kernel->size, "AvgPool1d backward BFP");
     size_t batch = lossGrad->shape->dimensions[0];
     size_t channels = lossGrad->shape->dimensions[1];

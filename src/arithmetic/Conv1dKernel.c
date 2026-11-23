@@ -1058,14 +1058,6 @@ void conv1dKernelBfpRaw(tensor_t const *input, tensor_t const *weight, tensor_t 
     size_t outputLength = output->shape->dimensions[2];
     size_t kernelSize = weight->shape->dimensions[2];
 
-    if (input->quantization->type != BFP || weight->quantization->type != BFP) {
-        PRINT_ERROR("conv1dKernelBfpRaw: input and weight must be BFP (unpacked scratch form)");
-        exit(1);
-    }
-    if (output->quantization->type != BFP_RAW) {
-        PRINT_ERROR("conv1dKernelBfpRaw: output must be BFP_RAW (the integer forward raw)");
-        exit(1);
-    }
     if (inChannels % groups != 0 || outChannels % groups != 0) {
         PRINT_ERROR("conv1dKernelBfpRaw: groups (%zu) must divide in_channels "
                     "(%zu) and out_channels (%zu)",
@@ -1078,22 +1070,7 @@ void conv1dKernelBfpRaw(tensor_t const *input, tensor_t const *weight, tensor_t 
 
     bfpQConfig_t *inQC = input->quantization->qConfig;
     bfpQConfig_t *wQC = weight->quantization->qConfig;
-    validateBfpQConfigShape(inQC, calcNumberOfElementsByShape(input->shape));
-    validateBfpQConfigShape(wQC, calcNumberOfElementsByShape(weight->shape));
-
-    bfpQConfig_t *biasQC = NULL;
-    if (bias != NULL) {
-        if (bias->quantization->type != BFP) {
-            PRINT_ERROR("conv1dKernelBfpRaw: bias must be BFP");
-            exit(1);
-        }
-        if (calcNumberOfElementsByShape(bias->shape) != outChannels) {
-            PRINT_ERROR("conv1dKernelBfpRaw: bias element count != out_channels");
-            exit(1);
-        }
-        biasQC = bias->quantization->qConfig;
-        validateBfpQConfigShape(biasQC, outChannels);
-    }
+    bfpQConfig_t *biasQC = bias != NULL ? bias->quantization->qConfig : NULL;
 
     windowGeometry1d_t geom = windowGeometry1dCalc(inputLength, kernel);
     if (geom.outputLength != outputLength) {

@@ -799,21 +799,6 @@ static void badGeometry(void) {
     moInit(&fixG, 4, 2, 2, 8, 8, badCodes, badStored);
     moRun(muOf(0.9f), HALF_AWAY, NULL);
 }
-static void badCount(void) {
-    moInit(&fixV, 4, 1, 0, 8, 8, badCodes, badStored);
-    moInit(&fixG, 3, 1, 0, 8, 8, badCodes, badStored);
-    moRun(muOf(0.9f), HALF_AWAY, NULL);
-}
-static void badGradDtype(void) {
-    setupBad();
-    static float gf[4] = {1, 2, 3, 4};
-    static quantization_t fq;
-    initFloat32Quantization(&fq);
-    static tensor_t gt;
-    setTensorValues(&gt, (uint8_t *)gf, &fixG.shape, &fq, NULL);
-    momentumStoreBfpInPlace(&fixV.t, &gt, muOf(0.9f), HALF_AWAY, NULL);
-}
-
 /* Storage overlap, not only pointer identity: the engine writes the state's
  * payload chunk by chunk while still reading the gradient, so a state one
  * byte into the gradient's payload (512 per-tensor m8 codes, all 64, mu 0.5)
@@ -862,8 +847,6 @@ void testMomentumRejectsBadInputs(void) {
     ASSERT_EXITS_WITH_FAILURE(badMuNotNormalized());
     ASSERT_EXITS_WITH_FAILURE(badAlias());
     ASSERT_EXITS_WITH_FAILURE(badGeometry());
-    ASSERT_EXITS_WITH_FAILURE(badCount());
-    ASSERT_EXITS_WITH_FAILURE(badGradDtype());
 }
 
 int main(void) {

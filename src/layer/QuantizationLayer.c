@@ -125,15 +125,7 @@ static void quantizationBackwardKernelBfp(tensor_t **ops, size_t n, tensor_t *ra
     (void)rs;
     tensor_t *loss = ops[0];
     size_t count = calcNumberOfElementsByTensor(loss);
-    if (loss->quantization->type != BFP || rawOut->quantization->type != BFP_RAW ||
-        calcNumberOfElementsByTensor(rawOut) != count) {
-        PRINT_ERROR("Quantization backward BFP: needs a BFP loss and a BFP_RAW output of the same "
-                    "element count, got dtypes %d -> %d",
-                    (int)loss->quantization->type, (int)rawOut->quantization->type);
-        exit(1);
-    }
     const bfpQConfig_t *qC = loss->quantization->qConfig;
-    validateBfpQConfigShape(qC, count);
     bfpRawQConfig_t *rawQC = rawOut->quantization->qConfig;
     bfpRawRequireOutput(rawQC, count, "Quantization backward BFP");
     if (count == 0) {

@@ -27,7 +27,7 @@
 static const arithmetic_t NO_ARITHMETIC = {.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY};
 
 /* The switches below name every layerType_t (-Werror=switch catches a new one); this ends
- * them for LAYER_TYPE_COUNT or a value outside the enum. */
+ * them for a value outside the enum. */
 static _Noreturn void unknownLayerType(const char *fn, layerType_t type) {
     PRINT_ERROR("%s: unknown layer type %d", fn, (int)type);
     exit(1);
@@ -66,8 +66,6 @@ quantization_t *layerOutputQ(layer_t *layer) {
         return layer->config->quantization->outputQ;
     case ADD:
         return layer->config->add->outputQ;
-    case LAYER_TYPE_COUNT:
-        break;
     }
     unknownLayerType(__func__, layer->type);
 }
@@ -165,8 +163,6 @@ quantization_t *backwardWireQ(layer_t *layer) {
         return layer->config->add->propLossQ;
     case FLATTEN:
         return NULL;
-    case LAYER_TYPE_COUNT:
-        break;
     }
     unknownLayerType(__func__, layer->type);
 }
@@ -204,8 +200,6 @@ arithmetic_t layerForwardMath(layer_t *layer) {
         return NO_ARITHMETIC;
     case ADD:
         return layer->config->add->forwardMath;
-    case LAYER_TYPE_COUNT:
-        break;
     }
     unknownLayerType(__func__, layer->type);
 }
@@ -371,8 +365,6 @@ static const char *nonFloat32Field(layer_t *layer, bool forwardOnly) {
     }
     case QUANTIZATION:
         return "layerType QUANTIZATION (a conversion node)";
-    case LAYER_TYPE_COUNT:
-        break;
     }
     unknownLayerType(__func__, layer->type);
 }
@@ -427,8 +419,6 @@ bool layerForwardUpdatesState(const layer_t *layer) {
     case DROPOUT:
     case ADD:
         return false;
-    case LAYER_TYPE_COUNT:
-        break;
     }
     unknownLayerType(__func__, layer->type);
 }
@@ -485,8 +475,6 @@ size_t layerForwardCost(const layer_t *layer, size_t inElements, size_t outEleme
         return outElements;
     case FLATTEN:
         return 0u;
-    case LAYER_TYPE_COUNT:
-        break;
     }
     unknownLayerType(__func__, layer->type);
 }

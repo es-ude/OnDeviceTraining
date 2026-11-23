@@ -793,8 +793,5 @@ static void deserializeLayer(layer_t *layer, FILE *f) {
         }
         break;
     }
-    case LAYER_TYPE_COUNT:
-        PRINT_ERROR("deserializeLayer: LAYER_TYPE_COUNT is the enum's count, not a layer type");
-        exit(1);
     }
 }

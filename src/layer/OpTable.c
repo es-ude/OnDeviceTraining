@@ -69,4 +69,4 @@ const opFunctions_t opFunctions[] = {
 };
 
 _Static_assert(sizeof opFunctions / sizeof opFunctions[0] == LAYER_TYPE_COUNT,
-               "one op row per layerType_t member: a type appended without its row stops here");
+               "one op row per layerType_t member: LAYER_TYPE_COUNT must follow the last member");

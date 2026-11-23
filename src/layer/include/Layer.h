@@ -24,8 +24,9 @@ typedef struct quantizationConfig quantizationConfig_t;
 /* WIRE FORMAT -- append-only. The serialized layer record's uint8 tag is this
  * enum's POSITION (src/serial/Serialize.c). Never insert or reorder members:
  * that renumbers the tail and silently corrupts every previously serialized
- * model. Append new members directly before LAYER_TYPE_COUNT and extend the
- * wire-tag pins in test/unit/serial/UnitTestSerialize.c. */
+ * model. Append new members after the last one, move LAYER_TYPE_COUNT to the
+ * new last member, add the member's opFunctions[] and layerFunctions[] rows
+ * and extend the wire-tag pins in test/unit/serial/UnitTestSerialize.c. */
 typedef enum layerType {
     LINEAR,
     RELU,
@@ -41,10 +42,13 @@ typedef enum layerType {
     LAYERNORM,
     GROUPNORM,
     BATCHNORM1D,
-    ADD,
-    /* Not a layer: the member count, so it bounds every table indexed by type. Stays last. */
-    LAYER_TYPE_COUNT
+    ADD
 } layerType_t;
+
+/* The member count, outside the enum so exhaustive layer-type switches need no sentinel arm.
+ * It bounds every table indexed by type: the tables' size asserts (Layer.c, OpTable.c) fail
+ * when a row is added but this still names the old last member. */
+#define LAYER_TYPE_COUNT (ADD + 1)
 
 /* How a step touches one operand wire. WRITE opens a wire (a node's dx at its buffer's first
  * contribution); ACC adds into an already open one. READ also marks a slot that writes nothing. */

@@ -56,8 +56,8 @@
  * layerType_t enum position (Serialize.c serializeLayer). The enum is an
  * append-only wire contract -- inserting or reordering members silently
  * corrupts every previously serialized model. If one of these asserts fires,
- * you reordered/inserted; move your new member directly before LAYER_TYPE_COUNT
- * instead. When appending, add its pin line here and bump the count pin. */
+ * you reordered/inserted; append your new member after the last one instead.
+ * When appending, add its pin line here and bump the count pin. */
 _Static_assert(LINEAR == 0, "layerType_t wire tag: LINEAR must stay 0 (append-only enum)");
 _Static_assert(RELU == 1, "layerType_t wire tag: RELU must stay 1 (append-only enum)");
 _Static_assert(CONV1D == 2, "layerType_t wire tag: CONV1D must stay 2 (append-only enum)");
@@ -78,8 +78,8 @@ _Static_assert(BATCHNORM1D == 13,
                "layerType_t wire tag: BATCHNORM1D must stay 13 (append-only enum)");
 _Static_assert(ADD == 14, "layerType_t wire tag: ADD must stay 14 (append-only enum)");
 _Static_assert(LAYER_TYPE_COUNT == 15,
-               "new layerType_t member: append it directly before LAYER_TYPE_COUNT and add its "
-               "wire-tag pin above");
+               "new layerType_t member: append it after the last one, move LAYER_TYPE_COUNT to "
+               "it and add its wire-tag pin above");
 
 /* WIRE-FORMAT PINS (#serial): the serialized arithmetic record's uint8 tag IS the
    arithmeticType_t enum position (serializeArithmetic, Serialize.c) -- append-only. */

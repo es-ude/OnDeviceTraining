@@ -74,7 +74,8 @@ layerFunctions_t layerFunctions[] = {
     [ADD] = {addChainForwardStub, addChainBackwardStub, addChainShapeStub}};
 
 _Static_assert(sizeof layerFunctions / sizeof layerFunctions[0] == LAYER_TYPE_COUNT,
-               "one layerFunctions row per layerType_t member");
+               "one layerFunctions row per layerType_t member: LAYER_TYPE_COUNT must follow the "
+               "last member");
 
 void initLayer(layer_t *layer, layerType_t type, layerConfig_t *config) {
     layer->type = type;

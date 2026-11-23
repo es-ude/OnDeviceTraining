@@ -264,6 +264,20 @@ static void requireStreamedSamples(size_t totalSamples, const char *caller) {
     }
 }
 
+/* The metrics argmax reads rows * C class scores from an inference callback's
+ * output. The built-in losses already pin the output to the label, so only a
+ * custom callback can miss. A single sample is a chunk of one row. */
+static void requireOutputScoreCount(const char *caller, tensor_t *out, size_t rows, size_t C,
+                                    size_t chunkFirst) {
+    size_t elements = calcNumberOfElementsByTensor(out);
+    if (elements != rows * C) {
+        PRINT_ERROR("%s: the output of the chunk starting at sample %zu has %zu elements, expected "
+                    "%zu rows x %zu classes",
+                    caller, chunkFirst, elements, rows, C);
+        exit(1);
+    }
+}
+
 /* A stacked chunk's output must hold `rows` contiguous rows of C FLOAT32
  * class scores -- the per-row argmax reads it at row * C. */
 static void requireChunkOutput(const char *caller, inferenceStats_t *stats, size_t rows, size_t C,
@@ -282,13 +296,7 @@ static void requireChunkOutput(const char *caller, inferenceStats_t *stats, size
                     caller, chunkFirst, rows);
         exit(1);
     }
-    size_t elements = calcNumberOfElementsByTensor(out);
-    if (elements != rows * C) {
-        PRINT_ERROR("%s: the output of the chunk starting at sample %zu has %zu elements, expected "
-                    "%zu rows x %zu classes",
-                    caller, chunkFirst, elements, rows, C);
-        exit(1);
-    }
+    requireOutputScoreCount(caller, out, rows, C, chunkFirst);
     for (size_t d = 0; d < s->numberOfDimensions; d++) {
         if (s->orderOfDimensions[d] != d) {
             PRINT_ERROR("%s: the output of the chunk starting at sample %zu is not in identity "
@@ -415,9 +423,10 @@ static float evaluateStacked(const char *caller, const char *knob, const model_t
  * counts NULL: no prediction counting. callBase: the evaluation epoch's call
  * index of the batch's first sample (one call per sample). Returns the plain
  * loss sum; the epoch level divides for MEAN. */
-static float evaluateSamples(const model_t *model, lossFuncType_t funcType, batch_t *batch,
-                             inferenceWithLossFn_t inferenceFn, reduction_t forwardReduction,
-                             evalCounts_t *counts, size_t callBase, const trainingCall_t *call) {
+static float evaluateSamples(const char *caller, const model_t *model, lossFuncType_t funcType,
+                             batch_t *batch, inferenceWithLossFn_t inferenceFn,
+                             reduction_t forwardReduction, evalCounts_t *counts, size_t callBase,
+                             const trainingCall_t *call) {
     float totalLoss = 0.0f;
 
     for (size_t i = 0; i < batch->size; i++) {
@@ -432,6 +441,7 @@ static float evaluateSamples(const model_t *model, lossFuncType_t funcType, batc
         totalLoss += stats->loss;
 
         if (counts != NULL) {
+            requireOutputScoreCount(caller, stats->output, 1, counts->numClasses, callBase + i);
             size_t predicted = argmaxByTensor(stats->output, counts->numClasses);
             /* The raw sample label IS the one row's class vector (the view
              * shares its data), so the target argmax reads it directly. */
@@ -447,7 +457,8 @@ static float evaluateSamples(const model_t *model, lossFuncType_t funcType, batc
 
 float evaluationBatch(const model_t *model, lossFuncType_t funcType, batch_t *batch,
                       inferenceWithLossFn_t inferenceFn, reduction_t forwardReduction) {
-    return evaluateSamples(model, funcType, batch, inferenceFn, forwardReduction, NULL, 0, NULL);
+    return evaluateSamples("evaluationBatch", model, funcType, batch, inferenceFn, forwardReduction,
+                           NULL, 0, NULL);
 }
 
 /* One evaluation epoch over numberOfBatches loader batches: per sample at
@@ -472,8 +483,8 @@ static float evaluateEpochInternal(const char *caller, const char *knob, const m
                 evalFirstSample(model, dataLoader, batch->samples[0], m, counts, caller);
                 firstSeen = true;
             }
-            totalLoss += evaluateSamples(model, funcType, batch, inferenceFn, forwardReduction,
-                                         counts, streamed, call);
+            totalLoss += evaluateSamples(caller, model, funcType, batch, inferenceFn,
+                                         forwardReduction, counts, streamed, call);
             streamed += batch->size;
             freeBatch(batch);
         }

@@ -491,6 +491,17 @@ void testStackedRejectsMalformedInferenceOutput(void) {
     freeFixtureData();
 }
 
+/* The per-sample metrics argmax reads numClasses scores from the callback's output too. */
+void testPerSampleMetricsRejectShortInferenceOutput(void) {
+    initData();
+    ASSERT_EXITS_WITH(0, metricsWith(inferenceWithLoss, 1)); /* the fixture itself is valid */
+    ASSERT_EXITS_WITH_OUTPUT(1,
+                             "evaluationEpochWithMetrics: the output of the chunk starting at "
+                             "sample 0 has 2 elements, expected 1 rows x 3 classes",
+                             metricsWith(shortRowInference, 1));
+    freeFixtureData();
+}
+
 /* dtype: sample `index` is SYM_INT32-tagged; else sample 4 has another shape. */
 static void metricsWithMismatchedSample(bool dtype, size_t index) {
     if (dtype) {
@@ -651,6 +662,7 @@ int main(void) {
     RUN_TEST(testStackedMeanDividesByStreamedCount);
     RUN_TEST(testEmptyStreamFailsFast);
     RUN_TEST(testStackedRejectsMalformedInferenceOutput);
+    RUN_TEST(testPerSampleMetricsRejectShortInferenceOutput);
     RUN_TEST(testStackedReportRejectsNumClassesNotMatchingTheLabel);
     RUN_TEST(testStackedRejectsUnstackableSamples);
     RUN_TEST(testStackedForwardGateFiresBeforeTheStream);

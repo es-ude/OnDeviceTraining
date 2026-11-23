@@ -75,7 +75,7 @@ void convTranspose1dKernelSymInt32Grouped(tensor_t const *input, tensor_t const 
  *  an int32 block partial. Operand contract as conv1dKernelBfp: unpacked BFP
  *  scratch in, raw FLOAT32 out, no rounding. Taps outer, icOffset inner; both
  *  operands are group-tracked per step (bfpGroupAt) and each finished int32
- *  segment folds into a float accumulator via bfpLdexpInt32. Bias is a float
+ *  segment folds into a float accumulator via ldexpf. Bias is a float
  *  seed per output element, so outputPadding tail positions hold only the bias.
  *  bfpValidateBlockHeadroom over in_channels/groups * kernel_size rules out
  *  int32 overflow before the loop. */

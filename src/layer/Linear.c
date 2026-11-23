@@ -322,14 +322,14 @@ void linearCalcBiasGradsBfp(tensor_t *loss, tensor_t *biasGrad) {
             if (n == 0) {
                 currentGroup = g;
             } else if (g != currentGroup) {
-                acc += bfpLdexpInt32(partial, (int)qC->exponents[currentGroup] - expBias);
+                acc += ldexpf((float)partial, (int)qC->exponents[currentGroup] - expBias);
                 partial = 0;
                 currentGroup = g;
             }
             partial += codes[idx];
         }
         if (batch > 0) {
-            acc += bfpLdexpInt32(partial, (int)qC->exponents[currentGroup] - expBias);
+            acc += ldexpf((float)partial, (int)qC->exponents[currentGroup] - expBias);
         }
         out[f] = acc;
     }

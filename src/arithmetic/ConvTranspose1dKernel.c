@@ -824,11 +824,11 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
                             } else if (inGroup != currentInGroup || wGroup != currentWGroup) {
                                 /* Boundary fold on EITHER operand's group change:
                                  * the finished same-exponent segment's raw int32
-                                 * partial enters the float accumulator via bfpLdexpInt32 (exact;
+                                 * partial enters the float accumulator via ldexpf (exact;
                                  * only the int-to-float rounding above 2^24). */
-                                acc += bfpLdexpInt32(
-                                    partial, (int)inQC->exponents[currentInGroup] - inExpBias +
-                                                 (int)wQC->exponents[currentWGroup] - wExpBias);
+                                acc += ldexpf((float)partial,
+                                              (int)inQC->exponents[currentInGroup] - inExpBias +
+                                                  (int)wQC->exponents[currentWGroup] - wExpBias);
                                 partial = 0;
                                 currentInGroup = inGroup;
                                 currentWGroup = wGroup;
@@ -841,9 +841,9 @@ void convTranspose1dKernelBfpGather(tensor_t const *input, tensor_t const *weigh
                      * boundary, so this is its only fold; tap-free positions
                      * never seed a segment at all. */
                     if (currentWGroup != SIZE_MAX) {
-                        acc += bfpLdexpInt32(partial,
-                                             (int)inQC->exponents[currentInGroup] - inExpBias +
-                                                 (int)wQC->exponents[currentWGroup] - wExpBias);
+                        acc += ldexpf((float)partial,
+                                      (int)inQC->exponents[currentInGroup] - inExpBias +
+                                          (int)wQC->exponents[currentWGroup] - wExpBias);
                     }
 
                     yArr[(b * outChannels + oc) * outputLength + outPos] = acc;

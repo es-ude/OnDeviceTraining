@@ -660,7 +660,7 @@ static void weightGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tens
     size_t rowLen = gwElems / outChannels;
     for (size_t oc = 0; oc < outChannels; oc++) {
         for (size_t j = 0; j < rowLen; j++) {
-            float v = bfpLdexpInt32(acc[oc * rowLen + j], eAccOf[oc]);
+            float v = ldexpf((float)acc[oc * rowLen + j], eAccOf[oc]);
             memcpy(&acc[oc * rowLen + j], &v, sizeof(v));
         }
     }
@@ -840,7 +840,7 @@ static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
                 if (b == 0 && outPos == 0) {
                     currentGroup = g;
                 } else if (g != currentGroup) {
-                    acc += bfpLdexpInt32(partial, (int)gyQC->exponents[currentGroup] - expBias);
+                    acc += ldexpf((float)partial, (int)gyQC->exponents[currentGroup] - expBias);
                     partial = 0;
                     currentGroup = g;
                 }
@@ -848,7 +848,7 @@ static void biasGradKernelBfp(tensor_t **ops, size_t n, tensor_t *rawOut, tensor
             }
         }
         if (batch > 0 && outputLength > 0) {
-            acc += bfpLdexpInt32(partial, (int)gyQC->exponents[currentGroup] - expBias);
+            acc += ldexpf((float)partial, (int)gyQC->exponents[currentGroup] - expBias);
         }
         out[oc] = acc;
     }

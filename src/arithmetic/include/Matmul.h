@@ -44,7 +44,7 @@ void matmulSymInt32TensorsGroupedWeight(tensor_t *aTensor, tensor_t *bTensor, te
  *  the funnel's unpacked BFP scratch (int32 mantissas, live bfpQConfig_t); the
  *  output is raw FLOAT32 and the funnel epilogue packs it. The bias is
  *  dequantized into the float accumulator before the reduction. One int32
- *  partial per output element folds via bfpLdexpInt32 whenever either operand
+ *  partial per output element folds via ldexpf whenever either operand
  *  changes storage group (bfpGroupAt), and at the tail; the kernel never
  *  rounds. bfpValidateBlockHeadroom rejects a reduction whose segment could
  *  overflow int32. */

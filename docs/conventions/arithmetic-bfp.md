@@ -293,8 +293,6 @@ Every `ARITH_BFP` kernel (`matmulBfpTensors`, `conv1dKernelBfp`,
   `acc += ldexpf((float)partial, Ea + Eb − biasA − biasB)`. The power-of-two
   multiply is exact (D7) — the only rounding this step introduces is
   ordinary float32 addition across blocks, plus the two exceptions in §§7–8.
-  Kernels write the fold as `bfpLdexpInt32(partial, e)` (BfpKernelSupport.h):
-  bit-identical to that ldexpf, a plain multiply by an exact 2^e on the hot path.
   Amended for the forward by §13: an op that opts into the integer raw
   (`opSpec_t.bfpRawOut`) emits `BFP_RAW` and the epilogue re-blocks in
   integers; without the opt-in (every backward op) this bullet stands.
@@ -2189,7 +2187,7 @@ summation order and therefore the numbers.
   is the exact one (§7) and native BFP numbers change by design.
 - **weightGrad output into FLOAT32 grads (bridge), and under the fixed
   grid:** each weightGrad accumulator becomes `float(acc) · 2^E_acc` in
-  place (`weightGradKernelBfp`, `bfpLdexpInt32`; the cast rounds to nearest
+  place (`weightGradKernelBfp`, `ldexpf`; the cast rounds to nearest
   even above 2^24, §7), accumulated by the float ACC arms.
 - **Grad raw into BFP grads (2026-11-05, `BFP_RAW_BACKWARD_ACC`):** with a
   BFP grad under `OUT_ACC_DYNAMIC_RESCALE` (the HAR `BFP_GRADS=1` path) the

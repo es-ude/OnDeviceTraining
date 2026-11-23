@@ -568,7 +568,7 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
                      * int32 partial enters the float accumulator via a pure
                      * exponent shift -- rounding-free by kernel contract. */
                     acc +=
-                        bfpLdexpInt32(partial, (int)aQC->exponents[currentAGroup] - aExpBias +
+                        ldexpf((float)partial, (int)aQC->exponents[currentAGroup] - aExpBias +
                                                    (int)bQC->exponents[currentBGroup] - bExpBias);
                     partial = 0;
                     currentAGroup = aGroup;
@@ -579,7 +579,7 @@ void matmulBfpTensors(tensor_t *aTensor, tensor_t *bTensor, tensor_t *bias,
                 partial += mulInt32s(aValue, bValue);
             }
             if (aColumns > 0) {
-                acc += bfpLdexpInt32(partial, (int)aQC->exponents[currentAGroup] - aExpBias +
+                acc += ldexpf((float)partial, (int)aQC->exponents[currentAGroup] - aExpBias +
                                                   (int)bQC->exponents[currentBGroup] - bExpBias);
             }
             writeFloatToByteArray(acc, &outputTensor->data[resultCounter * sizeof(float)]);

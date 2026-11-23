@@ -37,7 +37,8 @@ typedef struct parameter {
     tensor_t *grad;
 } parameter_t;
 
-/*! Packs numValues codes from dataInBits to dataOutBits (> 0) wide: narrowing
+/*! Packs numValues codes from dataInBits to dataOutBits wide (both > 0; the
+ * quantization entries refuse a zero-width code): narrowing
  * keeps the low bits, widening zero-fills. byteConversion starts both cursors at
  * bit 0 and zeroes dataOut first. */
 void byteConversion(uint8_t *dataIn, size_t dataInBits, uint8_t *dataOut, size_t dataOutBits,

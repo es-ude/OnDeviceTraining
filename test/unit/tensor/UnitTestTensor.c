@@ -479,8 +479,8 @@ void testByteConversionAppendMatchesReferenceEngine() {
     const size_t numWide = sizeof wideWidths / sizeof wideWidths[0];
     byteConvLcgState = 0x505u;
 
-    for (size_t in = 0; in <= 32; in++) {
-        for (size_t out = 0; out <= 32; out++) {
+    for (size_t in = 1; in <= 32; in++) {
+        for (size_t out = 1; out <= 32; out++) {
             for (size_t s = 0; s < numOffsets; s++) {
                 for (size_t d = 0; d < numOffsets; d++) {
                     for (size_t c = 0; c < numCounts; c++) {

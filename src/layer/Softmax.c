@@ -391,19 +391,15 @@ static void softmaxRequireWire(const tensor_t *input, const tensor_t *t, const c
 }
 
 /* Admits the input; the caller admits the other wires against it. */
-static void softmaxRequireInput(layer_t *softmaxLayer, tensor_t *input) {
-    size_t rank = input->shape->numberOfDimensions;
-    size_t outDims[rank];
-    size_t outOrder[rank];
-    shape_t outShape = {.dimensions = outDims, .orderOfDimensions = outOrder};
-    softmaxCalcOutputShape(softmaxLayer, input->shape, &outShape);
+static void softmaxRequireInput(const tensor_t *input) {
+    tensorRequireRowOrder(input->shape, "Softmax");
 }
 
 void softmaxForward(layer_t *softmaxLayer, tensor_t *input, tensor_t *output,
                     const layerExec_t *exec) {
     rngKey_t opKey;
     softmaxConfig_t *cfg = softmaxLayer->config->softmax;
-    softmaxRequireInput(softmaxLayer, input);
+    softmaxRequireInput(input);
     softmaxRequireWire(input, output, "Softmax forward", "output");
     switch (cfg->forwardMath.type) {
     case ARITH_BFP: {
@@ -641,7 +637,7 @@ void softmaxBackward(layer_t *softmaxLayer, tensor_t *input, tensor_t *loss, ten
                      const layerExec_t *exec) {
     rngKey_t opKey;
     softmaxConfig_t *cfg = softmaxLayer->config->softmax;
-    softmaxRequireInput(softmaxLayer, input);
+    softmaxRequireInput(input);
     switch (cfg->propLossMath.type) {
     case ARITH_FLOAT32:
         softmaxRequireNonBfpGradWires(input, loss, propLoss);

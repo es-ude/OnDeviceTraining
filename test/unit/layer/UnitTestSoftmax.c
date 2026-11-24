@@ -589,6 +589,27 @@ void testSoftmaxForwardRank1IsOneRow(void) {
     }
 }
 
+/* A rank-0 input (an (N,) dataset loads as rank-0 samples) is one one-element row. */
+void testSoftmaxForwardRank0IsOne(void) {
+    const size_t unusedDims[1] = {0};
+    tensor_t *input = buildSoftmaxWireNd(unusedDims, 0, (float[]){3.5f});
+    tensor_t *output = buildSoftmaxWireNd(unusedDims, 0, NULL);
+    quantization_t *floatQ = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, floatQ);
+    layer_t *softmaxLayer = softmaxLayerInit(&lq);
+
+    layerFunctions[SOFTMAX].forward(softmaxLayer, input, output, NULL);
+    float captured = ((float *)output->data)[0];
+
+    freeSoftmaxLayer(softmaxLayer);
+    freeTensor(output);
+    freeTensor(input);
+    freeQuantization(floatQ);
+
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, captured);
+}
+
 /* Rank 3 [2,2,3]: a row is EVERYTHING after axis 0 (6 elements), not the last
  * axis -- PyTorch's softmax(dim=-1) would normalize each 3-element vector.
  * The generator asserts the two differ, so this pins the row geometry. */
@@ -2309,6 +2330,7 @@ int main() {
 
     RUN_TEST(testSoftmaxForwardRowsEachSumToOne);
     RUN_TEST(testSoftmaxForwardRank1IsOneRow);
+    RUN_TEST(testSoftmaxForwardRank0IsOne);
     RUN_TEST(testSoftmaxForwardRank3RowSpansTrailingAxes);
     RUN_TEST(testSoftmaxForwardMixedScaleRowsStayFinite);
     RUN_TEST(testSoftmaxForwardRejectsTransposedMultiRow);

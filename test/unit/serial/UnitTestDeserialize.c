@@ -659,6 +659,93 @@ static void testDeserializeParameterRejectsHasGradAboveOne(void) {
     freeTensor(paramTensor);
 }
 
+/* A FLOAT32 rank-2 record with explicit dims and axis order. */
+static void writeFloat2DRecord(FILE *f, uint32_t d0, uint32_t d1, uint32_t order0,
+                               uint32_t order1) {
+    writeU32LE(f, 2);
+    writeU32LE(f, d0);
+    writeU32LE(f, d1);
+    writeU32LE(f, order0);
+    writeU32LE(f, order1);
+    fputc(FLOAT32, f);
+    for (uint32_t i = 0; i < d0 * d1; i++) {
+        writeF32LE(f, (float)i);
+    }
+}
+
+/* Loads the parameter file at FILE_PATH into a trainable [2, 3] skeleton. */
+static void loadIntoTrainable2x3Skeleton(void) {
+    parameter_t skeleton = {.param = makeFloatTensor2D(2, 3, NULL, 0),
+                            .grad = makeFloatTensor2D(2, 3, NULL, 0)};
+    FILE *f = fopen(FILE_PATH, "rb");
+    deserializeParameter(&skeleton, f);
+    fclose(f);
+    freeTensor(skeleton.grad);
+    freeTensor(skeleton.param);
+}
+
+/* Backward sizes its scratch from the grad but writes the param's geometry, so a grad
+ * record that reshapes at equal bytes must not load. */
+static void testDeserializeParameterRejectsGradDimsNotMatchingParam(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fputc(1, f); /* hasGrad */
+    writeFloat2DRecord(f, 2, 3, 0, 1);
+    writeFloat2DRecord(f, 3, 2, 0, 1);
+    fclose(f);
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "deserializeParameter: grad dimensions[0] = 3 does not match the param's 2",
+        loadIntoTrainable2x3Skeleton());
+}
+
+static void testDeserializeParameterRejectsGradOrderNotMatchingParam(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fputc(1, f); /* hasGrad */
+    writeFloat2DRecord(f, 2, 3, 0, 1);
+    writeFloat2DRecord(f, 2, 3, 1, 0);
+    fclose(f);
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "deserializeParameter: grad orderOfDimensions[0] = 1 does not match the param's 0",
+        loadIntoTrainable2x3Skeleton());
+}
+
+/* A frozen checkpoint (no grad record) of another geometry reshapes the param while the
+ * trainable skeleton keeps its old grad. */
+static void testDeserializeParameterRejectsFrozenRecordReshapingATrainableParam(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fputc(0, f); /* hasGrad */
+    writeFloat2DRecord(f, 3, 2, 0, 1);
+    fclose(f);
+
+    ASSERT_EXITS_WITH_OUTPUT(
+        1, "deserializeParameter: grad dimensions[0] = 2 does not match the param's 3",
+        loadIntoTrainable2x3Skeleton());
+}
+
+static tensor_t *makeSymTensor1D(size_t d0, uint8_t qBits, roundingMode_t roundingMode);
+
+/* A hand-built skeleton can pair a param with a grad of another rank but the same count. */
+static void loadIntoSkeletonWithFlatGrad(void) {
+    parameter_t skeleton = {.param = makeFloatTensor2D(2, 3, NULL, 0),
+                            .grad = makeSymTensor1D(6, 8, HALF_AWAY)};
+    FILE *f = fopen(FILE_PATH, "rb");
+    deserializeParameter(&skeleton, f);
+    fclose(f);
+    freeTensor(skeleton.grad);
+    freeTensor(skeleton.param);
+}
+
+static void testDeserializeParameterRejectsGradRankNotMatchingParam(void) {
+    FILE *f = fopen(FILE_PATH, "wb");
+    fputc(0, f); /* hasGrad */
+    writeFloat2DRecord(f, 2, 3, 0, 1);
+    fclose(f);
+
+    ASSERT_EXITS_WITH_OUTPUT(1, "deserializeParameter: grad rank 1 does not match the param's 2",
+                             loadIntoSkeletonWithFlatGrad());
+}
+
 static tensor_t *makeAsymTensor1D(size_t d0) {
     size_t *dims = reserveMemory(1 * sizeof(size_t));
     dims[0] = d0;
@@ -1955,7 +2042,7 @@ static tensor_t *makeAsymGroupedTensor1D(size_t d0, uint8_t qBits, roundingMode_
 /* Writes a parameter record whose grad is `fileGrad`, then loads it into a trainable skeleton
  * whose grad is the per-tensor `skeletonGrad` of the same payload size. */
 static void loadGradRecordIntoPerTensorSkeleton(tensor_t *fileGrad, tensor_t *skeletonGrad) {
-    tensor_t *param = makeFloatTensor2D(2, 3, (float[]){1.f, 2.f, 3.f, 4.f, 5.f, 6.f}, 6);
+    tensor_t *param = makeSymTensor1D(6, 8, HALF_AWAY);
     FILE *f = fopen(FILE_PATH, "wb");
     uint8_t hasGrad = 1;
     fwrite(&hasGrad, sizeof(uint8_t), 1, f);
@@ -1963,7 +2050,7 @@ static void loadGradRecordIntoPerTensorSkeleton(tensor_t *fileGrad, tensor_t *sk
     serializeTensor(fileGrad, f);
     fclose(f);
 
-    parameter_t skeleton = {.param = makeFloatTensor2D(2, 3, NULL, 0), .grad = skeletonGrad};
+    parameter_t skeleton = {.param = makeSymTensor1D(6, 8, HALF_AWAY), .grad = skeletonGrad};
     f = fopen(FILE_PATH, "rb");
     deserializeParameter(&skeleton, f);
     fclose(f);
@@ -2889,8 +2976,8 @@ static void testDeserializeConv1dRejectsGroupsNotDividingOutChannels(void) {
 }
 
 /* The LINEAR record carries the weight dims, and forward reads one bias value per weight row:
- * a [3, 2] weight keeps the element count of the skeleton's [2, 3] but its 2-element bias is
- * one row short. */
+ * a [3, 2] weight (and grad) keeps the element count of the skeleton's [2, 3] but its 2-element
+ * bias is one row short. */
 static void testDeserializeLinearRejectsBiasNotMatchingOutFeatures(void) {
     quantization_t *floatQ = quantizationInitFloat();
     layerQuant_t lq;
@@ -2899,14 +2986,15 @@ static void testDeserializeLinearRejectsBiasNotMatchingOutFeatures(void) {
     linearInit_t init = {.inFeatures = 3, .outFeatures = 2, .weightInit.key = &initKey};
     layer_t *layer = linearLayerInitOwning(&init, &lq);
     size_t *weightDims = layer->config->linear->weights->param->shape->dimensions;
-    weightDims[0] = 3;
-    weightDims[1] = 2;
+    size_t *gradDims = layer->config->linear->weights->grad->shape->dimensions;
+    weightDims[0] = gradDims[0] = 3;
+    weightDims[1] = gradDims[1] = 2;
     layer_t *model[] = {layer};
     FILE *f = fopen(FILE_PATH, "wb");
     serializeModel(&MODEL_CHAIN(model, 1), f);
     fclose(f);
-    weightDims[0] = 2;
-    weightDims[1] = 3;
+    weightDims[0] = gradDims[0] = 2;
+    weightDims[1] = gradDims[1] = 3;
 
     f = fopen(FILE_PATH, "rb");
     ASSERT_EXITS_WITH_OUTPUT(1,
@@ -3296,6 +3384,10 @@ int main(void) {
     RUN_TEST(testDeserializeTensorAcceptsTransposedOrderOfDimensions);
     RUN_TEST(testSkipSerializedTensorRejectsDuplicateOrderOfDimensions);
     RUN_TEST(testDeserializeParameterRejectsHasGradAboveOne);
+    RUN_TEST(testDeserializeParameterRejectsGradDimsNotMatchingParam);
+    RUN_TEST(testDeserializeParameterRejectsGradOrderNotMatchingParam);
+    RUN_TEST(testDeserializeParameterRejectsFrozenRecordReshapingATrainableParam);
+    RUN_TEST(testDeserializeParameterRejectsGradRankNotMatchingParam);
     RUN_TEST(testDeserializeTensorRoundTripsAsymZeroPoint);
     RUN_TEST(testDeserializeQConfigAcceptsWideZeroPoint);
     RUN_TEST(testDeserializeQConfigAcceptsNumGroupsMismatchViaReallocation);

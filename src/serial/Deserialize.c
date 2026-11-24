@@ -81,6 +81,31 @@ static void requirePerTensorGrad(const tensor_t *grad) {
     }
 }
 
+/* deserializeTensor pins only rank and payload bytes per tensor, so a packed record can trade
+ * width for element count. Backward sizes its scratch from the grad but writes the param's
+ * geometry: the two must agree axis by axis, or the first backward overruns. */
+static void requireGradShapedLikeParam(const shape_t *grad, const shape_t *param) {
+    if (grad->numberOfDimensions != param->numberOfDimensions) {
+        PRINT_ERROR("deserializeParameter: grad rank %zu does not match the param's %zu",
+                    grad->numberOfDimensions, param->numberOfDimensions);
+        exit(1);
+    }
+    for (size_t d = 0; d < param->numberOfDimensions; d++) {
+        if (grad->dimensions[d] != param->dimensions[d]) {
+            PRINT_ERROR("deserializeParameter: grad dimensions[%zu] = %zu does not match the "
+                        "param's %zu",
+                        d, grad->dimensions[d], param->dimensions[d]);
+            exit(1);
+        }
+        if (grad->orderOfDimensions[d] != param->orderOfDimensions[d]) {
+            PRINT_ERROR("deserializeParameter: grad orderOfDimensions[%zu] = %zu does not match "
+                        "the param's %zu",
+                        d, grad->orderOfDimensions[d], param->orderOfDimensions[d]);
+            exit(1);
+        }
+    }
+}
+
 void deserializeParameter(parameter_t *parameter, FILE *f) {
     uint8_t hasGrad = serialReadU8(f);
     if (hasGrad > 1u) {
@@ -96,7 +121,11 @@ void deserializeParameter(parameter_t *parameter, FILE *f) {
          * Parse past the record so the stream stays in sync. */
         skipSerializedTensor(f);
     }
-    /* hasGrad == 0 into a trainable skeleton leaves its grad unchanged. */
+    /* hasGrad == 0 into a trainable skeleton keeps its grad, which must still fit the param
+     * the file just reshaped. */
+    if (parameter->grad != NULL) {
+        requireGradShapedLikeParam(parameter->grad->shape, parameter->param->shape);
+    }
 }
 
 static void requireWiringEntry(const char *field, size_t index, uint16_t file, uint16_t skeleton) {

@@ -9,8 +9,9 @@
 void deserializeTensor(tensor_t *tensor, FILE *f);
 
 /*! Present gradients are discarded for frozen parameters; absent gradients
- *  leave destination gradients unchanged. Discarding gradients requires a
- *  seekable stream. */
+ *  leave destination gradients unchanged. A trainable parameter's grad must
+ *  end with the loaded param's dims and axis order, or the load exits.
+ *  Discarding gradients requires a seekable stream. */
 void deserializeParameter(parameter_t *parameter, FILE *f);
 
 /*! m must match the file's layer count and wiring. Requires a seekable stream

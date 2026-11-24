@@ -1015,9 +1015,14 @@ void testBatchUpdateThatWouldWrapCountExits(void) {
     freePpcaReplay(g);
 }
 
+/* The CCIPCA step divides by count + 1, so the count check must run before it: a BFP basis
+ * would otherwise reject the step's non-finite result first. */
 void testStreamingUpdateThatWouldWrapCountExits(void) {
     ppcaReplayConfig_t cfg = floatConfig(6, 2, 8);
+    quantization_t *bfpQ = quantizationInitBfp(8, 8, HALF_AWAY);
+    cfg.basisQ = bfpQ;
     ppcaReplay_t *g = ppcaReplayCreate(&cfg);
+    freeQuantization(bfpQ);
     ppcaWorkspace_t *ws = ppcaWorkspaceCreate(6, 2, 8);
     tensor_t *x = buildFloat32TensorND(1, (size_t[]){6}, (float[]){1, 2, 3, 4, 5, 6});
     g->count = UINT32_MAX;

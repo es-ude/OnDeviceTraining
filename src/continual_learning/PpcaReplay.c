@@ -19,13 +19,13 @@
 #include "Tensor.h"
 #include "TensorConversion.h"
 
-/* The one place count grows: it is uint32_t, so exit before m samples would wrap it. */
-static void ppcaAdvanceCount(ppcaReplay_t *g, size_t m, const char *who) {
+/* count is uint32_t and the CCIPCA step computes count + 1 in it, so an update checks the room
+ * for its m samples at entry, before any kernel or state write. */
+static void ppcaRequireCountRoom(const ppcaReplay_t *g, size_t m, const char *who) {
     if (m > UINT32_MAX - g->count) {
         PRINT_ERROR("%s: count %u + %zu samples would wrap uint32_t", who, (unsigned)g->count, m);
         exit(1);
     }
-    g->count += (uint32_t)m;
 }
 
 ppcaWorkspaceLayout_t ppcaWorkspaceLayout(size_t dim, size_t rank, size_t maxSessionSamples) {
@@ -356,6 +356,7 @@ void ppcaReplayUpdate(ppcaReplay_t *g, const tensor_t *samples, ppcaWorkspace_t 
                     ws->maxSessionSamples, m);
         exit(1);
     }
+    ppcaRequireCountRoom(g, m, "ppcaReplayUpdate");
 
     size_t d = g->dim;
     size_t k = g->rank;
@@ -433,7 +434,7 @@ void ppcaReplayUpdate(ppcaReplay_t *g, const tensor_t *samples, ppcaWorkspace_t 
 
     g->sigma2 = ws->sigma2Out;
     g->totalVar = ws->totalVarOut;
-    ppcaAdvanceCount(g, m, "ppcaReplayUpdate");
+    g->count += (uint32_t)m;
 }
 
 typedef struct {
@@ -557,6 +558,7 @@ void ppcaReplayUpdateStreaming(ppcaReplay_t *g, const tensor_t *x, ppcaWorkspace
         PRINT_ERROR("ppcaReplayUpdateStreaming: x must have dim=%zu elements", g->dim);
         exit(1);
     }
+    ppcaRequireCountRoom(g, 1, "ppcaReplayUpdateStreaming");
 
     size_t d = g->dim;
     size_t k = g->rank;
@@ -618,5 +620,5 @@ void ppcaReplayUpdateStreaming(ppcaReplay_t *g, const tensor_t *x, ppcaWorkspace
     } else {
         g->sigma2 = g->sigma2Floor;
     }
-    ppcaAdvanceCount(g, 1, "ppcaReplayUpdateStreaming");
+    g->count += 1u;
 }

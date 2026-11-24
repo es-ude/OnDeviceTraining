@@ -60,6 +60,7 @@ target_link_libraries(Deserialize PRIVATE
         GroupNorm
         Kernel
         LayerNorm
+        Linear
         MaxPool1d
         QuantizationLayer
 )

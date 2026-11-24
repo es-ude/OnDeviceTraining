@@ -2851,8 +2851,8 @@ void testConv1dSrForwardIsAPureFunctionOfItsForwardOpKey(void) {
     freeConv1dLayer(layer);
 }
 
-/* See testLinearInitConfigClearsOwnsQuantizations. The init reads only
- * the weight's dimensions[2], so a stack shape is enough. */
+/* See testLinearInitConfigClearsOwnsQuantizations. The init validates the
+ * kernel against the weight's shape, so a stack shape with all three dims is enough. */
 void testConv1dInitConfigClearsOwnsQuantizations(void) {
     kernel_t kernel;
     initKernel(&kernel, 2, VALID, 1, 1);

@@ -19,8 +19,9 @@ void setCSVData(csvData_t *csvData, char **rows, size_t numberOfRows, size_t *en
 void csvReadRowsByBufferSize(char *filePath, csvData_t *csvData);
 
 /*! Consumes the row strings in place (strtok); output rows must have entriesInRow
- * capacity. A field without a leading number exits(1); text after the number is
- * ignored. */
+ * capacity. A non-empty field without a leading number exits(1); text after the number is
+ * ignored. Empty fields are skipped (strtok merges adjacent commas): later fields shift left
+ * and the row's trailing output slots stay unwritten. */
 void csvParseBufferAsFloat(csvData_t *csvData, float **output);
 
 /*! Writes the caller-supplied row text verbatim; callers supply separators and newlines.

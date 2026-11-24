@@ -314,8 +314,7 @@ only the quantization configs change; the int32 accumulator (no int64) is kept.
   **affine product** run on int12 operands by default. The product kernels
   (Matmul, Conv1d, ConvTranspose1d, both grouped twins) do **not** reject wider
   operands: they accept any declared width and the accumulator guard below
-  decides per op (proven safe, exact on the checked path, or abort).
-  `matmulValidateSymOperand` only checks the dtype. LayerNorm / GroupNorm
+  decides per op (proven safe, exact on the checked path, or abort). LayerNorm / GroupNorm
   (`layerNormRequireSymWidth`, `groupNormRequireSymWidth`) still reject
   `qMaxBits > ODT_SYM_OPERAND_QMAXBITS`: their affine product `q·gamma_q` has no
   guarded accumulator, so the cap is its overflow argument. The Reduce / pool

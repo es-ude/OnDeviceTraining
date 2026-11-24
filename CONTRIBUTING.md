@@ -98,7 +98,7 @@ What each option does is documented once, for users, in the README's
 [Build options](README.md#build-options) section.
 
 Each preset builds into its own `build/<preset>/` directory. Test presets
-exist for the six `unit_test*` presets; test binaries in
+exist for every `unit_test*` preset; test binaries in
 `build/<preset>/test/unit/` can also be executed directly. Two practical
 notes:
 

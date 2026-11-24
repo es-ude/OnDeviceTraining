@@ -347,7 +347,7 @@ void testByteConversionAppend_NegativeCodeStoresLowBits() {
 }
 
 /* Differential pin of byteConversionAppend against the simple bit-walking
- * reference engine (ReferenceByteConversion.h) over every width pair 0..32, src/dst bit
+ * reference engine (ReferenceByteConversion.h) over every width pair 1..32, src/dst bit
  * offsets that cover each in-byte phase plus a multi-byte one, and element
  * counts that end on and off byte boundaries. Variant A surrounds both
  * buffers with canaries, so any changed byte outside the payload is caught on
@@ -383,9 +383,6 @@ static void byteConvFail(const char *what, char variant, size_t in, size_t out, 
 static void byteConvCheckCanaryCase(size_t in, size_t out, size_t srcStart, size_t dstStart,
                                     size_t n) {
     size_t srcBytes = (srcStart + n * in + 7) / 8;
-    if (srcBytes == 0) {
-        srcBytes = 1;
-    }
     size_t dstBytes = (dstStart + n * out + 7) / 8;
     size_t srcTotal = srcBytes + 2 * BYTE_CONV_CANARY;
     size_t dstTotal = dstBytes + 2 * BYTE_CONV_CANARY;
@@ -427,9 +424,6 @@ static void byteConvCheckCanaryCase(size_t in, size_t out, size_t srcStart, size
 static void byteConvCheckExactSizeCase(size_t in, size_t out, size_t srcStart, size_t dstStart,
                                        size_t n) {
     size_t srcBytes = (srcStart + n * in + 7) / 8;
-    if (srcBytes == 0) {
-        srcBytes = 1;
-    }
     size_t dstBytes = (dstStart + n * out + 7) / 8;
     uint8_t *src = reserveMemory(srcBytes);
     uint8_t *srcCopy = reserveMemory(srcBytes);

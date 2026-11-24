@@ -1008,18 +1008,18 @@ change; or, for a forward-only experiment, pin `cfg->forwardMath` directly
 on a hand-wired config (the config path has no factory rules — the
 test-side forward pin twins do exactly this).
 
-Two gaps the rule set deliberately does NOT close — owned here rather than
-papered over:
+Two edges of the rule set — (a) closed at construction, (b) deliberately
+left open — owned here rather than papered over:
 
-- **(a) R7 covers params + wires, NOT grad storage.** A FLOAT32-everything
-  profile (FLOAT32 math, params, wires) with a per-tensor-BFP
-  `weightGradStorage`/`biasGradStorage` passes every factory rule — R8
-  delegates to `gradInit`, whose carrier gate accepts a per-tensor BFP
-  template — builds fine, and dies at the FIRST backward at the runtime
-  #261 guard ("packed grad storage requires the funnel route"). This is
-  the PRE-EXISTING #261 packed-grad hole of the norms' FLOAT32 backward,
-  with BFP now joining SYM/ASYM in it; closing it means funnel-routing the
-  float backward's grads (the #261 follow-up), not another factory rule.
+- **(a) R7 covers params + wires; grad storage has its own check.** A
+  FLOAT32-everything profile (FLOAT32 math, params, wires) with a
+  per-tensor-BFP (or SYM/ASYM) `weightGradStorage`/`biasGradStorage` is
+  rejected at construction and at load: unless the layer is frozen,
+  `normValidateAffineCoherence` (`NormConfigGuard.h`) requires FLOAT32
+  gamma/beta grad storage under an `ARITH_FLOAT32` `propLossMath`, because
+  the FLOAT32 backward adds into the grads through a raw float cast.
+  Training packed grads there means funnel-routing the float backward's
+  grads (the #261 follow-up), not a looser rule.
 - **(b) The R5-vs-R7 asymmetry + the zero-init trap.** R5 leaves the SYM
   inference-only profile constructible (SYM_INT32 forward + FLOAT32
   backward: the runtime backward guard rejects training it, inference

@@ -37,8 +37,9 @@ lossConfig_t defaultLossConfig(lossFuncType_t funcType);
  *
  * Contract, enforced by every dispatcher: modelOutput has rank >= 2
  * and at least one element, and the label has modelOutput's rank and dimensions
- * (orderOfDimensions is not compared). A FLOAT32 modelOutput requires FLOAT32
- * label (and backward result) storage. All microbatches in one macro batch
+ * (orderOfDimensions is not compared). MSE: a FLOAT32 modelOutput requires FLOAT32
+ * label and backward result storage; CrossEntropy dequantizes another label dtype and
+ * requantizes its gradient into another result dtype. All microbatches in one macro batch
  * must have equal B (uniform microbatch size assumption — see
  * docs/conventions/loss.md, "Loss API: microbatch contracts"). */
 typedef float (*lossFwdFn_t)(tensor_t *modelOutput, tensor_t *label, reduction_t reduction,

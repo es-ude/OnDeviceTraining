@@ -80,7 +80,8 @@ void layerNormValidateConfig(const layerNormConfig_t *cfg, const char *who) {
                                 cfg->weightGradAccMode, cfg->biasGradAccMode, cfg->frozen, who);
 }
 
-/* Logical size of dim `index`; orderOfDimensions is a permutation (initTensor, deserializer). */
+/* Logical size of dim `index`. orderOfDimensions must be a permutation: the caller builds it with
+ * setOrderOfDimsForNewTensor or a transpose; the deserializer checks a loaded one. */
 static size_t layerNormLogicalDim(const shape_t *s, size_t index) {
     size_t d = 0;
     while (s->orderOfDimensions[d] != index) {

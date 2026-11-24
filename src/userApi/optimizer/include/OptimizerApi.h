@@ -46,7 +46,9 @@ void collectTrainableParameters(const model_t *m, parameter_t **slots);
  * both collect zero parameters. */
 bool modelHasFrozenLayer(const model_t *m);
 
-/* Reject missing or unsupported gradient storage during optimizer construction. */
+/* Reject missing or unsupported gradient storage during optimizer construction. A tracked grad's
+ * storage (dtype, grouping) is fixed once the optimizer exists; requantizing or regrouping it
+ * later is out of contract. */
 void validateOptimizerGradStorage(optimizer_t *optim, const char *factoryName);
 
 /* Builds statesPerParameter zeroed state tensors per collected parameter, each at the

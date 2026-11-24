@@ -3412,9 +3412,7 @@ void testLinearCalcOutputShapeRejectsWrongInputFeatures(void) {
 
 /* The user-visible failure: inference() on a one-Linear model handed a natural
  * [3] sample (a missed batchViewOf). Unguarded, it returns a garbage [3]-element
- * output. Rank 3 is not repeated at this level: on the FLOAT32 path the
- * forward's matmul already exits on a >2D operand ("Matmul only supports up to
- * 2D Tensors"), so that test would pass without the guard.
+ * output.
  *
  * Without the guard the write past the one-slot dims array is undefined
  * behaviour: in the plain presets it returns a garbage output (exit 0 -> RED),

@@ -808,7 +808,8 @@ static inline void bfpRequireElementCount(size_t elems, size_t expected, const c
 /*! Pair gate for the layers outside the executeOp funnel that copy codes and exponents between
  * two BFP wires (Relu, Flatten, Dropout): sound only for equal counts, grids and widths; anything
  * else is a re-block, which belongs to the Quantization layer. Each grid's fit to its own wire is
- * established where the tensor is built or bound, not here. */
+ * the caller's: initTensor and the remat wire bind establish it, a raw setTensorValues bind
+ * checks nothing, and neither does this gate. */
 static inline void bfpRequireSameGeometry(const bfpQConfig_t *aQC, size_t aElems,
                                           const bfpQConfig_t *bQC, size_t bElems,
                                           const char *what) {

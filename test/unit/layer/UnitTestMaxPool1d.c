@@ -1335,8 +1335,8 @@ void testMaxPool1dBackwardBfpScattersToArgmaxPositions(void) {
     freeTensor(input);
 }
 
-/* -1 marks an empty window: the backward must skip it. The sentinel sits in
- * channel 1, so a missing skip would land in channel 0's last cell. */
+/* -1 marks an empty window: the backward must skip it. In the BFP walk a missing skip
+ * exits at the window-span check (VALID padding puts index -1 outside every window). */
 void testMaxPool1dBackwardBfpSkipsMinusOneSentinel(void) {
     size_t lossDims[] = {1, 2, 4};
     size_t propDims[] = {1, 2, 8};

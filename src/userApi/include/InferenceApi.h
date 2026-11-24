@@ -37,10 +37,8 @@ tensor_t **inferenceBatched(const model_t *m, batch_t *batch);
  *  be keyed to this model and to input's shape, or the call exits at bind
  *  naming the field. input is borrowed, never copied or written. Output
  *  values, shape, dtype, dynamic quantization state and the loss equal the
- *  NULL path's bit for bit; only an input's sparsity marker is dropped: a
- *  scheduler's output is unmarked, where a chain's NULL path marks it (a
- *  non-chain model's NULL path runs on a scheduler, so its output is unmarked
- *  too). A non-NULL call->key is this call's key: layer i gets it folded with
+ *  NULL path's bit for bit. Every path drops an input's sparsity marker: the
+ *  output is unmarked. A non-NULL call->key is this call's key: layer i gets it folded with
  *  (LAYER, i) and the loss with (LAYER, m->numLayers), on either path; without
  *  it every layer gets a NULL context. label is required: a NULL label exits
  *  (inference() is the forward without a loss). */

@@ -351,14 +351,16 @@ void testExemplarBufferRejectsNonIdentityOrderIntoEmptyBuffer(void) {
 }
 
 #if SIZE_MAX > UINT32_MAX
-/* #475: numClasses * capacity wraps to 0. */
+/* numClasses * capacity wraps to 0. The large operand is numClasses: a capacity above
+ * UINT32_MAX would stop at the capacity guard first. */
 void testExemplarBufferCreateRejectsSlotCountOverflow(void) {
-    ASSERT_EXITS_WITH_FAILURE(exemplarBufferCreate(2, SIZE_MAX / 2u + 1u));
+    ASSERT_EXITS_WITH_OUTPUT(1, "overflows size_t", exemplarBufferCreate(SIZE_MAX / 2u + 1u, 2));
 }
 
-/* #475: the slot count fits, the byte count (* sizeof(tensor_t *)) wraps to 0. */
+/* The slot count fits, the byte count (* sizeof(tensor_t *)) wraps to 0. */
 void testExemplarBufferCreateRejectsSlotByteOverflow(void) {
-    ASSERT_EXITS_WITH_FAILURE(exemplarBufferCreate(1, SIZE_MAX / sizeof(tensor_t *) + 1u));
+    ASSERT_EXITS_WITH_OUTPUT(1, "overflows size_t",
+                             exemplarBufferCreate(SIZE_MAX / sizeof(tensor_t *) + 1u, 1));
 }
 #endif
 

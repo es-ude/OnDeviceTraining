@@ -111,9 +111,4 @@ bool layerIsFrozen(const layer_t *layer);
  *  BatchNorm1d, which is config-bearing but has no gamma/beta. */
 bool layerParameters(const layer_t *layer, parameter_t **weightOut, parameter_t **biasOut);
 
-/*! Index of the deepest (closest-to-input) layer whose parameters train:
- *  backward truncates there, since nothing below consumes dx.
- *  Returns modelSize when no layer trains. */
-size_t deepestTrainableIndex(layer_t **model, size_t modelSize);
-
 #endif

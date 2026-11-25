@@ -8,7 +8,7 @@ Feature extraction (MFCC) and downsampling are the model's job, not the loader's
 per the repo's data-shape convention.
 
     load_speechcommands(root, num_classes) -> dict
-        num_classes in {6, 35}
+        num_classes in {6, 12, 35}
         returns {"train": (x, y), "val": (x, y), "test": (x, y)}
             x: float32 [N, 1, 16000]
             y: int32   [N]  (0..num_classes-1)
@@ -17,6 +17,10 @@ per the repo's data-shape convention.
     0 yes  1 no  2 up  3 down
     4 silence  -- synthetic low-amplitude Gaussian noise (fixed per-split seed)
     5 unknown  -- random clips drawn from the other 31 keywords (fixed per-split seed)
+12-class config (TC-ResNet8 paper setup; labels 0..11, fixed order):
+    0..9 yes no up down left right on off stop go
+    10 silence, 11 unknown  -- built exactly like the 6-class silence/unknown
+    (same SILENCE_STD, same per-split seeds; unknown draws from the other 25 keywords)
 35-class config (labels 0..34): the 35 natural keywords, alphabetical. No synthetic classes.
 """
 from __future__ import annotations
@@ -30,6 +34,7 @@ from torchaudio.datasets import SPEECHCOMMANDS
 SAMPLE_RATE = 16000
 CLIP_LEN = 16000  # 1 s
 KEYWORDS_6 = ["yes", "no", "up", "down"]
+KEYWORDS_12 = ["yes", "no", "up", "down", "left", "right", "on", "off", "stop", "go"]
 SILENCE_STD = 0.05
 SPLIT_SEED = 42  # mirrors examples/_shared/seeds.py; kept local to avoid an import cycle
 _SUBSETS = {"train": "training", "val": "validation", "test": "testing"}
@@ -93,27 +98,30 @@ def _stack(clips: list[np.ndarray], label_id: int) -> tuple[np.ndarray, np.ndarr
     return x, y
 
 
-def _build_split_6(paths_by_label, split_index: int) -> tuple[np.ndarray, np.ndarray]:
+def _build_split_keywords(paths_by_label, split_index: int, keywords) -> tuple[np.ndarray, np.ndarray]:
+    """The 6- and 12-class recipe: `keywords` in order as labels 0..K-1, then
+    silence (K) and unknown (K+1). Silence is drawn before the unknown clips from
+    one per-split RNG; changing that order changes every generated dataset."""
     xs, ys = [], []
-    for label_id, kw in enumerate(KEYWORDS_6):
+    for label_id, kw in enumerate(keywords):
         x, y = _stack(_decode(paths_by_label.get(kw, [])), label_id)
         xs.append(x)
         ys.append(y)
-    n_per = int(round(np.mean([len(paths_by_label.get(kw, [])) for kw in KEYWORDS_6])))
+    n_per = int(round(np.mean([len(paths_by_label.get(kw, [])) for kw in keywords])))
+    silence_id, unknown_id = len(keywords), len(keywords) + 1
 
     rng = np.random.default_rng(SPLIT_SEED + split_index)
-    # silence (label 4): synthetic low-amplitude Gaussian noise
     silence = rng.normal(0.0, SILENCE_STD, size=(n_per, CLIP_LEN)).astype(np.float32)
     silence = np.clip(silence, -1.0, 1.0)
     xs.append(silence[:, None, :])
-    ys.append(np.full((n_per,), 4, dtype=np.int32))
-    # unknown (label 5): random draw of paths from the other 31 keywords in THIS
-    # split, decoding only the selected clips (memory-bounded).
-    pool = [p for lab, ps in paths_by_label.items() if lab not in KEYWORDS_6 for p in ps]
+    ys.append(np.full((n_per,), silence_id, dtype=np.int32))
+    # unknown: random draw of paths from the other keywords in THIS split,
+    # decoding only the selected clips (memory-bounded).
+    pool = [p for lab, ps in paths_by_label.items() if lab not in keywords for p in ps]
     idx = rng.choice(len(pool), size=min(n_per, len(pool)), replace=False)
     unknown = np.stack(_decode([pool[i] for i in idx])).astype(np.float32)
     xs.append(unknown[:, None, :])
-    ys.append(np.full((unknown.shape[0],), 5, dtype=np.int32))
+    ys.append(np.full((unknown.shape[0],), unknown_id, dtype=np.int32))
 
     return np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
 
@@ -131,7 +139,7 @@ def _build_split_35(paths_by_label, keywords_35) -> tuple[np.ndarray, np.ndarray
 
 
 def load_speechcommands(root, num_classes: int) -> dict:
-    assert num_classes in (6, 35), num_classes
+    assert num_classes in (6, 12, 35), num_classes
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
 
@@ -146,8 +154,9 @@ def load_speechcommands(root, num_classes: int) -> dict:
 
     out = {}
     for split_index, split in enumerate(("train", "val", "test")):
-        if num_classes == 6:
-            out[split] = _build_split_6(grouped[split], split_index)
-        else:
+        if num_classes == 35:
             out[split] = _build_split_35(grouped[split], keywords_35)
+        else:
+            keywords = KEYWORDS_6 if num_classes == 6 else KEYWORDS_12
+            out[split] = _build_split_keywords(grouped[split], split_index, keywords)
     return out

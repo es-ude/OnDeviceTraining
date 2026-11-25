@@ -107,6 +107,22 @@
       }
     },
     {
+      "name": "examples_release",
+      "displayName": "Examples, optimized (Release) - for timing and sweeps",
+      "inherits": "examples",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "examples_release_memprofile",
+      "displayName": "Examples, optimized (Release) + memory profiling (ODT_MEM_PROFILE=ON)",
+      "inherits": "examples_memprofile",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
       "name": "differential",
       "displayName": "Differential numerics driver (ODT_BUILD_DIFFERENTIAL=ON, no unit tests)",
       "inherits": "host",
@@ -208,6 +224,14 @@
     {
       "name": "examples_memprofile",
       "configurePreset": "examples_memprofile"
+    },
+    {
+      "name": "examples_release",
+      "configurePreset": "examples_release"
+    },
+    {
+      "name": "examples_release_memprofile",
+      "configurePreset": "examples_release_memprofile"
     },
     {
       "name": "differential",

@@ -141,8 +141,11 @@ class MemoryLog(TypedDict):
     refwd_steps: NotRequired[int]  # the plan's recomputed layer forwards per training call
     forward_cost: NotRequired[int]  # multiply-accumulate proxy of the call's forwards
     recompute_cost: NotRequired[int]  # the same proxy over its recomputed forwards
-    # kws_tcresnet8 writes only dataset_b, heap_peak_b and this key (no analytic breakdown):
-    # heap_peak_b - dataset_b, the training memory without the loaded splits
+    # kws_tcresnet8 writes only dataset_b, heap_peak_b and the two keys below (no analytic
+    # breakdown). loader_index_b: the train + val loader index arrays (one size_t per sample);
+    # train_heap_peak_b = heap_peak_b - dataset_b - loader_index_b, the training memory without
+    # anything that grows with the dataset
+    loader_index_b: NotRequired[int]
     train_heap_peak_b: NotRequired[int]
 
 

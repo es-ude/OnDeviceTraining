@@ -682,8 +682,9 @@ static int runPaperTraining(const tcrModel_t *r, const runConfig_t *cfg, trainin
     dataLoaderSetReshufflePerEpoch(trainLoader, true);
     dataLoader_t *valLoader = dataLoaderInit(getValSample, getValSize, 1, NULL, NULL,
                                              /*shuffle*/ false, /*dropLast*/ true);
-    dataLoader_t *testLoader = dataLoaderInit(getTestSample, getTestSize, 1, NULL, NULL,
-                                              /*shuffle*/ false, /*dropLast*/ true);
+    /* One index per sample: dataset-proportional like the splits themselves, so it is reported
+     * apart from the training memory. */
+    const size_t loaderIndexBytes = (getTrainSize() + getValSize()) * sizeof(size_t);
 
     optimizer_t *sgd = createPaperOptimizer(&r->model);
     lrScheduler_t lrSched;
@@ -726,6 +727,9 @@ static int runPaperTraining(const tcrModel_t *r, const runConfig_t *cfg, trainin
         trainingRun(&r->model, lossConfig, trainLoader, valLoader, sgd, epochs,
                     calculateGradsSequential, inferenceWithLoss, &options);
     const size_t heapPeak = memProfilePeakBytes();
+    /* Created after the training peak is read, so its index array stays out of that peak. */
+    dataLoader_t *testLoader = dataLoaderInit(getTestSample, getTestSize, 1, NULL, NULL,
+                                              /*shuffle*/ false, /*dropLast*/ true);
     const epochStats_t test = evaluationEpochWithMetrics(
         &r->model, CROSS_ENTROPY, testLoader, inferenceWithLoss, REDUCTION_MEAN, cfg->microBatch);
     const double wallS = secondsSince(&runT0);
@@ -737,15 +741,18 @@ static int runPaperTraining(const tcrModel_t *r, const runConfig_t *cfg, trainin
             (double)test.loss, (double)test.accuracy, result.stoppedOnNonFiniteLoss ? 1 : 0,
             result.epochsCompleted);
 #ifdef ODT_MEM_PROFILE
-    /* Training memory excludes the dataset: the peak minus what the loaded splits hold. */
+    /* Training memory excludes everything dataset-proportional: the loaded splits and the
+     * train/val loader index arrays. */
+    const size_t trainHeapPeak = heapPeak - datasetBytes - loaderIndexBytes;
     fprintf(g_log,
-            ",\n  \"memory\": {\"dataset_b\": %zu, \"heap_peak_b\": %zu, "
-            "\"train_heap_peak_b\": %zu}",
-            datasetBytes, heapPeak, heapPeak - datasetBytes);
-    printf("MEMORY dataset_b=%zu heap_peak_b=%zu train_heap_peak_b=%zu\n", datasetBytes, heapPeak,
-           heapPeak - datasetBytes);
+            ",\n  \"memory\": {\"dataset_b\": %zu, \"loader_index_b\": %zu, "
+            "\"heap_peak_b\": %zu, \"train_heap_peak_b\": %zu}",
+            datasetBytes, loaderIndexBytes, heapPeak, trainHeapPeak);
+    printf("MEMORY dataset_b=%zu loader_index_b=%zu heap_peak_b=%zu train_heap_peak_b=%zu\n",
+           datasetBytes, loaderIndexBytes, heapPeak, trainHeapPeak);
 #else
     (void)datasetBytes;
+    (void)loaderIndexBytes;
     (void)heapPeak;
 #endif
     fprintf(g_log, "\n}\n");

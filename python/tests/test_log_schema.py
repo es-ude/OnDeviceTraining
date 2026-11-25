@@ -206,3 +206,13 @@ def test_the_budget_keys_are_declared_optional():
     assert {"wire_budget_b", "wire_cost_model"} <= TrainConfig.__optional_keys__
     hints = get_type_hints(TrainConfig)
     assert (hints["wire_budget_b"], hints["wire_cost_model"]) == (int, str)
+
+
+def test_the_tcresnet8_keys_are_declared_optional():
+    """kws_tcresnet8 logs its width, micro-batch and parameter count in config and, in
+    ODT_MEM_PROFILE builds, the training heap peak without the dataset; no other trainer
+    writes them."""
+    assert {"width", "micro_batch", "num_params"} <= TrainConfig.__optional_keys__
+    assert "train_heap_peak_b" in MemoryLog.__optional_keys__
+    hints = get_type_hints(TrainConfig)
+    assert (hints["width"], hints["micro_batch"], hints["num_params"]) == (str, int, int)

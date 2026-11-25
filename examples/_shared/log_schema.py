@@ -69,6 +69,12 @@ class TrainConfig(TypedDict):
     wire_budget_b: NotRequired[int]
     wire_cost_model: NotRequired[str]
 
+    # kws_tcresnet8: TCR_WIDTH, the rows per forward/backward call (TCR_MICROBATCH; `batch` stays
+    # the optimizer batch) and the trainable parameter count (running statistics excluded)
+    width: NotRequired[str]  # "full" | "half"
+    micro_batch: NotRequired[int]
+    num_params: NotRequired[int]
+
 
 class EpochLog(TypedDict):
     epoch: int
@@ -135,6 +141,9 @@ class MemoryLog(TypedDict):
     refwd_steps: NotRequired[int]  # the plan's recomputed layer forwards per training call
     forward_cost: NotRequired[int]  # multiply-accumulate proxy of the call's forwards
     recompute_cost: NotRequired[int]  # the same proxy over its recomputed forwards
+    # kws_tcresnet8 writes only dataset_b, heap_peak_b and this key (no analytic breakdown):
+    # heap_peak_b - dataset_b, the training memory without the loaded splits
+    train_heap_peak_b: NotRequired[int]
 
 
 class RunLog(TypedDict, total=False):

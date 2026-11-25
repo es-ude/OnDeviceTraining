@@ -35,10 +35,13 @@
 #include "ReluApi.h"
 #include "SgdApi.h"
 #include "SoftmaxApi.h"
+#include "StateDictApi.h"
 #include "StorageApi.h"
 #include "Tensor.h"
 #include "TensorApi.h"
+#include "TrainingEpochDefault.h"
 #include "TrainingLoopApi.h"
+#include "npy_writer.h"
 
 /* TC-ResNet8 (Choi et al. 2019) trained with the paper's recipe. The input is MFCC [40, T]
  * (coefficients as channels, frames as length); T and the class count come from the data. */
@@ -70,6 +73,7 @@ typedef struct runConfig {
     size_t microBatch;
     size_t epochsOverride; /* 0 = the paper's iteration budget */
     const char *outDir;
+    const char *sameStartDir; /* NULL = the paper's training run */
 } runConfig_t;
 
 static dataset_t g_train;
@@ -125,6 +129,13 @@ static runConfig_t readConfig(void) {
     cfg.epochsOverride = (size_t)envLong("TCR_EPOCHS", 0, 1, 100000);
     const char *out = getenv("TCR_OUT");
     cfg.outDir = (out != NULL && out[0] != '\0') ? out : "examples/kws_tcresnet8/logs";
+    const char *sameStart = getenv("TCR_SAME_START");
+    cfg.sameStartDir = (sameStart != NULL && sameStart[0] != '\0') ? sameStart : NULL;
+    if (cfg.sameStartDir != NULL && cfg.microBatch != BATCH) {
+        failUsage("the same-start check needs micro-batch = batch = 100 (BN batch statistics as "
+                  "in PyTorch)",
+                  "TCR_MICROBATCH", getenv("TCR_MICROBATCH"));
+    }
     return cfg;
 }
 
@@ -501,9 +512,164 @@ static void ensureDir(const char *dir) {
     }
 }
 
-/* trainingRun over the paper's recipe: SGD with momentum, weight decay on conv/fc weights only
- * (BN scale/shift in a group without decay), STEP_LR per epoch, validation after every epoch and
- * the test set once at the end. */
+/* SGD with momentum, weight decay on conv/fc weights only (BN scale/shift in a group without
+ * decay). */
+static optimizer_t *createPaperOptimizer(const model_t *m) {
+    optimizer_t *sgd =
+        sgdMCreateOptim(BASE_LR, MOMENTUM, WEIGHT_DECAY, m, quantizationInitFloat(),
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    (void)sgdMAddGroup(sgd, m, paramSelectNormOrBias, NULL, 1.0f, 0.0f);
+    return sgd;
+}
+
+/* Loads the files train_pytorch.py --export-init writes: p<i>.weight.npy (+ p<i>.bias.npy, the
+ * BN shift) for parameter layer i and bn<j>.running_{mean,var}.npy for BN layer j, both in node
+ * order. The parameter walk drives the loading, so every file is checked against the size of
+ * the parameter it fills before modelLoadStateDict copies it. */
+#define MAX_PARAM_LAYERS MAX_NODES
+#define MAX_BN_LAYERS MAX_NODES
+
+typedef struct twinLoad {
+    const char *dir;
+    stateDictEntry_t entries[MAX_PARAM_LAYERS];
+    tensor_t *files[2 * MAX_PARAM_LAYERS];
+    size_t numFiles;
+    size_t numLayers;
+    size_t lastLayerIndex;
+    size_t bnChannels[MAX_BN_LAYERS];
+    size_t numBn;
+} twinLoad_t;
+
+static tensor_t *loadTwinFile(const char *dir, const char *file, size_t expected) {
+    char path[600];
+    snprintf(path, sizeof(path), "%s/%s", dir, file);
+    tensor_t *t = npyLoadFlat(path);
+    if (t == NULL) {
+        fprintf(stderr, "ERROR: TCR_SAME_START: cannot load %s\n", path);
+        exit(1);
+    }
+    if (calcNumberOfElementsByTensor(t) != expected) {
+        fprintf(stderr, "ERROR: TCR_SAME_START: %s holds %zu values, the model expects %zu\n", path,
+                calcNumberOfElementsByTensor(t), expected);
+        exit(1);
+    }
+    return t;
+}
+
+static void loadTwinParameter(const paramRef_t *ref, void *ctx) {
+    twinLoad_t *s = ctx;
+    if (s->numLayers == 0 || ref->layerIndex != s->lastLayerIndex) {
+        s->entries[s->numLayers++] = (stateDictEntry_t){.name = g_nodeNames[ref->layerIndex]};
+        s->lastLayerIndex = ref->layerIndex;
+    }
+    stateDictEntry_t *e = &s->entries[s->numLayers - 1];
+    const size_t n = calcNumberOfElementsByParameter(ref->parameter);
+    const bool shift = ref->role == PARAM_ROLE_BIAS || ref->role == PARAM_ROLE_NORM_SHIFT;
+    char file[48];
+    snprintf(file, sizeof(file), "p%02zu.%s.npy", s->numLayers - 1, shift ? "bias" : "weight");
+    tensor_t *t = loadTwinFile(s->dir, file, n);
+    s->files[s->numFiles++] = t;
+    if (shift) {
+        e->biasData = (float *)t->data;
+    } else {
+        e->weightData = (float *)t->data;
+    }
+    if (ref->role == PARAM_ROLE_NORM_SCALE) {
+        s->bnChannels[s->numBn++] = n;
+    }
+}
+
+static void loadTwinState(const model_t *m, const char *dir) {
+    twinLoad_t s = {.dir = dir};
+    forEachTrainableParameter(m, loadTwinParameter, &s);
+    modelLoadStateDict(m, s.entries, s.numLayers);
+
+    stateDictBuffers_t buffers[MAX_BN_LAYERS];
+    tensor_t *bufferFiles[2 * MAX_BN_LAYERS];
+    for (size_t j = 0; j < s.numBn; ++j) {
+        char file[48];
+        snprintf(file, sizeof(file), "bn%02zu.running_mean.npy", j);
+        bufferFiles[2 * j] = loadTwinFile(dir, file, s.bnChannels[j]);
+        snprintf(file, sizeof(file), "bn%02zu.running_var.npy", j);
+        bufferFiles[2 * j + 1] = loadTwinFile(dir, file, s.bnChannels[j]);
+        /* the exported state is the untrained one: no batch tracked yet */
+        buffers[j] = (stateDictBuffers_t){.runningMean = (float *)bufferFiles[2 * j]->data,
+                                          .runningVar = (float *)bufferFiles[2 * j + 1]->data,
+                                          .numBatchesTracked = 0};
+    }
+    modelLoadStateDictBuffers(m, buffers, s.numBn);
+
+    for (size_t i = 0; i < s.numFiles; ++i) {
+        freeTensor(s.files[i]);
+    }
+    for (size_t i = 0; i < 2 * s.numBn; ++i) {
+        freeTensor(bufferFiles[i]);
+    }
+    printf("TCR_SAME_START: loaded %zu parameter layers and %zu BN buffers from %s\n", s.numLayers,
+           s.numBn, dir);
+}
+
+#define SAME_START_STEPS 100
+
+static float g_stepLoss[SAME_START_STEPS];
+static size_t g_stepsRecorded;
+
+/* At micro-batch = batch each step is one grads call, so its loss is the step's batch mean. */
+static trainingStats_t *recordStepLoss(const model_t *model, lossConfig_t lossConfig,
+                                       reduction_t forwardReduction, tensor_t *input,
+                                       tensor_t *label, const trainingCall_t *call) {
+    trainingStats_t *stats =
+        calculateGradsSequential(model, lossConfig, forwardReduction, input, label, call);
+    g_stepLoss[g_stepsRecorded++] = stats->loss;
+    return stats;
+}
+
+static size_t sameStartSamples(void) {
+    return SAME_START_STEPS * BATCH;
+}
+
+/* The first SAME_START_STEPS steps of trainingRun's epoch 0, logged per step: the train loader
+ * is shuffled under epoch 0's key, then trainingEpochDefault (the per-batch code trainingRun
+ * runs) trains over a copy of the loader whose dataset ends after those steps. Writes
+ * <outDir>/step_losses.npy. */
+static int runSameStart(const tcrModel_t *r, const runConfig_t *cfg, trainingRng_t *rng) {
+    if (getTrainSize() / BATCH < SAME_START_STEPS) {
+        fprintf(stderr, "ERROR: TCR_SAME_START: epoch 0 holds %zu steps, fewer than %d\n",
+                getTrainSize() / BATCH, SAME_START_STEPS);
+        return 1;
+    }
+    loadTwinState(&r->model, cfg->sameStartDir);
+    const lossConfig_t lossConfig = {
+        .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL};
+    dataLoader_t *trainLoader = dataLoaderInit(getTrainSample, getTrainSize, BATCH, NULL, NULL,
+                                               /*shuffle*/ true, /*dropLast*/ true);
+    dataLoaderSetReshufflePerEpoch(trainLoader, true);
+    const rngKey_t shuffleKey = trainingRngShuffleKey(rng, trainLoader->reshufflePerEpoch);
+    dataLoaderShuffle(trainLoader, &shuffleKey);
+    dataLoader_t window = *trainLoader;
+    window.getDatasetSize = sameStartSamples;
+
+    optimizer_t *sgd = createPaperOptimizer(&r->model);
+    const trainingCall_t call = {.rng = rng};
+    (void)trainingEpochDefault(&r->model, lossConfig, &window, sgd, recordStepLoss, REDUCTION_MEAN,
+                               cfg->microBatch, &call);
+
+    ensureDir(cfg->outDir);
+    char path[600];
+    snprintf(path, sizeof(path), "%s/step_losses.npy", cfg->outDir);
+    const size_t shape[1] = {SAME_START_STEPS};
+    if (npyWriteFloat32(path, g_stepLoss, shape, 1) != 0) {
+        fprintf(stderr, "ERROR: cannot write %s\n", path);
+        return 1;
+    }
+    printf("TCR_SAME_START: %d steps, loss %.6f -> %.6f, wrote %s\n", SAME_START_STEPS,
+           (double)g_stepLoss[0], (double)g_stepLoss[SAME_START_STEPS - 1], path);
+    freeDataLoader(trainLoader);
+    return 0;
+}
+
+/* trainingRun over the paper's recipe: the optimizer above, STEP_LR per epoch, validation after
+ * every epoch and the test set once at the end. */
 static int runPaperTraining(const tcrModel_t *r, const runConfig_t *cfg, trainingRng_t *rng,
                             size_t datasetBytes) {
     const size_t stepSize = paperStepSizeEpochs(getTrainSize());
@@ -519,10 +685,7 @@ static int runPaperTraining(const tcrModel_t *r, const runConfig_t *cfg, trainin
     dataLoader_t *testLoader = dataLoaderInit(getTestSample, getTestSize, 1, NULL, NULL,
                                               /*shuffle*/ false, /*dropLast*/ true);
 
-    optimizer_t *sgd =
-        sgdMCreateOptim(BASE_LR, MOMENTUM, WEIGHT_DECAY, &r->model, quantizationInitFloat(),
-                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
-    (void)sgdMAddGroup(sgd, &r->model, paramSelectNormOrBias, NULL, 1.0f, 0.0f);
+    optimizer_t *sgd = createPaperOptimizer(&r->model);
     lrScheduler_t lrSched;
     stepLrInit(&lrSched, sgd, stepSize, LR_GAMMA);
 
@@ -607,11 +770,17 @@ int main(void) {
     layerQuantInitUniform(&lq, quantizationInitFloat());
     trainingRng_t rng;
     trainingRngInit(&rng, cfg.seed);
-    tcrModel_t r = buildModel(cfg.halfWidth, g_numClasses, DROPOUT_P, cfg.microBatch, &lq, &rng);
+    /* The same-start check turns Dropout off: matching masks across implementations needs
+     * tooling that does not exist. */
+    const float dropoutP = cfg.sameStartDir != NULL ? 0.0f : DROPOUT_P;
+    tcrModel_t r = buildModel(cfg.halfWidth, g_numClasses, dropoutP, cfg.microBatch, &lq, &rng);
     r.numParams = walkCount(&r.model, countParameter);
     checkModel(&r, cfg.halfWidth, g_inputLen, g_numClasses);
     printf("parameter tensors: %zu, of them BN scale/shift (no weight decay): %zu\n",
            walkCount(&r.model, countAllParameterTensors), walkCount(&r.model, countNormParameter));
 
+    if (cfg.sameStartDir != NULL) {
+        return runSameStart(&r, &cfg, &rng);
+    }
     return runPaperTraining(&r, &cfg, &rng, datasetBytes);
 }

@@ -95,6 +95,18 @@ draws each layer's initial values from that layer's `INIT` key
 (`trainingRngInitKey`), through the factory's `initWeightTensor`/
 `initBiasTensor` and `initDistribution`.
 
+One opt-in mode exchanges them: the TC-ResNet8 same-start check
+(`examples/kws_tcresnet8/same_start.py`). The twin writes its initial weights
+and BatchNorm running buffers in C node order
+(`train_pytorch.py --export-init`), and the C program loads them when
+`TCR_SAME_START=<dir>` is set (`modelLoadStateDict`,
+`modelLoadStateDictBuffers`). Both sides then train the first 100 steps of
+epoch 0 in the keyed order below, with Dropout off (p = 0; the two sides'
+masks come from different generators) and micro-batch = batch = 100, so the
+BatchNorm batch statistics cover the same rows. C runs those steps through
+`trainingEpochDefault`, the per-batch code of `trainingRun`, and writes each
+step's loss to `step_losses.npy`. Every other run keeps its own init.
+
 ## Shuffle ordering
 
 The C data loader orders a `shuffle = true` loader with `dataLoaderShuffle`
@@ -131,7 +143,9 @@ scheduler.
 Final-state only. After `N` epochs both sides should reach the same
 test accuracy / loss within per-example tolerance tables in `compare.py`.
 The framework's `parity.ParityCheck` either uses absolute or relative
-tolerance, never both.
+tolerance, never both. The same-start check above is the one per-step
+comparison: it compares every step's loss of the two sides, relative
+tolerance 1e-4.
 
 ## The tests that hold this contract
 

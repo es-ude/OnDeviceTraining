@@ -7,7 +7,10 @@
 
 /*! Builds a Dropout layer. Borrows `forwardQ`, `backwardQ`, and `mask`
  *  (caller retains ownership; ownsQuantizations = false). `mask` must be a
- *  pre-allocated BOOL tensor whose element count equals the layer input's. */
+ *  pre-allocated BOOL tensor holding microBatchSize x per-sample elements (the
+ *  training input's count; a training forward or backward on any other count
+ *  exits). Evaluation never reads the mask, so an eval chunk of any row count
+ *  is fine. */
 layer_t *dropoutLayerInit(float p, tensor_t *mask, quantization_t *forwardQ,
                           quantization_t *backwardQ);
 

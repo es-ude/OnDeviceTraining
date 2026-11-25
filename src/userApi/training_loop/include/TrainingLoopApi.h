@@ -202,7 +202,8 @@ typedef struct trainingRunOptions {
                                     0 means 1. m > 1 stacks m samples into one [m, ...] call:
                                     FLOAT32 models only, every macro batch must be divisible by m.
                                     Evaluation inherits it unless evalMicroBatchSize is set.
-                                    Dropout fails fast at m > 1 (its mask holds one sample). A
+                                    Dropout's mask must hold m x per-sample elements (training
+                                    fails fast otherwise); evaluation never reads it. A
                                     rank-2 BatchNorm1d in training mode needs microBatchSize >= 2
                                     (batch statistics need >= 2 values per channel). */
     size_t evalMicroBatchSize;  /* rows per inferenceFn call during evaluation; 0 inherits

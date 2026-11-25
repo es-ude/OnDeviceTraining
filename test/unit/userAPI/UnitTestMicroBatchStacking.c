@@ -820,25 +820,26 @@ void testStackedGatherSizeOverflowFailsFast(void) {
     freeQuantization(q);
 }
 
-static tensor_t *buildBoolMask(size_t n) {
-    size_t *dims = reserveMemory(sizeof(size_t));
-    dims[0] = n;
-    size_t *order = reserveMemory(sizeof(size_t));
-    setOrderOfDimsForNewTensor(1, order);
+static tensor_t *buildBoolMask(const size_t *dims, size_t rank) {
+    size_t *ownedDims = reserveMemory(rank * sizeof(size_t));
+    for (size_t i = 0; i < rank; i++) {
+        ownedDims[i] = dims[i];
+    }
+    size_t *order = reserveMemory(rank * sizeof(size_t));
+    setOrderOfDimsForNewTensor(rank, order);
     shape_t *shape = reserveMemory(sizeof(shape_t));
-    setShape(shape, dims, 1, order);
+    setShape(shape, ownedDims, rank, order);
     return initTensor(shape, quantizationInitBool(), NULL);
 }
 
 void testStackedDropoutFailsFastOnItsMaskCount(void) {
-    /* Known limitation: the caller-allocated mask holds one
-     * sample's elements, so at m > 1 Dropout's own count guard exits
-     * (Dropout.c forward mask guard) -- a pre-existing fail-fast, pinned. */
+    /* A mask sized for one sample at m > 1 is a misuse (the mask must hold
+     * m x per-sample elements): Dropout's count guard exits. */
     initModelBData();
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
     layerQuantInitUniform(&lq, q);
-    tensor_t *mask = buildBoolMask(4);
+    tensor_t *mask = buildBoolMask((size_t[]){4}, 1);
     layer_t *model[B_SIZE];
     const rngKey_t initKey0 = rngFold(rngKeyFromSeed(17u), RNG_TAG_INIT, 0u);
     const rngKey_t initKey2 = rngFold(rngKeyFromSeed(17u), RNG_TAG_INIT, 2u);
@@ -856,6 +857,214 @@ void testStackedDropoutFailsFastOnItsMaskCount(void) {
     freeTensor(mask);
     freeQuantization(q);
     freeModelBData();
+}
+
+/* Model D: Linear(4 -> 6) -> Dropout(0.5) -> Linear(6 -> 3) -> Softmax,
+ * CROSS_ENTROPY. The mask is BOOL [2, 6]: sized for microBatchSize 2. */
+#define D_IN 4
+#define D_HIDDEN 6
+#define D_OUT 3
+#define D_SIZE 4
+#define D_M 2
+#define D_TRAIN_N 4
+#define D_EVAL_N 5
+#define D_N (D_TRAIN_N + D_EVAL_N)
+
+static tensor_t *dItems[D_N];
+static tensor_t *dLabels[D_N];
+
+static void initModelDData(void) {
+    rngStream_t rs = rngOpen(rngKeyFromSeed(531u));
+    for (size_t s = 0; s < D_N; s++) {
+        float item[D_IN];
+        fillRandom(&rs, item, D_IN);
+        float label[D_OUT] = {0.0f, 0.0f, 0.0f};
+        label[s % D_OUT] = 1.0f;
+        dItems[s] = buildFloatTensor((size_t[]){D_IN}, 1, item);
+        dLabels[s] = buildFloatTensor((size_t[]){D_OUT}, 1, label);
+    }
+}
+
+static void freeModelDData(void) {
+    for (size_t s = 0; s < D_N; s++) {
+        freeTensor(dLabels[s]);
+        freeTensor(dItems[s]);
+    }
+}
+
+static sample_t *dSample(size_t id) {
+    sample_t *s = reserveMemory(sizeof(sample_t));
+    s->item = dItems[id];
+    s->label = dLabels[id];
+    return s;
+}
+
+/* The train set is samples [0, D_TRAIN_N), the eval set the D_EVAL_N after it. */
+static sample_t *getModelDTrainSample(size_t id) {
+    return dSample(id);
+}
+
+static size_t getModelDTrainSize(void) {
+    return D_TRAIN_N;
+}
+
+static sample_t *getModelDEvalSample(size_t id) {
+    return dSample(D_TRAIN_N + id);
+}
+
+static size_t getModelDEvalSize(void) {
+    return D_EVAL_N;
+}
+
+static void buildModelD(layer_t **model, layerQuant_t *lq, quantization_t *q, tensor_t *mask) {
+    const rngKey_t initKey0 = rngFold(rngKeyFromSeed(4243u), RNG_TAG_INIT, 0u);
+    const rngKey_t initKey2 = rngFold(rngKeyFromSeed(4243u), RNG_TAG_INIT, 2u);
+    model[0] = linearLayerInit(
+        &(linearInit_t){.inFeatures = D_IN, .outFeatures = D_HIDDEN, .weightInit.key = &initKey0},
+        lq);
+    model[1] = dropoutLayerInit(0.5f, mask, q, q);
+    model[2] = linearLayerInit(
+        &(linearInit_t){.inFeatures = D_HIDDEN, .outFeatures = D_OUT, .weightInit.key = &initKey2},
+        lq);
+    model[3] = softmaxLayerInit(lq);
+}
+
+/* freeOptim owns the parameters; the Linear layers are torn down shell-only. */
+static void freeModelDShells(layer_t **model) {
+    freeSoftmaxLayer(model[3]);
+    freeReservedMemory(model[2]->config->linear);
+    freeReservedMemory(model[2]->config);
+    freeReservedMemory(model[2]);
+    freeDropoutLayer(model[1]);
+    freeReservedMemory(model[0]->config->linear);
+    freeReservedMemory(model[0]->config);
+    freeReservedMemory(model[0]);
+}
+
+static size_t g_dRecCalls;
+static size_t g_dRecRows;
+static float g_dRecOutput[D_EVAL_N * D_OUT];
+
+static inferenceStats_t *recordingInference(const model_t *model, tensor_t *input, tensor_t *label,
+                                            lossFuncType_t funcType, reduction_t forwardReduction,
+                                            const trainingCall_t *call) {
+    inferenceStats_t *stats =
+        inferenceWithLoss(model, input, label, funcType, forwardReduction, call);
+    size_t rows = stats->output->shape->dimensions[0];
+    TEST_ASSERT_TRUE(g_dRecRows + rows <= D_EVAL_N);
+    memcpy(&g_dRecOutput[g_dRecRows * D_OUT], stats->output->data, rows * D_OUT * sizeof(float));
+    g_dRecRows += rows;
+    g_dRecCalls++;
+    return stats;
+}
+
+static void resetDRecording(void) {
+    g_dRecCalls = 0;
+    g_dRecRows = 0;
+    memset(g_dRecOutput, 0, sizeof g_dRecOutput);
+}
+
+/* The optimizer owns model D's parameters from here on: free it after the last use of the model. */
+static optimizer_t *buildModelDSgd(layer_t **model, quantization_t *momentumQ) {
+    optimizer_t *sgd =
+        sgdMCreateOptim(0.5f, 0.0f, 0.0f, &MODEL_CHAIN(model, D_SIZE), momentumQ,
+                        (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    optimizerSetWriteBackRounding(sgd, HALF_AWAY);
+    return sgd;
+}
+
+/* One epoch of model D at batch 4, microBatchSize 2, with the given eval micro-batch size. */
+static trainingRunResult_t runModelD(layer_t **model, optimizer_t *sgd, size_t evalMicroBatchSize,
+                                     inferenceWithLossFn_t inferenceFn) {
+    dataLoader_t *trainDl = dataLoaderInit(getModelDTrainSample, getModelDTrainSize, D_TRAIN_N,
+                                           NULL, NULL, false, true);
+    dataLoader_t *evalDl =
+        dataLoaderInit(getModelDEvalSample, getModelDEvalSize, 1, NULL, NULL, false, true);
+    trainingRng_t rng;
+    trainingRngInit(&rng, 7u);
+    trainingRunOptions_t options = {
+        .microBatchSize = D_M, .evalMicroBatchSize = evalMicroBatchSize, .rng = &rng};
+    trainingRunResult_t result =
+        trainingRun(&MODEL_CHAIN(model, D_SIZE), defaultLossConfig(CROSS_ENTROPY), trainDl, evalDl,
+                    sgd, 1, calculateGradsSequential, inferenceFn, &options);
+    freeDataLoader(evalDl);
+    freeDataLoader(trainDl);
+    return result;
+}
+
+void testStackedDropoutTrainsWithMicroBatchMask(void) {
+    /* A [m, 6] mask trains at m = 2. The last training forward filled all
+     * m x 6 mask bits with independent draws: row 1 is not a copy of row 0
+     * (deterministic under trainingRng seed 7; the rows differ there). */
+    initModelDData();
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    tensor_t *mask = buildBoolMask((size_t[]){D_M, D_HIDDEN}, 2);
+    layer_t *model[D_SIZE];
+    buildModelD(model, &lq, q, mask);
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd = buildModelDSgd(model, momentumQ);
+
+    trainingRunResult_t result = runModelD(model, sgd, 0, inferenceWithLoss);
+
+    bool rowsDiffer = false;
+    for (size_t i = 0; i < D_HIDDEN; i++) {
+        rowsDiffer |= tensorBoolGet(mask, i) != tensorBoolGet(mask, D_HIDDEN + i);
+    }
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeModelDShells(model);
+    freeTensor(mask);
+    freeQuantization(q);
+    freeModelDData();
+
+    TEST_ASSERT_EQUAL_size_t(1, result.epochsCompleted);
+    TEST_ASSERT_TRUE_MESSAGE(isfinite(result.finalTrainLoss), "train loss must be finite");
+    TEST_ASSERT_TRUE_MESSAGE(rowsDiffer, "the two mask rows must hold independent draws");
+}
+
+void testStackedDropoutEvalIgnoresMaskWithShortLastChunk(void) {
+    /* Eval at evalMicroBatchSize 2 over 5 samples: chunks of 2, 2, 1 rows.
+     * The 1-row chunk does not match the [2, 6] mask, and eval must not read
+     * it: the output equals the same weights' forward without Dropout. */
+    initModelDData();
+    quantization_t *q = quantizationInitFloat();
+    layerQuant_t lq;
+    layerQuantInitUniform(&lq, q);
+    tensor_t *mask = buildBoolMask((size_t[]){D_M, D_HIDDEN}, 2);
+    layer_t *model[D_SIZE];
+    buildModelD(model, &lq, q, mask);
+    quantization_t *momentumQ = quantizationInitFloat();
+    optimizer_t *sgd = buildModelDSgd(model, momentumQ);
+
+    resetDRecording();
+    trainingRunResult_t result = runModelD(model, sgd, D_M, recordingInference);
+    size_t callsWithDropout = g_dRecCalls;
+    size_t rowsWithDropout = g_dRecRows;
+    float withDropout[D_EVAL_N * D_OUT];
+    memcpy(withDropout, g_dRecOutput, sizeof withDropout);
+
+    layer_t *withoutDropout[] = {model[0], model[2], model[3]};
+    dataLoader_t *evalDl =
+        dataLoaderInit(getModelDEvalSample, getModelDEvalSize, 1, NULL, NULL, false, true);
+    resetDRecording();
+    evaluationEpoch(&MODEL_CHAIN(withoutDropout, 3), CROSS_ENTROPY, evalDl, recordingInference,
+                    REDUCTION_MEAN, D_M);
+    freeDataLoader(evalDl);
+
+    freeOptim(sgd);
+    freeQuantization(momentumQ);
+    freeModelDShells(model);
+    freeTensor(mask);
+    freeQuantization(q);
+    freeModelDData();
+
+    TEST_ASSERT_EQUAL_size_t(1, result.epochsCompleted);
+    TEST_ASSERT_EQUAL_size_t(3, callsWithDropout);
+    TEST_ASSERT_EQUAL_size_t(D_EVAL_N, rowsWithDropout);
+    TEST_ASSERT_EQUAL_size_t(D_EVAL_N, g_dRecRows);
+    TEST_ASSERT_EQUAL_FLOAT_ARRAY(g_dRecOutput, withDropout, D_EVAL_N * D_OUT);
 }
 
 /* ---- per-chunk sample validation ----------------------------------------- */
@@ -1837,6 +2046,8 @@ int main(void) {
     RUN_TEST(testStackedRejectsEmptyBatch);
     RUN_TEST(testStackedGatherSizeOverflowFailsFast);
     RUN_TEST(testStackedDropoutFailsFastOnItsMaskCount);
+    RUN_TEST(testStackedDropoutTrainsWithMicroBatchMask);
+    RUN_TEST(testStackedDropoutEvalIgnoresMaskWithShortLastChunk);
     RUN_TEST(testStackedRejectsItemWithDifferentDims);
     RUN_TEST(testStackedRejectsItemWithDifferentRank);
     RUN_TEST(testStackedRejectsItemWithDifferentOrder);

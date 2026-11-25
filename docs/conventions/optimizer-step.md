@@ -62,3 +62,16 @@ scheduler or not. Both current rows (`SGD_M`, `ADAM_W`) implement them
 (`src/optimizer/Optimizer.c`); a new optimizer must too, and its unit test
 should pin both slots (`TEST_ASSERT_NOT_NULL(optimizerFunctions[TYPE].getLr)`
 and `setLr`, or a `trainingRun` smoke test).
+
+## Parameter groups
+
+`sgdMAddGroup` / `adamWAddGroup` move the parameters a `paramSelectFn_t` picks
+(`paramSelectNormOrBias` is the ready-made rule: biases and norm scale/shift)
+into a new group with its own LR multiplier and weight decay. Momentum, AdamW
+betas/eps and the bias-correction step count stay optimizer-wide: group 0 holds
+them. Groups never reorder `optimizer->parameter[]`; `groupOf[i]` names the
+settings block of parameter `i`, so the RNG streams (keyed by parameter index)
+and a single-group optimizer stay bit-identical. `getLr` returns the base LR
+(group 0); `setLr`, and so every LR scheduler, sets group 0 to the base and
+each other group to base × multiplier. Add every group after the factory and
+before training; groups do not change during training.

@@ -775,7 +775,7 @@ void testSgdStepSymInt32DoesNotRoundTripGrad(void) {
     parameter_t *params[1] = {param};
     optimImpl_t impl;
     impl.sgd = &sgd;
-    optimizer_t optim;
+    optimizer_t optim = {0};
     optim.parameter = params;
     optim.states = NULL;
     optim.sizeStates = 1;
@@ -825,7 +825,7 @@ void testSgdStepMMomentumZeroIgnoresStatesAndUpdatesParam(void) {
     parameter_t *params[1] = {param};
     optimImpl_t impl;
     impl.sgd = &sgd;
-    optimizer_t optim;
+    optimizer_t optim = {0};
     optim.parameter = params;
     optim.states = NULL; /* the #308 contract under test */
     optim.sizeStates = 1;
@@ -881,7 +881,7 @@ void testSgdZeroGradAsymSubByteZeroesAllPackedBytes(void) {
     parameter_t *params[1] = {param};
     optimImpl_t impl;
     impl.sgd = &sgd;
-    optimizer_t optim;
+    optimizer_t optim = {0};
     optim.parameter = params;
     optim.sizeStates = 1;
     optim.impl = &impl;
@@ -937,7 +937,7 @@ void testSgdZeroGradSymSubByteZeroesAllPackedBytesAndResetsScale(void) {
     parameter_t *params[1] = {param};
     optimImpl_t impl;
     impl.sgd = &sgd;
-    optimizer_t optim;
+    optimizer_t optim = {0};
     optim.parameter = params;
     optim.sizeStates = 1;
     optim.impl = &impl;
@@ -1224,7 +1224,7 @@ void testSgdStepMFloatReadsPackedSymGradGeneric(void) {
     parameter_t *params[1] = {param};
     optimImpl_t impl;
     impl.sgd = &sgd;
-    optimizer_t optim;
+    optimizer_t optim = {0};
     optim.parameter = params;
     optim.states = NULL;
     optim.sizeStates = 1;
@@ -1298,7 +1298,7 @@ void testSgdStepMMixedDtypeMovesBothParamsCorrectly(void) {
     parameter_t *params[2] = {A, B};
     optimImpl_t impl;
     impl.sgd = &sgd;
-    optimizer_t optim;
+    optimizer_t optim = {0};
     optim.parameter = params;
     optim.states = NULL;
     optim.sizeStates = 2;
@@ -1403,7 +1403,7 @@ void testSgdStepHalfAwayNeverEscapesSymDeadZone(void) {
     parameter_t *params[1] = {param};
     optimImpl_t impl;
     impl.sgd = &sgd;
-    optimizer_t optim;
+    optimizer_t optim = {0};
     optim.parameter = params;
     optim.states = NULL;
     optim.sizeStates = 1;
@@ -1445,7 +1445,7 @@ void testSgdStepDetWriteBackOverridesSrParamQConfig(void) {
     parameter_t *params[1] = {param};
     optimImpl_t impl;
     impl.sgd = &sgd;
-    optimizer_t optim;
+    optimizer_t optim = {0};
     optim.parameter = params;
     optim.states = NULL;
     optim.sizeStates = 1;
@@ -1492,7 +1492,7 @@ void testSgdStepOptimizerSrWriteBackOverridesHalfAwayParamQConfig(void) {
     parameter_t *params[1] = {param};
     optimImpl_t impl;
     impl.sgd = &sgd;
-    optimizer_t optim;
+    optimizer_t optim = {0};
     optim.parameter = params;
     optim.states = NULL;
     optim.sizeStates = 1;
@@ -1547,7 +1547,7 @@ void testSgdStepMMomentumPathHonorsOptimizerSrWriteBack(void) {
     states_t paramStates = {.stateBuffers = stateBuffers, .statesPerParameter = 1};
     states_t *states[1] = {&paramStates};
 
-    optimizer_t optim;
+    optimizer_t optim = {0};
     optim.parameter = params;
     optim.states = states;
     optim.sizeStates = 1;
@@ -1613,7 +1613,7 @@ void testSgdStepMStateWriteBackHonorsOptimizerSrRounding(void) {
     tensor_t *stateBuffers[1] = {state};
     states_t paramStates = {.stateBuffers = stateBuffers, .statesPerParameter = 1};
     states_t *states[1] = {&paramStates};
-    optimizer_t optim;
+    optimizer_t optim = {0};
     optim.parameter = params;
     optim.states = states;
     optim.sizeStates = 1;

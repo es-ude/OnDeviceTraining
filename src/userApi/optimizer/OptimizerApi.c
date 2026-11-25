@@ -327,6 +327,87 @@ void validateOptimizerGradStorage(optimizer_t *optim, const char *factoryName) {
     }
 }
 
+bool paramSelectNormOrBias(const paramRef_t *ref, void *ctx) {
+    (void)ctx;
+    return ref->role == PARAM_ROLE_BIAS || ref->role == PARAM_ROLE_NORM_SCALE ||
+           ref->role == PARAM_ROLE_NORM_SHIFT;
+}
+
+/* groupOf is uint8_t. */
+#define MAX_PARAMETER_GROUPS 256u
+
+typedef struct groupAssign {
+    optimizer_t *optim;
+    paramSelectFn_t select;
+    void *selectCtx;
+    uint8_t group;
+    size_t next;
+    size_t matched;
+    const char *what;
+} groupAssign_t;
+
+static void assignVisited(const paramRef_t *ref, void *ctxv) {
+    groupAssign_t *a = ctxv;
+    optimizer_t *optim = a->optim;
+    const size_t k = a->next++;
+    if (k >= optim->sizeStates || ref->parameter != optim->parameter[k]) {
+        PRINT_ERROR("%s: the model is not the one the optimizer was built from "
+                    "(parameter %zu differs)",
+                    a->what, k);
+        exit(1);
+    }
+    if (!a->select(ref, a->selectCtx)) {
+        return;
+    }
+    if (optim->groupOf[k] != 0) {
+        PRINT_ERROR("%s: parameter %zu is already in group %u; every parameter belongs to "
+                    "exactly one group",
+                    a->what, k, (unsigned)optim->groupOf[k]);
+        exit(1);
+    }
+    optim->groupOf[k] = a->group;
+    a->matched++;
+}
+
+size_t assignParameterGroup(optimizer_t *optim, const model_t *m, paramSelectFn_t select, void *ctx,
+                            float lrMultiplier, const char *what) {
+    if (!(isfinite(lrMultiplier) && lrMultiplier > 0.0f)) {
+        PRINT_ERROR("%s: lrMultiplier must be finite and > 0 (got %g)", what, (double)lrMultiplier);
+        exit(1);
+    }
+    const size_t group = optim->numGroups == 0 ? 1 : optim->numGroups;
+    if (group >= MAX_PARAMETER_GROUPS) {
+        PRINT_ERROR("%s: at most %u parameter groups", what, MAX_PARAMETER_GROUPS);
+        exit(1);
+    }
+    if (optim->sizeStates == 0) {
+        PRINT_ERROR("%s: the optimizer has no parameter to select", what);
+        exit(1);
+    }
+    if (optim->groupOf == NULL) {
+        optim->groupOf = reserveMemory(optim->sizeStates * sizeof(uint8_t));
+    }
+    groupAssign_t a = {.optim = optim,
+                       .select = select,
+                       .selectCtx = ctx,
+                       .group = (uint8_t)group,
+                       .next = 0,
+                       .matched = 0,
+                       .what = what};
+    forEachTrainableParameter(m, assignVisited, &a);
+    if (a.next != optim->sizeStates) {
+        PRINT_ERROR("%s: the model is not the one the optimizer was built from "
+                    "(%zu trainable parameters, the optimizer has %zu)",
+                    what, a.next, optim->sizeStates);
+        exit(1);
+    }
+    if (a.matched == 0) {
+        PRINT_ERROR("%s: the selection matches no parameter", what);
+        exit(1);
+    }
+    return group;
+}
+
 void freeState(states_t *state) {
     for (size_t i = 0; i < state->statesPerParameter; i++) {
         freeTensor(state->stateBuffers[i]);
@@ -346,6 +427,7 @@ void freeOptim(optimizer_t *optim) {
     if (optim->states != NULL) {
         freeReservedMemory(optim->states);
     }
+    freeReservedMemory(optim->groupOf);
     /* optimImpl_t is a union of pointers: freeing through any member names
      * the same reserveMemory block, so this is type-agnostic by layout. */
     freeReservedMemory(optim->impl->sgd);

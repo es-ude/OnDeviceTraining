@@ -58,6 +58,20 @@ void validateOptimizerGradStorage(optimizer_t *optim, const char *factoryName);
 states_t **initMomentStates(optimizer_t *optim, size_t statesPerParameter,
                             quantization_t *momentQuant, const char *factoryName);
 
+/* The ready-made group rule: biases and norm-layer scale/shift (PARAM_ROLE_BIAS,
+ * PARAM_ROLE_NORM_SCALE, PARAM_ROLE_NORM_SHIFT) -- the parameters that usually
+ * get no weight decay. ctx is unused. */
+bool paramSelectNormOrBias(const paramRef_t *ref, void *ctx);
+
+/* The type-independent half of sgdMAddGroup/adamWAddGroup: fails fast (exit 1)
+ * on a non-finite or non-positive lrMultiplier, a full group table (256), a
+ * model that is not the one the optimizer was built from, a selected parameter
+ * already in a non-zero group, or an empty selection. Otherwise moves the
+ * selected parameters into the next group index and returns it; the caller
+ * then appends that group's settings block and bumps numGroups. */
+size_t assignParameterGroup(optimizer_t *optim, const model_t *m, paramSelectFn_t select, void *ctx,
+                            float lrMultiplier, const char *what);
+
 /* Frees one parameter's state tensors, their array and the states_t itself. */
 void freeState(states_t *state);
 

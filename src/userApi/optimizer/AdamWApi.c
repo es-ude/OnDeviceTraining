@@ -1,6 +1,7 @@
 #define SOURCE_FILE "ADAM-W-API"
 
 #include <stdlib.h>
+#include <string.h>
 
 #include "AdamW.h"
 #include "AdamWApi.h"
@@ -40,5 +41,23 @@ optimizer_t *adamWCreateOptim(float learningRate, double beta1, double beta2, do
     optim->states = initMomentStates(optim, 2, momentQuant, "adamWCreateOptim");
 
     validateOptimizerGradStorage(optim, "adamWCreateOptim");
+    optim->numGroups = 1;
     return optim;
+}
+
+size_t adamWAddGroup(optimizer_t *optim, const model_t *m, paramSelectFn_t select, void *ctx,
+                     float lrMultiplier, double weightDecay) {
+    if (optim->type != ADAM_W) {
+        PRINT_ERROR("adamWAddGroup: the optimizer is not ADAM_W");
+        exit(1);
+    }
+    const size_t group = assignParameterGroup(optim, m, select, ctx, lrMultiplier, "adamWAddGroup");
+
+    adamW_t *groups = reserveMemory((group + 1) * sizeof(adamW_t));
+    memcpy(groups, optim->impl->adamW, group * sizeof(adamW_t));
+    adamWInitGroup(&groups[group], &groups[0], lrMultiplier, weightDecay);
+    freeReservedMemory(optim->impl->adamW);
+    optim->impl->adamW = groups;
+    optim->numGroups = group + 1;
+    return group;
 }

@@ -38,14 +38,28 @@ void adamWInit(adamW_t *adamW, float learningRate, double beta1, double beta2, d
     adamW->weightDecay = weightDecay;
     adamW->stepCount = 0;
     adamW->updateMath = updateMath;
+    adamW->lrMultiplier = 1.0f;
+}
+
+void adamWInitGroup(adamW_t *group, const adamW_t *base, float lrMultiplier, double weightDecay) {
+    *group = *base;
+    group->lrMultiplier = lrMultiplier;
+    group->weightDecay = weightDecay;
+    group->learningRate = base->learningRate * lrMultiplier;
 }
 
 float adamWGetLr(optimizer_t *optimizer) {
-    return optimizer->impl->adamW->learningRate;
+    return optimizer->impl->adamW[0].learningRate;
 }
 
 void adamWSetLr(optimizer_t *optimizer, float learningRate) {
-    optimizer->impl->adamW->learningRate = learningRate;
+    adamW_t *groups = optimizer->impl->adamW;
+    /* Group 0 takes learningRate unmultiplied, so a single-group optimizer
+     * (and a hand-built adamW_t) sees exactly the value it was handed. */
+    groups[0].learningRate = learningRate;
+    for (size_t g = 1; g < optimizer->numGroups; g++) {
+        groups[g].learningRate = learningRate * groups[g].lrMultiplier;
+    }
 }
 
 typedef struct {
@@ -113,7 +127,21 @@ static void adamWParamKernel(tensor_t **op, size_t n, tensor_t *rawOut, tensor_t
  * value contract: append, never renumber. */
 enum { ADAMW_OP_MOMENT = 0, ADAMW_OP_VARIANCE = 1, ADAMW_OP_PARAM = 2 };
 
+/* The param op's scalars for one group: its own lr and weight decay, the
+ * step's shared bias corrections. Composed in double, cast once. */
+static adamWParamCtx_t adamWParamCtxOf(const adamW_t *group, double bc1, double bc2sqrt,
+                                       double eps) {
+    double lr = (double)group->learningRate;
+    double stepScale = -(lr / bc1);
+    double decay = 1.0 - lr * group->weightDecay;
+    return (adamWParamCtx_t){.decay = (float)decay,
+                             .bc2sqrt = (float)bc2sqrt,
+                             .eps = (float)eps,
+                             .stepScale = (float)stepScale};
+}
+
 void adamWStep(optimizer_t *optim, const rngKey_t *updateKey) {
+    /* stepCount, betas, eps and updateMath are optimizer-wide: group 0 holds them. */
     adamW_t *adamW = optim->impl->adamW;
 
     adamW->stepCount++;
@@ -121,21 +149,18 @@ void adamWStep(optimizer_t *optim, const rngKey_t *updateKey) {
     /* Per-step scalars in DOUBLE (PyTorch's python-double prelude), cast to
      * float ONCE at the ctx boundary below -- float-composed betas lose
      * 1-beta unrecoverably (AdamW.h numerics note). */
-    double lr = (double)adamW->learningRate;
     double t = (double)adamW->stepCount;
     double w1 = 1.0 - adamW->beta1;
     double s2 = 1.0 - adamW->beta2;
     double bc1 = 1.0 - pow(adamW->beta1, t);
     double bc2sqrt = sqrt(1.0 - pow(adamW->beta2, t));
-    double stepScale = -(lr / bc1);
-    double decay = 1.0 - lr * adamW->weightDecay;
 
     adamWMomentCtx_t mc = {.w1 = (float)w1};
     adamWVarianceCtx_t vc = {.beta2 = (float)adamW->beta2, .s2 = (float)s2};
-    adamWParamCtx_t pc = {.decay = (float)decay,
-                          .bc2sqrt = (float)bc2sqrt,
-                          .eps = (float)adamW->eps,
-                          .stepScale = (float)stepScale};
+    adamWParamCtx_t pc = adamWParamCtxOf(adamW, bc1, bc2sqrt, adamW->eps);
+    /* pc belongs to this group; recomputed only when the group changes, so
+     * the step holds no per-group array. */
+    size_t pcGroup = 0;
 
     /* Training write-backs round by the OPTIMIZER's knob -- the update
      * ops run with writeBackRounding as their operation-owned rounding. */
@@ -144,6 +169,11 @@ void adamWStep(optimizer_t *optim, const rngKey_t *updateKey) {
 
     for (size_t i = 0; i < optim->sizeStates; i++) {
         parameter_t *p = optim->parameter[i];
+        size_t group = optim->groupOf == NULL ? 0 : optim->groupOf[i];
+        if (group != pcGroup) {
+            pc = adamWParamCtxOf(&adamW[group], bc1, bc2sqrt, adamW->eps);
+            pcGroup = group;
+        }
         tensor_t *m = optim->states[i]->stateBuffers[0];
         tensor_t *v = optim->states[i]->stateBuffers[1];
         rngKey_t opKey[3];

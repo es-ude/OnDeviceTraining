@@ -33,6 +33,9 @@ typedef struct adamW {
     double weightDecay;      /* decoupled (torch.optim.AdamW) */
     size_t stepCount;        /* t; starts 0, ++ at each adamWStep entry */
     arithmetic_t updateMath; /* FLOAT32-only, checked by adamWInit */
+    /* This group's learningRate = base learningRate (group 0's) * lrMultiplier;
+     * 1 for group 0. Betas, eps and stepCount are read from group 0 only. */
+    float lrMultiplier;
 } adamW_t;
 
 /*! Validates beta1/beta2 in [0,1), eps > 0, updateMath == ARITH_FLOAT32;
@@ -40,8 +43,16 @@ typedef struct adamW {
 void adamWInit(adamW_t *adamW, float learningRate, double beta1, double beta2, double eps,
                double weightDecay, arithmetic_t updateMath);
 
+/* Fills a parameter group's block from group 0: a copy with lrMultiplier and
+ * weightDecay replaced and learningRate = base->learningRate * lrMultiplier.
+ * Called by adamWAddGroup, which validates both values first. */
+void adamWInitGroup(adamW_t *group, const adamW_t *base, float lrMultiplier, double weightDecay);
+
+/* The base learning rate: group 0's. */
 float adamWGetLr(optimizer_t *optimizer);
 
+/* Sets group 0 to learningRate and every other group to learningRate * its
+ * lrMultiplier. */
 void adamWSetLr(optimizer_t *optimizer, float learningRate);
 
 /*! One AdamW step over every registered parameter. t = ++stepCount.

@@ -40,6 +40,7 @@ void sgdInit(sgd_t *sgd, float learningRate, float momentumFactor, float weightD
         exit(1);
     }
     sgdSetLearningRate(sgd, learningRate);
+    sgd->lrMultiplier = 1.0f;
     sgd->momentumFactor = momentumFactor;
     sgd->weightDecay = weightDecay;
     sgd->updateMath = updateMath;
@@ -56,6 +57,19 @@ void sgdInit(sgd_t *sgd, float learningRate, float momentumFactor, float weightD
         sgd->momentumE = mu.e;
         sgd->momentumIntValid = true;
     }
+}
+
+void sgdInitGroup(sgd_t *group, const sgd_t *base, float lrMultiplier, float weightDecay) {
+    *group = *base;
+    group->lrMultiplier = lrMultiplier;
+    group->weightDecay = weightDecay;
+    group->weightDecayIsNonzero = weightDecay != 0.0f;
+    sgdSetLearningRate(group, base->learningRate * lrMultiplier);
+}
+
+/* The settings block of parameter i. */
+static sgd_t *sgdGroupOf(const optimizer_t *optim, size_t i) {
+    return &optim->impl->sgd[optim->groupOf == NULL ? 0 : optim->groupOf[i]];
 }
 
 typedef struct {
@@ -238,11 +252,12 @@ static void sgdParamUpdateBfp(const sgd_t *sgd, tensor_t *param, const tensor_t 
 }
 
 void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
-    sgd_t *sgd = optim->impl->sgd;
+    /* Momentum and updateMath are optimizer-wide: group 0 holds them. */
+    const sgd_t *base = optim->impl->sgd;
 
     /* Training write-backs round by the OPTIMIZER's knob -- the update
      * ops run with writeBackRounding as their operation-owned rounding. */
-    arithmetic_t updateMath = sgd->updateMath;
+    arithmetic_t updateMath = base->updateMath;
     updateMath.roundingMode = optim->writeBackRounding;
 
     /* momentumFactor == 0: momentum state is semantically nonexistent --
@@ -251,9 +266,10 @@ void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
      * two-op momentum path. Mathematically identical at momentum == 0:
      * state would be exactly grad + wd*param, and param -= lr*state
      * collapses to param -= lr*(grad + wd*param). */
-    if (sgd->momentumIsZero) {
+    if (base->momentumIsZero) {
         for (size_t i = 0; i < optim->sizeStates; i++) {
             parameter_t *p = optim->parameter[i];
+            const sgd_t *sgd = sgdGroupOf(optim, i);
             /* BFP parameter on a BFP gradient: the integer update w - lr * g */
             if (p->param->quantization->type == BFP && p->grad->quantization->type == BFP) {
                 if (sgd->weightDecayIsNonzero) {
@@ -289,6 +305,7 @@ void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
 
     for (size_t i = 0; i < optim->sizeStates; i++) {
         parameter_t *p = optim->parameter[i];
+        const sgd_t *sgd = sgdGroupOf(optim, i);
         tensor_t *state = optim->states[i]->stateBuffers[0];
 
         /* FLOAT32 state and grad: one op under the PARAM op's key. The state
@@ -376,9 +393,15 @@ void sgdStepM(optimizer_t *optim, const rngKey_t *updateKey) {
 }
 
 float sgdGetLr(optimizer_t *optimizer) {
-    return optimizer->impl->sgd->learningRate;
+    return optimizer->impl->sgd[0].learningRate;
 }
 
 void sgdSetLr(optimizer_t *optimizer, float learningRate) {
-    sgdSetLearningRate(optimizer->impl->sgd, learningRate);
+    sgd_t *groups = optimizer->impl->sgd;
+    /* Group 0 takes learningRate unmultiplied, so a single-group optimizer
+     * (and a hand-built sgd_t) sees exactly the value it was handed. */
+    sgdSetLearningRate(&groups[0], learningRate);
+    for (size_t g = 1; g < optimizer->numGroups; g++) {
+        sgdSetLearningRate(&groups[g], learningRate * groups[g].lrMultiplier);
+    }
 }

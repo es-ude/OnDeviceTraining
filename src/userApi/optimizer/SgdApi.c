@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "Common.h"
 #include "Conv1d.h"
@@ -91,5 +92,49 @@ optimizer_t *sgdMCreateOptim(float learningRate, float momentumFactor, float wei
 
     validateOptimizerGradStorage(optim, "sgdMCreateOptim");
     rejectUnimplementedIntegerSgd(optim, sgd, momentumQuant);
+    optim->numGroups = 1;
     return optim;
+}
+
+/* The factory's integer-BFP weight-decay rule for one group's parameters,
+ * reading each parameter's actual state dtype (add-group has no template). */
+static void rejectGroupIntegerWeightDecay(const optimizer_t *optim, size_t group,
+                                          float weightDecay) {
+    if (weightDecay == 0.0f) {
+        return;
+    }
+    for (size_t i = 0; i < optim->sizeStates; i++) {
+        const parameter_t *p = optim->parameter[i];
+        if (optim->groupOf[i] != group || p->grad->quantization->type != BFP) {
+            continue;
+        }
+        const bool integerState =
+            optim->states != NULL && optim->states[i]->stateBuffers[0]->quantization->type == BFP;
+        const bool integerParam =
+            p->param->quantization->type == BFP && (optim->states == NULL || integerState);
+        if (integerState || integerParam) {
+            PRINT_ERROR("sgdMAddGroup: the integer SGD update on BFP storage has no "
+                        "weight-decay term (weightDecay = %g must be 0 for parameter %zu)",
+                        (double)weightDecay, i);
+            exit(1);
+        }
+    }
+}
+
+size_t sgdMAddGroup(optimizer_t *optim, const model_t *m, paramSelectFn_t select, void *ctx,
+                    float lrMultiplier, float weightDecay) {
+    if (optim->type != SGD_M) {
+        PRINT_ERROR("sgdMAddGroup: the optimizer is not SGD_M");
+        exit(1);
+    }
+    const size_t group = assignParameterGroup(optim, m, select, ctx, lrMultiplier, "sgdMAddGroup");
+    rejectGroupIntegerWeightDecay(optim, group, weightDecay);
+
+    sgd_t *groups = reserveMemory((group + 1) * sizeof(sgd_t));
+    memcpy(groups, optim->impl->sgd, group * sizeof(sgd_t));
+    sgdInitGroup(&groups[group], &groups[0], lrMultiplier, weightDecay);
+    freeReservedMemory(optim->impl->sgd);
+    optim->impl->sgd = groups;
+    optim->numGroups = group + 1;
+    return group;
 }

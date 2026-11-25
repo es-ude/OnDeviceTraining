@@ -20,4 +20,15 @@ optimizer_t *adamWCreateOptim(float learningRate, double beta1, double beta2, do
                               double weightDecay, const model_t *m, quantization_t *momentQuant,
                               arithmetic_t updateMath);
 
+/*! Adds a parameter group: the parameters `select` picks (walked in optimizer
+ * order, see ParameterWalk.h) leave group 0 and step with learning rate
+ * base * lrMultiplier and this decoupled weightDecay; betas, eps and the bias
+ * correction stay optimizer-wide. Returns the new group's index. Call after
+ * adamWCreateOptim and before training; m must be the model the optimizer was
+ * built from. Fails fast (exit 1) on a wrong model, a parameter that is
+ * already grouped, an empty selection, a 257th group, or a non-finite or
+ * non-positive lrMultiplier. */
+size_t adamWAddGroup(optimizer_t *optim, const model_t *m, paramSelectFn_t select, void *ctx,
+                     float lrMultiplier, double weightDecay);
+
 #endif // ADAM_W_API_H

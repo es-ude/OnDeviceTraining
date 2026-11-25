@@ -74,7 +74,10 @@ void stepLrInit(lrScheduler_t *sched, optimizer_t *optimizer, size_t stepSize, f
 void exponentialLrInit(lrScheduler_t *sched, optimizer_t *optimizer, float gamma);
 
 /*! lr = etaMin + (baseLr - etaMin) * (1 + cos(pi * lastEpoch / tMax)) / 2
- *  (torch CosineAnnealingLR closed form; periodic past tMax) */
+ *  (torch CosineAnnealingLR closed form; periodic past tMax).
+ *  With parameter groups, the scheduler sets the base LR and each group runs
+ *  at lr * its lrMultiplier, so etaMin is scaled per group too -- unlike torch,
+ *  where every group decays to the same etaMin. */
 void cosineAnnealingLrInit(lrScheduler_t *sched, optimizer_t *optimizer, size_t tMax, float etaMin);
 
 /*! lr = baseLr * (startFactor + (1 - startFactor) * lastEpoch / warmupEpochs) during warmup.

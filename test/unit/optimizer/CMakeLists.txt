@@ -169,3 +169,35 @@ add_elastic_ai_unit_test(
         Tensor
         Common
 )
+
+# Exercises SgdApi + AdamWApi + OptimizerApi together, so no single LIB_UNDER_TEST.
+add_executable(UnitTestOptimizerGroups UnitTestOptimizerGroups.c)
+target_link_libraries(UnitTestOptimizerGroups PRIVATE
+        unity
+        OptimizerApi
+        LossType
+        SgdApi
+        AdamWApi
+        Sgd
+        AdamW
+        Optimizer
+        ParameterWalk
+        LrScheduler
+        CommonLayerLibs
+        Linear
+        LayerQuant
+        ArithmeticType
+        QuantizationApi
+        TensorApi
+        StorageApi
+        DyadicScale
+        RNG
+        Rounding
+        Layer
+        Tensor
+        Common
+        m
+        odt_test_death
+        odt_test_layer_builders
+)
+__register_target_as_unit_test(UnitTestOptimizerGroups)

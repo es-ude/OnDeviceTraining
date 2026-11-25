@@ -33,15 +33,26 @@ typedef struct sgd {
      * (soft-float calls on a core without an FPU). */
     bool momentumIsZero;
     bool weightDecayIsNonzero;
+    /* This group's learningRate = base learningRate (group 0's) * lrMultiplier;
+     * 1 for group 0. */
+    float lrMultiplier;
 } sgd_t;
 
 void sgdInit(sgd_t *sgd, float learningRate, float momentumFactor, float weightDecay,
              arithmetic_t updateMath);
 
+/* Fills a parameter group's block from group 0: a copy with lrMultiplier and
+ * weightDecay replaced and the fields derived from them re-derived. Called by
+ * sgdMAddGroup, which validates both values first. */
+void sgdInitGroup(sgd_t *group, const sgd_t *base, float lrMultiplier, float weightDecay);
+
 void sgdStepM(optimizer_t *optimizer, const rngKey_t *updateKey);
 
+/* The base learning rate: group 0's. */
 float sgdGetLr(optimizer_t *optimizer);
 
+/* Sets group 0 to learningRate and every other group to learningRate * its
+ * lrMultiplier. */
 void sgdSetLr(optimizer_t *optimizer, float learningRate);
 
 #endif

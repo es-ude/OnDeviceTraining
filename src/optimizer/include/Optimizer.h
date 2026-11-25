@@ -1,6 +1,10 @@
 #ifndef OPTIMIZER_H
 #define OPTIMIZER_H
 
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
 #include "Layer.h"
 #include "Model.h"
 #include "Quantization.h"
@@ -41,7 +45,20 @@ typedef struct optimizer {
      * HALF_AWAY (enum value 0, pinned by the serial format) -- hand-assembled
      * optimizers must set the field explicitly. */
     roundingMode_t writeBackRounding;
+    /* Parameter groups: parameter i takes the settings block
+     * impl->sgd[groupOf[i]] / impl->adamW[groupOf[i]]. NULL puts every
+     * parameter in group 0; numGroups 0 or 1 means one group. Set only by the
+     * add-group entries (sgdMAddGroup, adamWAddGroup), before training. */
+    uint8_t *groupOf;
+    size_t numGroups;
 } optimizer_t;
+
+/* Pointer-only use, like rngKey_t: the identical typedef lives in
+ * ParameterWalk.h, which a selector that reads the ref's fields includes. */
+typedef struct paramRef paramRef_t;
+
+/* Chooses the parameters an add-group call moves into its new group. */
+typedef bool (*paramSelectFn_t)(const paramRef_t *ref, void *ctx);
 
 /* updateKey: NULLable, borrowed for the call; the key of this update (see
  * optimizerStep). */

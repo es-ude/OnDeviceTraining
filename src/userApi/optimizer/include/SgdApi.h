@@ -35,4 +35,16 @@ optimizer_t *sgdMCreateOptim(float learningRate, float momentumFactor, float wei
                              const model_t *m, quantization_t *momentumQuant,
                              arithmetic_t updateMath);
 
+/*! Adds a parameter group: the parameters `select` picks (walked in optimizer
+ * order, see ParameterWalk.h) leave group 0 and step with learning rate
+ * base * lrMultiplier and this weightDecay; momentum stays optimizer-wide.
+ * Returns the new group's index. Call after sgdMCreateOptim and before
+ * training; m must be the model the optimizer was built from.
+ * Fails fast (exit 1) on a wrong model, a parameter that is already grouped,
+ * an empty selection, a 257th group, a non-finite or non-positive
+ * lrMultiplier, or a nonzero weightDecay on a parameter that takes the
+ * integer BFP update. */
+size_t sgdMAddGroup(optimizer_t *optim, const model_t *m, paramSelectFn_t select, void *ctx,
+                    float lrMultiplier, float weightDecay);
+
 #endif // SGD_API_H

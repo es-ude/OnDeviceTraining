@@ -5,15 +5,12 @@
 #include <string.h>
 
 #include "AdamW.h"
-#include "BatchNorm1d.h"
 #include "Common.h"
-#include "Conv1d.h"
-#include "Conv1dTransposed.h"
 #include "DyadicScale.h"
 #include "Layer.h"
-#include "Linear.h"
 #include "OdtHook.h"
 #include "Optimizer.h"
+#include "ParameterWalk.h"
 #include "Sgd.h"
 
 void optimizerStep(optimizer_t *optimizer, const rngKey_t *updateKey) {
@@ -81,46 +78,13 @@ optimizerFunctions_t optimizerFunctions[] = {
     [ADAM_W] = {
         .step = adamWStep, .zero = optimizerZeroGrad, .getLr = adamWGetLr, .setLr = adamWSetLr}};
 
-/* Linear/Conv1d/Conv1dTransposed are bias-optional (BIAS_FALSE,
- * header-sanctioned): a bias-less layer contributes only its weight state,
- * not a weight+bias pair. Every other trainable layer type still has a
- * fixed contribution. */
-static size_t calcNumberOfStatesByLayer(const layer_t *layer) {
-    if (layerIsFrozen(layer)) {
-        return 0;
-    }
-    switch (layer->type) {
-    case LINEAR:
-        return layer->config->linear->bias != NULL ? 2 : 1;
-    case LAYERNORM:
-    case GROUPNORM:
-        return 2;
-    case BATCHNORM1D:
-        return layer->config->batchNorm1d->affine ? 2 : 0;
-    case RELU:
-    case SOFTMAX:
-    case FLATTEN:
-    case MAXPOOL1D:
-    case AVGPOOL1D:
-    case ADAPTIVE_AVGPOOL1D:
-    case DROPOUT:
-    case QUANTIZATION:
-    case ADD:
-        return 0;
-    case CONV1D:
-        return layer->config->conv1d->bias != NULL ? 2 : 1;
-    case CONV1D_TRANSPOSED:
-        return layer->config->conv1dTransposed->bias != NULL ? 2 : 1;
-    default:
-        PRINT_ERROR("Unknown Layer Type!");
-        exit(1);
-    }
+static void countParameter(const paramRef_t *ref, void *ctx) {
+    (void)ref;
+    (*(size_t *)ctx)++;
 }
 
 size_t calcTotalNumberOfStates(const model_t *m) {
     size_t number = 0;
-    for (size_t i = 0; i < m->numLayers; i++) {
-        number += calcNumberOfStatesByLayer(m->layers[i]);
-    }
+    forEachTrainableParameter(m, countParameter, &number);
     return number;
 }

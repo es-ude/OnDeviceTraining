@@ -5,17 +5,12 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#include "BatchNorm1d.h"
 #include "BfpKernelSupport.h"
 #include "Common.h"
-#include "Conv1d.h"
-#include "Conv1dTransposed.h"
-#include "GroupNorm.h"
 #include "Layer.h"
-#include "LayerNorm.h"
-#include "Linear.h"
 #include "OptimizerApi.h"
 #include "OptimizerKeys.h"
+#include "ParameterWalk.h"
 #include "Quantization.h"
 #include "ScaleCanon.h"
 #include "StorageApi.h"
@@ -220,97 +215,19 @@ float optimizerClipGradNorm(optimizer_t *optimizer, float maxNorm) {
     return totalNorm;
 }
 
+typedef struct slotFill {
+    parameter_t **slots;
+    size_t next;
+} slotFill_t;
+
+static void fillSlot(const paramRef_t *ref, void *ctx) {
+    slotFill_t *fill = ctx;
+    fill->slots[fill->next++] = ref->parameter;
+}
+
 void collectTrainableParameters(const model_t *m, parameter_t **slots) {
-    size_t paramSlot = 0;
-    for (size_t i = 0; i < m->numLayers; i++) {
-        layer_t *currentLayer = m->layers[i];
-        if (layerIsFrozen(currentLayer)) {
-            continue;
-        }
-        layerConfig_t *layerConfig = currentLayer->config;
-
-        switch (currentLayer->type) {
-        case LINEAR: {
-            linearConfig_t *linearConfig = layerConfig->linear;
-
-            slots[paramSlot] = linearConfig->weights;
-
-            /* BIAS_FALSE (header-sanctioned): no bias parameter to collect. */
-            if (linearConfig->bias != NULL) {
-                slots[paramSlot + 1] = linearConfig->bias;
-                paramSlot += 2;
-            } else {
-                paramSlot += 1;
-            }
-            break;
-        }
-        case CONV1D: {
-            conv1dConfig_t *conv1dCfg = layerConfig->conv1d;
-
-            slots[paramSlot] = conv1dCfg->weights;
-
-            /* BIAS_FALSE (header-sanctioned): no bias parameter to collect. */
-            if (conv1dCfg->bias != NULL) {
-                slots[paramSlot + 1] = conv1dCfg->bias;
-                paramSlot += 2;
-            } else {
-                paramSlot += 1;
-            }
-            break;
-        }
-        case CONV1D_TRANSPOSED: {
-            conv1dTransposedConfig_t *ctCfg = layerConfig->conv1dTransposed;
-
-            slots[paramSlot] = ctCfg->weights;
-
-            /* BIAS_FALSE (header-sanctioned): no bias parameter to collect. */
-            if (ctCfg->bias != NULL) {
-                slots[paramSlot + 1] = ctCfg->bias;
-                paramSlot += 2;
-            } else {
-                paramSlot += 1;
-            }
-            break;
-        }
-        case LAYERNORM: {
-            layerNormConfig_t *lnCfg = layerConfig->layerNorm;
-
-            slots[paramSlot] = lnCfg->gamma;
-            slots[paramSlot + 1] = lnCfg->beta;
-
-            paramSlot += 2;
-            break;
-        }
-        case GROUPNORM: {
-            groupNormConfig_t *gnCfg = layerConfig->groupNorm;
-
-            slots[paramSlot] = gnCfg->gamma;
-            slots[paramSlot + 1] = gnCfg->beta;
-
-            paramSlot += 2;
-            break;
-        }
-        case BATCHNORM1D: {
-            batchNorm1dConfig_t *bnCfg = layerConfig->batchNorm1d;
-            if (bnCfg->affine) {
-                slots[paramSlot] = bnCfg->gamma;
-                slots[paramSlot + 1] = bnCfg->beta;
-                paramSlot += 2;
-            }
-            break;
-        }
-        case RELU:
-        case SOFTMAX:
-        case FLATTEN:
-        case MAXPOOL1D:
-        case AVGPOOL1D:
-        case ADAPTIVE_AVGPOOL1D:
-        case DROPOUT:
-        case QUANTIZATION:
-        case ADD:
-            break;
-        }
-    }
+    slotFill_t fill = {.slots = slots, .next = 0};
+    forEachTrainableParameter(m, fillSlot, &fill);
 }
 
 bool modelHasFrozenLayer(const model_t *m) {

@@ -146,3 +146,26 @@ add_custom_command(
 )
 add_custom_target(generate_expected_sgd_grouped DEPENDS ${GEN_SGD_GROUPED_HEADER})
 add_dependencies(UnitTestSgd generate_expected_sgd_grouped)
+
+add_elastic_ai_unit_test(
+        LIB_UNDER_TEST
+        ParameterWalk
+        MORE_LIBS
+        LossType
+        Optimizer
+        OptimizerApi
+        CommonLayerLibs
+        LinearApi
+        Conv1dApi
+        BatchNorm1dApi
+        LayerNormApi
+        ReluApi
+        LayerQuant
+        LayerCommon
+        QuantizationApi
+        StorageApi
+        RNG
+        Layer
+        Tensor
+        Common
+)

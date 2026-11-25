@@ -12,11 +12,7 @@ target_link_libraries(OptimizerApi PRIVATE
         TensorConversion
         Rounding
         Layer
-        Conv1d
-        Conv1dTransposed
-        GroupNorm
-        LayerNorm
-        Linear
+        ParameterWalk
         Common
         StorageApi
 )

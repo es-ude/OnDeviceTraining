@@ -6,9 +6,7 @@ target_link_libraries(Optimizer PRIVATE
         Quantization
         Rounding
         Layer
-        Conv1d
-        Conv1dTransposed
-        Linear
+        ParameterWalk
         Tensor
         Common
         OdtHook
@@ -19,6 +17,27 @@ target_link_libraries(Optimizer PRIVATE
         # library, which is the order GNU ld needs.
         Sgd
         AdamW
+)
+
+# The one trainable-parameter walk (optimizer order + roles). Its own library so Optimizer
+# and OptimizerApi both link it without either depending on the other.
+add_library(ParameterWalk ParameterWalk.c)
+target_include_directories(ParameterWalk PUBLIC include)
+target_link_libraries(ParameterWalk PRIVATE
+        LossType
+        Layer
+        Linear
+        Conv1d
+        Conv1dTransposed
+        LayerNorm
+        GroupNorm
+        BatchNorm1d
+        ArithmeticType
+        ExecuteOp
+        Quantization
+        Rounding
+        Tensor
+        Common
 )
 
 add_library(OptimizerKeys OptimizerKeys.c)

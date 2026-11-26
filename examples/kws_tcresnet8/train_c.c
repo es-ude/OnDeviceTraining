@@ -172,10 +172,16 @@ static tensorArray_t *buildOneHotLabels(const tensorArray_t *intLabels, const ch
     return out;
 }
 
-static tensorArray_t *loadArray(const char *dir, const char *file) {
+static tensorArray_t *loadArray(const char *dir, const char *file, qtype_t type,
+                                const char *typeName) {
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", dir, file);
-    return npyLoad(path);
+    tensorArray_t *arr = npyLoad(path);
+    if (arr->array[0]->quantization->type != type) {
+        fprintf(stderr, "ERROR: %s is not %s\n", file, typeName);
+        exit(1);
+    }
+    return arr;
 }
 
 /* Every split must hold [N, 40, T] items and N labels; returns the split's T. The rank is checked
@@ -204,7 +210,7 @@ static void loadDatasets(const char *dir) {
     char file[32];
     for (size_t s = 0; s < 3; ++s) {
         snprintf(file, sizeof(file), "%s_y.npy", names[s]);
-        tensorArray_t *y = loadArray(dir, file);
+        tensorArray_t *y = loadArray(dir, file, INT32, "int32");
         if (s == 0) {
             int32_t maxLabel = 0;
             for (size_t i = 0; i < y->size; ++i) {
@@ -217,7 +223,7 @@ static void loadDatasets(const char *dir) {
     }
     for (size_t s = 0; s < 3; ++s) {
         snprintf(file, sizeof(file), "%s_x.npy", names[s]);
-        splits[s]->items = loadArray(dir, file);
+        splits[s]->items = loadArray(dir, file, FLOAT32, "float32");
         const size_t frames = checkItems(splits[s]->items, splits[s]->labels, names[s]);
         if (s == 0) {
             g_inputLen = frames;

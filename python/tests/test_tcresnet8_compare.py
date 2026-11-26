@@ -44,3 +44,35 @@ def test_diverged_run_is_complete_but_a_short_one_is_not(tmp_path):
     _write_log(tmp_path, short, epochs_logged=2, diverged=0)
     assert is_complete(diverged, tmp_path)
     assert not is_complete(short, tmp_path)
+
+
+def _final_logs(accs, diverged_accs=()):
+    """(seed, log) pairs: finished runs with these test accuracies, then diverged ones."""
+    logs = [{"final": {"test_acc": a, "diverged": 0}} for a in accs]
+    logs += [{"final": {"test_acc": a, "diverged": 1}} for a in diverged_accs]
+    return list(enumerate(logs))
+
+
+_DEV = np.array([-0.9, -0.6, -0.4, -0.2, -0.1, 0.1, 0.2, 0.4, 0.6, 0.9]) * 0.01
+_S = float(np.std(_DEV, ddof=1))
+
+
+def test_diverged_runs_stay_out_of_the_statistics():
+    # A 1.5-std gap fails; averaging in one collapsed run per side would inflate the pooled
+    # std enough to call it a pass.
+    from examples.kws_tcresnet8.compare import cell_stats, hypothesis_verdict
+
+    c_accs, c_div = cell_stats(_final_logs(0.95 + _DEV + 1.5 * _S, diverged_accs=[0.1]))
+    py_accs, py_div = cell_stats(_final_logs(0.95 + _DEV, diverged_accs=[0.1]))
+    assert len(c_accs) == len(py_accs) == 10
+    assert c_div == py_div == [10]
+    assert hypothesis_verdict(c_accs, c_div, py_accs, py_div) == "FAIL"
+
+
+def test_divergence_on_one_side_only_fails():
+    from examples.kws_tcresnet8.compare import cell_stats, hypothesis_verdict
+
+    c_accs, c_div = cell_stats(_final_logs(0.95 + _DEV[:9] + 0.5 * _S, diverged_accs=[float("nan")]))
+    py_accs, py_div = cell_stats(_final_logs(0.95 + _DEV))
+    assert hypothesis_verdict(c_accs, [], py_accs, py_div) == "pass"
+    assert hypothesis_verdict(c_accs, c_div, py_accs, py_div) == "FAIL"

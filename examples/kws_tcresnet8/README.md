@@ -84,7 +84,9 @@ by the group's LR multiplier too; torch does not. This example uses `STEP_LR` on
 
 ODT's BatchNorm1d takes batch statistics over the micro-batch it is given; PyTorch takes them over
 the whole batch. So the C-vs-PyTorch comparison runs at micro-batch = batch = 100. Micro-batch 4 is
-the Pico-sized memory setting; its accuracy runs show what small-batch BN statistics cost.
+the Pico-sized memory setting; its accuracy runs show what small-batch BN statistics cost. It also
+shortens the running-statistics horizon: BN updates its running average once per micro-batch, so at
+micro-batch 4 it updates 25 times per optimizer step instead of once.
 
 ## Same-start check
 
@@ -167,9 +169,14 @@ output next to it), memory runs in `logs/sweep/<data>_<width>/mem_m<mb>/`, timin
 
 `compare.py` prints, per configuration, mean ± std of the test accuracy for the three arms and the
 hypothesis test: the C and PyTorch means at micro-batch 100 must differ by less than one pooled
-standard deviation (exit 1 otherwise). Missing or diverged seeds are listed, not averaged away.
+standard deviation (exit 1 otherwise). Missing seeds are listed. Diverged seeds are listed per arm
+and kept out of the mean, the std and the hypothesis test; a configuration where only one side
+diverged fails.
 
 The memory table reports the training memory: the heap peak minus the loaded splits and minus the
 train/val loader index arrays (one `size_t` per sample; shown in their own column), i.e.
-parameters, gradients, optimizer state, activations and scratch. It is compared against the
-Pico 2 (RP2350) SRAM of 520 KiB. The test loader is created after the peak is read.
+parameters, gradients, optimizer state, activations and scratch. The table prints its margin to the
+Pico 2 (RP2350) SRAM of 520 KiB. The number is the heap only, measured on a 64-bit host: it leaves
+out the stack, static data and the firmware, and host pointers and `size_t` are twice the RP2350
+width, so a device fit needs headroom beyond a positive margin. The test loader is created after the
+peak is read.

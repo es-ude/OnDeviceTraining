@@ -192,9 +192,11 @@ Notes on the qualified cells:
 - **Micro-batch scope** — the SYM_INT32/BFP columns hold at micro-batch size 1 only:
   training at `microBatchSize > 1` and evaluation at `evalMicroBatchSize > 1` require
   an all-FLOAT32 forward model (`stackGatherRequireFloat32Model`, fail-fast; #152,
-  #468). Dropout fails fast when *training* at m > 1 (its caller-allocated mask holds
-  one sample's elements; pinned by `testStackedDropoutFailsFastOnItsMaskCount`);
-  stacked evaluation is unaffected (no mask in eval mode).
+  #468). Dropout trains at m > 1 when its caller-allocated mask holds m x per-sample
+  elements, one independent draw per row (`testStackedDropoutTrainsWithMicroBatchMask`).
+  A mask of any other count fails fast in training
+  (`testStackedDropoutFailsFastOnItsMaskCount`); evaluation never reads the mask, so
+  eval chunks of any row count work (`testStackedDropoutEvalIgnoresMaskWithShortLastChunk`).
 
 ### Graph topology
 
@@ -304,6 +306,19 @@ Notes on the qualified cells:
   (factory and step), and
   `optimizerZeroGrad` — shared across both rows. No bias-correction on SGD; AdamW
   has PyTorch-standard bias correction (`bc1`/`bc2`).
+- **Parameter groups** — `sgdMAddGroup` / `adamWAddGroup(optim, model, select, ctx,
+  lrMultiplier, weightDecay)`, called after the factory and before training: the
+  parameters a `paramSelectFn_t` picks (walked in optimizer order, `ParameterWalk.h`)
+  leave group 0 and step with LR = base x `lrMultiplier` and their own weight decay
+  (coupled L2 for SGD, decoupled for AdamW); momentum, betas, eps and the bias
+  correction stay optimizer-wide. `paramSelectNormOrBias` is the ready-made rule
+  (biases and norm scale/shift: the parameters that usually get no weight decay,
+  torch's two-group recipe). Up to 256 groups; a wrong model, an already-grouped
+  parameter, an empty selection, a non-finite or non-positive multiplier, or (SGD) a
+  nonzero weight decay on a parameter that takes the integer BFP update fail fast.
+  `setLr` sets every group to base x its multiplier, so schedulers drive all groups;
+  deviation from torch: `COSINE_ANNEALING_LR`'s `etaMin` is scaled by the multiplier
+  too. Exercised by `examples/kws_tcresnet8` (no weight decay on BN gamma/beta).
 - **Global-norm gradient clipping** (`optimizerClipGradNorm(optim, maxNorm)`, #382,
   `torch.nn.utils.clip_grad_norm_` parity): ONE joint L2 norm over every element of
   every tracked grad (as if concatenated into a single vector, not a per-tensor

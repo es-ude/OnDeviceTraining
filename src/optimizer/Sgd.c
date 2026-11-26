@@ -67,7 +67,6 @@ void sgdInitGroup(sgd_t *group, const sgd_t *base, float lrMultiplier, float wei
     sgdSetLearningRate(group, base->learningRate * lrMultiplier);
 }
 
-/* The settings block of parameter i. */
 static sgd_t *sgdGroupOf(const optimizer_t *optim, size_t i) {
     return &optim->impl->sgd[optim->groupOf == NULL ? 0 : optim->groupOf[i]];
 }

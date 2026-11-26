@@ -731,11 +731,11 @@ void testSgdMCreateOptimRegistersLayerNormGammaAndBeta(void) {
 }
 
 void testLayerNormContributesTwoOptimizerStates(void) {
-    /* #380: calcNumberOfStatesByLayer now checks layerIsFrozen(layer) first,
-     * which for LAYERNORM dereferences layer->config->layerNorm->frozen -- a
-     * bare .config = NULL fixture (the pre-#380 shortcut) would crash. A
-     * stack-local layerNormConfig_t with frozen left at its zero-init default
-     * (false, the trainable case) keeps this a minimal, config-only fixture. */
+    /* forEachTrainableParameter checks layerIsFrozen(layer) first, which for
+     * LAYERNORM dereferences layer->config->layerNorm->frozen, so a bare
+     * .config = NULL fixture would crash. A stack-local layerNormConfig_t with
+     * frozen left at its zero-init default (false, the trainable case) keeps
+     * this a minimal, config-only fixture. */
     layerNormConfig_t lnCfg = {0};
     layerConfig_t lcfg = {.layerNorm = &lnCfg};
     layer_t layer = {.type = LAYERNORM, .config = &lcfg};

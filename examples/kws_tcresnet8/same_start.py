@@ -7,9 +7,9 @@ micro-batch = batch = 100. Passes (exit 0) only when all three checks hold:
 1. step 1: |C - PyTorch fp32| / |PyTorch fp32| <= 1e-4 on the first step's loss;
 2. one update: per kind (param, momentum, running_mean, running_var),
    d(X) = max over tensors of max|X - t64| / max|t64| against a float64 twin (t64) of the same
-   step, and d(C) <= 10 * max(d(t32), 1e-6);
-3. eval: after that update, C and PyTorch fp32 agree on the argmax of >= 199 of the first 200
-   validation samples (running BN statistics, no Dropout).
+   step, and d(C) <= 10 * max(d(t32), 1e-6); a non-finite distance fails;
+3. eval: after that update, C's probabilities are finite and C and PyTorch fp32 agree on the
+   argmax of >= 199 of the first 200 validation samples (running BN statistics, no Dropout).
 
 The 100-step loss curve is printed and saved for information only: float32 rounding at near-zero
 ReLU inputs and in BN's batch sums makes any two float32 implementations part within a few steps.
@@ -51,8 +51,11 @@ C_BINARY = REPO_ROOT / "build/examples/examples/kws_tcresnet8/train_c_kws_tcresn
 
 def kind_distance(x: list[np.ndarray], ref: list[np.ndarray]) -> float:
     """max over tensors of max|x - ref| / max|ref|: each tensor is scaled by its own largest
-    value, since an element-wise relative error is dominated by values near 0."""
-    return max(float(np.abs(a - r).max() / np.abs(r).max()) for a, r in zip(x, ref, strict=True))
+    value, since an element-wise relative error is dominated by values near 0. NaN propagates
+    (from x, or 0/0 from an all-zero ref), so the caller must reject a non-finite distance."""
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return float(np.max([np.abs(a - r).max() / np.abs(r).max()
+                             for a, r in zip(x, ref, strict=True)]))
 
 
 def same_start_verdict(step1_c: float, step1_t32: float, state_c: dict, state_t32: dict,
@@ -66,14 +69,15 @@ def same_start_verdict(step1_c: float, step1_t32: float, state_c: dict, state_t3
         d_t32 = kind_distance(state_t32[k], state_t64[k])
         bound = STATE_FACTOR * max(d_t32, STATE_FLOOR)
         state[k] = {"d_c": d_c, "d_t32": d_t32, "bound": bound, "ratio": d_c / bound,
-                    "pass": bool(d_c <= bound)}
+                    "pass": bool(np.isfinite(d_c) and np.isfinite(d_t32) and d_c <= bound)}
     agree = int((probs_c.argmax(axis=1) == probs_t32.argmax(axis=1)).sum())
+    probs_finite = bool(np.isfinite(probs_c).all())
     verdict = {
         "step1": {"c": float(step1_c), "t32": float(step1_t32), "rel": step1_rel, "tol": STEP1_REL_TOL,
                   "pass": bool(step1_rel <= STEP1_REL_TOL)},
         "state": state,
         "eval": {"agree": agree, "rows": len(probs_t32), "min_agree": EVAL_MIN_AGREE,
-                 "pass": agree >= EVAL_MIN_AGREE},
+                 "finite": probs_finite, "pass": probs_finite and agree >= EVAL_MIN_AGREE},
     }
     verdict["pass"] = (verdict["step1"]["pass"] and all(s["pass"] for s in state.values())
                        and verdict["eval"]["pass"])
@@ -104,7 +108,8 @@ def print_verdict(v: dict) -> None:
         print(f"   {k:<13} {s['d_c']:9.2e} {s['d_t32']:9.2e} {s['bound']:9.2e} {s['ratio']:10.3f}"
               f"  {'PASS' if s['pass'] else 'FAIL'}")
     e = v["eval"]
-    print(f"3. eval argmax: {e['agree']}/{e['rows']} agree (need {e['min_agree']})  "
+    finite = "" if e["finite"] else ", C probabilities not finite"
+    print(f"3. eval argmax: {e['agree']}/{e['rows']} agree (need {e['min_agree']}){finite}  "
           f"{'PASS' if e['pass'] else 'FAIL'}")
 
 

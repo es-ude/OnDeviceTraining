@@ -3,11 +3,13 @@
 Per configuration (data A/B x width full/half): mean +- std of the final-epoch test accuracy for
 C at micro-batch 100, PyTorch, and C at micro-batch 4; the hypothesis test (the C and PyTorch
 means at micro-batch 100 differ by less than one pooled standard deviation); mean loss curves;
-and the training-memory table of the ODT_MEM_PROFILE runs against the Pico 2's 520 KiB SRAM.
+and the training-heap table of the ODT_MEM_PROFILE runs with its margin to the Pico 2's 520 KiB
+SRAM (heap only). Diverged seeds are listed per cell and kept out of every statistic.
 
     uv run examples/kws_tcresnet8/compare.py [--logs DIR] [--plots DIR]
 
-Exits 1 when the hypothesis test fails in any configuration with logs on both sides.
+Exits 1 when the hypothesis test fails in any configuration with logs on both sides, or when
+only one side has diverged seeds there.
 """
 from __future__ import annotations
 
@@ -45,8 +47,10 @@ def gap_within_pooled_std(c: np.ndarray, py: np.ndarray) -> bool:
     return bool(abs(np.mean(c) - np.mean(py)) < pooled_std(c, py))
 
 
-def load_arm(root: Path, data: str, width: str, side: str, mb: int) -> tuple[list[RunLog], list[int]]:
-    """The arm's logs that finished training (diverged ones included), and the missing seeds."""
+def load_arm(root: Path, data: str, width: str, side: str, mb: int
+             ) -> tuple[list[tuple[int, RunLog]], list[int]]:
+    """The arm's (seed, log) pairs that finished training (diverged ones included), and the
+    missing seeds."""
     logs, missing = [], []
     for seed in SEEDS:
         path = Run(data, width, side, mb, seed).log_path(root)
@@ -58,44 +62,66 @@ def load_arm(root: Path, data: str, width: str, side: str, mb: int) -> tuple[lis
         if "final" not in log:
             missing.append(seed)
             continue
-        logs.append(log)
+        logs.append((seed, log))
     return logs, missing
 
 
-def fmt_acc(accs: np.ndarray) -> str:
+def is_diverged(log: RunLog) -> bool:
+    return bool(log["final"].get("diverged", 0))
+
+
+def cell_stats(logs: list[tuple[int, RunLog]]) -> tuple[np.ndarray, list[int]]:
+    """The test accuracies of the runs that trained to the end, and the diverged seeds. A
+    diverged run's accuracy is not a sample of the trained model, so it stays out of every
+    statistic and is reported by seed instead."""
+    accs = np.array([log["final"]["test_acc"] for _, log in logs if not is_diverged(log)],
+                    dtype=float)
+    return accs, [seed for seed, log in logs if is_diverged(log)]
+
+
+def hypothesis_verdict(c: np.ndarray, c_div: list[int], py: np.ndarray,
+                       py_div: list[int]) -> str | None:
+    """"pass"/"FAIL" for one configuration, None when a side has fewer than two finished seeds.
+    Divergence on one side only fails: the other implementation trained those seeds."""
+    if bool(c_div) != bool(py_div):
+        return "FAIL"
+    if len(c) < 2 or len(py) < 2:
+        return None
+    return "pass" if gap_within_pooled_std(c, py) else "FAIL"
+
+
+def fmt_acc(accs: np.ndarray, diverged: list[int]) -> str:
+    div = f", {len(diverged)} div" if diverged else ""
     if len(accs) == 0:
-        return "-"
+        return f"- (n=0{div})"
     std = f"{100 * accs.std(ddof=1):.2f}" if len(accs) > 1 else "n/a"
-    return f"{100 * accs.mean():.2f} +- {std} (n={len(accs)})"
+    return f"{100 * accs.mean():.2f} +- {std} (n={len(accs)}{div})"
 
 
 def accuracy_report(root: Path) -> tuple[bool, dict]:
-    print("Final-epoch test accuracy [%], mean +- std over seeds:")
-    print(f"{'config':<8} {'C m100':>22} {'PyTorch m100':>22} {'C-Py':>7} {'pooled':>7} "
-          f"{'verdict':>8} {'C m4':>22}")
+    print("Final-epoch test accuracy [%], mean +- std over the seeds that trained to the end "
+          "(n = those seeds, div = diverged seeds, kept out of every statistic):")
+    print(f"{'config':<8} {'C m100':>29} {'PyTorch m100':>29} {'C-Py':>7} {'pooled':>7} "
+          f"{'verdict':>8} {'C m4':>29}")
     all_pass, arms = True, {}
     for data, width in CONFIGS:
         cells = {}
         for side, mb in ARMS:
             logs, missing = load_arm(root, data, width, side, mb)
-            arms[(data, width, side, mb)] = logs
-            diverged = sum(log["final"].get("diverged", 0) for log in logs)
-            accs = np.array([log["final"]["test_acc"] for log in logs], dtype=float)
-            cells[(side, mb)] = accs
+            arms[(data, width, side, mb)] = [log for _, log in logs if not is_diverged(log)]
+            accs, diverged = cell_stats(logs)
+            cells[(side, mb)] = (accs, diverged)
             if missing or diverged:
                 print(f"  note {data}/{width}/{side}/m{mb}: missing seeds {missing}, "
-                      f"{diverged} diverged")
-        c, py = cells[("c", 100)], cells[("pytorch", 100)]
-        if len(c) >= 2 and len(py) >= 2:
-            ok = gap_within_pooled_std(c, py)
-            all_pass &= ok
-            gap = f"{100 * (c.mean() - py.mean()):+.2f}"
-            pooled = f"{100 * pooled_std(c, py):.2f}"
-            verdict = "pass" if ok else "FAIL"
-        else:
-            gap = pooled = verdict = "n/a"
-        print(f"{data}/{width:<6} {fmt_acc(c):>22} {fmt_acc(py):>22} {gap:>7} {pooled:>7} "
-              f"{verdict:>8} {fmt_acc(cells[('c', 4)]):>22}")
+                      f"diverged seeds {diverged}")
+        (c, c_div), (py, py_div) = cells[("c", 100)], cells[("pytorch", 100)]
+        verdict = hypothesis_verdict(c, c_div, py, py_div)
+        if verdict is not None:
+            all_pass &= verdict == "pass"
+        gap = f"{100 * (c.mean() - py.mean()):+.2f}" if len(c) and len(py) else "n/a"
+        pooled = f"{100 * pooled_std(c, py):.2f}" if len(c) >= 2 and len(py) >= 2 else "n/a"
+        print(f"{data}/{width:<6} {fmt_acc(c, c_div):>29} {fmt_acc(py, py_div):>29} {gap:>7} "
+              f"{pooled:>7} {verdict or 'n/a':>8} {fmt_acc(*cells[('c', 4)]):>29}")
     return all_pass, arms
 
 
@@ -134,9 +160,10 @@ def plot_loss_curves(out_path: Path, arms: dict) -> None:
 
 
 def memory_report(root: Path) -> None:
-    print(f"\nTraining memory (ODT_MEM_PROFILE, heap peak minus the dataset and the loader index "
-          f"arrays) against the Pico 2 SRAM ({PICO2_SRAM_B // 1024} KiB = {PICO2_SRAM_B} B):")
-    print(f"{'config':<8} {'m':>4} {'training KiB':>13} {'Pico 2':>7} {'loader idx KiB':>15} "
+    print(f"\nTraining heap (ODT_MEM_PROFILE on the host: heap peak minus the dataset and the loader "
+          f"index arrays; stack, static data and firmware not counted) and its margin to the "
+          f"Pico 2 SRAM ({PICO2_SRAM_B // 1024} KiB = {PICO2_SRAM_B} B):")
+    print(f"{'config':<8} {'m':>4} {'heap KiB':>9} {'margin KiB':>11} {'loader idx KiB':>15} "
           f"{'dataset MiB':>12}")
     for data, width in CONFIGS:
         for mb in MEM_MICRO_BATCHES:
@@ -144,11 +171,11 @@ def memory_report(root: Path) -> None:
             try:
                 mem = load_log(path)["memory"]
             except (OSError, ValueError, KeyError):
-                print(f"{data}/{width:<6} {mb:>4} {'-':>13}")
+                print(f"{data}/{width:<6} {mb:>4} {'-':>9}")
                 continue
             train_b = mem["train_heap_peak_b"]
-            fits = "fits" if train_b <= PICO2_SRAM_B else "over"
-            print(f"{data}/{width:<6} {mb:>4} {train_b / 1024:>13.1f} {fits:>7} "
+            print(f"{data}/{width:<6} {mb:>4} {train_b / 1024:>9.1f} "
+                  f"{(PICO2_SRAM_B - train_b) / 1024:>+11.1f} "
                   f"{mem['loader_index_b'] / 1024:>15.1f} {mem['dataset_b'] / 2**20:>12.1f}")
 
 

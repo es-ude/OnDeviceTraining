@@ -80,3 +80,33 @@ def test_eval_argmax_agreement(agree, passes):
     assert v["eval"]["agree"] == agree
     assert v["eval"]["pass"] is passes
     assert v["pass"] is passes
+
+
+def test_nan_c_state_fails():
+    # In the second tensor: a plain max() over Python floats drops a NaN that is not first.
+    c = _state(1.0)
+    c["param"] = [np.array([1.0, 0.25]), np.array([np.nan])]
+    v = _verdict(state_c=c)
+    assert v["state"]["param"]["pass"] is False
+    assert v["pass"] is False
+
+
+def test_all_zero_reference_tensor_fails():
+    # 0/0 gives a NaN distance, which must not read as "within the bound".
+    zero = {k: [np.array([1.0, 0.25]), np.array([0.0])] for k in KINDS}
+    labels = np.zeros(ROWS, dtype=np.int64)
+    v = same_start_verdict(step1_c=1.0, step1_t32=1.0, state_c=zero, state_t32=zero,
+                           state_t64=zero, probs_c=_probs(labels), probs_t32=_probs(labels))
+    assert not any(s["pass"] for s in v["state"].values())
+    assert v["pass"] is False
+
+
+def test_non_finite_c_probabilities_fail():
+    labels = np.zeros(ROWS, dtype=np.int64)
+    probs_c = _probs(labels)
+    probs_c[5, 1] = np.nan  # one disagreeing row: 199/200 would still pass the argmax count
+    v = same_start_verdict(step1_c=1.0, step1_t32=1.0, state_c=_state(1.0),
+                           state_t32=_state(1.0), state_t64=_state(1.0),
+                           probs_c=probs_c, probs_t32=_probs(labels))
+    assert v["eval"]["pass"] is False
+    assert v["pass"] is False

@@ -97,8 +97,8 @@ void testInference_ProducesAdaptiveMeans(void) {
     TEST_ASSERT_FLOAT_WITHIN(1e-5f, 3.5f, out1);
 }
 
-// Exercises Optimizer.c calcNumberOfStatesByLayer + SgdApi.c state-alloc:
-// the layer is parameter-less, so both must classify it as zero-state.
+// The pool is parameter-less: calcTotalNumberOfStates and SGD's state
+// allocation must both see zero optimizer states.
 void testOptimizer_ZeroStatesForParameterlessPool(void) {
     quantization_t *q = quantizationInitFloat();
     layer_t *pool = buildPool(q, 2);

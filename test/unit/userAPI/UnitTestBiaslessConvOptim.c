@@ -57,12 +57,10 @@ static void freeLinearLayerShell(layer_t *layer) {
     freeReservedMemory(layer);
 }
 
-/* A bias-less Conv1d (BIAS_FALSE, header-sanctioned, cfg->bias == NULL) used
- * to make calcNumberOfStatesByLayerType count 2 states unconditionally for
- * CONV1D, then sgdMCreateOptim NULL-derefed conv1dCfg->bias->param while
- * building the (nonexistent) bias momentum state. This test proves both the
- * COUNT (calcTotalNumberOfStates) and the COLLECTION (sgdMCreateOptim +
- * freeOptim) sites now handle bias == NULL correctly. */
+/* A bias-less Conv1d (BIAS_FALSE, header-sanctioned, cfg->bias == NULL) has
+ * one trainable parameter: both the COUNT (calcTotalNumberOfStates) and the
+ * COLLECTION (sgdMCreateOptim + freeOptim) sites must skip the missing bias
+ * instead of dereferencing conv1dCfg->bias. */
 void testOptimizer_OneStateForBiaslessConv1d(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
@@ -137,9 +135,9 @@ void testOptimizer_TwoStatesForBiasedConv1d(void) {
 }
 
 /* Same bias-less state-count/collection guard as the Conv1d test, but for a
- * CONV1D_TRANSPOSED layer (BIAS_FALSE): calcNumberOfStatesByLayer's separate
- * CONV1D_TRANSPOSED arm must count 1, and sgdMCreateOptim must collect only the
- * weight momentum state (no NULL bias deref). */
+ * CONV1D_TRANSPOSED layer (BIAS_FALSE): calcTotalNumberOfStates must count 1,
+ * and sgdMCreateOptim must collect only the weight momentum state (no NULL bias
+ * deref). */
 void testOptimizer_OneStateForBiaslessConv1dTransposed(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;
@@ -175,11 +173,9 @@ void testOptimizer_OneStateForBiaslessConv1dTransposed(void) {
 }
 
 /* Same bias-less state-count/collection guard as the Conv1d test, but for a
- * LINEAR layer (BIAS_FALSE, header-sanctioned, cfg->bias == NULL): the
- * CASE LINEAR arm in calcNumberOfStatesByLayer must count 1 (not the fixed
- * 2), and sgdMCreateOptim's LINEAR collection block must skip the bias
- * momentum state instead of NULL-dereferencing linearConfig->bias->param
- * (issue #292, mirrors the CONV1D fix from PR #291). */
+ * LINEAR layer (BIAS_FALSE, header-sanctioned, cfg->bias == NULL):
+ * calcTotalNumberOfStates must count 1, and sgdMCreateOptim must skip the bias
+ * momentum state instead of NULL-dereferencing linearConfig->bias->param. */
 void testBiaslessLinearCountsOneStateAndOptimizerSurvives(void) {
     quantization_t *q = quantizationInitFloat();
     layerQuant_t lq;

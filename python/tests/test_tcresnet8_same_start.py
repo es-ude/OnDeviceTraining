@@ -110,3 +110,26 @@ def test_non_finite_c_probabilities_fail():
                            probs_c=probs_c, probs_t32=_probs(labels))
     assert v["eval"]["pass"] is False
     assert v["pass"] is False
+
+
+@pytest.mark.parametrize(("c_rows", "t32_rows"), [(1, ROWS), (150, ROWS), (ROWS - 1, ROWS - 1)])
+def test_eval_needs_both_sides_to_hold_exactly_the_eval_rows(c_rows, t32_rows):
+    # A one-row C artifact broadcasts against the twin's 200 rows; a short pair of identical
+    # artifacts would agree on every row it has.
+    probs_c = _probs(np.zeros(c_rows, dtype=np.int64))
+    probs_t32 = _probs(np.zeros(t32_rows, dtype=np.int64))
+    v = same_start_verdict(step1_c=1.0, step1_t32=1.0, state_c=_state(1.0),
+                           state_t32=_state(1.0), state_t64=_state(1.0),
+                           probs_c=probs_c, probs_t32=probs_t32)
+    assert v["eval"]["pass"] is False
+    assert v["pass"] is False
+
+
+def test_relative_paths_resolve_against_the_invocation_directory(tmp_path, monkeypatch):
+    # The C child runs from the repo root, so it must receive the paths the driver writes to.
+    from examples.kws_tcresnet8.same_start import parse_args
+
+    monkeypatch.chdir(tmp_path)
+    args = parse_args(["--data", "B", "--width", "half", "--out", "check", "--c-binary", "bin/c"])
+    assert args.out == tmp_path.resolve() / "check"
+    assert args.c_binary == tmp_path.resolve() / "bin" / "c"

@@ -76,3 +76,42 @@ def test_divergence_on_one_side_only_fails():
     py_accs, py_div = cell_stats(_final_logs(0.95 + _DEV))
     assert hypothesis_verdict(c_accs, [], py_accs, py_div) == "pass"
     assert hypothesis_verdict(c_accs, c_div, py_accs, py_div) == "FAIL"
+
+
+def test_a_short_finished_log_counts_as_missing(tmp_path, monkeypatch):
+    # A one-epoch smoke run that wrote "final" is not a sweep result; a diverged short run is.
+    from examples.kws_tcresnet8 import run_sweep
+    from examples.kws_tcresnet8.compare import load_arm
+
+    monkeypatch.setattr(run_sweep, "paper_epochs", lambda data: 3)
+    Run = run_sweep.Run
+    _write_log(tmp_path, Run("B", "half", "c", 100, 0), epochs_logged=3, diverged=0)
+    _write_log(tmp_path, Run("B", "half", "c", 100, 1), epochs_logged=1, diverged=0)
+    _write_log(tmp_path, Run("B", "half", "c", 100, 2), epochs_logged=1, diverged=1)
+    logs, missing = load_arm(tmp_path, "B", "half", "c", 100)
+    assert [seed for seed, _ in logs] == [0, 2]
+    assert missing == [1, *range(3, 10)]
+
+
+def test_divergence_on_different_seeds_fails():
+    # Each side diverged on a seed the other trained: neither list is empty, yet they differ.
+    from examples.kws_tcresnet8.compare import hypothesis_verdict
+
+    accs = 0.95 + _DEV[:9]
+    assert hypothesis_verdict(accs, [3], accs, [3]) == "pass"
+    assert hypothesis_verdict(accs, [0], accs, [1]) == "FAIL"
+    assert hypothesis_verdict(accs, [0, 1], accs, [1]) == "FAIL"
+
+
+def test_a_configuration_without_a_verdict_because_of_divergence_fails_the_report(tmp_path, capsys):
+    # Both sides diverged on the only seed they ran: no finished seed to test, which must not
+    # read as "nothing to compare yet".
+    from examples.kws_tcresnet8.compare import accuracy_report
+    from examples.kws_tcresnet8.run_sweep import Run
+
+    assert accuracy_report(tmp_path)[0]
+    for side in ("c", "pytorch"):
+        _write_log(tmp_path, Run("B", "half", side, 100, 0), epochs_logged=1, diverged=1)
+    all_pass, _ = accuracy_report(tmp_path)
+    assert not all_pass
+    assert "B/half: no verdict" in capsys.readouterr().out

@@ -8,8 +8,9 @@ micro-batch = batch = 100. Passes (exit 0) only when all three checks hold:
 2. one update: per kind (param, momentum, running_mean, running_var),
    d(X) = max over tensors of max|X - t64| / max|t64| against a float64 twin (t64) of the same
    step, and d(C) <= 10 * max(d(t32), 1e-6); a non-finite distance fails;
-3. eval: after that update, C's probabilities are finite and C and PyTorch fp32 agree on the
-   argmax of >= 199 of the first 200 validation samples (running BN statistics, no Dropout).
+3. eval: after that update, C's probabilities are finite, both sides hold exactly the first 200
+   validation samples, and C and PyTorch fp32 agree on the argmax of >= 199 of them (running BN
+   statistics, no Dropout).
 
 The 100-step loss curve is printed and saved for information only: float32 rounding at near-zero
 ReLU inputs and in BN's batch sums makes any two float32 implementations part within a few steps.
@@ -61,7 +62,8 @@ def kind_distance(x: list[np.ndarray], ref: list[np.ndarray]) -> float:
 def same_start_verdict(step1_c: float, step1_t32: float, state_c: dict, state_t32: dict,
                        state_t64: dict, probs_c: np.ndarray, probs_t32: np.ndarray) -> dict:
     """The rule of the module docstring over plain arrays. state_*: kind -> list of tensors in one
-    order on all three sides; probs_*: [EVAL_ROWS, classes]."""
+    order on all three sides; probs_*: [EVAL_ROWS, classes], any other shape fails the eval
+    check."""
     step1_rel = float(abs(step1_c - step1_t32) / abs(step1_t32))
     state = {}
     for k in KINDS:
@@ -70,14 +72,17 @@ def same_start_verdict(step1_c: float, step1_t32: float, state_c: dict, state_t3
         bound = STATE_FACTOR * max(d_t32, STATE_FLOOR)
         state[k] = {"d_c": d_c, "d_t32": d_t32, "bound": bound, "ratio": d_c / bound,
                     "pass": bool(np.isfinite(d_c) and np.isfinite(d_t32) and d_c <= bound)}
-    agree = int((probs_c.argmax(axis=1) == probs_t32.argmax(axis=1)).sum())
+    shape_ok = probs_c.shape == probs_t32.shape and probs_c.ndim == 2 and len(probs_c) == EVAL_ROWS
+    agree = int((probs_c.argmax(axis=1) == probs_t32.argmax(axis=1)).sum()) if shape_ok else 0
     probs_finite = bool(np.isfinite(probs_c).all())
     verdict = {
         "step1": {"c": float(step1_c), "t32": float(step1_t32), "rel": step1_rel, "tol": STEP1_REL_TOL,
                   "pass": bool(step1_rel <= STEP1_REL_TOL)},
         "state": state,
-        "eval": {"agree": agree, "rows": len(probs_t32), "min_agree": EVAL_MIN_AGREE,
-                 "finite": probs_finite, "pass": probs_finite and agree >= EVAL_MIN_AGREE},
+        "eval": {"agree": agree, "rows": EVAL_ROWS, "min_agree": EVAL_MIN_AGREE,
+                 "shape_c": list(probs_c.shape), "shape_t32": list(probs_t32.shape),
+                 "shape_ok": shape_ok, "finite": probs_finite,
+                 "pass": shape_ok and probs_finite and agree >= EVAL_MIN_AGREE},
     }
     verdict["pass"] = (verdict["step1"]["pass"] and all(s["pass"] for s in state.values())
                        and verdict["eval"]["pass"])
@@ -109,19 +114,30 @@ def print_verdict(v: dict) -> None:
               f"  {'PASS' if s['pass'] else 'FAIL'}")
     e = v["eval"]
     finite = "" if e["finite"] else ", C probabilities not finite"
-    print(f"3. eval argmax: {e['agree']}/{e['rows']} agree (need {e['min_agree']}){finite}  "
+    shape = "" if e["shape_ok"] else (f", shapes C {e['shape_c']} / PyTorch {e['shape_t32']} "
+                                      f"(need [{e['rows']}, classes] on both)")
+    print(f"3. eval argmax: {e['agree']}/{e['rows']} agree (need {e['min_agree']}){finite}{shape}  "
           f"{'PASS' if e['pass'] else 'FAIL'}")
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """The command line with --out and --c-binary absolute: the C child runs from the repo root,
+    so a relative path would name a different directory there."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--data", choices=sorted(DATA), required=True)
     parser.add_argument("--width", choices=("full", "half"), required=True)
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--c-binary", type=Path, default=C_BINARY)
     parser.add_argument("--out", type=Path, help="default: examples/kws_tcresnet8/logs/same_start_<data>_<width>")
-    args = parser.parse_args()
-    out = args.out or HERE / "logs" / f"same_start_{args.data}_{args.width}"
+    args = parser.parse_args(argv)
+    args.out = (args.out or HERE / "logs" / f"same_start_{args.data}_{args.width}").resolve()
+    args.c_binary = args.c_binary.resolve()
+    return args
+
+
+def main() -> int:
+    args = parse_args()
+    out = args.out
     init_dir = out / "init"
     data_dir = DATA[args.data]
 

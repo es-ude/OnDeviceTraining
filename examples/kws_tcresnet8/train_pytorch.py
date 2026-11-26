@@ -281,6 +281,8 @@ def main() -> None:
     torch.manual_seed(cfg["seed"])
 
     train_x, train_y = load_split(cfg["data_dir"], "train")
+    if len(train_x) < BATCH:
+        raise SystemExit(f"ERROR: train holds {len(train_x)} samples, fewer than one batch of {BATCH}")
     classes = int(train_y.max()) + 1
     model = TcResNet8(cfg["width"], classes)
     if args.export_init is not None:

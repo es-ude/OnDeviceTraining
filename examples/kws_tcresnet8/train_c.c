@@ -178,19 +178,21 @@ static tensorArray_t *loadArray(const char *dir, const char *file) {
     return npyLoad(path);
 }
 
-/* Every split must hold [N, 40, T] items with one T and N labels. */
-static void checkItems(const tensorArray_t *items, const tensorArray_t *labels, const char *split) {
+/* Every split must hold [N, 40, T] items and N labels; returns the split's T. The rank is checked
+ * before any dimension is read: npyLoad gives each sample exactly the file's rank minus one. */
+static size_t checkItems(const tensorArray_t *items, const tensorArray_t *labels,
+                         const char *split) {
     if (items->size == 0 || items->size != labels->size) {
         fprintf(stderr, "ERROR: %s has %zu items and %zu labels\n", split, items->size,
                 labels->size);
         exit(1);
     }
     const shape_t *s = items->array[0]->shape;
-    if (s->numberOfDimensions != 2 || s->dimensions[0] != IN_CHANNELS ||
-        s->dimensions[1] != g_inputLen) {
-        fprintf(stderr, "ERROR: %s items are not [%d, %zu]\n", split, IN_CHANNELS, g_inputLen);
+    if (s->numberOfDimensions != 2 || s->dimensions[0] != IN_CHANNELS) {
+        fprintf(stderr, "ERROR: %s items are not [%d, T]\n", split, IN_CHANNELS);
         exit(1);
     }
+    return s->dimensions[1];
 }
 
 /* Labels first, each split's raw labels freed before the next split loads, items last: the heap
@@ -216,10 +218,14 @@ static void loadDatasets(const char *dir) {
     for (size_t s = 0; s < 3; ++s) {
         snprintf(file, sizeof(file), "%s_x.npy", names[s]);
         splits[s]->items = loadArray(dir, file);
-        if (s == 0 && splits[s]->items->size > 0) {
-            g_inputLen = splits[s]->items->array[0]->shape->dimensions[1];
+        const size_t frames = checkItems(splits[s]->items, splits[s]->labels, names[s]);
+        if (s == 0) {
+            g_inputLen = frames;
+        } else if (frames != g_inputLen) {
+            fprintf(stderr, "ERROR: %s items are [%d, %zu], train items [%d, %zu]\n", names[s],
+                    IN_CHANNELS, frames, IN_CHANNELS, g_inputLen);
+            exit(1);
         }
-        checkItems(splits[s]->items, splits[s]->labels, names[s]);
     }
     if (g_train.items->size < BATCH) {
         fprintf(stderr, "ERROR: train holds %zu samples, fewer than one batch of %d\n",
@@ -525,17 +531,20 @@ static void ensureDir(const char *dir) {
 /* SGD with momentum, weight decay on conv/fc weights only (BN scale/shift in a group without
  * decay). */
 static optimizer_t *createPaperOptimizer(const model_t *m) {
+    /* caller-owned template: each momentum state gets its own clone during creation */
+    quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd =
-        sgdMCreateOptim(BASE_LR, MOMENTUM, WEIGHT_DECAY, m, quantizationInitFloat(),
+        sgdMCreateOptim(BASE_LR, MOMENTUM, WEIGHT_DECAY, m, momentumQ,
                         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    freeQuantization(momentumQ);
     (void)sgdMAddGroup(sgd, m, paramSelectNormOrBias, NULL, 1.0f, 0.0f);
     return sgd;
 }
 
 /* Loads the files train_pytorch.py --export-init writes: p<i>.weight.npy (+ p<i>.bias.npy, the
  * BN shift) for parameter layer i and bn<j>.running_{mean,var}.npy for BN layer j, both in node
- * order. The parameter walk drives the loading, so every file is checked against the size of
- * the parameter it fills before modelLoadStateDict copies it. */
+ * order. The parameter walk drives the loading, so every file is checked for float32 and against
+ * the size of the parameter it fills before modelLoadStateDict copies it. */
 #define MAX_PARAM_LAYERS MAX_NODES
 #define MAX_BN_LAYERS MAX_NODES
 
@@ -556,6 +565,10 @@ static tensor_t *loadTwinFile(const char *dir, const char *file, size_t expected
     tensor_t *t = npyLoadFlat(path);
     if (t == NULL) {
         fprintf(stderr, "ERROR: TCR_SAME_START: cannot load %s\n", path);
+        exit(1);
+    }
+    if (t->quantization->type != FLOAT32) {
+        fprintf(stderr, "ERROR: TCR_SAME_START: %s is not float32\n", path);
         exit(1);
     }
     if (calcNumberOfElementsByTensor(t) != expected) {

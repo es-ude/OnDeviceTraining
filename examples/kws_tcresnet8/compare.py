@@ -8,8 +8,10 @@ SRAM (heap only). Diverged seeds are listed per cell and kept out of every stati
 
     uv run examples/kws_tcresnet8/compare.py [--logs DIR] [--plots DIR]
 
-Exits 1 when the hypothesis test fails in any configuration with logs on both sides, or when
-only one side has diverged seeds there.
+Exits 1 when the hypothesis test fails in any configuration with logs on both sides, when a seed
+diverged on one side only, or when divergence leaves a side with fewer than two finished seeds.
+Only complete logs count (every epoch the configuration names, or a recorded divergence); a
+shorter log counts as a missing seed.
 """
 from __future__ import annotations
 
@@ -30,6 +32,7 @@ from examples.kws_tcresnet8.run_sweep import (  # noqa: E402
     MEM_MICRO_BATCHES,
     SEEDS,
     Run,
+    is_complete,
 )
 
 PICO2_SRAM_B = 520 * 1024  # RP2350
@@ -49,20 +52,15 @@ def gap_within_pooled_std(c: np.ndarray, py: np.ndarray) -> bool:
 
 def load_arm(root: Path, data: str, width: str, side: str, mb: int
              ) -> tuple[list[tuple[int, RunLog]], list[int]]:
-    """The arm's (seed, log) pairs that finished training (diverged ones included), and the
-    missing seeds."""
+    """The arm's (seed, log) pairs that run_sweep counts as complete (diverged ones included),
+    and the other seeds as missing."""
     logs, missing = [], []
     for seed in SEEDS:
-        path = Run(data, width, side, mb, seed).log_path(root)
-        try:
-            log = load_log(path)
-        except (OSError, ValueError, KeyError):
+        run = Run(data, width, side, mb, seed)
+        if is_complete(run, root):
+            logs.append((seed, load_log(run.log_path(root))))
+        else:
             missing.append(seed)
-            continue
-        if "final" not in log:
-            missing.append(seed)
-            continue
-        logs.append((seed, log))
     return logs, missing
 
 
@@ -82,8 +80,9 @@ def cell_stats(logs: list[tuple[int, RunLog]]) -> tuple[np.ndarray, list[int]]:
 def hypothesis_verdict(c: np.ndarray, c_div: list[int], py: np.ndarray,
                        py_div: list[int]) -> str | None:
     """"pass"/"FAIL" for one configuration, None when a side has fewer than two finished seeds.
-    Divergence on one side only fails: the other implementation trained those seeds."""
-    if bool(c_div) != bool(py_div):
+    A seed that diverged on one side only fails: the other implementation trained it (or has
+    not run it yet, which cannot clear the divergence)."""
+    if set(c_div) != set(py_div):
         return "FAIL"
     if len(c) < 2 or len(py) < 2:
         return None
@@ -118,6 +117,10 @@ def accuracy_report(root: Path) -> tuple[bool, dict]:
         verdict = hypothesis_verdict(c, c_div, py, py_div)
         if verdict is not None:
             all_pass &= verdict == "pass"
+        elif c_div or py_div:
+            all_pass = False
+            print(f"  {data}/{width}: no verdict: diverged seeds leave C {len(c)} and PyTorch "
+                  f"{len(py)} finished seeds, fewer than the two the test needs")
         gap = f"{100 * (c.mean() - py.mean()):+.2f}" if len(c) and len(py) else "n/a"
         pooled = f"{100 * pooled_std(c, py):.2f}" if len(c) >= 2 and len(py) >= 2 else "n/a"
         print(f"{data}/{width:<6} {fmt_acc(c, c_div):>29} {fmt_acc(py, py_div):>29} {gap:>7} "

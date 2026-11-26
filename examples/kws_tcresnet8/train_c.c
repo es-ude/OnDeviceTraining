@@ -11,7 +11,9 @@
 
 #include "AdaptivePool1dApi.h"
 #include "AddApi.h"
+#include "BatchNorm1d.h"
 #include "BatchNorm1dApi.h"
+#include "BatchView.h"
 #include "CalculateGradsSequential.h"
 #include "Common.h"
 #include "Conv1dApi.h"
@@ -63,6 +65,11 @@
 /* one input per node, plus the second input of each Add */
 #define MAX_EDGES (MAX_NODES + NUM_BLOCKS)
 
+/* TCR_SAME_START_STEPS range: 1 for the one-update check, the default 100 for the loss curve */
+#define SAME_START_MAX_STEPS 100
+/* validation rows whose eval-mode probabilities the same-start mode writes */
+#define SAME_START_EVAL_ROWS 200
+
 static const size_t FULL_STEM = 16;
 static const size_t FULL_BLOCK_OUT[NUM_BLOCKS] = {24, 32, 48};
 
@@ -74,6 +81,7 @@ typedef struct runConfig {
     size_t epochsOverride; /* 0 = the paper's iteration budget */
     const char *outDir;
     const char *sameStartDir; /* NULL = the paper's training run */
+    size_t sameStartSteps;
 } runConfig_t;
 
 static dataset_t g_train;
@@ -136,6 +144,8 @@ static runConfig_t readConfig(void) {
                   "in PyTorch)",
                   "TCR_MICROBATCH", getenv("TCR_MICROBATCH"));
     }
+    cfg.sameStartSteps =
+        (size_t)envLong("TCR_SAME_START_STEPS", SAME_START_MAX_STEPS, 1, SAME_START_MAX_STEPS);
     return cfg;
 }
 
@@ -609,12 +619,11 @@ static void loadTwinState(const model_t *m, const char *dir) {
            s.numBn, dir);
 }
 
-#define SAME_START_STEPS 100
-
-static float g_stepLoss[SAME_START_STEPS];
+static float g_stepLoss[SAME_START_MAX_STEPS];
 static size_t g_stepsRecorded;
 
-/* At micro-batch = batch each step is one grads call, so its loss is the step's batch mean. */
+/* At micro-batch = batch each step is one grads call, so its loss is the step's batch mean. The
+ * window loader runs cfg->sameStartSteps <= SAME_START_MAX_STEPS steps, which bounds the index. */
 static trainingStats_t *recordStepLoss(const model_t *model, lossConfig_t lossConfig,
                                        reduction_t forwardReduction, tensor_t *input,
                                        tensor_t *label, const trainingCall_t *call) {
@@ -624,20 +633,84 @@ static trainingStats_t *recordStepLoss(const model_t *model, lossConfig_t lossCo
     return stats;
 }
 
+static size_t g_sameStartSteps;
+
 static size_t sameStartSamples(void) {
-    return SAME_START_STEPS * BATCH;
+    return g_sameStartSteps * BATCH;
 }
 
-/* The first SAME_START_STEPS steps of trainingRun's epoch 0, logged per step: the train loader
- * is shuffled under epoch 0's key, then trainingEpochDefault (the per-batch code trainingRun
- * runs) trains over a copy of the loader whose dataset ends after those steps. Writes
- * <outDir>/step_losses.npy. */
-static int runSameStart(const tcrModel_t *r, const runConfig_t *cfg, trainingRng_t *rng) {
-    if (getTrainSize() / BATCH < SAME_START_STEPS) {
-        fprintf(stderr, "ERROR: TCR_SAME_START: epoch 0 holds %zu steps, fewer than %d\n",
-                getTrainSize() / BATCH, SAME_START_STEPS);
-        return 1;
+static void writeNpy(const char *dir, const char *file, const float *data, const size_t *shape,
+                     size_t ndim) {
+    char path[600];
+    snprintf(path, sizeof(path), "%s/%s", dir, file);
+    if (npyWriteFloat32(path, data, shape, ndim) != 0) {
+        fprintf(stderr, "ERROR: cannot write %s\n", path);
+        exit(1);
     }
+}
+
+/* <dir>/param<i>.npy and momentum<i>.npy per parameter tensor in the optimizer's order (node
+ * order; BN scale, then shift), running_mean<j>.npy and running_var<j>.npy per BN layer: the
+ * order train_pytorch.training_state lists them in. */
+static void writeTrainingState(const model_t *m, const optimizer_t *sgd, const char *dir) {
+    ensureDir(dir);
+    char file[48];
+    for (size_t i = 0; i < sgd->sizeStates; ++i) {
+        const size_t n[1] = {calcNumberOfElementsByParameter(sgd->parameter[i])};
+        snprintf(file, sizeof(file), "param%02zu.npy", i);
+        writeNpy(dir, file, (const float *)sgd->parameter[i]->param->data, n, 1);
+        snprintf(file, sizeof(file), "momentum%02zu.npy", i);
+        writeNpy(dir, file, (const float *)sgd->states[i]->stateBuffers[0]->data, n, 1);
+    }
+    size_t bn = 0;
+    for (size_t l = 0; l < m->numLayers; ++l) {
+        if (m->layers[l]->type != BATCHNORM1D) {
+            continue;
+        }
+        const batchNorm1dConfig_t *c = m->layers[l]->config->batchNorm1d;
+        const size_t n[1] = {c->numChannels};
+        snprintf(file, sizeof(file), "running_mean%02zu.npy", bn);
+        writeNpy(dir, file, (const float *)c->runningMean->data, n, 1);
+        snprintf(file, sizeof(file), "running_var%02zu.npy", bn);
+        writeNpy(dir, file, (const float *)c->runningVar->data, n, 1);
+        ++bn;
+    }
+}
+
+/* <dir>/val_probs.npy: the eval-mode softmax output (running BN statistics, Dropout off) of the
+ * first SAME_START_EVAL_ROWS validation samples, [rows, classes]. */
+static void writeValProbs(const model_t *m, const char *dir) {
+    if (getValSize() < SAME_START_EVAL_ROWS) {
+        fprintf(stderr, "ERROR: TCR_SAME_START: val holds %zu samples, fewer than %d\n",
+                getValSize(), SAME_START_EVAL_ROWS);
+        exit(1);
+    }
+    float *probs = reserveMemory(SAME_START_EVAL_ROWS * g_numClasses * sizeof(float));
+    for (size_t i = 0; i < SAME_START_EVAL_ROWS; ++i) {
+        sample_t *s = getValSample(i);
+        batchView_t itemView;
+        tensor_t *out = inference(m, batchViewOf(&itemView, s->item));
+        memcpy(probs + i * g_numClasses, out->data, g_numClasses * sizeof(float));
+        freeTensor(out);
+        freeSample(s);
+    }
+    writeNpy(dir, "val_probs.npy", probs, (const size_t[]){SAME_START_EVAL_ROWS, g_numClasses}, 2);
+    freeReservedMemory(probs);
+}
+
+/* The first cfg->sameStartSteps steps of trainingRun's epoch 0: the train loader is shuffled
+ * under epoch 0's key, then trainingEpochDefault (the per-batch code trainingRun runs) trains over
+ * a copy of the loader whose dataset ends after those steps. Writes <outDir>/step_losses.npy (one
+ * loss per step), the training state after the last step to <outDir>/state/, and
+ * <outDir>/val_probs.npy. same_start.py runs 1 step for the state and eval checks and 100 for the
+ * loss curve. */
+static int runSameStart(const tcrModel_t *r, const runConfig_t *cfg, trainingRng_t *rng) {
+    if (getTrainSize() / BATCH < cfg->sameStartSteps) {
+        fprintf(stderr, "ERROR: TCR_SAME_START: epoch 0 holds %zu steps, fewer than %zu\n",
+                getTrainSize() / BATCH, cfg->sameStartSteps);
+        exit(1);
+    }
+    g_sameStartSteps = cfg->sameStartSteps;
     loadTwinState(&r->model, cfg->sameStartDir);
     const lossConfig_t lossConfig = {
         .funcType = CROSS_ENTROPY, .backwardReduction = REDUCTION_MEAN, .classWeights = NULL};
@@ -655,15 +728,15 @@ static int runSameStart(const tcrModel_t *r, const runConfig_t *cfg, trainingRng
                                cfg->microBatch, &call);
 
     ensureDir(cfg->outDir);
-    char path[600];
-    snprintf(path, sizeof(path), "%s/step_losses.npy", cfg->outDir);
-    const size_t shape[1] = {SAME_START_STEPS};
-    if (npyWriteFloat32(path, g_stepLoss, shape, 1) != 0) {
-        fprintf(stderr, "ERROR: cannot write %s\n", path);
-        return 1;
-    }
-    printf("TCR_SAME_START: %d steps, loss %.6f -> %.6f, wrote %s\n", SAME_START_STEPS,
-           (double)g_stepLoss[0], (double)g_stepLoss[SAME_START_STEPS - 1], path);
+    writeNpy(cfg->outDir, "step_losses.npy", g_stepLoss, (const size_t[]){g_stepsRecorded}, 1);
+    char stateDir[600];
+    snprintf(stateDir, sizeof(stateDir), "%s/state", cfg->outDir);
+    writeTrainingState(&r->model, sgd, stateDir);
+    writeValProbs(&r->model, cfg->outDir);
+    printf("TCR_SAME_START: %zu steps, loss %.6f -> %.6f, wrote step_losses.npy, state/ and "
+           "val_probs.npy to %s\n",
+           g_stepsRecorded, (double)g_stepLoss[0], (double)g_stepLoss[g_stepsRecorded - 1],
+           cfg->outDir);
     freeDataLoader(trainLoader);
     return 0;
 }

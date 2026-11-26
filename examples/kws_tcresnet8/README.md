@@ -47,6 +47,7 @@ The C program reads T and the class count from the `.npy` files, so one binary s
 | `TCR_EPOCHS` | paper count | override the epoch count (the LR schedule keeps the paper's step size) |
 | `TCR_OUT` | `examples/kws_tcresnet8/logs` | where `c.json` / `pytorch.json` go (schema: `examples/_shared/log_schema.py`) |
 | `TCR_SAME_START` | unset | C only: load the twin's exported initial state; used by `same_start.py` |
+| `TCR_SAME_START_STEPS` | 100 | C only, with `TCR_SAME_START`: steps to train (1 to 100); writes the losses, the state after the last step and the first 200 validation probabilities |
 
 ## Recipe
 
@@ -88,16 +89,46 @@ the Pico-sized memory setting; its accuracy runs show what small-batch BN statis
 ## Same-start check
 
 `same_start.py` exports the twin's initial weights and BN buffers, the C program loads them, and
-both train the first 100 steps of epoch 0 in the same sample order (`examples/_shared/keyed_sampler.py`
-mirrors C's shuffle) with Dropout off; the per-step losses are written side by side to
+both train the first steps of epoch 0 in the same sample order (`examples/_shared/keyed_sampler.py`
+mirrors C's shuffle) with Dropout off. The results go to
 `logs/same_start_<data>_<width>/same_start.json`.
 
 ```
 uv run examples/kws_tcresnet8/same_start.py --data A --width full [--c-binary PATH]
 ```
 
-The pass criterion for this check is pending; the script's built-in tolerance is not the
-ruling yet.
+It exits 0 only when all three checks pass:
+
+1. **Step-1 loss:** C within a relative 1e-4 of PyTorch float32.
+2. **State after one update:** parameters, SGD momentum, BN running mean and running variance,
+   each compared with a float64 run of the twin (t64). Per kind, d(X) = max over tensors of
+   max|X − t64| / max|t64|; C passes if d(C) ≤ 10 × max(d(t32), 1e-6). The 1e-6 floor (about
+   8 float32 ulp) keeps the bound above one ulp when PyTorch float32 sits next to float64.
+3. **Eval argmax:** after that update, C and PyTorch float32 agree on ≥ 199 of the first 200
+   validation samples (running BN statistics, no Dropout).
+
+The 100-step loss curve is printed and saved, with the first step where the two sides differ by
+more than 1e-4, but it never fails the check. Any two float32 implementations part within a few
+steps: a ReLU input near zero rounds to the other side, and LR 0.1 with momentum amplifies it.
+PyTorch float32 parts from its own float64 run at step 3 on A full. C parts earlier than PyTorch
+float32 mainly because its BatchNorm sums batch × time in one float32 accumulator. The
+training-level C-vs-PyTorch test is the 10-seed comparison in `compare.py`.
+
+Measured (seed 42, `examples` preset):
+
+| check | A full | B half |
+|---|---|---|
+| 1. step-1 loss, relative | 8.9e-8 | 2.2e-7 |
+| 2. param: d(C) / bound | 3.5e-3 / 1.7e-2 | 3.0e-6 / 1.0e-5 |
+| 2. momentum: d(C) / bound | 3.5e-3 / 8.4e-2 | 4.9e-6 / 2.9e-5 |
+| 2. running mean: d(C) / bound | 5.1e-6 / 1.0e-5 | 1.5e-6 / 1.0e-5 |
+| 2. running var: d(C) / bound | 1.2e-6 / 1.0e-5 | 6.4e-7 / 1.0e-5 |
+| 3. eval argmax agreement | 200/200 | 200/200 |
+| curve: first step above 1e-4 (information) | 3 | 4 |
+
+Both pass. On A full, ReLU ties already flip inside step 1 on both sides, so d(t32) is large
+there too (param 1.7e-3, momentum 8.4e-3). The tightest margin is A full's running mean at half
+its floored bound.
 
 ## Builds
 

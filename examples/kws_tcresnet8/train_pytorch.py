@@ -7,7 +7,7 @@ TCR_WIDTH full|half, TCR_SEED, TCR_MICROBATCH, TCR_EPOCHS, TCR_OUT. Output: TCR_
 in the schema of c.json.
 
 `--export-init DIR` writes the initial weights and BN buffers in C node order (the files the C
-program's TCR_SAME_START mode loads) and exits; same_start.py drives the per-step comparison.
+program's TCR_SAME_START mode loads) and exits; same_start.py drives the same-start check.
 """
 from __future__ import annotations
 
@@ -189,23 +189,55 @@ def train_loader(x: torch.Tensor, y: torch.Tensor, seed: int) -> torch.utils.dat
                                        sampler=KeyedShuffleSampler(len(ds), seed, reshuffle=True))
 
 
-def same_start_losses(data_dir: Path, width: str, seed: int, steps: int, init_dir: Path) -> np.ndarray:
-    """The twin's side of the same-start check: Dropout off, micro-batch = batch, the first
-    `steps` steps of epoch 0; exports its initial state to init_dir for the C side first."""
+def same_start_model(width: str, classes: int, seed: int,
+                     dtype: torch.dtype = torch.float32) -> tuple[TcResNet8, torch.optim.SGD]:
+    """The seeded start every same-start run shares, Dropout off. Built and initialised in float32
+    and only then cast, so a float64 twin starts from exactly the values export_init writes."""
     torch.manual_seed(seed)
-    x, y = load_split(data_dir, "train")
-    model = TcResNet8(width, int(y.max()) + 1, dropout_p=0.0)
-    export_init(model, init_dir)
-    optimizer = make_optimizer(model)
+    model = TcResNet8(width, classes, dropout_p=0.0).to(dtype)
+    return model, make_optimizer(model)
+
+
+def same_start_train(model: TcResNet8, optimizer: torch.optim.Optimizer, x: torch.Tensor,
+                     y: torch.Tensor, seed: int, steps: int) -> np.ndarray:
+    """The first `steps` steps of epoch 0 at micro-batch = batch, in the C trainer's keyed order;
+    returns each step's loss. The batches are cast to the model's dtype."""
+    dtype = next(model.parameters()).dtype
     model.train()
     losses = []
     for xb, yb in train_loader(x, y, seed):
         if len(losses) == steps:
             break
-        losses.append(train_step(model, optimizer, xb, yb, BATCH))
+        losses.append(train_step(model, optimizer, xb.to(dtype), yb, BATCH))
     if len(losses) < steps:
         raise SystemExit(f"ERROR: epoch 0 holds only {len(losses)} of the {steps} same-start steps")
     return np.asarray(losses, dtype=np.float64)
+
+
+def training_state(model: TcResNet8, optimizer: torch.optim.Optimizer) -> dict[str, list[np.ndarray]]:
+    """The full training state as float64 arrays, in the order the C program's TCR_SAME_START
+    mode writes it: `param` and `momentum` per parameter tensor in C node order (BN: scale, then
+    shift), `running_mean` and `running_var` per BN layer. Call after at least one step (SGD
+    creates its momentum buffers on the first step)."""
+    state: dict[str, list[np.ndarray]] = {"param": [], "momentum": [], "running_mean": [],
+                                          "running_var": []}
+    for layer in model.c_node_order():
+        params = [layer.weight] + ([layer.bias] if isinstance(layer, nn.BatchNorm1d) else [])
+        for p in params:
+            state["param"].append(p.detach().double().numpy().ravel())
+            state["momentum"].append(optimizer.state[p]["momentum_buffer"].double().numpy().ravel())
+        if isinstance(layer, nn.BatchNorm1d):
+            state["running_mean"].append(layer.running_mean.double().numpy())
+            state["running_var"].append(layer.running_var.double().numpy())
+    return state
+
+
+def eval_probs(model: TcResNet8, x: torch.Tensor) -> np.ndarray:
+    """Eval-mode softmax (running BN statistics, no Dropout), as float64 [N, classes]."""
+    model.eval()
+    with torch.no_grad():
+        logits = model(x.to(next(model.parameters()).dtype))
+    return torch.softmax(logits, dim=1).double().numpy()
 
 
 def _env_int(name: str, default: int, lo: int, hi: int) -> int:

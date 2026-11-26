@@ -90,7 +90,9 @@ training starts.
 Each side uses its own native init, and init weights are NOT exchanged between
 the implementations: that keeps the parity story robust to known C-side init
 drift. PyTorch uses `torch.nn.init` defaults (Kaiming uniform for
-`Conv1d`/`Linear` weights, uniform `[-1/√fan_in, 1/√fan_in]` for biases). C
+`Conv1d`/`Linear` weights, uniform `[-1/√fan_in, 1/√fan_in]` for biases);
+the TC-ResNet8 twin is the exception and uses Xavier uniform, as its C side
+does. C
 draws each layer's initial values from that layer's `INIT` key
 (`trainingRngInitKey`), through the factory's `initWeightTensor`/
 `initBiasTensor` and `initDistribution`.
@@ -104,8 +106,21 @@ and BatchNorm running buffers in C node order
 epoch 0 in the keyed order below, with Dropout off (p = 0; the two sides'
 masks come from different generators) and micro-batch = batch = 100, so the
 BatchNorm batch statistics cover the same rows. C runs those steps through
-`trainingEpochDefault`, the per-batch code of `trainingRun`, and writes each
-step's loss to `step_losses.npy`. Every other run keeps its own init.
+`trainingEpochDefault`, the per-batch code of `trainingRun`
+(`TCR_SAME_START_STEPS`, default 100), and writes each step's loss, the full
+training state after the last step and the eval-mode outputs of the first 200
+validation samples. Every other run keeps its own init.
+
+The check passes on three things: the step-1 loss (relative 1e-4), the state
+after one update (parameters, SGD momentum, BN running mean and variance,
+each kind within 10× PyTorch float32's distance to a float64 twin of the same
+step, floored at 1e-6), and the eval argmax on those 200 samples (≥ 199
+agree). The loss curve over 100 steps is reported but never fails the check:
+two float32 implementations part within a few steps, because an element near
+zero at a ReLU rounds to the other side (a "tie") and LR 0.1 with momentum
+amplifies it, and PyTorch float32 parts from its own float64 run as early as
+step 3. C parts earlier than PyTorch float32 mainly because its BatchNorm
+sums batch × time in one float32 accumulator (#548).
 
 ## Shuffle ordering
 
@@ -143,9 +158,8 @@ scheduler.
 Final-state only. After `N` epochs both sides should reach the same
 test accuracy / loss within per-example tolerance tables in `compare.py`.
 The framework's `parity.ParityCheck` either uses absolute or relative
-tolerance, never both. The same-start check above is the one per-step
-comparison: it compares every step's loss of the two sides, relative
-tolerance 1e-4.
+tolerance, never both. The same-start check above is the one comparison
+inside training: step 1 and the state after one update, not every step.
 
 ## The tests that hold this contract
 

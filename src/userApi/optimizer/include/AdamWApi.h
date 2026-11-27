@@ -12,7 +12,8 @@
  * supported default; quantized moment storage is a memory knob routed
  * through the executeOp funnel (no bit-parity claim; the write-back dead-zone
  * semantics apply to moments exactly as to params). Moment storage must be
- * per-tensor; the template stays caller-owned. Grad storage must be
+ * per-tensor; the template stays caller-owned and may be freed as soon as the create
+ * call returns. Grad storage must be
  * FLOAT32/SYM_INT32/SYM/ASYM/BFP.
  * Free with freeOptim(). */
 optimizer_t *adamWCreateOptim(float learningRate, double beta1, double beta2, double eps,

@@ -326,9 +326,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd = sgdMCreateOptim(
         LR, MOMENTUM, /*weightDecay*/ 0.0f, &MODEL_CHAIN(model, MODEL_SIZE),
-        quantizationInitFloat(), (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+        momentumQ, (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    freeQuantization(momentumQ);
     optimizerFunctions_t optimFns = optimizerFunctions[sgd->type];
 
     lossConfig_t lossCfg = {

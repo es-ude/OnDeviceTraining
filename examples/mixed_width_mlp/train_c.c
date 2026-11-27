@@ -384,9 +384,11 @@ int main(void) {
      * fixed seed above.
      * The gates below are dtype + loss-decrease checks, not gold values, so
      * this example deliberately trains under the framework default. */
+    quantization_t *momentumQ = quantizationInitFloat();
     optimizer_t *sgd = sgdMCreateOptim(
         LR, MOMENTUM, /*weightDecay*/ 0.0f, &MODEL_CHAIN(model, MODEL_SIZE),
-        quantizationInitFloat(), (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+        momentumQ, (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    freeQuantization(momentumQ);
     optimizerFunctions_t optimFns = optimizerFunctions[sgd->type];
 
     lossConfig_t lossCfg = defaultLossConfig(CROSS_ENTROPY);

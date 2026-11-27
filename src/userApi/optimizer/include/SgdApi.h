@@ -15,6 +15,7 @@
  *
  * \param momentumQuant: Quantization template for momentum state buffers
  *        (caller-owned; not consumed -- cloned once per state via getQLike).
+ *        It may be freed as soon as this call returns.
  *        Must be per-tensor; ignored when momentumFactor == 0.
  * \param updateMath: arithmetic_t the update ops run in (by-value,
  *        mirroring the layer-side per-op knobs). Pass

@@ -400,6 +400,7 @@ int main(void) {
     optimizer_t *sgd = sgdMCreateOptim(
         g_lr, g_momentum, /*weightDecay*/ 0.0f, &MODEL_CHAIN(model, MODEL_SIZE), momentumQ,
         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    freeQuantization(momentumQ);
 
     /* Replay source (only when REPLAY=1): PPCA set for ppca/mean modes, raw
      * exemplar buffer for exemplar mode (no generators, no workspace). */

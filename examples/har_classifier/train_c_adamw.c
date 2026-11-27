@@ -360,6 +360,7 @@ int main(void) {
         optim = adamWCreateOptim(g_lr, kBeta1, kBeta2, kEps, kWeightDecay,
                                  &MODEL_CHAIN(model, MODEL_SIZE), momentQ,
                                  (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+        freeQuantization(momentQ);
 #ifdef ODT_MEM_PROFILE
         markAfterOpt = memProfileMark(); /* optstate_b = delta */
 #endif

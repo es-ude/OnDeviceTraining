@@ -552,6 +552,7 @@ int main(void) {
         sgd = sgdMCreateOptim(g_lr, g_momentum, /*weightDecay*/ 0.0f,
                               &MODEL_CHAIN(model, MODEL_SIZE), momentumQ,
                               (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+        freeQuantization(momentumQ);
 #ifdef ODT_MEM_PROFILE
         markAfterOpt = memProfileMark(); /* optstate_b = delta */
 #endif

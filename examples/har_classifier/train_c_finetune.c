@@ -433,6 +433,7 @@ int main(void) {
     optimizer_t *sgd1 = sgdMCreateOptim(
         g_lr, g_momentum, /*weightDecay*/ 0.0f, &MODEL_CHAIN(model, MODEL_SIZE), momentumQ1,
         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    freeQuantization(momentumQ1);
 
     clock_gettime(CLOCK_MONOTONIC, &g_epoch_t0);
     g_currentStage = 1;
@@ -498,6 +499,7 @@ int main(void) {
     optimizer_t *sgd2 = sgdMCreateOptim(
         g_lr, g_momentum, /*weightDecay*/ 0.0f, &MODEL_CHAIN(model2, MODEL_SIZE), momentumQ2,
         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    freeQuantization(momentumQ2);
 #ifdef ODT_MEM_PROFILE
     markAfterOpt2 = memProfileMark(); /* optstate_b = delta */
 #endif

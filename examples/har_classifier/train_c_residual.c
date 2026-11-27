@@ -364,6 +364,7 @@ int main(void) {
         optimizer_t *sgd =
             sgdMCreateOptim(g_lr, g_momentum, /*weightDecay*/ 0.0f, &model, momentumQ,
                             (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+        freeQuantization(momentumQ);
 
         trainingRunOptions_t options = {.callback = epochCallback,
                                         .remat = rematSel.chosen ? &remat : NULL,

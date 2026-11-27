@@ -1364,6 +1364,7 @@ int main(int argc, char **argv) {
     optimizer_t *sgd = sgdMCreateOptim(
         g_lr, g_momentum, /*weightDecay*/ 0.0f, &MODEL_CHAIN(model, g_modelSize), momentumQ,
         (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+    freeQuantization(momentumQ);
     /* ONE call covers the param write-back AND the momentum-state write-back
      * (Sgd.c runs both update ops with writeBackRounding as the op rounding). */
     optimizerSetWriteBackRounding(sgd, trainingSideRounding());

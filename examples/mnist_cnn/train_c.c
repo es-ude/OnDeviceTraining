@@ -352,10 +352,9 @@ int main(void) {
                                                  /*dropLast*/ true);
 
         quantization_t *momentumQ = quantizationInitFloat();
-        optimizer_t *sgd =
-            sgdMCreateOptim(LR, MOMENTUM, /*weightDecay*/ 0.0f, &MODEL_CHAIN(model, MODEL_SIZE),
-                            momentumQ,
-                            (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
+        optimizer_t *sgd = sgdMCreateOptim(
+            LR, MOMENTUM, /*weightDecay*/ 0.0f, &MODEL_CHAIN(model, MODEL_SIZE), momentumQ,
+            (arithmetic_t){.type = ARITH_FLOAT32, .roundingMode = HALF_AWAY});
         freeQuantization(momentumQ);
 
         g_log_file = fopen("examples/mnist_cnn/logs/c.json", "w");

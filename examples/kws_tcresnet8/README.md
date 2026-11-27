@@ -180,3 +180,41 @@ Pico 2 (RP2350) SRAM of 520 KiB. The number is the heap only, measured on a 64-b
 out the stack, static data and the firmware, and host pointers and `size_t` are twice the RP2350
 width, so a device fit needs headroom beyond a positive margin. The test loader is created after the
 peak is read.
+
+## Results
+
+One full sweep on a Linux x86-64 host (Ryzen 9 9950X, gcc 15.2, `examples_release`; the twin on
+the CPU with one thread), 10 seeds per arm, final-epoch test accuracy in %:
+
+| config | C m100 | PyTorch m100 | C − Py | pooled std | verdict | C m4 |
+|---|---|---|---|---|---|---|
+| A / full | 96.01 ± 0.20 | 96.30 ± 0.19 | −0.29 | 0.19 | FAIL | 96.20 ± 0.19 |
+| A / half | 94.86 ± 0.21 | 94.92 ± 0.35 | −0.06 | 0.29 | pass | 94.97 ± 0.20 |
+| B / full | 95.02 ± 0.36 | 95.29 ± 0.32 | −0.27 | 0.34 | pass | 94.80 ± 0.39 |
+| B / half | 93.75 ± 0.39 | 94.06 ± 0.24 | −0.31 | 0.32 | pass | 93.86 ± 0.32 |
+
+The paper reports 96.1 % for TC-ResNet8 on its 12-class setup (data A, full width); C matches it.
+
+**A known small gap.** C sits about 0.3 percentage points below the twin. Per seed (both sides start
+from the same weights), C is below PyTorch on 10 of 10 seeds for A / full and on 8 of 10 for both B
+configurations, so the gap is systematic, not noise; it is just large enough to fail the one-pooled-std
+rule for A / full (1.5 std). The same A / full cell on an arm64 macOS host gave −0.02, so the gap
+depends on the platform's rounding. A candidate cause is BatchNorm's single float32 accumulator
+over batch × time: at micro-batch 100 it sums 9,800 values per channel on data A and 3,200 on data B.
+On data A, C at micro-batch 4 (392 values per sum) is closer to the twin than C at micro-batch 100;
+on data B it is not, so this is a hypothesis, not a finding. The gap is accepted and documented; the
+summation question is tracked separately.
+
+Training heap (heap peak minus dataset and loader index arrays; stack, static data and firmware not
+counted), against the Pico 2's 520 KiB SRAM:
+
+| config | m100 | m4 |
+|---|---|---|
+| A / full | 12,556 KiB | 1,278 KiB |
+| A / half | 6,887 KiB | 509 KiB (+11 KiB margin) |
+| B / full | 4,585 KiB | 956 KiB |
+| B / half | 2,384 KiB | 327 KiB (+193 KiB margin) |
+
+Only half width at micro-batch 4 has a positive heap margin; for data A the 11 KiB left will not
+cover stack and firmware, so only the 6-class half-width model at micro-batch 4 is a plausible fit
+on the device.
